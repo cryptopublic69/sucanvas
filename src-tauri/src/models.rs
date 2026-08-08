@@ -196,15 +196,29 @@ pub struct ComfySubmitResult {
     pub seed: String,
     pub outputs: Vec<ComfyOutputFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_elapsed_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_warning: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ComfyQueueStatus {
-    pub state: String,
-    pub position: Option<usize>,
+pub struct ComfyQueueSummary {
+    pub running_count: usize,
     pub pending_count: usize,
+    pub total_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComfyClientTaskStatus {
+    pub client_id: String,
+    pub prompt_id: Option<String>,
+    pub status: String,
+    pub seed: Option<String>,
+    pub outputs: Vec<ComfyOutputFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_elapsed_seconds: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]

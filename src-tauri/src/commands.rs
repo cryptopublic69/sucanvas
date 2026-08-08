@@ -15,10 +15,10 @@ use uuid::Uuid;
 
 use crate::{
     models::{
-        ComfyOutputFile, ComfyQueueStatus, ComfySubmitInput, ComfySubmitResult, CreateEdgeInput,
-        CreateNodeInput, CreateNodeResult, CreateProjectInput, DeleteNodesInput, DeletedBatch,
-        EdgeRecord, NodeRecord, RuntimeInfo, UpdateNodeInput, UpdateProjectInput,
-        WorkspaceSnapshot,
+        ComfyClientTaskStatus, ComfyOutputFile, ComfyQueueSummary, ComfySubmitInput,
+        ComfySubmitResult, CreateEdgeInput, CreateNodeInput, CreateNodeResult, CreateProjectInput,
+        DeleteNodesInput, DeletedBatch, EdgeRecord, NodeRecord, RuntimeInfo, UpdateNodeInput,
+        UpdateProjectInput, WorkspaceSnapshot,
     },
     ApplicationState, RunningComfyTask,
 };
@@ -822,6 +822,25 @@ fn collect_video_files(value: &Value, files: &mut Vec<(String, String, String)>)
     }
 }
 
+fn comfy_execution_elapsed_seconds(entry: &Value) -> Option<f64> {
+    let messages = entry.pointer("/status/messages")?.as_array()?;
+    let timestamp_for = |message: &Value, event_name: &str| {
+        let parts = message.as_array()?;
+        if parts.first()?.as_str()? != event_name {
+            return None;
+        }
+        parts.get(1)?.get("timestamp")?.as_f64()
+    };
+    let started_at = messages
+        .iter()
+        .find_map(|message| timestamp_for(message, "execution_start"))?;
+    let completed_at = messages
+        .iter()
+        .rev()
+        .find_map(|message| timestamp_for(message, "execution_success"))?;
+    (completed_at >= started_at).then_some((completed_at - started_at) / 1000.0)
+}
+
 fn comfy_view_url(
     server_url: &str,
     filename: &str,
@@ -1088,6 +1107,7 @@ async fn submit_comfyui_workflow_inner(
             prompt_id,
             seed: generation_seed.to_string(),
             outputs,
+            execution_elapsed_seconds: comfy_execution_elapsed_seconds(entry),
             cleanup_warning,
         });
     }
@@ -1149,11 +1169,73 @@ fn value_contains_string(value: &Value, needle: &str) -> bool {
     }
 }
 
+fn comfy_client_id_from_queue_item(item: &Value) -> Option<&str> {
+    item.get(3)?.get("client_id")?.as_str()
+}
+
+fn comfy_prompt_id_from_queue_item(item: &Value) -> Option<&str> {
+    item.get(1)?.as_str()
+}
+
+fn comfy_seed_from_prompt(prompt: &Value) -> Option<String> {
+    let value = prompt.pointer(&format!("/2/{H3_SEED_NODE_ID}/inputs/noise_seed"))?;
+    value
+        .as_u64()
+        .map(|seed| seed.to_string())
+        .or_else(|| value.as_str().map(str::to_owned))
+}
+
+fn comfy_outputs_from_history_entry(
+    server_url: &str,
+    entry: &Value,
+) -> Result<Vec<ComfyOutputFile>, String> {
+    let mut raw_files = Vec::new();
+    collect_video_files(entry.get("outputs").unwrap_or(&Value::Null), &mut raw_files);
+    let mut seen = HashSet::new();
+    let mut outputs = Vec::new();
+    for (filename, subfolder, file_type) in raw_files {
+        let identity = format!("{file_type}/{subfolder}/{filename}");
+        if !seen.insert(identity) {
+            continue;
+        }
+        outputs.push(ComfyOutputFile {
+            url: comfy_view_url(server_url, &filename, &subfolder, &file_type)?,
+            filename,
+            subfolder,
+            file_type,
+        });
+    }
+    Ok(outputs)
+}
+
 async fn cancel_known_comfy_prompt(
     client: &Client,
     server_url: &str,
     prompt_id: &str,
 ) -> Result<(), String> {
+    let mut cancel_url = Url::parse(&format!("{}/", server_url.trim_end_matches('/')))
+        .map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    cancel_url
+        .path_segments_mut()
+        .map_err(|_| "ComfyUI 地址不能作为任务取消接口".to_owned())?
+        .extend(["api", "jobs", prompt_id, "cancel"]);
+    let atomic_response = client
+        .post(cancel_url)
+        .send()
+        .await
+        .map_err(|error| format!("按任务 ID 取消 ComfyUI 任务失败：{error}"))?;
+    let atomic_status = atomic_response.status();
+    if atomic_status.is_success() {
+        return Ok(());
+    }
+    if atomic_status.as_u16() != 404 && atomic_status.as_u16() != 405 {
+        return Err(format!(
+            "ComfyUI 拒绝按任务 ID 取消（HTTP {atomic_status}）"
+        ));
+    }
+
+    // Older ComfyUI versions do not expose the atomic job-cancel endpoint.
+    // Keep the legacy queue/interrupt flow only as a compatibility fallback.
     let queue = client
         .get(format!("{server_url}/queue"))
         .send()
@@ -1226,66 +1308,24 @@ async fn wait_until_comfy_prompt_stopped(
     Err("ComfyUI 尚未确认任务停止，已保留输入素材避免提前删除".to_owned())
 }
 
-fn comfy_queue_status_from_value(queue: &Value, prompt_id: &str) -> ComfyQueueStatus {
-    let pending = queue
+fn comfy_queue_summary_from_value(queue: &Value) -> ComfyQueueSummary {
+    let running_count = queue
+        .get("queue_running")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let pending_count = queue
         .get("queue_pending")
         .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    if queue
-        .get("queue_running")
-        .is_some_and(|value| value_contains_string(value, prompt_id))
-    {
-        return ComfyQueueStatus {
-            state: "running".to_owned(),
-            position: None,
-            pending_count: pending.len(),
-        };
-    }
-    let position = pending
-        .iter()
-        .position(|entry| value_contains_string(entry, prompt_id))
-        .map(|index| index + 1);
-    ComfyQueueStatus {
-        state: if position.is_some() {
-            "queued"
-        } else {
-            "unknown"
-        }
-        .to_owned(),
-        position,
-        pending_count: pending.len(),
+        .map_or(0, Vec::len);
+    ComfyQueueSummary {
+        running_count,
+        pending_count,
+        total_count: running_count + pending_count,
     }
 }
 
 #[tauri::command]
-pub async fn get_comfyui_queue_status(
-    server_url: String,
-    client_id: String,
-    state: State<'_, ApplicationState>,
-) -> Result<Option<ComfyQueueStatus>, String> {
-    let task = state
-        .running_comfy_tasks
-        .lock()
-        .map_err(|_| "ComfyUI 任务列表锁已损坏".to_owned())?
-        .get(&client_id)
-        .cloned();
-    let Some(task) = task else {
-        return Ok(None);
-    };
-    let prompt_id = task
-        .prompt_id
-        .lock()
-        .map_err(|_| "ComfyUI 任务状态锁已损坏".to_owned())?
-        .clone();
-    let Some(prompt_id) = prompt_id else {
-        return Ok(Some(ComfyQueueStatus {
-            state: "preparing".to_owned(),
-            position: None,
-            pending_count: 0,
-        }));
-    };
-
+pub async fn get_comfyui_queue_summary(server_url: String) -> Result<ComfyQueueSummary, String> {
     let parsed_server =
         Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
     if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
@@ -1310,7 +1350,133 @@ pub async fn get_comfyui_queue_status(
     if !status.is_success() {
         return Err(format!("ComfyUI 拒绝查询队列（HTTP {status}）：{queue}"));
     }
-    Ok(Some(comfy_queue_status_from_value(&queue, &prompt_id)))
+    Ok(comfy_queue_summary_from_value(&queue))
+}
+
+#[tauri::command]
+pub async fn get_comfyui_client_task_statuses(
+    server_url: String,
+    client_ids: Vec<String>,
+) -> Result<Vec<ComfyClientTaskStatus>, String> {
+    if client_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let parsed_server =
+        Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let server_url = server_url.trim().trim_end_matches('/').to_owned();
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 状态客户端失败：{error}"))?;
+    let queue_response = client
+        .get(format!("{server_url}/queue"))
+        .send()
+        .await
+        .map_err(|error| format!("查询 ComfyUI 队列失败：{error}"))?;
+    let queue_status = queue_response.status();
+    let queue: Value = queue_response
+        .json()
+        .await
+        .map_err(|error| format!("解析 ComfyUI 队列失败（HTTP {queue_status}）：{error}"))?;
+    if !queue_status.is_success() {
+        return Err(format!(
+            "ComfyUI 拒绝查询队列（HTTP {queue_status}）：{queue}"
+        ));
+    }
+    let history_response = client
+        .get(format!("{server_url}/history?max_items=500"))
+        .send()
+        .await
+        .map_err(|error| format!("查询 ComfyUI 历史记录失败：{error}"))?;
+    let history_status = history_response.status();
+    let history: Value = history_response
+        .json()
+        .await
+        .map_err(|error| format!("解析 ComfyUI 历史记录失败（HTTP {history_status}）：{error}"))?;
+    if !history_status.is_success() {
+        return Err(format!(
+            "ComfyUI 拒绝查询历史记录（HTTP {history_status}）：{history}"
+        ));
+    }
+
+    let running = queue
+        .get("queue_running")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let pending = queue
+        .get("queue_pending")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let history_entries = history.as_object();
+    let mut statuses = Vec::with_capacity(client_ids.len());
+    for client_id in client_ids {
+        let active = running
+            .iter()
+            .find(|item| comfy_client_id_from_queue_item(item) == Some(client_id.as_str()))
+            .map(|item| ("running", item))
+            .or_else(|| {
+                pending
+                    .iter()
+                    .find(|item| comfy_client_id_from_queue_item(item) == Some(client_id.as_str()))
+                    .map(|item| ("pending", item))
+            });
+        if let Some((status, item)) = active {
+            statuses.push(ComfyClientTaskStatus {
+                client_id,
+                prompt_id: comfy_prompt_id_from_queue_item(item).map(str::to_owned),
+                status: status.to_owned(),
+                seed: comfy_seed_from_prompt(item),
+                outputs: Vec::new(),
+                execution_elapsed_seconds: None,
+            });
+            continue;
+        }
+
+        let history_entry = history_entries.and_then(|entries| {
+            entries.values().find(|entry| {
+                entry.pointer("/prompt/3/client_id").and_then(Value::as_str)
+                    == Some(client_id.as_str())
+            })
+        });
+        if let Some(entry) = history_entry {
+            let status = entry
+                .pointer("/status/status_str")
+                .and_then(Value::as_str)
+                .unwrap_or("error");
+            statuses.push(ComfyClientTaskStatus {
+                client_id,
+                prompt_id: entry
+                    .pointer("/prompt/1")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                status: status.to_owned(),
+                seed: comfy_seed_from_prompt(entry.get("prompt").unwrap_or(&Value::Null)),
+                outputs: if status == "success" {
+                    comfy_outputs_from_history_entry(&server_url, entry)?
+                } else {
+                    Vec::new()
+                },
+                execution_elapsed_seconds: comfy_execution_elapsed_seconds(entry),
+            });
+            continue;
+        }
+
+        statuses.push(ComfyClientTaskStatus {
+            client_id,
+            prompt_id: None,
+            status: "missing".to_owned(),
+            seed: None,
+            outputs: Vec::new(),
+            execution_elapsed_seconds: None,
+        });
+    }
+    Ok(statuses)
 }
 
 #[tauri::command]
@@ -1319,6 +1485,17 @@ pub async fn cancel_comfyui_workflow(
     client_id: String,
     state: State<'_, ApplicationState>,
 ) -> Result<Option<String>, String> {
+    let parsed_server =
+        Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let server_url = server_url.trim().trim_end_matches('/');
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 取消客户端失败：{error}"))?;
     let task = state
         .running_comfy_tasks
         .lock()
@@ -1326,6 +1503,29 @@ pub async fn cancel_comfyui_workflow(
         .get(&client_id)
         .cloned();
     let Some(task) = task else {
+        let queue_response = client
+            .get(format!("{server_url}/queue"))
+            .send()
+            .await
+            .map_err(|error| format!("查询 ComfyUI 队列失败：{error}"))?;
+        let queue: Value = queue_response
+            .json()
+            .await
+            .map_err(|error| format!("解析 ComfyUI 队列失败：{error}"))?;
+        let prompt_id = ["queue_running", "queue_pending"].iter().find_map(|key| {
+            queue
+                .get(*key)
+                .and_then(Value::as_array)?
+                .iter()
+                .find(|item| comfy_client_id_from_queue_item(item) == Some(client_id.as_str()))
+                .and_then(comfy_prompt_id_from_queue_item)
+                .map(str::to_owned)
+        });
+        let Some(prompt_id) = prompt_id else {
+            return Ok(None);
+        };
+        cancel_known_comfy_prompt(&client, server_url, &prompt_id).await?;
+        wait_until_comfy_prompt_stopped(&client, server_url, &prompt_id).await?;
         return Ok(None);
     };
     task.cancelled.store(true, Ordering::SeqCst);
@@ -1338,18 +1538,6 @@ pub async fn cancel_comfyui_workflow(
     let Some(prompt_id) = prompt_id else {
         return Ok(None);
     };
-
-    let parsed_server =
-        Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
-    if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
-        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
-    }
-    let server_url = server_url.trim().trim_end_matches('/');
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| format!("创建 ComfyUI 取消客户端失败：{error}"))?;
 
     cancel_known_comfy_prompt(&client, server_url, &prompt_id).await?;
     wait_until_comfy_prompt_stopped(&client, server_url, &prompt_id).await?;
@@ -1364,9 +1552,9 @@ pub fn get_runtime_info(state: State<'_, ApplicationState>) -> RuntimeInfo {
 #[cfg(test)]
 mod tests {
     use super::{
-        comfy_input_task_path, comfy_queue_status_from_value, configure_h3_generation,
-        configure_secondary_source_video, media_format, resolve_generation_seed, MediaFormat,
-        AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
+        comfy_execution_elapsed_seconds, comfy_input_task_path, comfy_queue_summary_from_value,
+        configure_h3_generation, configure_secondary_source_video, media_format,
+        resolve_generation_seed, MediaFormat, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
     use serde_json::json;
     use std::path::Path;
@@ -1413,7 +1601,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_running_and_pending_queue_positions() {
+    fn reports_the_global_running_and_pending_queue_counts() {
         let queue = json!({
             "queue_running": [[1, "running-prompt", {}]],
             "queue_pending": [
@@ -1421,15 +1609,25 @@ mod tests {
                 [3, "second-pending", {}]
             ]
         });
-        let running = comfy_queue_status_from_value(&queue, "running-prompt");
-        assert_eq!(running.state, "running");
-        assert_eq!(running.position, None);
-        assert_eq!(running.pending_count, 2);
+        let summary = comfy_queue_summary_from_value(&queue);
+        assert_eq!(summary.running_count, 1);
+        assert_eq!(summary.pending_count, 2);
+        assert_eq!(summary.total_count, 3);
+    }
 
-        let pending = comfy_queue_status_from_value(&queue, "second-pending");
-        assert_eq!(pending.state, "queued");
-        assert_eq!(pending.position, Some(2));
-        assert_eq!(pending.pending_count, 2);
+    #[test]
+    fn measures_only_comfy_execution_time() {
+        let history_entry = json!({
+            "status": {
+                "messages": [
+                    ["execution_start", { "timestamp": 1_786_228_387_929_u64 }],
+                    ["execution_cached", { "timestamp": 1_786_228_387_990_u64 }],
+                    ["execution_success", { "timestamp": 1_786_228_555_233_u64 }]
+                ]
+            }
+        });
+        let elapsed = comfy_execution_elapsed_seconds(&history_entry).unwrap();
+        assert!((elapsed - 167.304).abs() < 0.001);
     }
 
     #[test]

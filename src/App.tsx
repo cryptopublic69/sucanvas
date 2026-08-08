@@ -140,13 +140,23 @@ interface ComfySubmitResult {
   promptId: string;
   seed: string;
   outputs: ComfyOutputFile[];
+  executionElapsedSeconds?: number | null;
   cleanupWarning?: string;
 }
 
-interface ComfyQueueStatus {
-  state: "preparing" | "queued" | "running" | "unknown";
-  position: number | null;
+interface ComfyQueueSummary {
+  runningCount: number;
   pendingCount: number;
+  totalCount: number;
+}
+
+interface ComfyClientTaskStatus {
+  clientId: string;
+  promptId: string | null;
+  status: "running" | "pending" | "success" | "error" | "cancelled" | "missing";
+  seed: string | null;
+  outputs: ComfyOutputFile[];
+  executionElapsedSeconds?: number | null;
 }
 
 interface GenerationSnapshot {
@@ -157,6 +167,14 @@ interface GenerationSnapshot {
   imagePaths: string[];
   audioPaths: string[];
   videoPaths: string[];
+}
+
+interface PersistedComfyTask {
+  clientId: string;
+  nodeId: string;
+  canvasId: string;
+  snapshot: GenerationSnapshot;
+  startedAt: number;
 }
 
 interface NodePatch {
@@ -179,11 +197,11 @@ interface CanvasContextMenuState {
 interface CanvasNodeData extends Record<string, unknown> {
   record: NodeRecord;
   matched: boolean;
+  activeTaskCount: number;
   inputCount: number;
   mediaInputs: NodeRecord[];
   textInputCount: number;
   textInputs: NodeRecord[];
-  queuePosition: number | null;
   onChange: (id: string, patch: NodePatch) => void;
   onSave: (id: string, patch: NodePatch) => Promise<boolean>;
   onExecutionCheck: (message: string, valid: boolean) => void;
@@ -216,6 +234,14 @@ interface CanvasEdgeData extends Record<string, unknown> {
 
 type CanvasFlowNode = Node<CanvasNodeData, "canvasNode">;
 
+function recordAtCurrentFlowPosition(node: CanvasFlowNode): NodeRecord {
+  return {
+    ...node.data.record,
+    x: node.position.x,
+    y: node.position.y,
+  };
+}
+
 const CANVAS_GRID_SIZE = 24;
 const CANVAS_SNAP_GRID: [number, number] = [CANVAS_GRID_SIZE, CANVAS_GRID_SIZE];
 const AUDIO_NODE_MIN_HEIGHT = 240;
@@ -224,6 +250,7 @@ const MEDIA_NODE_CHROME_HEIGHT = 73;
 const COMFYUI_SERVER_URL = "http://192.168.5.108:8188";
 const DEFAULT_GENERATION_SEED = "56456340597885880";
 const H3_REFERENCE_WORKFLOW_PATH = "D:\\Downloads\\MiniMax+H3全能参考工作流.json";
+const COMFY_TASK_STORAGE_KEY = "infinite-canvas:comfy-tasks";
 const VIDEO_RESIZE_CONTROLS = [
   { position: "top", direction: [0, -1] },
   { position: "right", direction: [1, 0] },
@@ -270,6 +297,50 @@ function openComfyProgressSocket(clientId: string): Promise<WebSocket | null> {
     socket.addEventListener("open", () => finish(socket), { once: true });
     socket.addEventListener("error", () => finish(null), { once: true });
   });
+}
+
+function comfyProgressFromSocketData(data: unknown): {
+  value: number;
+  maximum: number;
+  progress: number;
+} | null {
+  if (typeof data !== "string") return null;
+  try {
+    const message = JSON.parse(data) as JsonObject;
+    if (message.type !== "progress" || !message.data || typeof message.data !== "object") return null;
+    const progressData = message.data as JsonObject;
+    const value = typeof progressData.value === "number" ? progressData.value : null;
+    const maximum = typeof progressData.max === "number" ? progressData.max : null;
+    if (value === null || maximum === null || maximum <= 0) return null;
+    return {
+      value,
+      maximum,
+      progress: Math.max(0, Math.min(100, (value / maximum) * 100)),
+    };
+  } catch {
+    // ComfyUI also sends binary previews; they are intentionally ignored here.
+    return null;
+  }
+}
+
+function comfyPreviewRequestId(
+  canvasId: string,
+  sourceNodeId: string,
+  promptId: string,
+  outputIndex: number,
+): string {
+  return `comfy-preview:${canvasId}:${sourceNodeId}:${promptId}:${outputIndex}`;
+}
+
+function appendUniqueById<T extends { id: string }>(current: T[], additions: T[]): T[] {
+  if (!additions.length) return current;
+  const ids = new Set(current.map((item) => item.id));
+  const uniqueAdditions = additions.filter((item) => {
+    if (ids.has(item.id)) return false;
+    ids.add(item.id);
+    return true;
+  });
+  return uniqueAdditions.length ? [...current, ...uniqueAdditions] : current;
 }
 
 function snapCanvasCoordinate(value: number): number {
@@ -351,6 +422,28 @@ function generatedSeedsFromContent(content: JsonObject): string[] {
   return [...new Set(seeds)];
 }
 
+function copiedVideoGenerationContent(content: JsonObject): JsonObject {
+  const copied = structuredClone(content);
+  for (const key of [
+    "comfyPromptId",
+    "comfyServerUrl",
+    "generatedSeeds",
+    "generatedVideos",
+    "generationCount",
+    "generationElapsedSeconds",
+    "generationSnapshot",
+    "lastGenerationSeed",
+  ]) {
+    delete copied[key];
+  }
+  return {
+    ...copied,
+    status: "idle",
+    executionProgress: null,
+    validationMessage: "",
+  };
+}
+
 function normalizedGeneratedVideoTitle(title: string): string {
   const match = /^生成视频 · Seed \d+(?: · (\d+))?$/.exec(title);
   if (!match) return title;
@@ -371,24 +464,47 @@ function formattedGenerationElapsed(content: JsonObject): string {
   return `耗时 ${seconds}秒`;
 }
 
+function validExecutionElapsedSeconds(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
 function generatedPreviewPosition(
   generator: NodeRecord,
   existingNodes: NodeRecord[],
   width: number,
   height: number,
 ): { x: number; y: number } {
-  const gap = CANVAS_GRID_SIZE;
-  const x = snapCanvasCoordinate(generator.x + generator.width + gap * 2);
-  let y = snapCanvasCoordinate(generator.y);
+  const horizontalGap = CANVAS_GRID_SIZE * 2;
+  const verticalGap = CANVAS_GRID_SIZE / 2;
+  const previousPreviews = existingNodes.filter((node) => (
+    node.kind === "generated-video"
+    && node.content.sourceGeneratorId === generator.id
+    && typeof node.content.sourcePreviewId !== "string"
+  ));
+  const latestPreview = previousPreviews.reduce<NodeRecord | null>((latest, node) => {
+    if (!latest) return node;
+    const latestCreatedAt = Date.parse(latest.createdAt) || 0;
+    const nodeCreatedAt = Date.parse(node.createdAt) || 0;
+    return nodeCreatedAt >= latestCreatedAt ? node : latest;
+  }, null);
+  if (latestPreview) {
+    return {
+      x: latestPreview.x,
+      y: latestPreview.y + latestPreview.height + verticalGap,
+    };
+  }
+
+  const x = snapCanvasCoordinate(generator.x + generator.width + horizontalGap);
+  let y = generator.y;
   for (let attempt = 0; attempt <= existingNodes.length; attempt += 1) {
     const blocked = existingNodes.some((node) => (
-      x < node.x + node.width + gap
-      && x + width + gap > node.x
-      && y < node.y + node.height + gap
-      && y + height + gap > node.y
+      x < node.x + node.width + verticalGap
+      && x + width + verticalGap > node.x
+      && y < node.y + node.height + verticalGap
+      && y + height + verticalGap > node.y
     ));
     if (!blocked) return { x, y };
-    y = snapCanvasCoordinate(y + height + gap);
+    y += height + verticalGap;
   }
   return { x, y };
 }
@@ -397,6 +513,23 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string" && Boolean(item))
     : [];
+}
+
+function persistedComfyTasksFromStorage(): PersistedComfyTask[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(COMFY_TASK_STORAGE_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((task): task is PersistedComfyTask => (
+      task && typeof task === "object"
+      && typeof task.clientId === "string"
+      && typeof task.nodeId === "string"
+      && typeof task.canvasId === "string"
+      && typeof task.startedAt === "number"
+      && task.snapshot && typeof task.snapshot === "object"
+    ));
+  } catch {
+    return [];
+  }
 }
 
 function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot | null {
@@ -653,11 +786,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const {
     record,
     matched,
+    activeTaskCount,
     inputCount,
     mediaInputs,
     textInputCount,
     textInputs,
-    queuePosition,
     onChange,
     onSave,
     onExecutionCheck,
@@ -684,6 +817,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [draggedMediaId, setDraggedMediaId] = useState<string | null>(null);
   const [dragOverMediaId, setDragOverMediaId] = useState<string | null>(null);
   const [removingMediaId, setRemovingMediaId] = useState<string | null>(null);
+  const [clearingImages, setClearingImages] = useState(false);
+  const [imageIdsPendingClear, setImageIdsPendingClear] = useState<string[] | null>(null);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
   const [textDraft, setTextDraft] = useState(() => textFromContent(record.content));
   const [textDirty, setTextDirty] = useState(false);
@@ -747,8 +882,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const generatedVideoSeed = typeof record.content.seed === "string"
     ? record.content.seed
     : "";
-  const executionRunning = record.content.status === "running"
-    || record.content.status === "cancelling";
+  const executionRunning = activeTaskCount > 0;
   const executionCancelling = record.content.status === "cancelling";
   const executionProgress = typeof record.content.executionProgress === "number"
     && Number.isFinite(record.content.executionProgress)
@@ -1115,6 +1249,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     }
   };
 
+  const clearConnectedImages = async () => {
+    if (!imageIdsPendingClear?.length || clearingImages) return;
+    setClearingImages(true);
+    try {
+      for (const inputId of imageIdsPendingClear) {
+        await onRemoveInput(id, inputId);
+      }
+      setImageIdsPendingClear(null);
+    } finally {
+      setClearingImages(false);
+    }
+  };
+
   const toggleAudioPreview = async (inputId: string) => {
     const audio = audioPreviewRefs.current.get(inputId);
     if (!audio) return;
@@ -1134,7 +1281,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   };
 
   return (
-    <>
     <article className={`canvas-node kind-${record.kind} ${matched ? "" : "is-dimmed"}`}>
       <NodeResizer
         minWidth={260}
@@ -1811,6 +1957,22 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                           </li>
                         );
                       })}
+                      {group.kind === "image" && (
+                        <li className="video-image-clear-slot nodrag">
+                          <button
+                            type="button"
+                            className="video-image-clear-button"
+                            disabled={clearingImages}
+                            title="清空当前视频节点的全部参考图片"
+                            aria-label={`清空全部 ${group.inputs.length} 张参考图片`}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={() => setImageIdsPendingClear(group.inputs.map((input) => input.id))}
+                          >
+                            <Trash2 size={15} aria-hidden="true" />
+                            <span>{clearingImages ? "清除中" : "清空"}</span>
+                          </button>
+                        </li>
+                      )}
                     </ol>
                   </section>
                 ))}
@@ -1858,20 +2020,35 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 </div>
               )}
             </div>
-            <button
-              type="button"
-              className={`video-execute-button ${executionRunning ? "is-cancel" : ""}`}
-              disabled={executionCancelling}
-              onClick={() => {
-                if (executionRunning) void onCancelExecution(id);
-                else void checkAndExecute();
-              }}
-            >
-              {executionRunning
-                ? <Square size={12} fill="currentColor" />
-                : <Play size={14} fill="currentColor" />}
-              {executionRunning ? (executionCancelling ? "正在取消…" : "取消生成") : "开始执行"}
-            </button>
+            <div className="video-execution-actions">
+              <button
+                type="button"
+                className="video-execute-button"
+                disabled={executionCancelling || (seedMode === "fixed" && executionRunning)}
+                title={seedMode === "fixed" && executionRunning
+                  ? "固定种子已有任务正在执行，不能重复排队"
+                  : "提交一个新的生成任务"}
+                aria-label={seedMode === "fixed" && executionRunning
+                  ? "固定种子已有任务正在执行，不能重复排队"
+                  : "开始执行"}
+                onClick={() => void checkAndExecute()}
+              >
+                <Play size={15} fill="currentColor" />
+              </button>
+              {executionRunning && (
+                <button
+                  type="button"
+                  className="video-cancel-button"
+                  disabled={executionCancelling}
+                  onClick={() => void onCancelExecution(id)}
+                  title={`取消最早提交的任务；当前共有 ${activeTaskCount} 个任务`}
+                  aria-label={`取消最早提交的任务；当前共有 ${activeTaskCount} 个任务`}
+                >
+                  <X size={13} />
+                  {activeTaskCount}
+                </button>
+              )}
+            </div>
           </div>
           <div className={`input-badge ${inputCount ? "has-input" : ""}`}>
             {inputCount
@@ -2034,17 +2211,54 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         </div>,
         document.body,
       )}
+      {imageIdsPendingClear && createPortal(
+        <div
+          className="project-dialog-backdrop"
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={() => {
+            if (!clearingImages) setImageIdsPendingClear(null);
+          }}
+        >
+          <div
+            className="project-dialog project-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby={`clear-images-title-${id}`}
+            aria-describedby={`clear-images-description-${id}`}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><Trash2 size={22} /></div>
+            <div>
+              <h2 id={`clear-images-title-${id}`}>确认清空图片素材？</h2>
+              <p id={`clear-images-description-${id}`}>
+                将从当前视频生成节点断开全部 {imageIdsPendingClear.length} 张参考图片。原始图片素材节点不会被删除，文字、音频和视频连接不受影响。
+              </p>
+            </div>
+            <div className="project-dialog-actions">
+              <button
+                type="button"
+                className="dialog-cancel"
+                autoFocus
+                disabled={clearingImages}
+                onClick={() => setImageIdsPendingClear(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="dialog-danger"
+                disabled={clearingImages}
+                onClick={() => void clearConnectedImages()}
+              >
+                <Trash2 size={14} />
+                {clearingImages ? "正在清空…" : "确认清空"}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
     </article>
-    {queuePosition !== null && queuePosition > 0 && (
-      <span
-        className="comfy-queue-badge nodrag"
-        title={`ComfyUI 等待队列第 ${queuePosition} 位`}
-        aria-label={`ComfyUI 等待队列第 ${queuePosition} 位`}
-      >
-        {queuePosition}
-      </span>
-    )}
-    </>
   );
 }
 
@@ -2169,8 +2383,14 @@ function CanvasWorkspace() {
   );
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [search, setSearch] = useState("");
+  const [spacePanActive, setSpacePanActive] = useState(false);
   const [notice, setNotice] = useState("正在打开画布…");
-  const [comfyQueuePositions, setComfyQueuePositions] = useState<Record<string, number>>({});
+  const [comfyQueueCounts, setComfyQueueCounts] = useState<ComfyQueueSummary>({
+    runningCount: 0,
+    pendingCount: 0,
+    totalCount: 0,
+  });
+  const [activeComfyTaskCounts, setActiveComfyTaskCounts] = useState<Record<string, number>>({});
   const [copiedApi, setCopiedApi] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const [canvasContextMenu, setCanvasContextMenu] = useState<CanvasContextMenuState | null>(null);
@@ -2179,9 +2399,15 @@ function CanvasWorkspace() {
   const nodesSnapshot = useRef<CanvasFlowNode[]>([]);
   const edgesSnapshot = useRef<Edge[]>([]);
   const incomingPlacementReservations = useRef<NodeRecord[]>([]);
-  const runningComfyClients = useRef(new Map<string, string>());
-  const comfyQueuePollTimers = useRef(new Map<string, number>());
-  const cancelledVideoNodes = useRef(new Set<string>());
+  const runningComfyClients = useRef(new Map<string, Set<string>>());
+  const cancelledComfyClients = useRef(new Set<string>());
+  const ownedComfyClients = useRef(new Set<string>());
+  const recoveringComfyClients = useRef(new Set<string>());
+  const missingRecoveredTaskPolls = useRef(new Map<string, number>());
+  const recoveredComfySockets = useRef(new Map<string, WebSocket>());
+  const connectingRecoveredComfyClients = useRef(new Set<string>());
+  const recoveredNodeActiveKeys = useRef(new Map<string, string>());
+  const persistedComfyTasks = useRef<PersistedComfyTask[]>(persistedComfyTasksFromStorage());
   const comfyOutputRootRef = useRef(comfyOutputRoot);
   const comfyInputRootRef = useRef(comfyInputRoot);
   const makeFlowNodeRef = useRef<((record: NodeRecord, matched?: boolean) => CanvasFlowNode) | null>(null);
@@ -2191,10 +2417,75 @@ function CanvasWorkspace() {
   const nodeClipboard = useRef<NodeClipboard | null>(null);
   const { setCenter, fitView, screenToFlowPosition } = useReactFlow<CanvasFlowNode, Edge>();
 
+  const savePersistedComfyTasks = useCallback((tasks: PersistedComfyTask[]) => {
+    persistedComfyTasks.current = tasks;
+    window.localStorage.setItem(COMFY_TASK_STORAGE_KEY, JSON.stringify(tasks));
+  }, []);
+
+  const rememberComfyTask = useCallback((task: PersistedComfyTask) => {
+    savePersistedComfyTasks([
+      ...persistedComfyTasks.current.filter((candidate) => candidate.clientId !== task.clientId),
+      task,
+    ]);
+  }, [savePersistedComfyTasks]);
+
+  const forgetComfyTask = useCallback((clientId: string) => {
+    savePersistedComfyTasks(
+      persistedComfyTasks.current.filter((task) => task.clientId !== clientId),
+    );
+  }, [savePersistedComfyTasks]);
+
+  const registerComfyTask = useCallback((nodeId: string, clientId: string) => {
+    const clients = runningComfyClients.current.get(nodeId) ?? new Set<string>();
+    clients.add(clientId);
+    runningComfyClients.current.set(nodeId, clients);
+    setActiveComfyTaskCounts((current) => ({ ...current, [nodeId]: clients.size }));
+  }, []);
+
+  const unregisterComfyTask = useCallback((nodeId: string, clientId: string) => {
+    const clients = runningComfyClients.current.get(nodeId);
+    if (!clients) return;
+    clients.delete(clientId);
+    if (clients.size) {
+      setActiveComfyTaskCounts((current) => ({ ...current, [nodeId]: clients.size }));
+      return;
+    }
+    runningComfyClients.current.delete(nodeId);
+    setActiveComfyTaskCounts((current) => {
+      const next = { ...current };
+      delete next[nodeId];
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     nodesSnapshot.current = nodes;
     edgesSnapshot.current = edges;
   }, [edges, nodes]);
+
+  useEffect(() => {
+    const isEditableTarget = (target: EventTarget | null) => (
+      target instanceof HTMLElement
+      && (target.isContentEditable || target.matches("input, textarea, select"))
+    );
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== "Space" || isEditableTarget(event.target)) return;
+      event.preventDefault();
+      setSpacePanActive(true);
+    };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.code === "Space") setSpacePanActive(false);
+    };
+    const stopSpacePan = () => setSpacePanActive(false);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", stopSpacePan);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", stopSpacePan);
+    };
+  }, []);
 
   useEffect(() => {
     window.localStorage.setItem("infinite-canvas:project-columns", String(projectColumns));
@@ -2213,9 +2504,25 @@ function CanvasWorkspace() {
     comfyInputRootRef.current = comfyInputRoot;
   }, [comfyInputRoot]);
 
-  useEffect(() => () => {
-    comfyQueuePollTimers.current.forEach((timer) => window.clearTimeout(timer));
-    comfyQueuePollTimers.current.clear();
+  useEffect(() => {
+    let disposed = false;
+    let timer: number | null = null;
+    const poll = async () => {
+      try {
+        const summary = await invoke<ComfyQueueSummary>("get_comfyui_queue_summary", {
+          serverUrl: COMFYUI_SERVER_URL,
+        });
+        if (!disposed) setComfyQueueCounts(summary);
+      } catch {
+        // Global queue visibility is supplemental and must not interrupt editing or generation.
+      }
+      if (!disposed) timer = window.setTimeout(() => void poll(), 1200);
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
   }, []);
 
   const toggleTheme = () => setTheme((current) => current === "dark" ? "light" : "dark");
@@ -2273,6 +2580,28 @@ function CanvasWorkspace() {
     },
     [persistPatch, setNodes],
   );
+
+  useEffect(() => {
+    if (!activeProjectId) return;
+    const persistedNodeIds = new Set(
+      persistedComfyTasks.current
+        .filter((task) => task.canvasId === activeProjectId)
+        .map((task) => task.nodeId),
+    );
+    nodes.forEach((node) => {
+      const status = node.data.record.content.status;
+      if (status !== "running" && status !== "cancelling") return;
+      if (persistedNodeIds.has(node.id) || runningComfyClients.current.has(node.id)) return;
+      changeNode(node.id, {
+        content: {
+          ...node.data.record.content,
+          status: "idle",
+          executionProgress: null,
+          validationMessage: "",
+        },
+      });
+    });
+  }, [activeProjectId, changeNode, nodes]);
 
   useEffect(() => {
     const recordsById = new Map(nodes.map((node) => [node.id, node.data.record]));
@@ -2438,49 +2767,6 @@ function CanvasWorkspace() {
     setNotice("ComfyUI 目录设置已保存");
   }, [comfyInputRootDraft, comfyOutputRootDraft]);
 
-  const clearComfyQueuePolling = useCallback((targetId: string) => {
-    const timer = comfyQueuePollTimers.current.get(targetId);
-    if (timer !== undefined) window.clearTimeout(timer);
-    comfyQueuePollTimers.current.delete(targetId);
-    setComfyQueuePositions((current) => {
-      if (!(targetId in current)) return current;
-      const next = { ...current };
-      delete next[targetId];
-      return next;
-    });
-  }, []);
-
-  const startComfyQueuePolling = useCallback((targetId: string, clientId: string) => {
-    clearComfyQueuePolling(targetId);
-    const poll = async () => {
-      if (runningComfyClients.current.get(targetId) !== clientId) return;
-      try {
-        const status = await invoke<ComfyQueueStatus | null>("get_comfyui_queue_status", {
-          serverUrl: COMFYUI_SERVER_URL,
-          clientId,
-        });
-        const position = status?.state === "queued" ? status.position : null;
-        setComfyQueuePositions((current) => {
-          if (position !== null && position > 0) {
-            if (current[targetId] === position) return current;
-            return { ...current, [targetId]: position };
-          }
-          if (!(targetId in current)) return current;
-          const next = { ...current };
-          delete next[targetId];
-          return next;
-        });
-      } catch {
-        // Queue polling is supplemental and must not interrupt generation.
-      }
-      if (runningComfyClients.current.get(targetId) !== clientId) return;
-      const timer = window.setTimeout(() => void poll(), 1200);
-      comfyQueuePollTimers.current.set(targetId, timer);
-    };
-    const timer = window.setTimeout(() => void poll(), 500);
-    comfyQueuePollTimers.current.set(targetId, timer);
-  }, [clearComfyQueuePolling]);
-
   const generationSnapshotForGenerator = useCallback((generatorId: string): GenerationSnapshot | null => {
     const generator = nodesSnapshot.current.find(
       (node) => node.id === generatorId,
@@ -2524,18 +2810,27 @@ function CanvasWorkspace() {
   }, []);
 
   const executeVideoNode = useCallback(async (targetId: string) => {
-    const target = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record;
-    if (!target) {
+    const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
+    if (!targetNode) {
       setNotice("无法执行：找不到视频生成节点");
       return;
     }
+    const target = recordAtCurrentFlowPosition(targetNode);
     const requestedSeedMode = seedModeFromContent(target.content);
     const requestedFixedSeed = fixedSeedFromContent(target.content);
+    const activeClients = runningComfyClients.current.get(targetId);
+    if (target.content.status === "cancelling") {
+      setNotice("当前任务正在取消，请稍后再提交");
+      return;
+    }
     if (
       requestedSeedMode === "fixed"
-      && generatedSeedsFromContent(target.content).includes(requestedFixedSeed)
+      && (generatedSeedsFromContent(target.content).includes(requestedFixedSeed)
+        || Boolean(activeClients?.size))
     ) {
-      const message = `固定种子 ${requestedFixedSeed} 已经生成过，无需重复生成`;
+      const message = activeClients?.size
+        ? `固定种子 ${requestedFixedSeed} 已有任务正在执行，不能重复排队`
+        : `固定种子 ${requestedFixedSeed} 已经生成过，无需重复生成`;
       changeNode(targetId, {
         content: { ...target.content, status: "warning", validationMessage: message },
       });
@@ -2560,49 +2855,51 @@ function CanvasWorkspace() {
       return;
     }
     const clientId = crypto.randomUUID();
-    const executionStartedAt = Date.now();
-    cancelledVideoNodes.current.delete(targetId);
-    runningComfyClients.current.set(targetId, clientId);
-    startComfyQueuePolling(targetId, clientId);
+    const taskSubmittedAt = Date.now();
+    ownedComfyClients.current.add(clientId);
+    rememberComfyTask({
+      clientId,
+      nodeId: targetId,
+      canvasId: target.canvasId,
+      snapshot,
+      startedAt: taskSubmittedAt,
+    });
+    cancelledComfyClients.current.delete(clientId);
+    registerComfyTask(targetId, clientId);
+    const queuedTaskCount = runningComfyClients.current.get(targetId)?.size ?? 1;
     changeNode(targetId, {
       content: {
         ...target.content,
         status: "running",
         executionProgress: null,
-        validationMessage: "正在上传素材并提交到远程 ComfyUI…",
+        validationMessage: queuedTaskCount > 1
+          ? `已提交第 ${queuedTaskCount} 个任务，正在等待 ComfyUI 执行…`
+          : "正在上传素材并提交到远程 ComfyUI…",
       },
     });
-    setNotice("正在上传素材并提交到远程 ComfyUI…");
+    setNotice(queuedTaskCount > 1
+      ? `已为当前节点排队 ${queuedTaskCount} 个生成任务`
+      : "正在上传素材并提交到远程 ComfyUI…");
 
     let progressSocket: WebSocket | null = null;
     try {
       progressSocket = await openComfyProgressSocket(clientId);
-      if (cancelledVideoNodes.current.has(targetId)) {
+      if (cancelledComfyClients.current.has(clientId)) {
         throw new Error("ComfyUI 生成已取消");
       }
       progressSocket?.addEventListener("message", (event) => {
-        if (cancelledVideoNodes.current.has(targetId)) return;
-        if (typeof event.data !== "string") return;
-        try {
-          const message = JSON.parse(event.data) as JsonObject;
-          if (message.type !== "progress" || !message.data || typeof message.data !== "object") return;
-          const data = message.data as JsonObject;
-          const value = typeof data.value === "number" ? data.value : null;
-          const maximum = typeof data.max === "number" ? data.max : null;
-          if (value === null || maximum === null || maximum <= 0) return;
-          const progress = Math.max(0, Math.min(100, (value / maximum) * 100));
-          const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
-          changeNode(targetId, {
-            content: {
-              ...latest.content,
-              status: "running",
-              executionProgress: progress,
-              validationMessage: `ComfyUI 正在生成：当前步骤 ${value}/${maximum}`,
-            },
-          });
-        } catch {
-          // ComfyUI also sends binary previews; they are intentionally ignored here.
-        }
+        if (cancelledComfyClients.current.has(clientId)) return;
+        const update = comfyProgressFromSocketData(event.data);
+        if (!update) return;
+        const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
+        changeNode(targetId, {
+          content: {
+            ...latest.content,
+            status: "running",
+            executionProgress: update.progress,
+            validationMessage: `ComfyUI 正在生成：当前步骤 ${update.value}/${update.maximum}`,
+          },
+        });
       });
       const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow", {
         input: {
@@ -2623,69 +2920,103 @@ function CanvasWorkspace() {
           secondarySource: null,
         },
       });
-      if (cancelledVideoNodes.current.has(targetId)) return;
-      const generationElapsedSeconds = (Date.now() - executionStartedAt) / 1000;
+      if (cancelledComfyClients.current.has(clientId)) return;
+      const generationElapsedSeconds = validExecutionElapsedSeconds(result.executionElapsedSeconds);
 
       const previewWidth = 360;
       const previewHeight = 288;
-      const placementRecords = nodesSnapshot.current.map((node) => node.data.record);
+      const placementRecords = [
+        ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
+        ...incomingPlacementReservations.current,
+      ];
       const createdNodes: CanvasFlowNode[] = [];
       const createdEdges: Edge[] = [];
-      for (const [index, output] of result.outputs.entries()) {
-        const position = generatedPreviewPosition(
-          target,
-          placementRecords,
-          previewWidth,
-          previewHeight,
-        );
-        const previewResult = await invoke<CreateNodeResult>("create_node", {
-          input: {
-            canvasId: target.canvasId,
+      const reservationIds = new Set<string>();
+      try {
+        for (const [index, output] of result.outputs.entries()) {
+          const position = generatedPreviewPosition(
+            target,
+            placementRecords,
+            previewWidth,
+            previewHeight,
+          );
+          const reservationId = `generated-preview:${clientId}:${index}`;
+          const reservedRecord: NodeRecord = {
+            ...target,
+            id: reservationId,
             kind: "generated-video",
-            title: result.outputs.length > 1
-              ? `视频预览 ${index + 1}`
-              : "视频预览",
-            content: {
-              videoUrl: output.url,
-              originalName: output.filename,
-              filename: output.filename,
-              subfolder: output.subfolder,
-              fileType: output.fileType,
-              seed: result.seed,
-              comfyPromptId: result.promptId,
-              comfyServerUrl: COMFYUI_SERVER_URL,
-              sourceGeneratorId: targetId,
-              generationSnapshot: snapshot,
-              generationElapsedSeconds,
-            },
-            source: "comfyui",
+            content: { sourceGeneratorId: targetId },
             x: position.x,
             y: position.y,
             width: previewWidth,
             height: previewHeight,
-          },
-        });
-        placementRecords.push(previewResult.node);
-        const flowNode = makeFlowNodeRef.current?.(previewResult.node);
-        if (flowNode) createdNodes.push(flowNode);
-
-        const edgeRecord = await invoke<EdgeRecord>("create_edge", {
-          input: {
-            canvasId: target.canvasId,
-            sourceNodeId: targetId,
-            targetNodeId: previewResult.node.id,
-            kind: "output",
-            metadata: {
-              seed: result.seed,
-              promptId: result.promptId,
-              outputIndex: index,
+            createdAt: new Date().toISOString(),
+          };
+          reservationIds.add(reservationId);
+          incomingPlacementReservations.current.push(reservedRecord);
+          const previewResult = await invoke<CreateNodeResult>("create_node", {
+            input: {
+              canvasId: target.canvasId,
+              kind: "generated-video",
+              title: result.outputs.length > 1
+                ? `视频预览 ${index + 1}`
+                : "视频预览",
+              content: {
+                videoUrl: output.url,
+                originalName: output.filename,
+                filename: output.filename,
+                subfolder: output.subfolder,
+                fileType: output.fileType,
+                seed: result.seed,
+                comfyPromptId: result.promptId,
+                comfyServerUrl: COMFYUI_SERVER_URL,
+                sourceGeneratorId: targetId,
+                outputIndex: index,
+                generationSnapshot: snapshot,
+                ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
+              },
+              source: "comfyui",
+              requestId: comfyPreviewRequestId(target.canvasId, targetId, result.promptId, index),
+              x: position.x,
+              y: position.y,
+              width: previewWidth,
+              height: previewHeight,
             },
-          },
-        });
-        createdEdges.push(toFlowEdge(edgeRecord));
+          });
+          incomingPlacementReservations.current = incomingPlacementReservations.current
+            .map((candidate) => candidate.id === reservationId ? previewResult.node : candidate);
+          reservationIds.delete(reservationId);
+          reservationIds.add(previewResult.node.id);
+          placementRecords.push(previewResult.node);
+          const flowNode = makeFlowNodeRef.current?.(previewResult.node);
+          if (flowNode) createdNodes.push(flowNode);
+
+          const edgeRecord = await invoke<EdgeRecord>("create_edge", {
+            input: {
+              canvasId: target.canvasId,
+              sourceNodeId: targetId,
+              targetNodeId: previewResult.node.id,
+              kind: "output",
+              metadata: {
+                seed: result.seed,
+                promptId: result.promptId,
+                outputIndex: index,
+              },
+            },
+          });
+          createdEdges.push(toFlowEdge(edgeRecord));
+        }
+      } catch (error) {
+        incomingPlacementReservations.current = incomingPlacementReservations.current
+          .filter((candidate) => !reservationIds.has(candidate.id));
+        throw error;
       }
-      if (createdNodes.length) setNodes((current) => [...current, ...createdNodes]);
-      if (createdEdges.length) setEdges((current) => [...current, ...createdEdges]);
+      if (createdNodes.length) setNodes((current) => appendUniqueById(current, createdNodes));
+      if (createdEdges.length) setEdges((current) => appendUniqueById(current, createdEdges));
+      window.setTimeout(() => {
+        incomingPlacementReservations.current = incomingPlacementReservations.current
+          .filter((candidate) => !reservationIds.has(candidate.id));
+      }, 0);
 
       const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
       const nextContent = { ...latest.content };
@@ -2694,12 +3025,18 @@ function CanvasWorkspace() {
         ...generatedSeedsFromContent(latest.content),
         result.seed,
       ])];
+      const remainingTaskCount = Math.max(
+        0,
+        (runningComfyClients.current.get(targetId)?.size ?? 1) - 1,
+      );
       changeNode(targetId, {
         content: {
           ...nextContent,
-          status: "succeeded",
-          executionProgress: 100,
-          validationMessage: `生成完成，已创建 ${result.outputs.length} 个独立预览节点`,
+          status: remainingTaskCount ? "running" : "succeeded",
+          executionProgress: remainingTaskCount ? null : 100,
+          validationMessage: remainingTaskCount
+            ? `本次生成完成，仍有 ${remainingTaskCount} 个任务正在执行或排队`
+            : `生成完成，已创建 ${result.outputs.length} 个独立预览节点`,
           comfyPromptId: result.promptId,
           comfyServerUrl: COMFYUI_SERVER_URL,
           lastGenerationSeed: result.seed,
@@ -2717,17 +3054,25 @@ function CanvasWorkspace() {
         ? `视频生成完成，但输入缓存清理失败：${result.cleanupWarning}`
         : `视频生成完成：已创建 ${result.outputs.length} 个预览节点`);
     } catch (error) {
-      if (cancelledVideoNodes.current.has(targetId)) {
+      const remainingTaskCount = Math.max(
+        0,
+        (runningComfyClients.current.get(targetId)?.size ?? 1) - 1,
+      );
+      if (cancelledComfyClients.current.has(clientId)) {
         const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
         changeNode(targetId, {
           content: {
             ...latest.content,
-            status: "cancelled",
+            status: remainingTaskCount ? "cancelling" : "cancelled",
             executionProgress: null,
-            validationMessage: "已取消 ComfyUI 生成",
+            validationMessage: remainingTaskCount
+              ? `已取消一个任务，仍有 ${remainingTaskCount} 个任务正在执行或排队`
+              : "已取消 ComfyUI 生成",
           },
         });
-        setNotice("已取消 ComfyUI 生成");
+        setNotice(remainingTaskCount
+          ? `已取消一个任务，仍有 ${remainingTaskCount} 个任务`
+          : "已取消 ComfyUI 生成");
         return;
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -2735,27 +3080,30 @@ function CanvasWorkspace() {
       changeNode(targetId, {
         content: {
           ...latest.content,
-          status: "invalid",
+          status: remainingTaskCount ? "running" : "invalid",
           executionProgress: null,
-          validationMessage: `生成失败：${message}`,
+          validationMessage: remainingTaskCount
+            ? `一个任务生成失败，仍有 ${remainingTaskCount} 个任务正在执行或排队`
+            : `生成失败：${message}`,
         },
       });
       reportError(error);
     } finally {
       progressSocket?.close();
-      clearComfyQueuePolling(targetId);
-      if (runningComfyClients.current.get(targetId) === clientId) {
-        runningComfyClients.current.delete(targetId);
-      }
+      cancelledComfyClients.current.delete(clientId);
+      ownedComfyClients.current.delete(clientId);
+      forgetComfyTask(clientId);
+      unregisterComfyTask(targetId, clientId);
     }
-  }, [changeNode, clearComfyQueuePolling, generationSnapshotForGenerator, reportError, setEdges, setNodes, startComfyQueuePolling]);
+  }, [changeNode, forgetComfyTask, generationSnapshotForGenerator, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask]);
 
   const executeSecondarySample = useCallback(async (previewId: string) => {
-    const preview = nodesSnapshot.current.find((node) => node.id === previewId)?.data.record;
-    if (!preview || preview.kind !== "generated-video") {
+    const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
+    if (!previewNode || previewNode.data.record.kind !== "generated-video") {
       setNotice("无法二采：找不到视频预览节点");
       return;
     }
+    const preview = recordAtCurrentFlowPosition(previewNode);
     const secondarySource = comfyOutputFromContent(preview.content);
     const sourceGeneratorId = typeof preview.content.sourceGeneratorId === "string"
       ? preview.content.sourceGeneratorId
@@ -2788,10 +3136,8 @@ function CanvasWorkspace() {
         : baseSnapshot.secondaryResolutionMegapixels,
     };
     const clientId = crypto.randomUUID();
-    const executionStartedAt = Date.now();
-    cancelledVideoNodes.current.delete(previewId);
-    runningComfyClients.current.set(previewId, clientId);
-    startComfyQueuePolling(previewId, clientId);
+    cancelledComfyClients.current.delete(clientId);
+    registerComfyTask(previewId, clientId);
     changeNode(previewId, {
       content: {
         ...preview.content,
@@ -2805,12 +3151,12 @@ function CanvasWorkspace() {
     let progressSocket: WebSocket | null = null;
     try {
       progressSocket = await openComfyProgressSocket(clientId);
-      if (cancelledVideoNodes.current.has(previewId)) {
+      if (cancelledComfyClients.current.has(clientId)) {
         throw new Error("ComfyUI 二采已取消");
       }
       let executingNodeId = "";
       progressSocket?.addEventListener("message", (event) => {
-        if (cancelledVideoNodes.current.has(previewId) || typeof event.data !== "string") return;
+        if (cancelledComfyClients.current.has(clientId) || typeof event.data !== "string") return;
         try {
           const message = JSON.parse(event.data) as JsonObject;
           if (!message.data || typeof message.data !== "object") return;
@@ -2880,12 +3226,12 @@ function CanvasWorkspace() {
           secondarySource,
         },
       });
-      if (cancelledVideoNodes.current.has(previewId)) return;
-      const generationElapsedSeconds = (Date.now() - executionStartedAt) / 1000;
+      if (cancelledComfyClients.current.has(clientId)) return;
+      const generationElapsedSeconds = validExecutionElapsedSeconds(result.executionElapsedSeconds);
 
       const previewWidth = 360;
       const previewHeight = 288;
-      const placementRecords = nodesSnapshot.current.map((node) => node.data.record);
+      const placementRecords = nodesSnapshot.current.map(recordAtCurrentFlowPosition);
       const createdNodes: CanvasFlowNode[] = [];
       const createdEdges: Edge[] = [];
       for (const [index, output] of result.outputs.entries()) {
@@ -2911,10 +3257,12 @@ function CanvasWorkspace() {
               comfyServerUrl: COMFYUI_SERVER_URL,
               sourceGeneratorId,
               sourcePreviewId: previewId,
+              outputIndex: index,
               generationSnapshot: snapshot,
-              generationElapsedSeconds,
+              ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
             },
             source: "comfyui",
+            requestId: comfyPreviewRequestId(preview.canvasId, previewId, result.promptId, index),
             x: position.x,
             y: position.y,
             width: previewWidth,
@@ -2940,8 +3288,8 @@ function CanvasWorkspace() {
         });
         createdEdges.push(toFlowEdge(edgeRecord));
       }
-      if (createdNodes.length) setNodes((current) => [...current, ...createdNodes]);
-      if (createdEdges.length) setEdges((current) => [...current, ...createdEdges]);
+      if (createdNodes.length) setNodes((current) => appendUniqueById(current, createdNodes));
+      if (createdEdges.length) setEdges((current) => appendUniqueById(current, createdEdges));
 
       const latest = nodesSnapshot.current.find(
         (node) => node.id === previewId,
@@ -2962,7 +3310,7 @@ function CanvasWorkspace() {
       const latest = nodesSnapshot.current.find(
         (node) => node.id === previewId,
       )?.data.record ?? preview;
-      if (cancelledVideoNodes.current.has(previewId)) {
+      if (cancelledComfyClients.current.has(clientId)) {
         changeNode(previewId, {
           content: {
             ...latest.content,
@@ -2986,61 +3334,79 @@ function CanvasWorkspace() {
       reportError(error);
     } finally {
       progressSocket?.close();
-      clearComfyQueuePolling(previewId);
-      if (runningComfyClients.current.get(previewId) === clientId) {
-        runningComfyClients.current.delete(previewId);
-      }
+      cancelledComfyClients.current.delete(clientId);
+      unregisterComfyTask(previewId, clientId);
     }
-  }, [changeNode, clearComfyQueuePolling, generationSnapshotForGenerator, reportError, setEdges, setNodes, startComfyQueuePolling]);
+  }, [changeNode, generationSnapshotForGenerator, registerComfyTask, reportError, setEdges, setNodes, unregisterComfyTask]);
 
   const cancelVideoExecution = useCallback(async (targetId: string) => {
-    const clientId = runningComfyClients.current.get(targetId);
+    const clientIds = [...(runningComfyClients.current.get(targetId) ?? [])];
+    const clientId = clientIds.find(
+      (candidate) => !cancelledComfyClients.current.has(candidate),
+    );
     const target = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record;
     if (!clientId || !target) {
       setNotice("当前没有可取消的 ComfyUI 任务");
       return;
     }
-    cancelledVideoNodes.current.add(targetId);
+    cancelledComfyClients.current.add(clientId);
     changeNode(targetId, {
       content: {
         ...target.content,
         status: "cancelling",
-        validationMessage: "正在取消 ComfyUI 生成…",
+        validationMessage: clientIds.length > 1
+          ? `正在取消最早提交的任务，之后还剩 ${clientIds.length - 1} 个…`
+          : "正在取消 ComfyUI 生成…",
       },
     });
-    setNotice("正在取消 ComfyUI 生成…");
+    setNotice(clientIds.length > 1
+      ? `正在取消最早提交的任务，之后还剩 ${clientIds.length - 1} 个…`
+      : "正在取消 ComfyUI 生成…");
+
     try {
       const cleanupWarning = await invoke<string | null>("cancel_comfyui_workflow", {
         serverUrl: COMFYUI_SERVER_URL,
         clientId,
       });
+      if (!ownedComfyClients.current.has(clientId)) {
+        forgetComfyTask(clientId);
+        cancelledComfyClients.current.delete(clientId);
+        unregisterComfyTask(targetId, clientId);
+      }
+      const remainingTaskCount = [...(runningComfyClients.current.get(targetId) ?? [])]
+        .filter((candidate) => candidate !== clientId)
+        .length;
       const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
       changeNode(targetId, {
         content: {
           ...latest.content,
-          status: "cancelled",
+          status: remainingTaskCount ? "running" : "cancelled",
           executionProgress: null,
-          validationMessage: "已取消 ComfyUI 生成",
+          validationMessage: remainingTaskCount
+            ? `已取消最早提交的任务，仍有 ${remainingTaskCount} 个任务`
+            : "已取消 ComfyUI 生成",
         },
       });
       setNotice(cleanupWarning
-        ? `已取消 ComfyUI 生成，但输入缓存清理失败：${cleanupWarning}`
-        : "已取消 ComfyUI 生成");
+        ? `任务已取消，但输入缓存清理失败：${cleanupWarning}`
+        : remainingTaskCount
+          ? `已取消最早提交的任务，仍有 ${remainingTaskCount} 个任务`
+          : "已取消 ComfyUI 生成");
     } catch (error) {
-      cancelledVideoNodes.current.delete(targetId);
+      cancelledComfyClients.current.delete(clientId);
       const message = error instanceof Error ? error.message : String(error);
       const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
       changeNode(targetId, {
         content: {
           ...latest.content,
-          status: "invalid",
+          status: "running",
           executionProgress: null,
           validationMessage: `取消失败：${message}`,
         },
       });
       reportError(error);
     }
-  }, [changeNode, reportError]);
+  }, [changeNode, forgetComfyTask, reportError, unregisterComfyTask]);
 
   const disconnectEdge = useCallback(async (
     edgeId: string,
@@ -3148,11 +3514,11 @@ function CanvasWorkspace() {
       data: {
         record,
         matched,
+        activeTaskCount: activeComfyTaskCounts[record.id] ?? 0,
         inputCount: 0,
         mediaInputs: [],
         textInputCount: 0,
         textInputs: [],
-        queuePosition: null,
         onChange: changeNode,
         onSave: saveNode,
         onExecutionCheck: reportExecutionCheck,
@@ -3165,9 +3531,337 @@ function CanvasWorkspace() {
         onCopy: copyText,
       },
     }),
-    [cancelVideoExecution, changeNode, copyText, deleteNode, executeSecondarySample, executeVideoNode, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, saveNode],
+    [activeComfyTaskCounts, cancelVideoExecution, changeNode, copyText, deleteNode, executeSecondarySample, executeVideoNode, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, saveNode],
   );
   makeFlowNodeRef.current = makeFlowNode;
+
+  const restoreCompletedComfyTask = useCallback(async (
+    task: PersistedComfyTask,
+    recovered: ComfyClientTaskStatus,
+  ) => {
+    const generatorNode = nodesSnapshot.current.find((node) => node.id === task.nodeId);
+    if (!generatorNode || recovered.status !== "success" || !recovered.promptId) return null;
+    const alreadyRestored = nodesSnapshot.current.some((node) => (
+      node.data.record.kind === "generated-video"
+      && node.data.record.content.comfyPromptId === recovered.promptId
+    ));
+    if (alreadyRestored) return null;
+
+    const generator = recordAtCurrentFlowPosition(generatorNode);
+    const generationElapsedSeconds = validExecutionElapsedSeconds(
+      recovered.executionElapsedSeconds,
+    );
+    const previewWidth = 360;
+    const previewHeight = 288;
+    const placementRecords = [
+      ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
+      ...incomingPlacementReservations.current,
+    ];
+    const createdNodes: CanvasFlowNode[] = [];
+    const createdEdges: Edge[] = [];
+    const reservationIds = new Set<string>();
+    try {
+      for (const [index, output] of recovered.outputs.entries()) {
+        const position = generatedPreviewPosition(
+          generator,
+          placementRecords,
+          previewWidth,
+          previewHeight,
+        );
+        const reservationId = `recovered-preview:${task.clientId}:${index}`;
+        const reservation: NodeRecord = {
+          ...generator,
+          id: reservationId,
+          kind: "generated-video",
+          content: { sourceGeneratorId: task.nodeId },
+          x: position.x,
+          y: position.y,
+          width: previewWidth,
+          height: previewHeight,
+          createdAt: new Date().toISOString(),
+        };
+        reservationIds.add(reservationId);
+        incomingPlacementReservations.current.push(reservation);
+        const previewResult = await invoke<CreateNodeResult>("create_node", {
+          input: {
+            canvasId: task.canvasId,
+            kind: "generated-video",
+            title: recovered.outputs.length > 1 ? `视频预览 ${index + 1}` : "视频预览",
+            content: {
+              videoUrl: output.url,
+              originalName: output.filename,
+              filename: output.filename,
+              subfolder: output.subfolder,
+              fileType: output.fileType,
+              seed: recovered.seed ?? "",
+              comfyPromptId: recovered.promptId,
+              comfyServerUrl: COMFYUI_SERVER_URL,
+              sourceGeneratorId: task.nodeId,
+              outputIndex: index,
+              generationSnapshot: task.snapshot,
+              ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
+            },
+            source: "comfyui-recovery",
+            requestId: comfyPreviewRequestId(
+              task.canvasId,
+              task.nodeId,
+              recovered.promptId,
+              index,
+            ),
+            x: position.x,
+            y: position.y,
+            width: previewWidth,
+            height: previewHeight,
+          },
+        });
+        incomingPlacementReservations.current = incomingPlacementReservations.current
+          .map((candidate) => candidate.id === reservationId ? previewResult.node : candidate);
+        reservationIds.delete(reservationId);
+        reservationIds.add(previewResult.node.id);
+        placementRecords.push(previewResult.node);
+        const flowNode = makeFlowNodeRef.current?.(previewResult.node);
+        if (flowNode) createdNodes.push(flowNode);
+        const edgeRecord = await invoke<EdgeRecord>("create_edge", {
+          input: {
+            canvasId: task.canvasId,
+            sourceNodeId: task.nodeId,
+            targetNodeId: previewResult.node.id,
+            kind: "output",
+            metadata: {
+              seed: recovered.seed ?? "",
+              promptId: recovered.promptId,
+              outputIndex: index,
+              recovered: true,
+            },
+          },
+        });
+        createdEdges.push(toFlowEdge(edgeRecord));
+      }
+    } catch (error) {
+      incomingPlacementReservations.current = incomingPlacementReservations.current
+        .filter((candidate) => !reservationIds.has(candidate.id));
+      throw error;
+    }
+    if (createdNodes.length) setNodes((current) => appendUniqueById(current, createdNodes));
+    if (createdEdges.length) setEdges((current) => appendUniqueById(current, createdEdges));
+    window.setTimeout(() => {
+      incomingPlacementReservations.current = incomingPlacementReservations.current
+        .filter((candidate) => !reservationIds.has(candidate.id));
+    }, 0);
+
+    const latest = nodesSnapshot.current.find((node) => node.id === task.nodeId)?.data.record
+      ?? generator;
+    const generatedSeeds = recovered.seed
+      ? [...new Set([...generatedSeedsFromContent(latest.content), recovered.seed])]
+      : generatedSeedsFromContent(latest.content);
+    const remainingTaskCount = Math.max(
+      0,
+      (runningComfyClients.current.get(task.nodeId)?.size ?? 1) - 1,
+    );
+    const restoredContent: JsonObject = {
+      ...latest.content,
+      status: remainingTaskCount ? "running" : "succeeded",
+      executionProgress: remainingTaskCount ? null : 100,
+      validationMessage: remainingTaskCount
+        ? `已恢复一个完成任务，仍有 ${remainingTaskCount} 个任务正在执行或排队`
+        : `已恢复完成任务并创建 ${createdNodes.length} 个视频预览`,
+      comfyPromptId: recovered.promptId,
+      comfyServerUrl: COMFYUI_SERVER_URL,
+      lastGenerationSeed: recovered.seed ?? "",
+      generatedSeeds,
+      generationCount: (typeof latest.content.generationCount === "number"
+        ? latest.content.generationCount
+        : 0) + 1,
+    };
+    changeNode(task.nodeId, { content: restoredContent });
+    return restoredContent;
+  }, [changeNode, setEdges, setNodes]);
+
+  useEffect(() => {
+    if (!activeProjectId) return;
+    let disposed = false;
+    let timer: number | null = null;
+    const closeRecoveredProgressSocket = (clientId: string) => {
+      const socket = recoveredComfySockets.current.get(clientId);
+      recoveredComfySockets.current.delete(clientId);
+      if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+    };
+    const ensureRecoveredProgressSocket = (task: PersistedComfyTask) => {
+      if (
+        recoveredComfySockets.current.has(task.clientId)
+        || connectingRecoveredComfyClients.current.has(task.clientId)
+      ) return;
+      connectingRecoveredComfyClients.current.add(task.clientId);
+      void openComfyProgressSocket(task.clientId).then((socket) => {
+        connectingRecoveredComfyClients.current.delete(task.clientId);
+        if (
+          !socket
+          || disposed
+          || !persistedComfyTasks.current.some((candidate) => candidate.clientId === task.clientId)
+        ) {
+          socket?.close();
+          return;
+        }
+        recoveredComfySockets.current.set(task.clientId, socket);
+        socket.addEventListener("message", (event) => {
+          if (disposed) return;
+          const update = comfyProgressFromSocketData(event.data);
+          if (!update) return;
+          const node = nodesSnapshot.current.find((candidate) => candidate.id === task.nodeId);
+          if (!node) return;
+          recoveredNodeActiveKeys.current.set(task.nodeId, `${task.clientId}:running`);
+          changeNode(task.nodeId, {
+            content: {
+              ...node.data.record.content,
+              status: "running",
+              executionProgress: update.progress,
+              validationMessage: `ComfyUI 正在生成：当前步骤 ${update.value}/${update.maximum}`,
+            },
+          });
+        });
+        socket.addEventListener("close", () => {
+          if (recoveredComfySockets.current.get(task.clientId) === socket) {
+            recoveredComfySockets.current.delete(task.clientId);
+          }
+          if (recoveredNodeActiveKeys.current.get(task.nodeId)?.startsWith(`${task.clientId}:`)) {
+            recoveredNodeActiveKeys.current.delete(task.nodeId);
+          }
+        }, { once: true });
+      });
+    };
+    const pollRecoveredTasks = async () => {
+      const tasks = persistedComfyTasks.current.filter((task) => (
+        task.canvasId === activeProjectId
+        && !ownedComfyClients.current.has(task.clientId)
+      ));
+      if (tasks.length) {
+        tasks.forEach((task) => {
+          const clients = runningComfyClients.current.get(task.nodeId);
+          if (!clients?.has(task.clientId)) registerComfyTask(task.nodeId, task.clientId);
+        });
+        try {
+          const statuses = await invoke<ComfyClientTaskStatus[]>(
+            "get_comfyui_client_task_statuses",
+            { serverUrl: COMFYUI_SERVER_URL, clientIds: tasks.map((task) => task.clientId) },
+          );
+          const updatedNodeContents = new Map<string, JsonObject>();
+          for (const recovered of statuses) {
+            if (disposed) return;
+            const task = tasks.find((candidate) => candidate.clientId === recovered.clientId);
+            if (!task || !persistedComfyTasks.current.some(
+              (candidate) => candidate.clientId === task.clientId,
+            )) continue;
+            if (recovered.status !== "missing") {
+              missingRecoveredTaskPolls.current.delete(task.clientId);
+            }
+            if (recovered.status === "running" || recovered.status === "pending") {
+              ensureRecoveredProgressSocket(task);
+              continue;
+            }
+            if (recovered.status === "success" && recovered.outputs.length) {
+              closeRecoveredProgressSocket(task.clientId);
+              if (recoveringComfyClients.current.has(task.clientId)) continue;
+              recoveringComfyClients.current.add(task.clientId);
+              try {
+                const restoredContent = await restoreCompletedComfyTask(task, recovered);
+                if (restoredContent) updatedNodeContents.set(task.nodeId, restoredContent);
+                forgetComfyTask(task.clientId);
+                unregisterComfyTask(task.nodeId, task.clientId);
+                setNotice("已恢复 ComfyUI 完成任务及视频预览");
+              } finally {
+                recoveringComfyClients.current.delete(task.clientId);
+              }
+              continue;
+            }
+            if (recovered.status === "missing") {
+              const missingPolls = (missingRecoveredTaskPolls.current.get(task.clientId) ?? 0) + 1;
+              missingRecoveredTaskPolls.current.set(task.clientId, missingPolls);
+              if (missingPolls < 3) continue;
+            }
+            if (
+              recovered.status === "error"
+              || recovered.status === "cancelled"
+              || recovered.status === "missing"
+              || (recovered.status === "success" && !recovered.outputs.length)
+            ) {
+              closeRecoveredProgressSocket(task.clientId);
+              const node = nodesSnapshot.current.find((candidate) => candidate.id === task.nodeId);
+              if (node) {
+                const validationMessage = recovered.status === "missing"
+                  ? "恢复失败：任务不在 ComfyUI 队列或最近历史记录中"
+                  : recovered.status === "success"
+                    ? "恢复失败：ComfyUI 历史记录中没有视频输出"
+                    : recovered.status === "cancelled"
+                      ? "已取消恢复的 ComfyUI 任务"
+                      : "恢复的 ComfyUI 任务执行失败";
+                changeNode(task.nodeId, {
+                  content: {
+                    ...node.data.record.content,
+                    status: recovered.status === "cancelled" ? "cancelled" : "invalid",
+                    executionProgress: null,
+                    validationMessage,
+                  },
+                });
+              }
+              missingRecoveredTaskPolls.current.delete(task.clientId);
+              forgetComfyTask(task.clientId);
+              unregisterComfyTask(task.nodeId, task.clientId);
+            }
+          }
+
+          const activeByNode = new Map<string, {
+            task: PersistedComfyTask;
+            status: "running" | "pending";
+          }>();
+          for (const recovered of statuses) {
+            if (recovered.status !== "running" && recovered.status !== "pending") continue;
+            const task = tasks.find((candidate) => candidate.clientId === recovered.clientId);
+            if (!task || !persistedComfyTasks.current.some(
+              (candidate) => candidate.clientId === task.clientId,
+            )) continue;
+            const current = activeByNode.get(task.nodeId);
+            if (!current || (current.status === "pending" && recovered.status === "running")) {
+              activeByNode.set(task.nodeId, { task, status: recovered.status });
+            }
+          }
+          const recoveredNodeIds = new Set(tasks.map((task) => task.nodeId));
+          for (const nodeId of recoveredNodeIds) {
+            const active = activeByNode.get(nodeId);
+            if (!active) {
+              recoveredNodeActiveKeys.current.delete(nodeId);
+              continue;
+            }
+            const activeKey = `${active.task.clientId}:${active.status}`;
+            if (recoveredNodeActiveKeys.current.get(nodeId) === activeKey) continue;
+            recoveredNodeActiveKeys.current.set(nodeId, activeKey);
+            const node = nodesSnapshot.current.find((candidate) => candidate.id === nodeId);
+            if (!node) continue;
+            changeNode(nodeId, {
+              content: {
+                ...(updatedNodeContents.get(nodeId) ?? node.data.record.content),
+                status: "running",
+                executionProgress: null,
+                validationMessage: active.status === "running"
+                  ? "已恢复 ComfyUI 执行中任务，正在重新接收进度…"
+                  : "已恢复 ComfyUI 排队任务",
+              },
+            });
+          }
+        } catch (error) {
+          if (!disposed) reportError(error);
+        }
+      }
+      if (!disposed) timer = window.setTimeout(() => void pollRecoveredTasks(), 2000);
+    };
+    void pollRecoveredTasks();
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+      persistedComfyTasks.current
+        .filter((task) => task.canvasId === activeProjectId)
+        .forEach((task) => closeRecoveredProgressSocket(task.clientId));
+    };
+  }, [activeProjectId, changeNode, forgetComfyTask, registerComfyTask, reportError, restoreCompletedComfyTask, unregisterComfyTask]);
 
   const pasteCopiedNodes = useCallback(async () => {
     const clipboard = nodeClipboard.current;
@@ -3183,7 +3877,9 @@ function CanvasWorkspace() {
             canvasId: activeProjectId,
             kind: sourceNode.kind,
             title: `${sourceNode.title || "未命名节点"} 副本`,
-            content: structuredClone(sourceNode.content),
+            content: sourceNode.kind === "video-generation"
+              ? copiedVideoGenerationContent(sourceNode.content)
+              : structuredClone(sourceNode.content),
             source: "clipboard",
             x: snapCanvasCoordinate(sourceNode.x + pasteOffset),
             y: snapCanvasCoordinate(sourceNode.y + pasteOffset),
@@ -3567,8 +4263,8 @@ function CanvasWorkspace() {
             status: "idle",
             generationMode: "reference-to-video",
             generationDuration: 15,
-            generationPrimaryResolution: 0.4,
-            generationSecondaryResolution: 0.5,
+            generationPrimaryResolution: 0.3,
+            generationSecondaryResolution: 0.7,
             secondarySamplingEnabled: false,
             seedMode: "random",
             generationSeed: DEFAULT_GENERATION_SEED,
@@ -3845,11 +4541,11 @@ function CanvasWorkspace() {
             data: {
               ...node.data,
               matched: matchedIds.has(node.id),
+              activeTaskCount: activeComfyTaskCounts[node.id] ?? 0,
               inputCount: 0,
               mediaInputs: [],
               textInputCount: 0,
               textInputs: [],
-              queuePosition: comfyQueuePositions[node.id] ?? null,
             },
           };
         }
@@ -3879,16 +4575,16 @@ function CanvasWorkspace() {
           data: {
             ...node.data,
             matched: matchedIds.has(node.id),
+            activeTaskCount: activeComfyTaskCounts[node.id] ?? 0,
             inputCount: inputRecords.length,
             mediaInputs: orderedMedia,
             textInputCount: connectedText.length,
             textInputs: connectedText,
-            queuePosition: comfyQueuePositions[node.id] ?? null,
           },
         };
       });
     },
-    [comfyQueuePositions, edges, matchedIds, nodes],
+    [activeComfyTaskCounts, edges, matchedIds, nodes],
   );
 
   const focusFirstMatch = () => {
@@ -3970,6 +4666,17 @@ function CanvasWorkspace() {
     setSettingsOpen(true);
   };
 
+  const comfyQueueIndicator = comfyQueueCounts.totalCount > 0 ? (
+    <span
+      className="comfy-queue-summary"
+      title={`当前 ${comfyQueueCounts.totalCount} 个任务，${comfyQueueCounts.runningCount} 个正在执行，${comfyQueueCounts.pendingCount} 个等待中`}
+      aria-label={`当前 ${comfyQueueCounts.totalCount} 个任务，${comfyQueueCounts.runningCount} 个正在执行，${comfyQueueCounts.pendingCount} 个等待中`}
+    >
+      <span aria-hidden="true" />
+      {comfyQueueCounts.totalCount}
+    </span>
+  ) : null;
+
   const appSettingsDialog = settingsOpen && createPortal(
     <div className="project-dialog-backdrop" onMouseDown={() => setSettingsOpen(false)}>
       <form
@@ -4047,6 +4754,7 @@ function CanvasWorkspace() {
             </div>
           </div>
           <div className="project-header-actions">
+            {comfyQueueIndicator}
             <label className="project-columns-control">
               <span>每行项目数</span>
               <input
@@ -4240,10 +4948,12 @@ function CanvasWorkspace() {
       style={canvasBackground ? { background: canvasBackground } : undefined}
     >
       <ReactFlow<CanvasFlowNode, Edge>
+        className={spacePanActive ? "is-space-pan-active" : undefined}
         nodes={visibleNodes}
         edges={interactiveEdges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
+        nodesDraggable={!spacePanActive}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={connectNodes}
@@ -4251,14 +4961,25 @@ function CanvasWorkspace() {
         onPaneContextMenu={openCanvasContextMenu}
         isValidConnection={isValidConnection}
         onDelete={deleteElements}
-        onNodeDragStop={(_, node) => persistPatch(node.id, { x: node.position.x, y: node.position.y })}
+        onNodeDragStop={(_, node, draggedNodes) => {
+          const movedNodes = draggedNodes.length ? draggedNodes : [node];
+          movedNodes.forEach((movedNode) => {
+            persistPatch(movedNode.id, {
+              x: movedNode.position.x,
+              y: movedNode.position.y,
+            });
+          });
+        }}
         minZoom={0.12}
         maxZoom={2.2}
         snapToGrid
         snapGrid={CANVAS_SNAP_GRID}
         defaultEdgeOptions={{ type: "canvasEdge", animated: false }}
         deleteKeyCode={["Backspace", "Delete"]}
-        selectionOnDrag
+        selectionKeyCode="Control"
+        multiSelectionKeyCode="Control"
+        selectionOnDrag={false}
+        panActivationKeyCode="Space"
         panOnScroll
         fitView
       >
@@ -4344,6 +5065,7 @@ function CanvasWorkspace() {
 
         <Panel position="top-right" className="api-panel">
           <span className="live-indicator"><Radio size={14} /> 本地 API</span>
+          {comfyQueueIndicator}
           <label className="canvas-color-picker" title="选择当前项目的画布背景颜色">
             <Palette size={14} />
             <input
