@@ -111,6 +111,7 @@ pub fn run() {
             commands::submit_comfyui_workflow,
             commands::cancel_comfyui_workflow,
             commands::get_comfyui_queue_summary,
+            commands::get_comfyui_h3_loras,
             commands::get_comfyui_client_task_statuses,
             commands::get_runtime_info,
         ])

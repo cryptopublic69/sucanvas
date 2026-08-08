@@ -164,6 +164,8 @@ interface GenerationSnapshot {
   durationSeconds: number;
   primaryResolutionMegapixels: number;
   secondaryResolutionMegapixels: number;
+  loraName: string;
+  loraStrength: number;
   imagePaths: string[];
   audioPaths: string[];
   videoPaths: string[];
@@ -202,6 +204,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   mediaInputs: NodeRecord[];
   textInputCount: number;
   textInputs: NodeRecord[];
+  h3LoraOptions: string[];
   onChange: (id: string, patch: NodePatch) => void;
   onSave: (id: string, patch: NodePatch) => Promise<boolean>;
   onExecutionCheck: (message: string, valid: boolean) => void;
@@ -245,10 +248,11 @@ function recordAtCurrentFlowPosition(node: CanvasFlowNode): NodeRecord {
 const CANVAS_GRID_SIZE = 24;
 const CANVAS_SNAP_GRID: [number, number] = [CANVAS_GRID_SIZE, CANVAS_GRID_SIZE];
 const AUDIO_NODE_MIN_HEIGHT = 240;
-const VIDEO_NODE_BASE_HEIGHT = 432;
+const VIDEO_NODE_BASE_HEIGHT = 480;
 const MEDIA_NODE_CHROME_HEIGHT = 73;
 const COMFYUI_SERVER_URL = "http://192.168.5.108:8188";
 const DEFAULT_GENERATION_SEED = "56456340597885880";
+const DEFAULT_H3_LORA_NAME = "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors";
 const H3_REFERENCE_WORKFLOW_PATH = "D:\\Downloads\\MiniMax+H3全能参考工作流.json";
 const COMFY_TASK_STORAGE_KEY = "infinite-canvas:comfy-tasks";
 const VIDEO_RESIZE_CONTROLS = [
@@ -399,7 +403,7 @@ function videoGenerationAutoHeight(
   const listMediaRows = videoCount + Math.ceil(audioCount / 2);
   const imageColumns = Math.max(1, Math.floor((Math.max(180, nodeWidth - 32) + 6) / 66));
   const imageRows = imageCount ? Math.ceil(imageCount / imageColumns) : 0;
-  const contentHeight = 391
+  const contentHeight = 439
     + listMediaRows * 51
     + imageRows * 66
     + groupCount * 30
@@ -550,6 +554,8 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
       snapshot.secondaryResolutionMegapixels,
       0.5,
     ),
+    loraName: h3LoraNameFromContent(snapshot),
+    loraStrength: h3LoraStrengthFromContent(snapshot),
     imagePaths: stringArray(snapshot.imagePaths),
     audioPaths: stringArray(snapshot.audioPaths),
     videoPaths: stringArray(snapshot.videoPaths),
@@ -609,6 +615,30 @@ function secondaryVideoResolutionFromContent(content: JsonObject): number {
     content.generationSecondaryResolution ?? content.generationResolution,
     0.5,
   );
+}
+
+function isMinimaxH3LoraName(value: string): boolean {
+  const [directory, ...filenameParts] = value.trim().replace(/\//g, "\\").split("\\");
+  return directory.toLocaleLowerCase() === "minimaxh3" && filenameParts.join("\\").trim().length > 0;
+}
+
+function h3LoraNameFromContent(content: JsonObject): string {
+  const value = content.generationLoraName ?? content.loraName;
+  return typeof value === "string" && isMinimaxH3LoraName(value)
+    ? value
+    : DEFAULT_H3_LORA_NAME;
+}
+
+function h3LoraStrengthFromContent(content: JsonObject): number {
+  const value = content.generationLoraStrength ?? content.loraStrength;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 2
+    ? Math.round(value * 20) / 20
+    : 1;
+}
+
+function h3LoraDisplayName(value: string): string {
+  const parts = value.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? value;
 }
 
 function seedModeFromContent(content: JsonObject): SeedMode {
@@ -791,6 +821,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     mediaInputs,
     textInputCount,
     textInputs,
+    h3LoraOptions,
     onChange,
     onSave,
     onExecutionCheck,
@@ -853,6 +884,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const videoDuration = videoDurationFromContent(record.content);
   const primaryVideoResolution = primaryVideoResolutionFromContent(record.content);
   const secondaryVideoResolution = secondaryVideoResolutionFromContent(record.content);
+  const h3LoraName = h3LoraNameFromContent(record.content);
+  const h3LoraStrength = h3LoraStrengthFromContent(record.content);
+  const selectableH3Loras = h3LoraOptions.includes(h3LoraName)
+    ? h3LoraOptions
+    : [h3LoraName, ...h3LoraOptions];
   const seedMode = seedModeFromContent(record.content);
   const fixedSeed = fixedSeedFromContent(record.content);
   const validationStatus = record.content.status === "ready"
@@ -1593,6 +1629,48 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               />
               <output>{secondaryVideoResolution.toFixed(1)} MP</output>
             </label>
+          </div>
+          <div className="video-lora-control">
+            <span>H3 LoRA</span>
+            <select
+              className="nodrag nowheel"
+              value={h3LoraName}
+              title={h3LoraName}
+              aria-label="MiniMax H3 LoRA"
+              onChange={(event) => onChange(id, {
+                content: {
+                  ...record.content,
+                  generationLoraName: event.currentTarget.value,
+                  status: "idle",
+                  validationMessage: "",
+                },
+              })}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              {selectableH3Loras.map((lora) => (
+                <option key={lora} value={lora}>{h3LoraDisplayName(lora)}</option>
+              ))}
+            </select>
+            <input
+              className="video-parameter-range"
+              type="range"
+              min="0"
+              max="2"
+              step="0.05"
+              value={h3LoraStrength}
+              title={`LoRA 权重：${h3LoraStrength.toFixed(2)}`}
+              aria-label="LoRA 权重"
+              onChange={(event) => onChange(id, {
+                content: {
+                  ...record.content,
+                  generationLoraStrength: Number(event.currentTarget.value),
+                  status: "idle",
+                  validationMessage: "",
+                },
+              })}
+              onPointerDown={(event) => event.stopPropagation()}
+            />
+            <output title="LoRA 权重">×{h3LoraStrength.toFixed(2)}</output>
           </div>
           <div className="video-seed-control">
             <span>生成种子</span>
@@ -2390,6 +2468,7 @@ function CanvasWorkspace() {
     pendingCount: 0,
     totalCount: 0,
   });
+  const [h3LoraOptions, setH3LoraOptions] = useState<string[]>([DEFAULT_H3_LORA_NAME]);
   const [activeComfyTaskCounts, setActiveComfyTaskCounts] = useState<Record<string, number>>({});
   const [copiedApi, setCopiedApi] = useState(false);
   const [dropActive, setDropActive] = useState(false);
@@ -2522,6 +2601,20 @@ function CanvasWorkspace() {
     return () => {
       disposed = true;
       if (timer !== null) window.clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void invoke<string[]>("get_comfyui_h3_loras", { serverUrl: COMFYUI_SERVER_URL })
+      .then((loras) => {
+        if (!disposed && loras.length) setH3LoraOptions(loras);
+      })
+      .catch(() => {
+        // Keep the workflow's default H3 LoRA available while ComfyUI is offline.
+      });
+    return () => {
+      disposed = true;
     };
   }, []);
 
@@ -2803,6 +2896,8 @@ function CanvasWorkspace() {
       durationSeconds: videoDurationFromContent(generator.content),
       primaryResolutionMegapixels: primaryVideoResolutionFromContent(generator.content),
       secondaryResolutionMegapixels: secondaryVideoResolutionFromContent(generator.content),
+      loraName: h3LoraNameFromContent(generator.content),
+      loraStrength: h3LoraStrengthFromContent(generator.content),
       imagePaths: assetPaths("image"),
       audioPaths: assetPaths("audio"),
       videoPaths: assetPaths("video"),
@@ -2914,6 +3009,8 @@ function CanvasWorkspace() {
           primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
           secondaryResolutionMegapixels: snapshot.secondaryResolutionMegapixels,
           secondarySamplingEnabled: false,
+          loraName: snapshot.loraName,
+          loraStrength: snapshot.loraStrength,
           imagePaths: snapshot.imagePaths,
           audioPaths: snapshot.audioPaths,
           videoPaths: snapshot.videoPaths,
@@ -3220,6 +3317,8 @@ function CanvasWorkspace() {
           primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
           secondaryResolutionMegapixels: snapshot.secondaryResolutionMegapixels,
           secondarySamplingEnabled: true,
+          loraName: snapshot.loraName,
+          loraStrength: snapshot.loraStrength,
           imagePaths: snapshot.imagePaths,
           audioPaths: snapshot.audioPaths,
           videoPaths: snapshot.videoPaths,
@@ -3467,7 +3566,7 @@ function CanvasWorkspace() {
     const copiedNodes = nodesSnapshot.current
       .filter((node) => copiedIds.has(node.id))
       .map((node) => ({
-        ...node.data.record,
+        ...recordAtCurrentFlowPosition(node),
         content: structuredClone(node.data.record.content),
       }));
     if (!copiedNodes.length) return;
@@ -3519,6 +3618,7 @@ function CanvasWorkspace() {
         mediaInputs: [],
         textInputCount: 0,
         textInputs: [],
+        h3LoraOptions,
         onChange: changeNode,
         onSave: saveNode,
         onExecutionCheck: reportExecutionCheck,
@@ -3531,7 +3631,7 @@ function CanvasWorkspace() {
         onCopy: copyText,
       },
     }),
-    [activeComfyTaskCounts, cancelVideoExecution, changeNode, copyText, deleteNode, executeSecondarySample, executeVideoNode, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, saveNode],
+    [activeComfyTaskCounts, cancelVideoExecution, changeNode, copyText, deleteNode, executeSecondarySample, executeVideoNode, h3LoraOptions, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, saveNode],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -3943,6 +4043,7 @@ function CanvasWorkspace() {
       if (
         target instanceof HTMLInputElement
         || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
         || (target instanceof HTMLElement && target.isContentEditable)
       ) {
         return;
@@ -3956,6 +4057,14 @@ function CanvasWorkspace() {
         if (!selectedIds.length) return;
         event.preventDefault();
         copyNodesToClipboard(selectedIds);
+      } else if (key === "d" && !event.shiftKey) {
+        const selectedIds = nodesSnapshot.current
+          .filter((node) => node.selected)
+          .map((node) => node.id);
+        if (!selectedIds.length) return;
+        event.preventDefault();
+        copyNodesToClipboard(selectedIds);
+        void pasteCopiedNodes();
       } else if (key === "v" && nodeClipboard.current) {
         event.preventDefault();
         void pasteCopiedNodes();
@@ -4266,6 +4375,8 @@ function CanvasWorkspace() {
             generationPrimaryResolution: 0.3,
             generationSecondaryResolution: 0.7,
             secondarySamplingEnabled: false,
+            generationLoraName: DEFAULT_H3_LORA_NAME,
+            generationLoraStrength: 1,
             seedMode: "random",
             generationSeed: DEFAULT_GENERATION_SEED,
             manualHeight: VIDEO_NODE_BASE_HEIGHT,
@@ -4546,6 +4657,7 @@ function CanvasWorkspace() {
               mediaInputs: [],
               textInputCount: 0,
               textInputs: [],
+              h3LoraOptions,
             },
           };
         }
@@ -4580,11 +4692,12 @@ function CanvasWorkspace() {
             mediaInputs: orderedMedia,
             textInputCount: connectedText.length,
             textInputs: connectedText,
+            h3LoraOptions,
           },
         };
       });
     },
-    [activeComfyTaskCounts, edges, matchedIds, nodes],
+    [activeComfyTaskCounts, edges, h3LoraOptions, matchedIds, nodes],
   );
 
   const focusFirstMatch = () => {
@@ -4708,7 +4821,9 @@ function CanvasWorkspace() {
             spellCheck={false}
           />
           <small>
-            用于在任务结束后删除本次上传的 infinite-canvas 缓存目录；留空则不自动清理。
+            请填写 ComfyUI 的 input 根目录，例如
+            X:\ComfyUI_windows_portable\ComfyUI\input。不要包含 infinite-canvas；程序会自动创建并在任务结束后清理
+            infinite-canvas\任务ID。留空则不自动清理。
           </small>
         </label>
         <label>
@@ -4975,6 +5090,11 @@ function CanvasWorkspace() {
         snapToGrid
         snapGrid={CANVAS_SNAP_GRID}
         defaultEdgeOptions={{ type: "canvasEdge", animated: false }}
+        connectionLineStyle={{
+          stroke: "#646d82",
+          strokeWidth: 2.5,
+          vectorEffect: "non-scaling-stroke",
+        }}
         deleteKeyCode={["Backspace", "Delete"]}
         selectionKeyCode="Control"
         multiSelectionKeyCode="Control"

@@ -170,6 +170,9 @@ pub struct ComfySubmitInput {
     pub primary_resolution_megapixels: f64,
     pub secondary_resolution_megapixels: f64,
     pub secondary_sampling_enabled: bool,
+    pub lora_name: String,
+    #[serde(default = "default_lora_strength")]
+    pub lora_strength: f64,
     #[serde(default)]
     pub image_paths: Vec<String>,
     #[serde(default)]
@@ -178,6 +181,10 @@ pub struct ComfySubmitInput {
     pub video_paths: Vec<String>,
     #[serde(default)]
     pub secondary_source: Option<ComfyOutputFile>,
+}
+
+fn default_lora_strength() -> f64 {
+    1.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -422,6 +422,8 @@ const H3_SEED_NODE_ID: &str = "348";
 const H3_DURATION_NODE_ID: &str = "350";
 const H3_PRIMARY_RESOLUTION_NODE_ID: &str = "340";
 const H3_SECONDARY_RESOLUTION_NODE_ID: &str = "398";
+const H3_PRIMARY_LORA_NODE_ID: &str = "354";
+const H3_SECONDARY_LORA_NODE_ID: &str = "401";
 const H3_PRIMARY_OUTPUT_NODE_ID: &str = "360";
 const H3_SECONDARY_OUTPUT_NODE_ID: &str = "397";
 const H3_CLEAN_VIDEO_NODE_ID: &str = "9000";
@@ -432,6 +434,55 @@ const H3_AUDIO_NODE_IDS: [&str; 2] = ["374", "416"];
 const H3_IMAGE_NODE_IDS: [&str; 9] = [
     "362", "364", "365", "367", "368", "369", "370", "371", "372",
 ];
+
+fn is_minimax_h3_lora_name(value: &str) -> bool {
+    let normalized = value.trim().replace('/', "\\");
+    normalized
+        .split_once('\\')
+        .is_some_and(|(directory, filename)| {
+            directory.eq_ignore_ascii_case("MinimaxH3") && !filename.trim().is_empty()
+        })
+}
+
+fn minimax_h3_loras_from_object_info(value: &Value) -> Vec<String> {
+    let mut loras = value
+        .pointer("/LoraLoaderModelOnly/input/required/lora_name/0")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|name| is_minimax_h3_lora_name(name))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    loras.sort_by_key(|name| name.to_ascii_lowercase());
+    loras.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    loras
+}
+
+#[tauri::command]
+pub async fn get_comfyui_h3_loras(server_url: String) -> Result<Vec<String>, String> {
+    let parsed_server =
+        Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let server_url = server_url.trim().trim_end_matches('/');
+    let value = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?
+        .get(format!("{server_url}/object_info/LoraLoaderModelOnly"))
+        .send()
+        .await
+        .map_err(|error| format!("读取 ComfyUI LoRA 列表失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("读取 ComfyUI LoRA 列表失败：{error}"))?
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("解析 ComfyUI LoRA 列表失败：{error}"))?;
+    Ok(minimax_h3_loras_from_object_info(&value))
+}
 
 fn workflow_inputs_mut<'a>(
     workflow: &'a mut Value,
@@ -527,6 +578,8 @@ fn configure_h3_generation(
     primary_resolution_megapixels: f64,
     secondary_resolution_megapixels: f64,
     secondary_sampling_enabled: bool,
+    lora_name: &str,
+    lora_strength: f64,
 ) -> Result<(), String> {
     set_workflow_input(
         workflow,
@@ -554,6 +607,15 @@ fn configure_h3_generation(
             "megapixels",
             json!(secondary_resolution_megapixels),
         )?;
+    }
+    for node_id in [H3_PRIMARY_LORA_NODE_ID, H3_SECONDARY_LORA_NODE_ID] {
+        set_workflow_input(
+            workflow,
+            node_id,
+            "lora_name",
+            Value::String(lora_name.to_owned()),
+        )?;
+        set_workflow_input(workflow, node_id, "strength_model", json!(lora_strength))?;
     }
     install_clean_video_output(workflow, secondary_sampling_enabled)?;
     Ok(())
@@ -915,6 +977,13 @@ async fn submit_comfyui_workflow_inner(
     {
         return Err("二采分辨率必须在0.2到2.0 MP之间".to_owned());
     }
+    let lora_name = input.lora_name.trim();
+    if !is_minimax_h3_lora_name(lora_name) {
+        return Err("LoRA 只能选择 MinimaxH3 目录中的模型".to_owned());
+    }
+    if !input.lora_strength.is_finite() || input.lora_strength < 0.0 || input.lora_strength > 2.0 {
+        return Err("LoRA 权重必须在0.0到2.0之间".to_owned());
+    }
 
     let workflow_bytes = tokio::fs::read(&input.workflow_path)
         .await
@@ -965,6 +1034,8 @@ async fn submit_comfyui_workflow_inner(
         input.primary_resolution_megapixels,
         input.secondary_resolution_megapixels,
         input.secondary_sampling_enabled || uploaded_secondary_source.is_some(),
+        lora_name,
+        input.lora_strength,
     )?;
     for (index, node_id) in H3_IMAGE_NODE_IDS.iter().enumerate() {
         let input_name = format!("ref_images.ref_image_{index}");
@@ -1554,7 +1625,8 @@ mod tests {
     use super::{
         comfy_execution_elapsed_seconds, comfy_input_task_path, comfy_queue_summary_from_value,
         configure_h3_generation, configure_secondary_source_video, media_format,
-        resolve_generation_seed, MediaFormat, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
+        minimax_h3_loras_from_object_info, resolve_generation_seed, MediaFormat, AUDIO_MAX_BYTES,
+        IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
     use serde_json::json;
     use std::path::Path;
@@ -1565,11 +1637,13 @@ mod tests {
             "340": { "inputs": { "megapixels": 0.4 } },
             "348": { "inputs": { "noise_seed": 0 } },
             "350": { "inputs": { "value": 15.0 } },
+            "354": { "inputs": { "lora_name": "MinimaxH3\\old-primary.safetensors", "strength_model": 1.0 } },
             "360": { "inputs": { "save_output": false, "filename_prefix": "primary/video" } },
             "383": { "inputs": { "image": ["381", 0] } },
             "388": { "inputs": { "audio": ["382", 0] } },
             "397": { "inputs": { "save_output": true, "filename_prefix": "secondary/video" } },
             "398": { "inputs": { "megapixels": 0.5 } }
+            ,"401": { "inputs": { "lora_name": "MinimaxH3\\old-secondary.safetensors", "strength_model": 1.0 } }
         })
     }
 
@@ -1633,7 +1707,18 @@ mod tests {
     #[test]
     fn selected_preview_replaces_only_the_secondary_stage_inputs() {
         let mut workflow = resolution_test_workflow();
-        configure_h3_generation(&mut workflow, "prompt", 42, 8.0, 0.4, 0.8, true).unwrap();
+        configure_h3_generation(
+            &mut workflow,
+            "prompt",
+            42,
+            8.0,
+            0.4,
+            0.8,
+            true,
+            r"MinimaxH3\test.safetensors",
+            0.75,
+        )
+        .unwrap();
         configure_secondary_source_video(&mut workflow, "infinite-canvas/job/source.mp4").unwrap();
 
         assert_eq!(
@@ -1672,8 +1757,18 @@ mod tests {
     #[test]
     fn configures_both_sampling_resolutions_when_secondary_sampling_is_enabled() {
         let mut workflow = resolution_test_workflow();
-        configure_h3_generation(&mut workflow, "new prompt", u64::MAX, 8.0, 0.3, 2.0, true)
-            .unwrap();
+        configure_h3_generation(
+            &mut workflow,
+            "new prompt",
+            u64::MAX,
+            8.0,
+            0.3,
+            2.0,
+            true,
+            r"MinimaxH3\selected.safetensors",
+            0.65,
+        )
+        .unwrap();
 
         assert_eq!(
             workflow.pointer("/339/inputs/value"),
@@ -1692,6 +1787,16 @@ mod tests {
             workflow.pointer("/398/inputs/megapixels"),
             Some(&json!(2.0))
         );
+        for node_id in ["354", "401"] {
+            assert_eq!(
+                workflow.pointer(&format!("/{node_id}/inputs/lora_name")),
+                Some(&json!(r"MinimaxH3\selected.safetensors"))
+            );
+            assert_eq!(
+                workflow.pointer(&format!("/{node_id}/inputs/strength_model")),
+                Some(&json!(0.65))
+            );
+        }
         assert!(workflow.get("360").is_none());
         assert!(workflow.get("397").is_none());
         assert_eq!(
@@ -1711,7 +1816,18 @@ mod tests {
     #[test]
     fn disabling_secondary_sampling_saves_primary_output_and_removes_secondary_output() {
         let mut workflow = resolution_test_workflow();
-        configure_h3_generation(&mut workflow, "prompt", 42, 6.0, 0.2, 0.8, false).unwrap();
+        configure_h3_generation(
+            &mut workflow,
+            "prompt",
+            42,
+            6.0,
+            0.2,
+            0.8,
+            false,
+            r"MinimaxH3\test.safetensors",
+            1.0,
+        )
+        .unwrap();
 
         assert_eq!(
             workflow.pointer("/340/inputs/megapixels"),
@@ -1734,6 +1850,30 @@ mod tests {
         assert_eq!(
             workflow.pointer("/398/inputs/megapixels"),
             Some(&json!(0.5))
+        );
+    }
+
+    #[test]
+    fn filters_comfy_loras_to_the_minimax_h3_directory() {
+        let object_info = json!({
+            "LoraLoaderModelOnly": {
+                "input": {
+                    "required": {
+                        "lora_name": [[
+                            "Other\\ignored.safetensors",
+                            "MinimaxH3\\turbo.safetensors",
+                            "minimaxh3/quality.safetensors"
+                        ]]
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            minimax_h3_loras_from_object_info(&object_info),
+            vec![
+                "minimaxh3/quality.safetensors".to_owned(),
+                "MinimaxH3\\turbo.safetensors".to_owned(),
+            ]
         );
     }
 
