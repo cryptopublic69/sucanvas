@@ -1,0 +1,1591 @@
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+
+use reqwest::{multipart, Client, Url};
+use serde_json::{json, Value};
+use tauri::State;
+use uuid::Uuid;
+
+use crate::{
+    models::{
+        ComfyOutputFile, ComfyQueueStatus, ComfySubmitInput, ComfySubmitResult, CreateEdgeInput,
+        CreateNodeInput, CreateNodeResult, CreateProjectInput, DeleteNodesInput, DeletedBatch,
+        EdgeRecord, NodeRecord, RuntimeInfo, UpdateNodeInput, UpdateProjectInput,
+        WorkspaceSnapshot,
+    },
+    ApplicationState, RunningComfyTask,
+};
+
+#[tauri::command]
+pub fn load_workspace(
+    canvas_id: Option<String>,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkspaceSnapshot, String> {
+    let selected_id = match canvas_id {
+        Some(canvas_id) => canvas_id,
+        None => state
+            .active_canvas_id
+            .read()
+            .map_err(|_| "active project lock is poisoned".to_owned())?
+            .clone(),
+    };
+    let snapshot = state
+        .database
+        .load_project(&selected_id)
+        .map_err(|error| error.to_string())?;
+    *state
+        .active_canvas_id
+        .write()
+        .map_err(|_| "active project lock is poisoned".to_owned())? = selected_id;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn list_projects(state: State<'_, ApplicationState>) -> Result<Vec<WorkspaceSnapshot>, String> {
+    state
+        .database
+        .list_projects()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn create_project(
+    input: CreateProjectInput,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkspaceSnapshot, String> {
+    state
+        .database
+        .create_project(&input.name)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn update_project(
+    input: UpdateProjectInput,
+    state: State<'_, ApplicationState>,
+) -> Result<crate::models::CanvasRecord, String> {
+    state
+        .database
+        .rename_project(&input.id, &input.name)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn delete_project(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
+    state
+        .database
+        .delete_project(&id)
+        .map_err(|error| error.to_string())?;
+
+    let deleted_active_project = state
+        .active_canvas_id
+        .read()
+        .map_err(|_| "active project lock is poisoned".to_owned())?
+        .as_str()
+        == id;
+    if deleted_active_project {
+        let fallback_id = state
+            .database
+            .list_projects()
+            .map_err(|error| error.to_string())?
+            .first()
+            .map(|project| project.canvas.id.clone())
+            .unwrap_or_else(|| crate::models::DEFAULT_CANVAS_ID.to_owned());
+        *state
+            .active_canvas_id
+            .write()
+            .map_err(|_| "active project lock is poisoned".to_owned())? = fallback_id;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn create_node(
+    input: CreateNodeInput,
+    state: State<'_, ApplicationState>,
+) -> Result<CreateNodeResult, String> {
+    state
+        .database
+        .create_node(input)
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MediaFormat {
+    extension: &'static str,
+    mime_type: &'static str,
+    kind: &'static str,
+    max_bytes: u64,
+}
+
+const IMAGE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const AUDIO_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const VIDEO_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+fn media_format(path: &Path) -> Option<MediaFormat> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => Some(MediaFormat {
+            extension: "png",
+            mime_type: "image/png",
+            kind: "image",
+            max_bytes: IMAGE_MAX_BYTES,
+        }),
+        "jpg" | "jpeg" => Some(MediaFormat {
+            extension: "jpg",
+            mime_type: "image/jpeg",
+            kind: "image",
+            max_bytes: IMAGE_MAX_BYTES,
+        }),
+        "webp" => Some(MediaFormat {
+            extension: "webp",
+            mime_type: "image/webp",
+            kind: "image",
+            max_bytes: IMAGE_MAX_BYTES,
+        }),
+        "gif" => Some(MediaFormat {
+            extension: "gif",
+            mime_type: "image/gif",
+            kind: "image",
+            max_bytes: IMAGE_MAX_BYTES,
+        }),
+        "bmp" => Some(MediaFormat {
+            extension: "bmp",
+            mime_type: "image/bmp",
+            kind: "image",
+            max_bytes: IMAGE_MAX_BYTES,
+        }),
+        "avif" => Some(MediaFormat {
+            extension: "avif",
+            mime_type: "image/avif",
+            kind: "image",
+            max_bytes: IMAGE_MAX_BYTES,
+        }),
+        "mp3" => Some(MediaFormat {
+            extension: "mp3",
+            mime_type: "audio/mpeg",
+            kind: "audio",
+            max_bytes: AUDIO_MAX_BYTES,
+        }),
+        "wav" => Some(MediaFormat {
+            extension: "wav",
+            mime_type: "audio/wav",
+            kind: "audio",
+            max_bytes: AUDIO_MAX_BYTES,
+        }),
+        "m4a" => Some(MediaFormat {
+            extension: "m4a",
+            mime_type: "audio/mp4",
+            kind: "audio",
+            max_bytes: AUDIO_MAX_BYTES,
+        }),
+        "aac" => Some(MediaFormat {
+            extension: "aac",
+            mime_type: "audio/aac",
+            kind: "audio",
+            max_bytes: AUDIO_MAX_BYTES,
+        }),
+        "flac" => Some(MediaFormat {
+            extension: "flac",
+            mime_type: "audio/flac",
+            kind: "audio",
+            max_bytes: AUDIO_MAX_BYTES,
+        }),
+        "ogg" | "oga" => Some(MediaFormat {
+            extension: "ogg",
+            mime_type: "audio/ogg",
+            kind: "audio",
+            max_bytes: AUDIO_MAX_BYTES,
+        }),
+        "opus" => Some(MediaFormat {
+            extension: "opus",
+            mime_type: "audio/ogg",
+            kind: "audio",
+            max_bytes: AUDIO_MAX_BYTES,
+        }),
+        "mp4" => Some(MediaFormat {
+            extension: "mp4",
+            mime_type: "video/mp4",
+            kind: "video",
+            max_bytes: VIDEO_MAX_BYTES,
+        }),
+        "m4v" => Some(MediaFormat {
+            extension: "m4v",
+            mime_type: "video/x-m4v",
+            kind: "video",
+            max_bytes: VIDEO_MAX_BYTES,
+        }),
+        "mov" => Some(MediaFormat {
+            extension: "mov",
+            mime_type: "video/quicktime",
+            kind: "video",
+            max_bytes: VIDEO_MAX_BYTES,
+        }),
+        "webm" => Some(MediaFormat {
+            extension: "webm",
+            mime_type: "video/webm",
+            kind: "video",
+            max_bytes: VIDEO_MAX_BYTES,
+        }),
+        "ogv" => Some(MediaFormat {
+            extension: "ogv",
+            mime_type: "video/ogg",
+            kind: "video",
+            max_bytes: VIDEO_MAX_BYTES,
+        }),
+        "mkv" => Some(MediaFormat {
+            extension: "mkv",
+            mime_type: "video/x-matroska",
+            kind: "video",
+            max_bytes: VIDEO_MAX_BYTES,
+        }),
+        "avi" => Some(MediaFormat {
+            extension: "avi",
+            mime_type: "video/x-msvideo",
+            kind: "video",
+            max_bytes: VIDEO_MAX_BYTES,
+        }),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+pub async fn import_media(
+    path: String,
+    canvas_id: String,
+    x: f64,
+    y: f64,
+    state: State<'_, ApplicationState>,
+) -> Result<CreateNodeResult, String> {
+    let database = state.database.clone();
+    let assets_dir = state.assets_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        import_media_blocking(path, canvas_id, x, y, database, assets_dir)
+    })
+    .await
+    .map_err(|error| format!("媒体导入任务失败: {error}"))?
+}
+
+fn import_media_blocking(
+    path: String,
+    canvas_id: String,
+    x: f64,
+    y: f64,
+    database: crate::db::Database,
+    assets_dir: PathBuf,
+) -> Result<CreateNodeResult, String> {
+    if !x.is_finite() || !y.is_finite() {
+        return Err("媒体落点无效".to_owned());
+    }
+
+    let source = PathBuf::from(&path);
+    let source = source
+        .canonicalize()
+        .map_err(|error| format!("无法读取媒体 {path}: {error}"))?;
+    let metadata = source
+        .metadata()
+        .map_err(|error| format!("无法读取媒体信息: {error}"))?;
+    if !metadata.is_file() {
+        return Err("拖入的项目不是文件".to_owned());
+    }
+    let format =
+        media_format(&source).ok_or_else(|| "仅支持常见图片、音频和视频格式".to_owned())?;
+    if metadata.len() > format.max_bytes {
+        let (limit, media_label) = match format.kind {
+            "image" => ("64 MiB", "图片"),
+            "audio" => ("512 MiB", "音频"),
+            _ => ("4 GiB", "视频"),
+        };
+        return Err(format!("{media_label}文件超过 {limit} 限制",));
+    }
+    let original_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "媒体文件名不是有效的 Unicode".to_owned())?
+        .to_owned();
+    let destination = assets_dir.join(format!("asset-{}.{}", Uuid::new_v4(), format.extension));
+
+    std::fs::copy(&source, &destination)
+        .map_err(|error| format!("复制媒体到应用数据目录失败: {error}"))?;
+    let result = database.create_node(CreateNodeInput {
+        canvas_id: Some(canvas_id),
+        kind: Some(format.kind.to_owned()),
+        title: original_name.clone(),
+        content: json!({
+            "assetPath": destination.to_string_lossy(),
+            "mimeType": format.mime_type,
+            "originalName": original_name,
+        }),
+        source: Some("manual".to_owned()),
+        request_id: None,
+        x: Some(x),
+        y: Some(y),
+        width: Some(if format.kind == "video" { 420.0 } else { 360.0 }),
+        height: Some(if format.kind == "audio" { 240.0 } else { 300.0 }),
+    });
+
+    match result {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            let _ = std::fs::remove_file(&destination);
+            Err(error.to_string())
+        }
+    }
+}
+
+#[tauri::command]
+pub fn update_node(
+    input: UpdateNodeInput,
+    state: State<'_, ApplicationState>,
+) -> Result<NodeRecord, String> {
+    state
+        .database
+        .update_node(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn delete_node(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
+    let asset_path = state
+        .database
+        .get_node(&id)
+        .map_err(|error| error.to_string())?
+        .filter(|node| node.kind == "image" || node.kind == "audio" || node.kind == "video")
+        .and_then(|node| node.content.get("assetPath")?.as_str().map(PathBuf::from));
+
+    state
+        .database
+        .delete_node(&id)
+        .map_err(|error| error.to_string())?;
+
+    if let Some(asset_path) = asset_path {
+        let assets_dir = state.assets_dir.canonicalize().ok();
+        let asset_path = asset_path.canonicalize().ok();
+        if let (Some(assets_dir), Some(asset_path)) = (assets_dir, asset_path) {
+            if asset_path.starts_with(assets_dir) {
+                let _ = std::fs::remove_file(asset_path);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_nodes_undoable(
+    input: DeleteNodesInput,
+    state: State<'_, ApplicationState>,
+) -> Result<DeletedBatch, String> {
+    state
+        .database
+        .delete_nodes_with_snapshot(&input.ids)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn restore_deleted_nodes(
+    batch: DeletedBatch,
+    state: State<'_, ApplicationState>,
+) -> Result<DeletedBatch, String> {
+    state
+        .database
+        .restore_deleted_batch(batch)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn create_edge(
+    input: CreateEdgeInput,
+    state: State<'_, ApplicationState>,
+) -> Result<EdgeRecord, String> {
+    state
+        .database
+        .create_edge(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn delete_edge(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
+    state
+        .database
+        .delete_edge(&id)
+        .map_err(|error| error.to_string())
+}
+
+const H3_PROMPT_NODE_ID: &str = "339";
+const H3_SEED_NODE_ID: &str = "348";
+const H3_DURATION_NODE_ID: &str = "350";
+const H3_PRIMARY_RESOLUTION_NODE_ID: &str = "340";
+const H3_SECONDARY_RESOLUTION_NODE_ID: &str = "398";
+const H3_PRIMARY_OUTPUT_NODE_ID: &str = "360";
+const H3_SECONDARY_OUTPUT_NODE_ID: &str = "397";
+const H3_CLEAN_VIDEO_NODE_ID: &str = "9000";
+const H3_CLEAN_SAVE_NODE_ID: &str = "9001";
+const H3_SECONDARY_VIDEO_INPUT_NODE_ID: &str = "9002";
+const H3_CONDITIONING_NODE_ID: &str = "363";
+const H3_AUDIO_NODE_IDS: [&str; 2] = ["374", "416"];
+const H3_IMAGE_NODE_IDS: [&str; 9] = [
+    "362", "364", "365", "367", "368", "369", "370", "371", "372",
+];
+
+fn workflow_inputs_mut<'a>(
+    workflow: &'a mut Value,
+    node_id: &str,
+) -> Result<&'a mut serde_json::Map<String, Value>, String> {
+    workflow
+        .get_mut(node_id)
+        .and_then(Value::as_object_mut)
+        .and_then(|node| node.get_mut("inputs"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| format!("API 工作流缺少节点 {node_id} 的 inputs"))
+}
+
+fn set_workflow_input(
+    workflow: &mut Value,
+    node_id: &str,
+    input_name: &str,
+    value: Value,
+) -> Result<(), String> {
+    workflow_inputs_mut(workflow, node_id)?.insert(input_name.to_owned(), value);
+    Ok(())
+}
+
+fn remove_workflow_input(
+    workflow: &mut Value,
+    node_id: &str,
+    input_name: &str,
+) -> Result<(), String> {
+    workflow_inputs_mut(workflow, node_id)?.remove(input_name);
+    Ok(())
+}
+
+fn install_clean_video_output(
+    workflow: &mut Value,
+    secondary_sampling_enabled: bool,
+) -> Result<(), String> {
+    let source_output_node_id = if secondary_sampling_enabled {
+        H3_SECONDARY_OUTPUT_NODE_ID
+    } else {
+        H3_PRIMARY_OUTPUT_NODE_ID
+    };
+    let filename_prefix = workflow
+        .get(source_output_node_id)
+        .and_then(|node| node.get("inputs"))
+        .and_then(|inputs| inputs.get("filename_prefix"))
+        .and_then(Value::as_str)
+        .unwrap_or("InfiniteCanvas/Minimax_H3")
+        .to_owned();
+    let (image_node_id, audio_node_id, audio_output_index) = if secondary_sampling_enabled {
+        ("403", "382", 0)
+    } else {
+        ("405", "356", 1)
+    };
+    let workflow_object = workflow
+        .as_object_mut()
+        .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
+    workflow_object.remove(H3_PRIMARY_OUTPUT_NODE_ID);
+    workflow_object.remove(H3_SECONDARY_OUTPUT_NODE_ID);
+    workflow_object.insert(
+        H3_CLEAN_VIDEO_NODE_ID.to_owned(),
+        json!({
+            "inputs": {
+                "images": [image_node_id, 0],
+                "fps": 24.0,
+                "audio": [audio_node_id, audio_output_index],
+                "bit_depth": 8
+            },
+            "class_type": "CreateVideo",
+            "_meta": { "title": "Create Final Video" }
+        }),
+    );
+    workflow_object.insert(
+        H3_CLEAN_SAVE_NODE_ID.to_owned(),
+        json!({
+            "inputs": {
+                "video": [H3_CLEAN_VIDEO_NODE_ID, 0],
+                "filename_prefix": filename_prefix,
+                "format": "mp4",
+                "codec": "auto"
+            },
+            "class_type": "SaveVideo",
+            "_meta": { "title": "Save Final Video" }
+        }),
+    );
+    Ok(())
+}
+
+fn configure_h3_generation(
+    workflow: &mut Value,
+    prompt: &str,
+    seed: u64,
+    duration_seconds: f64,
+    primary_resolution_megapixels: f64,
+    secondary_resolution_megapixels: f64,
+    secondary_sampling_enabled: bool,
+) -> Result<(), String> {
+    set_workflow_input(
+        workflow,
+        H3_PROMPT_NODE_ID,
+        "value",
+        Value::String(prompt.to_owned()),
+    )?;
+    set_workflow_input(workflow, H3_SEED_NODE_ID, "noise_seed", json!(seed))?;
+    set_workflow_input(
+        workflow,
+        H3_DURATION_NODE_ID,
+        "value",
+        json!(duration_seconds),
+    )?;
+    set_workflow_input(
+        workflow,
+        H3_PRIMARY_RESOLUTION_NODE_ID,
+        "megapixels",
+        json!(primary_resolution_megapixels),
+    )?;
+    if secondary_sampling_enabled {
+        set_workflow_input(
+            workflow,
+            H3_SECONDARY_RESOLUTION_NODE_ID,
+            "megapixels",
+            json!(secondary_resolution_megapixels),
+        )?;
+    }
+    install_clean_video_output(workflow, secondary_sampling_enabled)?;
+    Ok(())
+}
+
+fn resolve_generation_seed(seed_mode: &str, seed: &str) -> Result<u64, String> {
+    match seed_mode {
+        "random" => Ok(Uuid::new_v4().as_u128() as u64),
+        "fixed" => seed
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "固定种子必须是0到18446744073709551615之间的整数".to_owned()),
+        _ => Err("种子模式必须是 random 或 fixed".to_owned()),
+    }
+}
+
+async fn upload_comfy_input(
+    client: &Client,
+    server_url: &str,
+    path: &str,
+    subfolder: &str,
+) -> Result<String, String> {
+    let source = Path::new(path);
+    if !source.is_file() {
+        return Err(format!("素材文件不存在：{path}"));
+    }
+    let filename = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("素材文件名无效：{path}"))?
+        .to_owned();
+    let part = multipart::Part::file(source)
+        .await
+        .map_err(|error| format!("读取素材失败 {path}：{error}"))?
+        .file_name(filename);
+    let form = multipart::Form::new()
+        .part("image", part)
+        .text("type", "input")
+        .text("subfolder", subfolder.to_owned())
+        .text("overwrite", "true");
+    let response = client
+        .post(format!("{server_url}/upload/image"))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|error| format!("上传素材失败：{error}"))?;
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析素材上传响应失败（HTTP {status}）：{error}"))?;
+    if !status.is_success() {
+        return Err(format!("ComfyUI 拒绝素材上传（HTTP {status}）：{body}"));
+    }
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ComfyUI 上传响应缺少文件名".to_owned())?;
+    let returned_subfolder = body.get("subfolder").and_then(Value::as_str).unwrap_or("");
+    Ok(if returned_subfolder.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{returned_subfolder}/{name}")
+    })
+}
+
+async fn upload_comfy_output_as_input(
+    client: &Client,
+    server_url: &str,
+    output: &ComfyOutputFile,
+    subfolder: &str,
+) -> Result<String, String> {
+    if output.filename.trim().is_empty() {
+        return Err("二采源视频缺少文件名".to_owned());
+    }
+    let source_url = comfy_view_url(
+        server_url,
+        &output.filename,
+        &output.subfolder,
+        &output.file_type,
+    )?;
+    let response = client
+        .get(source_url)
+        .send()
+        .await
+        .map_err(|error| format!("读取二采源视频失败：{error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("读取二采源视频失败（HTTP {status}）"));
+    }
+    let part = multipart::Part::stream(reqwest::Body::wrap_stream(response.bytes_stream()))
+        .file_name(output.filename.clone());
+    let form = multipart::Form::new()
+        .part("image", part)
+        .text("type", "input")
+        .text("subfolder", subfolder.to_owned())
+        .text("overwrite", "true");
+    let response = client
+        .post(format!("{server_url}/upload/image"))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|error| format!("上传二采源视频失败：{error}"))?;
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析二采源视频上传响应失败（HTTP {status}）：{error}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "ComfyUI 拒绝二采源视频上传（HTTP {status}）：{body}"
+        ));
+    }
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ComfyUI 二采源视频上传响应缺少文件名".to_owned())?;
+    let returned_subfolder = body.get("subfolder").and_then(Value::as_str).unwrap_or("");
+    Ok(if returned_subfolder.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{returned_subfolder}/{name}")
+    })
+}
+
+fn comfy_input_task_path(
+    input_root_path: &str,
+    upload_subfolder: &str,
+) -> Result<Option<PathBuf>, String> {
+    let input_root_path = input_root_path.trim().trim_matches('"');
+    if input_root_path.is_empty() {
+        return Ok(None);
+    }
+    let task_id = upload_subfolder
+        .strip_prefix("infinite-canvas/")
+        .ok_or_else(|| "拒绝清理非 infinite-canvas 上传目录".to_owned())?;
+    if task_id.contains('/') || task_id.contains('\\') || Uuid::parse_str(task_id).is_err() {
+        return Err("拒绝清理无效的 ComfyUI 任务目录".to_owned());
+    }
+    let input_root = PathBuf::from(input_root_path);
+    if !input_root.is_absolute() {
+        return Err("ComfyUI 输入映射目录必须是绝对路径".to_owned());
+    }
+    Ok(Some(input_root.join("infinite-canvas").join(task_id)))
+}
+
+async fn cleanup_comfy_input_directory(
+    input_root_path: &str,
+    upload_subfolder: &str,
+) -> Result<(), String> {
+    let Some(task_path) = comfy_input_task_path(input_root_path, upload_subfolder)? else {
+        return Ok(());
+    };
+    let metadata = match tokio::fs::symlink_metadata(&task_path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("无法检查 ComfyUI 输入任务目录：{error}")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("拒绝删除不是普通目录的 ComfyUI 输入任务路径".to_owned());
+    }
+    tokio::fs::remove_dir_all(&task_path)
+        .await
+        .map_err(|error| format!("删除 ComfyUI 输入任务目录失败：{error}"))
+}
+
+async fn cleanup_comfy_task_inputs(task: &RunningComfyTask) -> Option<String> {
+    if task.input_root_path.trim().is_empty() || task.cleanup_started.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    match cleanup_comfy_input_directory(&task.input_root_path, &task.upload_subfolder).await {
+        Ok(()) => None,
+        Err(error) => {
+            task.cleanup_started.store(false, Ordering::SeqCst);
+            Some(error)
+        }
+    }
+}
+
+fn append_cleanup_warning(message: String, cleanup_warning: Option<String>) -> String {
+    match cleanup_warning {
+        Some(warning) => format!("{message}；输入缓存清理失败：{warning}"),
+        None => message,
+    }
+}
+
+fn configure_secondary_source_video(
+    workflow: &mut Value,
+    uploaded_video: &str,
+) -> Result<(), String> {
+    let workflow_object = workflow
+        .as_object_mut()
+        .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
+    workflow_object.insert(
+        H3_SECONDARY_VIDEO_INPUT_NODE_ID.to_owned(),
+        json!({
+            "inputs": {
+                "video": uploaded_video,
+                "force_rate": 24.0,
+                "custom_width": 0,
+                "custom_height": 0,
+                "frame_load_cap": 0,
+                "skip_first_frames": 0,
+                "select_every_nth": 1
+            },
+            "class_type": "VHS_LoadVideo",
+            "_meta": { "title": "Load Selected Preview For Secondary Sampling" }
+        }),
+    );
+    set_workflow_input(
+        workflow,
+        "383",
+        "image",
+        json!([H3_SECONDARY_VIDEO_INPUT_NODE_ID, 0]),
+    )?;
+    set_workflow_input(
+        workflow,
+        "388",
+        "audio",
+        json!([H3_SECONDARY_VIDEO_INPUT_NODE_ID, 2]),
+    )?;
+    set_workflow_input(
+        workflow,
+        H3_CLEAN_VIDEO_NODE_ID,
+        "audio",
+        json!([H3_SECONDARY_VIDEO_INPUT_NODE_ID, 2]),
+    )?;
+    Ok(())
+}
+
+fn collect_video_files(value: &Value, files: &mut Vec<(String, String, String)>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_video_files(item, files);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(filename) = object.get("filename").and_then(Value::as_str) {
+                let extension = Path::new(filename)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if ["mp4", "webm", "mov", "mkv"].contains(&extension.as_str()) {
+                    files.push((
+                        filename.to_owned(),
+                        object
+                            .get("subfolder")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        object
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("output")
+                            .to_owned(),
+                    ));
+                }
+            }
+            for child in object.values() {
+                collect_video_files(child, files);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn comfy_view_url(
+    server_url: &str,
+    filename: &str,
+    subfolder: &str,
+    file_type: &str,
+) -> Result<String, String> {
+    let mut url = Url::parse(&format!("{server_url}/view"))
+        .map_err(|error| format!("ComfyUI 输出地址无效：{error}"))?;
+    url.query_pairs_mut()
+        .append_pair("filename", filename)
+        .append_pair("subfolder", subfolder)
+        .append_pair("type", file_type);
+    Ok(url.into())
+}
+
+fn ensure_comfy_task_active(cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::SeqCst) {
+        Err("ComfyUI 生成已取消".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+async fn submit_comfyui_workflow_inner(
+    input: ComfySubmitInput,
+    task: Arc<RunningComfyTask>,
+) -> Result<ComfySubmitResult, String> {
+    ensure_comfy_task_active(&task.cancelled)?;
+    let parsed_server = Url::parse(input.server_url.trim())
+        .map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let server_url = input.server_url.trim().trim_end_matches('/').to_owned();
+    if input.client_id.trim().is_empty() {
+        return Err("ComfyUI WebSocket client_id 不能为空".to_owned());
+    }
+    if input.prompt.trim().is_empty() {
+        return Err("提示词不能为空".to_owned());
+    }
+    let generation_seed = resolve_generation_seed(&input.seed_mode, &input.seed)?;
+    if input.image_paths.len() > H3_IMAGE_NODE_IDS.len() {
+        return Err(format!(
+            "当前工作流最多支持 {} 张参考图片",
+            H3_IMAGE_NODE_IDS.len()
+        ));
+    }
+    if input.audio_paths.len() > H3_AUDIO_NODE_IDS.len() {
+        return Err(format!(
+            "当前工作流最多支持 {} 个参考音频",
+            H3_AUDIO_NODE_IDS.len()
+        ));
+    }
+    if !input.video_paths.is_empty() {
+        return Err("当前 API 工作流没有参考视频输入节点".to_owned());
+    }
+    if !input.duration_seconds.is_finite()
+        || input.duration_seconds < 2.0
+        || input.duration_seconds > 15.0
+    {
+        return Err("生成时长必须在2到15秒之间".to_owned());
+    }
+    if !input.primary_resolution_megapixels.is_finite()
+        || input.primary_resolution_megapixels < 0.2
+        || input.primary_resolution_megapixels > 2.0
+    {
+        return Err("一采分辨率必须在0.2到2.0 MP之间".to_owned());
+    }
+    if !input.secondary_resolution_megapixels.is_finite()
+        || input.secondary_resolution_megapixels < 0.2
+        || input.secondary_resolution_megapixels > 2.0
+    {
+        return Err("二采分辨率必须在0.2到2.0 MP之间".to_owned());
+    }
+
+    let workflow_bytes = tokio::fs::read(&input.workflow_path)
+        .await
+        .map_err(|error| format!("读取 API 工作流失败：{error}"))?;
+    ensure_comfy_task_active(&task.cancelled)?;
+    let mut workflow: Value = serde_json::from_slice(&workflow_bytes)
+        .map_err(|error| format!("解析 API 工作流失败：{error}"))?;
+    let workflow_object = workflow
+        .as_object()
+        .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
+    if workflow_object.contains_key("nodes") || workflow_object.contains_key("links") {
+        return Err("这是普通 UI 工作流，请改用 Export Workflow (API Format)".to_owned());
+    }
+
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(900))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?;
+    let mut uploaded_images = Vec::with_capacity(input.image_paths.len());
+    for path in &input.image_paths {
+        ensure_comfy_task_active(&task.cancelled)?;
+        uploaded_images
+            .push(upload_comfy_input(&client, &server_url, path, &task.upload_subfolder).await?);
+    }
+    let mut uploaded_audios = Vec::with_capacity(input.audio_paths.len());
+    for path in &input.audio_paths {
+        ensure_comfy_task_active(&task.cancelled)?;
+        uploaded_audios
+            .push(upload_comfy_input(&client, &server_url, path, &task.upload_subfolder).await?);
+    }
+    let uploaded_secondary_source = if let Some(source) = input.secondary_source.as_ref() {
+        ensure_comfy_task_active(&task.cancelled)?;
+        Some(
+            upload_comfy_output_as_input(&client, &server_url, source, &task.upload_subfolder)
+                .await?,
+        )
+    } else {
+        None
+    };
+    ensure_comfy_task_active(&task.cancelled)?;
+
+    configure_h3_generation(
+        &mut workflow,
+        &input.prompt,
+        generation_seed,
+        input.duration_seconds,
+        input.primary_resolution_megapixels,
+        input.secondary_resolution_megapixels,
+        input.secondary_sampling_enabled || uploaded_secondary_source.is_some(),
+    )?;
+    for (index, node_id) in H3_IMAGE_NODE_IDS.iter().enumerate() {
+        let input_name = format!("ref_images.ref_image_{index}");
+        if let Some(uploaded_name) = uploaded_images.get(index) {
+            set_workflow_input(
+                &mut workflow,
+                node_id,
+                "image",
+                Value::String(uploaded_name.clone()),
+            )?;
+        } else {
+            workflow
+                .as_object_mut()
+                .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?
+                .remove(*node_id);
+            remove_workflow_input(&mut workflow, H3_CONDITIONING_NODE_ID, &input_name)?;
+        }
+    }
+    for (index, node_id) in H3_AUDIO_NODE_IDS.iter().enumerate() {
+        let input_name = format!("ref_audios.ref_audio_{index}");
+        if let Some(uploaded_name) = uploaded_audios.get(index) {
+            set_workflow_input(
+                &mut workflow,
+                node_id,
+                "audio",
+                Value::String(uploaded_name.clone()),
+            )?;
+        } else {
+            workflow
+                .as_object_mut()
+                .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?
+                .remove(*node_id);
+            remove_workflow_input(&mut workflow, H3_CONDITIONING_NODE_ID, &input_name)?;
+        }
+    }
+    if let Some(uploaded_video) = uploaded_secondary_source.as_deref() {
+        configure_secondary_source_video(&mut workflow, uploaded_video)?;
+    }
+
+    ensure_comfy_task_active(&task.cancelled)?;
+    task.submitted.store(true, Ordering::SeqCst);
+    let response = client
+        .post(format!("{server_url}/prompt"))
+        .json(&json!({ "prompt": workflow, "client_id": input.client_id }))
+        .send()
+        .await
+        .map_err(|error| format!("提交 ComfyUI 工作流失败：{error}"))?;
+    let status = response.status();
+    let response_body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析 ComfyUI 提交响应失败（HTTP {status}）：{error}"))?;
+    if !status.is_success() {
+        let cleanup_warning = cleanup_comfy_task_inputs(&task).await;
+        return Err(append_cleanup_warning(
+            format!("ComfyUI 拒绝工作流（HTTP {status}）：{response_body}"),
+            cleanup_warning,
+        ));
+    }
+    let prompt_id = response_body
+        .get("prompt_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("ComfyUI 响应缺少 prompt_id：{response_body}"))?
+        .to_owned();
+    *task
+        .prompt_id
+        .lock()
+        .map_err(|_| "ComfyUI 任务状态锁已损坏".to_owned())? = Some(prompt_id.clone());
+    if task.cancelled.load(Ordering::SeqCst) {
+        cancel_known_comfy_prompt(&client, &server_url, &prompt_id).await?;
+        wait_until_comfy_prompt_stopped(&client, &server_url, &prompt_id).await?;
+        let cleanup_warning = cleanup_comfy_task_inputs(&task).await;
+        return Err(append_cleanup_warning(
+            "ComfyUI 生成已取消".to_owned(),
+            cleanup_warning,
+        ));
+    }
+
+    for _ in 0..5400 {
+        ensure_comfy_task_active(&task.cancelled)?;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        ensure_comfy_task_active(&task.cancelled)?;
+        let history_response = client
+            .get(format!("{server_url}/history/{prompt_id}"))
+            .send()
+            .await
+            .map_err(|error| format!("查询 ComfyUI 任务状态失败：{error}"))?;
+        if !history_response.status().is_success() {
+            continue;
+        }
+        let history: Value = history_response
+            .json()
+            .await
+            .map_err(|error| format!("解析 ComfyUI 历史记录失败：{error}"))?;
+        let Some(entry) = history.get(&prompt_id) else {
+            continue;
+        };
+        let status_text = entry
+            .pointer("/status/status_str")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if status_text == "error" {
+            let messages = entry
+                .pointer("/status/messages")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let cleanup_warning = cleanup_comfy_task_inputs(&task).await;
+            return Err(append_cleanup_warning(
+                format!("ComfyUI 生成失败：{messages}"),
+                cleanup_warning,
+            ));
+        }
+        if status_text != "success" {
+            continue;
+        }
+        let mut raw_files = Vec::new();
+        collect_video_files(entry.get("outputs").unwrap_or(&Value::Null), &mut raw_files);
+        let mut seen = HashSet::new();
+        let mut outputs = Vec::new();
+        for (filename, subfolder, file_type) in raw_files {
+            let identity = format!("{file_type}/{subfolder}/{filename}");
+            if !seen.insert(identity) {
+                continue;
+            }
+            outputs.push(ComfyOutputFile {
+                url: comfy_view_url(&server_url, &filename, &subfolder, &file_type)?,
+                filename,
+                subfolder,
+                file_type,
+            });
+        }
+        let cleanup_warning = cleanup_comfy_task_inputs(&task).await;
+        if outputs.is_empty() {
+            return Err(append_cleanup_warning(
+                "ComfyUI 已完成，但历史记录中没有找到视频输出".to_owned(),
+                cleanup_warning,
+            ));
+        }
+        return Ok(ComfySubmitResult {
+            prompt_id,
+            seed: generation_seed.to_string(),
+            outputs,
+            cleanup_warning,
+        });
+    }
+
+    Err(format!("等待 ComfyUI 任务超时：{prompt_id}"))
+}
+
+#[tauri::command]
+pub async fn submit_comfyui_workflow(
+    input: ComfySubmitInput,
+    state: State<'_, ApplicationState>,
+) -> Result<ComfySubmitResult, String> {
+    let client_id = input.client_id.clone();
+    let upload_subfolder = format!("infinite-canvas/{}", Uuid::new_v4().simple());
+    let task = Arc::new(RunningComfyTask {
+        cancelled: AtomicBool::new(false),
+        submitted: AtomicBool::new(false),
+        prompt_id: std::sync::Mutex::new(None),
+        input_root_path: input.input_root_path.clone(),
+        upload_subfolder,
+        cleanup_started: AtomicBool::new(false),
+    });
+    state
+        .running_comfy_tasks
+        .lock()
+        .map_err(|_| "ComfyUI 任务列表锁已损坏".to_owned())?
+        .insert(client_id.clone(), task.clone());
+
+    let mut result = submit_comfyui_workflow_inner(input, task.clone()).await;
+    if !task.submitted.load(Ordering::SeqCst) {
+        if let Some(cleanup_warning) = cleanup_comfy_task_inputs(&task).await {
+            result = match result {
+                Ok(mut success) => {
+                    success.cleanup_warning = Some(cleanup_warning);
+                    Ok(success)
+                }
+                Err(error) => Err(append_cleanup_warning(error, Some(cleanup_warning))),
+            };
+        }
+    }
+    state
+        .running_comfy_tasks
+        .lock()
+        .map_err(|_| "ComfyUI 任务列表锁已损坏".to_owned())?
+        .remove(&client_id);
+    result
+}
+
+fn value_contains_string(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(value) => value == needle,
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_string(value, needle)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| value_contains_string(value, needle)),
+        _ => false,
+    }
+}
+
+async fn cancel_known_comfy_prompt(
+    client: &Client,
+    server_url: &str,
+    prompt_id: &str,
+) -> Result<(), String> {
+    let queue = client
+        .get(format!("{server_url}/queue"))
+        .send()
+        .await
+        .map_err(|error| format!("查询 ComfyUI 队列失败：{error}"))?;
+    let queue_status = queue.status();
+    let queue_body: Value = queue
+        .json()
+        .await
+        .map_err(|error| format!("解析 ComfyUI 队列失败（HTTP {queue_status}）：{error}"))?;
+    if !queue_status.is_success() {
+        return Err(format!(
+            "ComfyUI 拒绝查询队列（HTTP {queue_status}）：{queue_body}"
+        ));
+    }
+
+    let is_running = queue_body
+        .get("queue_running")
+        .is_some_and(|running| value_contains_string(running, prompt_id));
+    let endpoint = if is_running { "/interrupt" } else { "/queue" };
+    let mut request = client.post(format!("{server_url}{endpoint}"));
+    if !is_running {
+        request = request.json(&json!({ "delete": [prompt_id] }));
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("取消 ComfyUI 任务失败：{error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "ComfyUI 拒绝取消任务（HTTP {}）",
+            response.status()
+        ));
+    }
+    Ok(())
+}
+
+async fn wait_until_comfy_prompt_stopped(
+    client: &Client,
+    server_url: &str,
+    prompt_id: &str,
+) -> Result<(), String> {
+    for _ in 0..120 {
+        let response = client
+            .get(format!("{server_url}/queue"))
+            .send()
+            .await
+            .map_err(|error| format!("确认 ComfyUI 取消状态失败：{error}"))?;
+        let status = response.status();
+        let queue: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("解析 ComfyUI 取消状态失败（HTTP {status}）：{error}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "ComfyUI 拒绝确认取消状态（HTTP {status}）：{queue}"
+            ));
+        }
+        let still_queued = queue
+            .get("queue_running")
+            .is_some_and(|value| value_contains_string(value, prompt_id))
+            || queue
+                .get("queue_pending")
+                .is_some_and(|value| value_contains_string(value, prompt_id));
+        if !still_queued {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    Err("ComfyUI 尚未确认任务停止，已保留输入素材避免提前删除".to_owned())
+}
+
+fn comfy_queue_status_from_value(queue: &Value, prompt_id: &str) -> ComfyQueueStatus {
+    let pending = queue
+        .get("queue_pending")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if queue
+        .get("queue_running")
+        .is_some_and(|value| value_contains_string(value, prompt_id))
+    {
+        return ComfyQueueStatus {
+            state: "running".to_owned(),
+            position: None,
+            pending_count: pending.len(),
+        };
+    }
+    let position = pending
+        .iter()
+        .position(|entry| value_contains_string(entry, prompt_id))
+        .map(|index| index + 1);
+    ComfyQueueStatus {
+        state: if position.is_some() {
+            "queued"
+        } else {
+            "unknown"
+        }
+        .to_owned(),
+        position,
+        pending_count: pending.len(),
+    }
+}
+
+#[tauri::command]
+pub async fn get_comfyui_queue_status(
+    server_url: String,
+    client_id: String,
+    state: State<'_, ApplicationState>,
+) -> Result<Option<ComfyQueueStatus>, String> {
+    let task = state
+        .running_comfy_tasks
+        .lock()
+        .map_err(|_| "ComfyUI 任务列表锁已损坏".to_owned())?
+        .get(&client_id)
+        .cloned();
+    let Some(task) = task else {
+        return Ok(None);
+    };
+    let prompt_id = task
+        .prompt_id
+        .lock()
+        .map_err(|_| "ComfyUI 任务状态锁已损坏".to_owned())?
+        .clone();
+    let Some(prompt_id) = prompt_id else {
+        return Ok(Some(ComfyQueueStatus {
+            state: "preparing".to_owned(),
+            position: None,
+            pending_count: 0,
+        }));
+    };
+
+    let parsed_server =
+        Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let server_url = server_url.trim().trim_end_matches('/');
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 队列客户端失败：{error}"))?;
+    let response = client
+        .get(format!("{server_url}/queue"))
+        .send()
+        .await
+        .map_err(|error| format!("查询 ComfyUI 队列失败：{error}"))?;
+    let status = response.status();
+    let queue: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析 ComfyUI 队列失败（HTTP {status}）：{error}"))?;
+    if !status.is_success() {
+        return Err(format!("ComfyUI 拒绝查询队列（HTTP {status}）：{queue}"));
+    }
+    Ok(Some(comfy_queue_status_from_value(&queue, &prompt_id)))
+}
+
+#[tauri::command]
+pub async fn cancel_comfyui_workflow(
+    server_url: String,
+    client_id: String,
+    state: State<'_, ApplicationState>,
+) -> Result<Option<String>, String> {
+    let task = state
+        .running_comfy_tasks
+        .lock()
+        .map_err(|_| "ComfyUI 任务列表锁已损坏".to_owned())?
+        .get(&client_id)
+        .cloned();
+    let Some(task) = task else {
+        return Ok(None);
+    };
+    task.cancelled.store(true, Ordering::SeqCst);
+
+    let prompt_id = task
+        .prompt_id
+        .lock()
+        .map_err(|_| "ComfyUI 任务状态锁已损坏".to_owned())?
+        .clone();
+    let Some(prompt_id) = prompt_id else {
+        return Ok(None);
+    };
+
+    let parsed_server =
+        Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let server_url = server_url.trim().trim_end_matches('/');
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 取消客户端失败：{error}"))?;
+
+    cancel_known_comfy_prompt(&client, server_url, &prompt_id).await?;
+    wait_until_comfy_prompt_stopped(&client, server_url, &prompt_id).await?;
+    Ok(cleanup_comfy_task_inputs(&task).await)
+}
+
+#[tauri::command]
+pub fn get_runtime_info(state: State<'_, ApplicationState>) -> RuntimeInfo {
+    state.runtime.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        comfy_input_task_path, comfy_queue_status_from_value, configure_h3_generation,
+        configure_secondary_source_video, media_format, resolve_generation_seed, MediaFormat,
+        AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
+    };
+    use serde_json::json;
+    use std::path::Path;
+
+    fn resolution_test_workflow() -> serde_json::Value {
+        json!({
+            "339": { "inputs": { "value": "old prompt" } },
+            "340": { "inputs": { "megapixels": 0.4 } },
+            "348": { "inputs": { "noise_seed": 0 } },
+            "350": { "inputs": { "value": 15.0 } },
+            "360": { "inputs": { "save_output": false, "filename_prefix": "primary/video" } },
+            "383": { "inputs": { "image": ["381", 0] } },
+            "388": { "inputs": { "audio": ["382", 0] } },
+            "397": { "inputs": { "save_output": true, "filename_prefix": "secondary/video" } },
+            "398": { "inputs": { "megapixels": 0.5 } }
+        })
+    }
+
+    #[test]
+    fn cleanup_path_is_limited_to_the_infinite_canvas_uuid_directory() {
+        let task_id = "0123456789abcdef0123456789abcdef";
+        let path = comfy_input_task_path(
+            r"X:\ComfyUI_windows_portable\ComfyUI\input",
+            &format!("infinite-canvas/{task_id}"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            path,
+            Path::new(r"X:\ComfyUI_windows_portable\ComfyUI\input")
+                .join("infinite-canvas")
+                .join(task_id)
+        );
+        assert!(comfy_input_task_path(
+            r"X:\ComfyUI_windows_portable\ComfyUI\input",
+            "infinite-canvas/../output",
+        )
+        .is_err());
+        assert!(comfy_input_task_path(
+            r"X:\ComfyUI_windows_portable\ComfyUI\input",
+            "other-folder/0123456789abcdef0123456789abcdef",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn reports_running_and_pending_queue_positions() {
+        let queue = json!({
+            "queue_running": [[1, "running-prompt", {}]],
+            "queue_pending": [
+                [2, "first-pending", {}],
+                [3, "second-pending", {}]
+            ]
+        });
+        let running = comfy_queue_status_from_value(&queue, "running-prompt");
+        assert_eq!(running.state, "running");
+        assert_eq!(running.position, None);
+        assert_eq!(running.pending_count, 2);
+
+        let pending = comfy_queue_status_from_value(&queue, "second-pending");
+        assert_eq!(pending.state, "queued");
+        assert_eq!(pending.position, Some(2));
+        assert_eq!(pending.pending_count, 2);
+    }
+
+    #[test]
+    fn selected_preview_replaces_only_the_secondary_stage_inputs() {
+        let mut workflow = resolution_test_workflow();
+        configure_h3_generation(&mut workflow, "prompt", 42, 8.0, 0.4, 0.8, true).unwrap();
+        configure_secondary_source_video(&mut workflow, "infinite-canvas/job/source.mp4").unwrap();
+
+        assert_eq!(
+            workflow.pointer("/9002/class_type"),
+            Some(&json!("VHS_LoadVideo"))
+        );
+        assert_eq!(
+            workflow.pointer("/9002/inputs/video"),
+            Some(&json!("infinite-canvas/job/source.mp4"))
+        );
+        assert_eq!(
+            workflow.pointer("/383/inputs/image"),
+            Some(&json!(["9002", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/388/inputs/audio"),
+            Some(&json!(["9002", 2]))
+        );
+        assert_eq!(
+            workflow.pointer("/9000/inputs/audio"),
+            Some(&json!(["9002", 2]))
+        );
+    }
+
+    #[test]
+    fn supports_random_and_full_u64_fixed_seeds() {
+        assert!(resolve_generation_seed("random", "").is_ok());
+        assert_eq!(
+            resolve_generation_seed("fixed", "18446744073709551615").unwrap(),
+            u64::MAX
+        );
+        assert!(resolve_generation_seed("fixed", "18446744073709551616").is_err());
+        assert!(resolve_generation_seed("unknown", "1").is_err());
+    }
+
+    #[test]
+    fn configures_both_sampling_resolutions_when_secondary_sampling_is_enabled() {
+        let mut workflow = resolution_test_workflow();
+        configure_h3_generation(&mut workflow, "new prompt", u64::MAX, 8.0, 0.3, 2.0, true)
+            .unwrap();
+
+        assert_eq!(
+            workflow.pointer("/339/inputs/value"),
+            Some(&json!("new prompt"))
+        );
+        assert_eq!(workflow.pointer("/350/inputs/value"), Some(&json!(8.0)));
+        assert_eq!(
+            workflow.pointer("/348/inputs/noise_seed"),
+            Some(&json!(u64::MAX))
+        );
+        assert_eq!(
+            workflow.pointer("/340/inputs/megapixels"),
+            Some(&json!(0.3))
+        );
+        assert_eq!(
+            workflow.pointer("/398/inputs/megapixels"),
+            Some(&json!(2.0))
+        );
+        assert!(workflow.get("360").is_none());
+        assert!(workflow.get("397").is_none());
+        assert_eq!(
+            workflow.pointer("/9000/inputs/images"),
+            Some(&json!(["403", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/9000/inputs/audio"),
+            Some(&json!(["382", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/9001/inputs/filename_prefix"),
+            Some(&json!("secondary/video"))
+        );
+    }
+
+    #[test]
+    fn disabling_secondary_sampling_saves_primary_output_and_removes_secondary_output() {
+        let mut workflow = resolution_test_workflow();
+        configure_h3_generation(&mut workflow, "prompt", 42, 6.0, 0.2, 0.8, false).unwrap();
+
+        assert_eq!(
+            workflow.pointer("/340/inputs/megapixels"),
+            Some(&json!(0.2))
+        );
+        assert!(workflow.get("360").is_none());
+        assert!(workflow.get("397").is_none());
+        assert_eq!(
+            workflow.pointer("/9000/inputs/images"),
+            Some(&json!(["405", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/9000/inputs/audio"),
+            Some(&json!(["356", 1]))
+        );
+        assert_eq!(
+            workflow.pointer("/9001/inputs/filename_prefix"),
+            Some(&json!("primary/video"))
+        );
+        assert_eq!(
+            workflow.pointer("/398/inputs/megapixels"),
+            Some(&json!(0.5))
+        );
+    }
+
+    #[test]
+    fn accepts_supported_image_audio_and_video_extensions() {
+        assert_eq!(
+            media_format(Path::new("photo.JPEG")),
+            Some(MediaFormat {
+                extension: "jpg",
+                mime_type: "image/jpeg",
+                kind: "image",
+                max_bytes: IMAGE_MAX_BYTES
+            })
+        );
+        assert_eq!(
+            media_format(Path::new("still.avif")),
+            Some(MediaFormat {
+                extension: "avif",
+                mime_type: "image/avif",
+                kind: "image",
+                max_bytes: IMAGE_MAX_BYTES
+            })
+        );
+        assert_eq!(
+            media_format(Path::new("voice.MP3")),
+            Some(MediaFormat {
+                extension: "mp3",
+                mime_type: "audio/mpeg",
+                kind: "audio",
+                max_bytes: AUDIO_MAX_BYTES
+            })
+        );
+        assert_eq!(
+            media_format(Path::new("voice.oga")),
+            Some(MediaFormat {
+                extension: "ogg",
+                mime_type: "audio/ogg",
+                kind: "audio",
+                max_bytes: AUDIO_MAX_BYTES
+            })
+        );
+        assert_eq!(
+            media_format(Path::new("clip.mp4")),
+            Some(MediaFormat {
+                extension: "mp4",
+                mime_type: "video/mp4",
+                kind: "video",
+                max_bytes: VIDEO_MAX_BYTES
+            })
+        );
+        assert_eq!(media_format(Path::new("vector.svg")), None);
+    }
+}
