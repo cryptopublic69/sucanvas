@@ -21,6 +21,26 @@ pub const WORKFLOW_ENGINE_API_VERSION: &str = "1.0";
 pub const H3_MULTI_REFERENCE_ADAPTER: &str = "minimax-h3-multi-reference-v1";
 const MAX_PACKAGE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
+fn default_diffusion_model_node_id() -> String {
+    "358".to_owned()
+}
+
+fn default_diffusion_model_class_type() -> String {
+    "UNETLoader".to_owned()
+}
+
+fn default_diffusion_model_directory() -> String {
+    "MinimaxH3".to_owned()
+}
+
+fn default_diffusion_model_name() -> String {
+    r"MinimaxH3\minimax_h3_fl2va_pruned_int8_convrot.safetensors".to_owned()
+}
+
+fn default_secondary_guider_node_id() -> String {
+    "393".to_owned()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowBindings {
@@ -33,6 +53,8 @@ pub struct WorkflowBindings {
     pub secondary_lora_node_id: String,
     pub primary_sampler_node_id: String,
     pub secondary_scheduler_node_id: String,
+    #[serde(default = "default_secondary_guider_node_id")]
+    pub secondary_guider_node_id: String,
     pub primary_output_node_id: String,
     pub secondary_output_node_id: String,
     pub primary_color_node_id: String,
@@ -49,6 +71,12 @@ pub struct WorkflowBindings {
     pub secondary_audio_output_index: u32,
     pub secondary_resize_node_id: String,
     pub secondary_audio_encode_node_id: String,
+    #[serde(default = "default_diffusion_model_node_id")]
+    pub diffusion_model_node_id: String,
+    #[serde(default = "default_diffusion_model_class_type")]
+    pub diffusion_model_class_type: String,
+    #[serde(default = "default_diffusion_model_directory")]
+    pub diffusion_model_directory: String,
     pub lora_class_type: String,
     pub lora_directory: String,
 }
@@ -65,6 +93,7 @@ impl Default for WorkflowBindings {
             secondary_lora_node_id: "401".to_owned(),
             primary_sampler_node_id: "357".to_owned(),
             secondary_scheduler_node_id: "391".to_owned(),
+            secondary_guider_node_id: default_secondary_guider_node_id(),
             primary_output_node_id: "360".to_owned(),
             secondary_output_node_id: "397".to_owned(),
             primary_color_node_id: "405".to_owned(),
@@ -86,6 +115,9 @@ impl Default for WorkflowBindings {
             secondary_audio_output_index: 0,
             secondary_resize_node_id: "383".to_owned(),
             secondary_audio_encode_node_id: "388".to_owned(),
+            diffusion_model_node_id: default_diffusion_model_node_id(),
+            diffusion_model_class_type: default_diffusion_model_class_type(),
+            diffusion_model_directory: default_diffusion_model_directory(),
             lora_class_type: "LoraLoaderModelOnly".to_owned(),
             lora_directory: "MinimaxH3".to_owned(),
         }
@@ -264,6 +296,8 @@ pub struct WorkflowModuleDefaults {
     pub secondary_brightness: f64,
     pub secondary_contrast: f64,
     pub secondary_saturation: f64,
+    #[serde(default = "default_diffusion_model_name")]
+    pub diffusion_model_name: String,
     pub lora_name: String,
     pub lora_strength: f64,
 }
@@ -280,6 +314,7 @@ impl Default for WorkflowModuleDefaults {
             secondary_brightness: 1.0,
             secondary_contrast: 0.9,
             secondary_saturation: 1.0,
+            diffusion_model_name: default_diffusion_model_name(),
             lora_name: "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors".to_owned(),
             lora_strength: 1.0,
         }
@@ -741,14 +776,33 @@ pub fn validate_workflow_bytes(
         (&bindings.primary_sampler_node_id, "video_steps"),
         (&bindings.primary_sampler_node_id, "audio_steps"),
         (&bindings.secondary_scheduler_node_id, "steps"),
+        (&bindings.secondary_guider_node_id, "model"),
         (&bindings.primary_color_node_id, "brightness"),
         (&bindings.primary_color_node_id, "contrast"),
         (&bindings.primary_color_node_id, "saturation"),
         (&bindings.secondary_color_node_id, "brightness"),
         (&bindings.secondary_color_node_id, "contrast"),
         (&bindings.secondary_color_node_id, "saturation"),
+        (&bindings.diffusion_model_node_id, "unet_name"),
     ] {
         require_input(&workflow, node_id, input_name, &mut issues);
+    }
+    let diffusion_model_class_type = workflow
+        .get(&bindings.diffusion_model_node_id)
+        .and_then(|node| node.get("class_type"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if diffusion_model_class_type != bindings.diffusion_model_class_type {
+        issues.push(format!(
+            "节点 {} 类型应为 {}，实际为 {}",
+            bindings.diffusion_model_node_id,
+            bindings.diffusion_model_class_type,
+            if diffusion_model_class_type.is_empty() {
+                "<缺失>"
+            } else {
+                diffusion_model_class_type
+            }
+        ));
     }
     for node_id in [
         &bindings.primary_lora_node_id,
@@ -1207,10 +1261,12 @@ mod tests {
             "350": { "inputs": { "value": 6.0 } },
             "340": { "inputs": { "aspect_ratio": "16:9", "megapixels": 0.4 } },
             "398": { "inputs": { "aspect_ratio": "16:9", "megapixels": 0.5 } },
+            "358": { "class_type": "UNETLoader", "inputs": { "unet_name": "MinimaxH3\\model.safetensors" } },
             "354": { "class_type": "LoraLoaderModelOnly", "inputs": { "model": ["353", 0], "lora_name": "MinimaxH3\\a.safetensors", "strength_model": 1.0 } },
             "401": { "class_type": "LoraLoaderModelOnly", "inputs": { "model": ["353", 0], "lora_name": "MinimaxH3\\a.safetensors", "strength_model": 1.0 } },
-            "357": { "inputs": { "video_steps": 6, "audio_steps": 8 } },
-            "391": { "inputs": { "steps": 4 } },
+            "357": { "inputs": { "video_steps": 6, "audio_steps": 8, "model": ["354", 0] } },
+            "391": { "inputs": { "steps": 4, "model": ["401", 0] } },
+            "393": { "class_type": "BasicGuider", "inputs": { "model": ["401", 0] } },
             "405": { "inputs": { "brightness": 1.0, "contrast": 0.9, "saturation": 0.9 } },
             "403": { "inputs": { "brightness": 1.0, "contrast": 0.9, "saturation": 1.0 } },
             "360": { "inputs": { "filename_prefix": "primary" } },

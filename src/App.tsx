@@ -2,7 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { createPortal } from "react-dom";
 import {
   BaseEdge,
@@ -22,6 +22,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   SelectionMode,
+  ViewportPortal,
   getBezierPath,
   useEdgesState,
   useNodesState,
@@ -34,6 +35,7 @@ import {
   ChevronUp,
   Clapperboard,
   Copy,
+  DatabaseBackup,
   Dices,
   FileText,
   Film,
@@ -72,6 +74,7 @@ import {
   CSSProperties,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -133,6 +136,21 @@ interface AppLockStatus {
   enabled: boolean;
 }
 
+interface AppBackupSummary {
+  path: string;
+  createdAt: string;
+  fileCount: number;
+  totalBytes: number;
+}
+
+interface AppRestoreSummary {
+  createdAt: string;
+  sourceAppVersion: string;
+  fileCount: number;
+  totalBytes: number;
+  requiresRestart: boolean;
+}
+
 interface CreateNodeResult {
   node: NodeRecord;
   created: boolean;
@@ -190,10 +208,15 @@ interface GenerationSnapshot {
   secondaryBrightness: number;
   secondaryContrast: number;
   secondarySaturation: number;
+  diffusionModelName: string;
   loraName: string;
   loraStrength: number;
   loraStrengthRecorded?: boolean;
   loraBypassed: boolean;
+  secondaryLoraName: string;
+  secondaryLoraStrength: number;
+  secondaryLoraStrengthRecorded?: boolean;
+  secondaryLoraBypassed: boolean;
   imagePaths: string[];
   audioPaths: string[];
   videoPaths: string[];
@@ -240,7 +263,13 @@ interface VideoDeletionRequest {
 interface H3LoraPreference {
   loraName: string;
   loraStrength: number;
+  loraBypassed: boolean;
+  secondaryLoraName: string;
+  secondaryLoraStrength: number;
+  secondaryLoraBypassed: boolean;
 }
+
+type H3LoraPreferencePatch = Partial<H3LoraPreference>;
 
 interface H3ModelParameters {
   primaryVideoSteps: number;
@@ -256,12 +285,14 @@ interface H3ModelParameters {
 
 type WorkflowCapability = "video-generation" | "image-generation";
 type WorkflowVariant = "reference-to-video" | "first-last-frame" | "text-to-video" | "image-generation";
+type UiFontSize = "small" | "medium";
 type WorkflowModuleSlot = "video-generation:reference-to-video"
   | "video-generation:first-last-frame"
   | "video-generation:text-to-video"
   | "image-generation";
 
 interface WorkflowModuleDefaults extends H3ModelParameters {
+  diffusionModelName: string;
   loraName: string;
   loraStrength: number;
 }
@@ -276,6 +307,7 @@ interface WorkflowBindings {
   secondaryLoraNodeId: string;
   primarySamplerNodeId: string;
   secondarySchedulerNodeId: string;
+  secondaryGuiderNodeId: string;
   primaryOutputNodeId: string;
   secondaryOutputNodeId: string;
   primaryColorNodeId: string;
@@ -292,6 +324,9 @@ interface WorkflowBindings {
   secondaryAudioOutputIndex: number;
   secondaryResizeNodeId: string;
   secondaryAudioEncodeNodeId: string;
+  diffusionModelNodeId: string;
+  diffusionModelClassType: string;
+  diffusionModelDirectory: string;
   loraClassType: string;
   loraDirectory: string;
 }
@@ -404,6 +439,161 @@ function ModelParameterNumberInput({
   );
 }
 
+function CompactIntegerInput({
+  value,
+  min,
+  max,
+  ariaLabel,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  ariaLabel: string;
+  onChange: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) setDraft(String(value));
+  }, [focused, value]);
+
+  const validDraftValue = (text: string) => {
+    if (!/^\d+$/.test(text)) return null;
+    const parsed = Number(text);
+    return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : null;
+  };
+  const restoreOrCommit = () => {
+    const parsed = validDraftValue(draft);
+    if (parsed === null) {
+      setDraft(String(value));
+      return;
+    }
+    onChange(parsed);
+    setDraft(String(parsed));
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      pattern="[0-9]*"
+      value={draft}
+      aria-label={ariaLabel}
+      onFocus={() => setFocused(true)}
+      onChange={(event) => {
+        const next = event.currentTarget.value;
+        if (next !== "" && !/^\d+$/.test(next)) return;
+        setDraft(next);
+        const parsed = validDraftValue(next);
+        if (parsed !== null) onChange(parsed);
+      }}
+      onBlur={() => {
+        restoreOrCommit();
+        setFocused(false);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          restoreOrCommit();
+          event.currentTarget.blur();
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setDraft(String(value));
+          event.currentTarget.blur();
+          return;
+        }
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        event.preventDefault();
+        const current = validDraftValue(draft) ?? value;
+        const next = Math.min(max, Math.max(min, current + (event.key === "ArrowUp" ? 1 : -1)));
+        setDraft(String(next));
+        onChange(next);
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+    />
+  );
+}
+
+function CompactDecimalInput({
+  value,
+  min,
+  max,
+  disabled = false,
+  ariaLabel,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  disabled?: boolean;
+  ariaLabel: string;
+  onChange: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) setDraft(String(value));
+  }, [focused, value]);
+
+  const parsedDraftValue = (text: string) => {
+    if (text === "" || text === "." || !/^\d*(?:\.\d*)?$/.test(text)) return null;
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const commitDraft = () => {
+    const parsed = parsedDraftValue(draft);
+    if (parsed === null) {
+      setDraft(String(value));
+      return;
+    }
+    const normalized = Math.min(max, Math.max(min, parsed));
+    onChange(normalized);
+    setDraft(String(normalized));
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      pattern="[0-9]*[.]?[0-9]*"
+      value={draft}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      onFocus={() => setFocused(true)}
+      onChange={(event) => {
+        const next = event.currentTarget.value;
+        if (!/^\d*(?:\.\d*)?$/.test(next)) return;
+        setDraft(next);
+        const parsed = parsedDraftValue(next);
+        if (parsed !== null && parsed >= min && parsed <= max) onChange(parsed);
+      }}
+      onBlur={() => {
+        commitDraft();
+        setFocused(false);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commitDraft();
+          event.currentTarget.blur();
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setDraft(String(value));
+          event.currentTarget.blur();
+        }
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+    />
+  );
+}
+
 interface SettingsSelectOption {
   value: string;
   label: string;
@@ -501,13 +691,14 @@ interface CanvasNodeData extends Record<string, unknown> {
   relationHighlighted: boolean;
   activeTaskCount: number;
   inputCount: number;
+  outputCount: number;
   mediaInputs: NodeRecord[];
   textInputCount: number;
   textInputs: NodeRecord[];
   h3LoraOptions: string[];
   workflowModules: WorkflowModuleRecord[];
   workflowModuleDefaults: Partial<Record<WorkflowModuleSlot, string>>;
-  onH3LoraPreferenceChange: (preference: H3LoraPreference) => void;
+  onH3LoraPreferenceChange: (preference: H3LoraPreferencePatch) => void;
   onChange: (id: string, patch: NodePatch) => void;
   onExecutionCheck: (message: string, valid: boolean) => void;
   onExecute: (id: string) => Promise<void>;
@@ -515,7 +706,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   onCancelExecution: (id: string) => Promise<void>;
   onRevealGeneratedVideo: (id: string) => Promise<void>;
   onRemoveInput: (targetId: string, sourceId: string) => Promise<void>;
-  onDelete: (id: string) => void;
+  onDelete: (id: string, deleteSourceFile?: boolean) => void;
   onCopy: (text: string) => void;
 }
 
@@ -539,6 +730,35 @@ interface CanvasEdgeData extends Record<string, unknown> {
 
 type CanvasFlowNode = Node<CanvasNodeData, "canvasNode">;
 
+interface AlignmentGuide {
+  orientation: "vertical" | "horizontal";
+  position: number;
+  start: number;
+  end: number;
+}
+
+interface SpacingGuide extends AlignmentGuide {
+  distance: number;
+}
+
+interface SpacingAxisMatch {
+  delta: number;
+  distance: number;
+  guides: SpacingGuide[];
+}
+
+interface VisibleNodeCacheEntry {
+  source: CanvasFlowNode;
+  result: CanvasFlowNode;
+}
+
+interface CanvasNodeBounds {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
 function recordAtCurrentFlowPosition(node: CanvasFlowNode): NodeRecord {
   return {
     ...node.data.record,
@@ -547,10 +767,361 @@ function recordAtCurrentFlowPosition(node: CanvasFlowNode): NodeRecord {
   };
 }
 
+function canvasNodeBounds(node: CanvasFlowNode): CanvasNodeBounds {
+  const width = node.measured?.width ?? node.width ?? node.data.record.width;
+  const height = node.measured?.height ?? node.height ?? node.data.record.height;
+  return {
+    left: node.position.x,
+    right: node.position.x + width,
+    top: node.position.y,
+    bottom: node.position.y + height,
+  };
+}
+
+function combinedCanvasNodeBounds(nodes: CanvasFlowNode[]): CanvasNodeBounds {
+  const first = canvasNodeBounds(nodes[0]);
+  return nodes.slice(1).reduce((combined, node) => {
+    const bounds = canvasNodeBounds(node);
+    return {
+      left: Math.min(combined.left, bounds.left),
+      right: Math.max(combined.right, bounds.right),
+      top: Math.min(combined.top, bounds.top),
+      bottom: Math.max(combined.bottom, bounds.bottom),
+    };
+  }, first);
+}
+
+function boundsOverlap(startA: number, endA: number, startB: number, endB: number): boolean {
+  return Math.min(endA, endB) > Math.max(startA, startB);
+}
+
+function overlapMidpoint(startA: number, endA: number, startB: number, endB: number): number {
+  return (Math.max(startA, startB) + Math.min(endA, endB)) / 2;
+}
+
+function boundsIntersect(first: CanvasNodeBounds, second: CanvasNodeBounds): boolean {
+  return first.right >= second.left
+    && first.left <= second.right
+    && first.bottom >= second.top
+    && first.top <= second.bottom;
+}
+
+function guidesEqual(first: AlignmentGuide[], second: AlignmentGuide[]): boolean {
+  return first.length === second.length && first.every((guide, index) => {
+    const other = second[index];
+    return guide.orientation === other.orientation
+      && guide.position === other.position
+      && guide.start === other.start
+      && guide.end === other.end;
+  });
+}
+
+function nodeRecordArraysEqual(first: NodeRecord[], second: NodeRecord[]): boolean {
+  return first.length === second.length && first.every((record, index) => record === second[index]);
+}
+
+function findEqualSpacing(
+  draggedNodes: CanvasFlowNode[],
+  candidateNodes: CanvasFlowNode[],
+  tolerance: number,
+): { horizontal: SpacingAxisMatch | null; vertical: SpacingAxisMatch | null } {
+  const dragged = combinedCanvasNodeBounds(draggedNodes);
+  const candidates = candidateNodes.map(canvasNodeBounds);
+  let horizontal: SpacingAxisMatch | null = null;
+  let vertical: SpacingAxisMatch | null = null;
+
+  const nearestLeft = candidates
+    .filter((bounds) => bounds.right <= dragged.left + tolerance
+      && boundsOverlap(bounds.top, bounds.bottom, dragged.top, dragged.bottom))
+    .sort((a, b) => b.right - a.right)[0];
+  if (nearestLeft) {
+    const preceding = candidates
+      .filter((bounds) => bounds !== nearestLeft
+        && bounds.right <= nearestLeft.left
+        && boundsOverlap(bounds.top, bounds.bottom, nearestLeft.top, nearestLeft.bottom))
+      .sort((a, b) => b.right - a.right)[0];
+    if (preceding) {
+      const referenceGap = nearestLeft.left - preceding.right;
+      const delta = nearestLeft.right + referenceGap - dragged.left;
+      const distance = Math.abs(delta);
+      if (referenceGap >= 0 && distance <= tolerance) {
+        const snapped = { ...dragged, left: dragged.left + delta, right: dragged.right + delta };
+        horizontal = {
+          delta,
+          distance,
+          guides: [
+            {
+              orientation: "horizontal",
+              position: overlapMidpoint(preceding.top, preceding.bottom, nearestLeft.top, nearestLeft.bottom),
+              start: preceding.right,
+              end: nearestLeft.left,
+              distance: referenceGap,
+            },
+            {
+              orientation: "horizontal",
+              position: overlapMidpoint(nearestLeft.top, nearestLeft.bottom, snapped.top, snapped.bottom),
+              start: nearestLeft.right,
+              end: snapped.left,
+              distance: referenceGap,
+            },
+          ],
+        };
+      }
+    }
+  }
+
+  const nearestRight = candidates
+    .filter((bounds) => bounds.left >= dragged.right - tolerance
+      && boundsOverlap(bounds.top, bounds.bottom, dragged.top, dragged.bottom))
+    .sort((a, b) => a.left - b.left)[0];
+  if (nearestLeft && nearestRight) {
+    const leftGap = dragged.left - nearestLeft.right;
+    const rightGap = nearestRight.left - dragged.right;
+    const delta = (rightGap - leftGap) / 2;
+    const distance = Math.abs(delta);
+    const equalGap = leftGap + delta;
+    if (equalGap >= 0 && distance <= tolerance && (!horizontal || distance <= horizontal.distance)) {
+      const snapped = { ...dragged, left: dragged.left + delta, right: dragged.right + delta };
+      horizontal = {
+        delta,
+        distance,
+        guides: [
+          {
+            orientation: "horizontal",
+            position: overlapMidpoint(nearestLeft.top, nearestLeft.bottom, snapped.top, snapped.bottom),
+            start: nearestLeft.right,
+            end: snapped.left,
+            distance: equalGap,
+          },
+          {
+            orientation: "horizontal",
+            position: overlapMidpoint(snapped.top, snapped.bottom, nearestRight.top, nearestRight.bottom),
+            start: snapped.right,
+            end: nearestRight.left,
+            distance: equalGap,
+          },
+        ],
+      };
+    }
+  }
+  if (nearestRight) {
+    const following = candidates
+      .filter((bounds) => bounds !== nearestRight
+        && bounds.left >= nearestRight.right
+        && boundsOverlap(bounds.top, bounds.bottom, nearestRight.top, nearestRight.bottom))
+      .sort((a, b) => a.left - b.left)[0];
+    if (following) {
+      const referenceGap = following.left - nearestRight.right;
+      const delta = nearestRight.left - referenceGap - dragged.right;
+      const distance = Math.abs(delta);
+      if (referenceGap >= 0 && distance <= tolerance && (!horizontal || distance < horizontal.distance)) {
+        const snapped = { ...dragged, left: dragged.left + delta, right: dragged.right + delta };
+        horizontal = {
+          delta,
+          distance,
+          guides: [
+            {
+              orientation: "horizontal",
+              position: overlapMidpoint(snapped.top, snapped.bottom, nearestRight.top, nearestRight.bottom),
+              start: snapped.right,
+              end: nearestRight.left,
+              distance: referenceGap,
+            },
+            {
+              orientation: "horizontal",
+              position: overlapMidpoint(nearestRight.top, nearestRight.bottom, following.top, following.bottom),
+              start: nearestRight.right,
+              end: following.left,
+              distance: referenceGap,
+            },
+          ],
+        };
+      }
+    }
+  }
+
+  const nearestAbove = candidates
+    .filter((bounds) => bounds.bottom <= dragged.top + tolerance
+      && boundsOverlap(bounds.left, bounds.right, dragged.left, dragged.right))
+    .sort((a, b) => b.bottom - a.bottom)[0];
+  if (nearestAbove) {
+    const preceding = candidates
+      .filter((bounds) => bounds !== nearestAbove
+        && bounds.bottom <= nearestAbove.top
+        && boundsOverlap(bounds.left, bounds.right, nearestAbove.left, nearestAbove.right))
+      .sort((a, b) => b.bottom - a.bottom)[0];
+    if (preceding) {
+      const referenceGap = nearestAbove.top - preceding.bottom;
+      const delta = nearestAbove.bottom + referenceGap - dragged.top;
+      const distance = Math.abs(delta);
+      if (referenceGap >= 0 && distance <= tolerance) {
+        const snapped = { ...dragged, top: dragged.top + delta, bottom: dragged.bottom + delta };
+        vertical = {
+          delta,
+          distance,
+          guides: [
+            {
+              orientation: "vertical",
+              position: overlapMidpoint(preceding.left, preceding.right, nearestAbove.left, nearestAbove.right),
+              start: preceding.bottom,
+              end: nearestAbove.top,
+              distance: referenceGap,
+            },
+            {
+              orientation: "vertical",
+              position: overlapMidpoint(nearestAbove.left, nearestAbove.right, snapped.left, snapped.right),
+              start: nearestAbove.bottom,
+              end: snapped.top,
+              distance: referenceGap,
+            },
+          ],
+        };
+      }
+    }
+  }
+
+  const nearestBelow = candidates
+    .filter((bounds) => bounds.top >= dragged.bottom - tolerance
+      && boundsOverlap(bounds.left, bounds.right, dragged.left, dragged.right))
+    .sort((a, b) => a.top - b.top)[0];
+  if (nearestAbove && nearestBelow) {
+    const upperGap = dragged.top - nearestAbove.bottom;
+    const lowerGap = nearestBelow.top - dragged.bottom;
+    const delta = (lowerGap - upperGap) / 2;
+    const distance = Math.abs(delta);
+    const equalGap = upperGap + delta;
+    if (equalGap >= 0 && distance <= tolerance && (!vertical || distance <= vertical.distance)) {
+      const snapped = { ...dragged, top: dragged.top + delta, bottom: dragged.bottom + delta };
+      vertical = {
+        delta,
+        distance,
+        guides: [
+          {
+            orientation: "vertical",
+            position: overlapMidpoint(nearestAbove.left, nearestAbove.right, snapped.left, snapped.right),
+            start: nearestAbove.bottom,
+            end: snapped.top,
+            distance: equalGap,
+          },
+          {
+            orientation: "vertical",
+            position: overlapMidpoint(snapped.left, snapped.right, nearestBelow.left, nearestBelow.right),
+            start: snapped.bottom,
+            end: nearestBelow.top,
+            distance: equalGap,
+          },
+        ],
+      };
+    }
+  }
+  if (nearestBelow) {
+    const following = candidates
+      .filter((bounds) => bounds !== nearestBelow
+        && bounds.top >= nearestBelow.bottom
+        && boundsOverlap(bounds.left, bounds.right, nearestBelow.left, nearestBelow.right))
+      .sort((a, b) => a.top - b.top)[0];
+    if (following) {
+      const referenceGap = following.top - nearestBelow.bottom;
+      const delta = nearestBelow.top - referenceGap - dragged.bottom;
+      const distance = Math.abs(delta);
+      if (referenceGap >= 0 && distance <= tolerance && (!vertical || distance < vertical.distance)) {
+        const snapped = { ...dragged, top: dragged.top + delta, bottom: dragged.bottom + delta };
+        vertical = {
+          delta,
+          distance,
+          guides: [
+            {
+              orientation: "vertical",
+              position: overlapMidpoint(snapped.left, snapped.right, nearestBelow.left, nearestBelow.right),
+              start: snapped.bottom,
+              end: nearestBelow.top,
+              distance: referenceGap,
+            },
+            {
+              orientation: "vertical",
+              position: overlapMidpoint(nearestBelow.left, nearestBelow.right, following.left, following.right),
+              start: nearestBelow.bottom,
+              end: following.top,
+              distance: referenceGap,
+            },
+          ],
+        };
+      }
+    }
+  }
+
+  return { horizontal, vertical };
+}
+
+function findEdgeAlignment(
+  draggedNodes: CanvasFlowNode[],
+  candidateNodes: CanvasFlowNode[],
+  tolerance: number,
+): { deltaX: number; deltaY: number; guides: AlignmentGuide[] } {
+  const draggedBounds = combinedCanvasNodeBounds(draggedNodes);
+  const draggedVerticalEdges = [draggedBounds.left, draggedBounds.right];
+  const draggedHorizontalEdges = [draggedBounds.top, draggedBounds.bottom];
+  let bestVertical: { distance: number; delta: number; target: CanvasNodeBounds; position: number } | null = null;
+  let bestHorizontal: { distance: number; delta: number; target: CanvasNodeBounds; position: number } | null = null;
+
+  for (const candidate of candidateNodes) {
+    const target = canvasNodeBounds(candidate);
+    for (const targetEdge of [target.left, target.right]) {
+      for (const draggedEdge of draggedVerticalEdges) {
+        const delta = targetEdge - draggedEdge;
+        const distance = Math.abs(delta);
+        if (distance <= tolerance && (!bestVertical || distance < bestVertical.distance)) {
+          bestVertical = { distance, delta, target, position: targetEdge };
+        }
+      }
+    }
+    for (const targetEdge of [target.top, target.bottom]) {
+      for (const draggedEdge of draggedHorizontalEdges) {
+        const delta = targetEdge - draggedEdge;
+        const distance = Math.abs(delta);
+        if (distance <= tolerance && (!bestHorizontal || distance < bestHorizontal.distance)) {
+          bestHorizontal = { distance, delta, target, position: targetEdge };
+        }
+      }
+    }
+  }
+
+  const guides: AlignmentGuide[] = [];
+  const snappedBounds = {
+    left: draggedBounds.left + (bestVertical?.delta ?? 0),
+    right: draggedBounds.right + (bestVertical?.delta ?? 0),
+    top: draggedBounds.top + (bestHorizontal?.delta ?? 0),
+    bottom: draggedBounds.bottom + (bestHorizontal?.delta ?? 0),
+  };
+  if (bestVertical) {
+    guides.push({
+      orientation: "vertical",
+      position: bestVertical.position,
+      start: Math.min(snappedBounds.top, bestVertical.target.top),
+      end: Math.max(snappedBounds.bottom, bestVertical.target.bottom),
+    });
+  }
+  if (bestHorizontal) {
+    guides.push({
+      orientation: "horizontal",
+      position: bestHorizontal.position,
+      start: Math.min(snappedBounds.left, bestHorizontal.target.left),
+      end: Math.max(snappedBounds.right, bestHorizontal.target.right),
+    });
+  }
+
+  return {
+    deltaX: bestVertical?.delta ?? 0,
+    deltaY: bestHorizontal?.delta ?? 0,
+    guides,
+  };
+}
+
 const CANVAS_GRID_SIZE = 24;
-const CANVAS_SNAP_GRID: [number, number] = [CANVAS_GRID_SIZE, CANVAS_GRID_SIZE];
+const ALIGNMENT_SNAP_TOLERANCE_PX = 6;
+const EMPTY_NODE_RECORDS: NodeRecord[] = [];
 const AUDIO_NODE_MIN_HEIGHT = 240;
-const VIDEO_NODE_BASE_HEIGHT = 480;
+const VIDEO_NODE_BASE_HEIGHT = 576;
 const MEDIA_NODE_CHROME_HEIGHT = 73;
 const IMAGE_NODE_CHROME_HEIGHT = 38;
 const GENERATED_VIDEO_FOOTER_HEIGHT = 38;
@@ -562,6 +1133,7 @@ const DEFAULT_GENERATED_VIDEO_ASPECT_RATIO = 16 / 9;
 const SHOW_NODE_SEARCH = false;
 const COMFYUI_SERVER_URL = "http://192.168.5.108:8188";
 const DEFAULT_GENERATION_SEED = "56456340597885880";
+const DEFAULT_H3_DIFFUSION_MODEL_NAME = "MinimaxH3\\minimax_h3_fl2va_pruned_int8_convrot.safetensors";
 const DEFAULT_H3_LORA_NAME = "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors";
 const H3_LORA_PREFERENCE_STORAGE_KEY = "infinite-canvas:h3-lora-preference";
 const DEFAULT_H3_MODEL_PARAMETERS: H3ModelParameters = {
@@ -575,6 +1147,36 @@ const DEFAULT_H3_MODEL_PARAMETERS: H3ModelParameters = {
   secondaryContrast: 0.9,
   secondarySaturation: 1,
 };
+
+function stablePlaceholderUnit(key: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 0xffffffff;
+}
+
+function generatedPlaceholderPositionStyle(nodeId: string, blobIndex: number): CSSProperties {
+  const horizontalOffset = stablePlaceholderUnit(`${nodeId}:${blobIndex}:x`) * 30 - 15;
+  const verticalOffset = stablePlaceholderUnit(`${nodeId}:${blobIndex}:y`) * 24 - 12;
+  const startX = stablePlaceholderUnit(`${nodeId}:${blobIndex}:start-x`) * 16 - 8;
+  const startY = stablePlaceholderUnit(`${nodeId}:${blobIndex}:start-y`) * 16 - 8;
+  const angle = stablePlaceholderUnit(`${nodeId}:${blobIndex}:angle`) * Math.PI * 2;
+  const travelDistance = 24;
+  const endX = startX + Math.cos(angle) * travelDistance;
+  const endY = startY + Math.sin(angle) * travelDistance;
+  const phaseDelay = stablePlaceholderUnit(`${nodeId}:${blobIndex}:phase`) * 7;
+  return {
+    "--placeholder-blob-x": `${horizontalOffset.toFixed(2)}%`,
+    "--placeholder-blob-y": `${verticalOffset.toFixed(2)}%`,
+    "--placeholder-motion-start-x": `${startX.toFixed(2)}%`,
+    "--placeholder-motion-start-y": `${startY.toFixed(2)}%`,
+    "--placeholder-motion-end-x": `${endX.toFixed(2)}%`,
+    "--placeholder-motion-end-y": `${endY.toFixed(2)}%`,
+    animationDelay: `-${phaseDelay.toFixed(2)}s`,
+  } as CSSProperties;
+}
 const H3_MODEL_PARAMETERS_STORAGE_KEY = "infinite-canvas:h3-model-parameters";
 const DEFAULT_H3_REFERENCE_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3全能参考工作流.json";
 const H3_REFERENCE_WORKFLOW_STORAGE_KEY = "infinite-canvas:h3-reference-workflow-path";
@@ -597,11 +1199,8 @@ const WORKFLOW_MODULE_SLOTS: WorkflowModuleSlot[] = [
 ];
 const COMFY_TASK_STORAGE_KEY = "infinite-canvas:comfy-tasks";
 const PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY = "infinite-canvas:show-private-projects";
+const UI_FONT_SIZE_STORAGE_KEY = "infinite-canvas:ui-font-size";
 const VIDEO_RESIZE_CONTROLS = [
-  { position: "top", direction: [0, -1] },
-  { position: "right", direction: [1, 0] },
-  { position: "bottom", direction: [0, 1] },
-  { position: "left", direction: [-1, 0] },
   { position: "top-left", direction: [-1, -1] },
   { position: "top-right", direction: [1, -1] },
   { position: "bottom-right", direction: [1, 1] },
@@ -638,6 +1237,22 @@ function mediaNodeHeightForAspectRatio(width: number, aspectRatio: number): numb
     2400,
     Math.max(180, width / aspectRatio + MEDIA_NODE_CHROME_HEIGHT),
   );
+}
+
+function loadImageNaturalSize(path: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const image = new window.Image();
+    image.decoding = "async";
+    image.onload = () => {
+      if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+        resolve({ width: image.naturalWidth, height: image.naturalHeight });
+      } else {
+        reject(new Error("图片没有可用的尺寸信息"));
+      }
+    };
+    image.onerror = () => reject(new Error("无法读取图片尺寸"));
+    image.src = convertFileSrc(path);
+  });
 }
 
 type VideoGenerationMode = typeof VIDEO_GENERATION_MODES[number]["value"];
@@ -861,6 +1476,22 @@ function generatedPreviewPosition(
 ): { x: number; y: number } {
   const horizontalGap = CANVAS_GRID_SIZE * 2;
   const verticalGap = CANVAS_GRID_SIZE / 2;
+  const availableYBelow = (x: number, startingY: number): number => {
+    let y = startingY;
+    for (let attempt = 0; attempt <= existingNodes.length; attempt += 1) {
+      const blockers = existingNodes.filter((node) => (
+        x < node.x + node.width + verticalGap
+        && x + width + verticalGap > node.x
+        && y < node.y + node.height + verticalGap
+        && y + height + verticalGap > node.y
+      ));
+      if (!blockers.length) return y;
+      const nextY = Math.max(...blockers.map((node) => node.y + node.height)) + verticalGap;
+      if (nextY <= y) break;
+      y = nextY;
+    }
+    return y;
+  };
   const previousPreviews = existingNodes.filter((node) => (
     node.kind === "generated-video"
     && node.content.sourceGeneratorId === generator.id
@@ -873,25 +1504,15 @@ function generatedPreviewPosition(
     return nodeCreatedAt >= latestCreatedAt ? node : latest;
   }, null);
   if (latestPreview) {
+    const x = latestPreview.x;
     return {
-      x: latestPreview.x,
-      y: latestPreview.y + latestPreview.height + verticalGap,
+      x,
+      y: availableYBelow(x, latestPreview.y + latestPreview.height + verticalGap),
     };
   }
 
   const x = snapCanvasCoordinate(generator.x + generator.width + horizontalGap);
-  let y = generator.y;
-  for (let attempt = 0; attempt <= existingNodes.length; attempt += 1) {
-    const blocked = existingNodes.some((node) => (
-      x < node.x + node.width + verticalGap
-      && x + width + verticalGap > node.x
-      && y < node.y + node.height + verticalGap
-      && y + height + verticalGap > node.y
-    ));
-    if (!blocked) return { x, y };
-    y += height + verticalGap;
-  }
-  return { x, y };
+  return { x, y: availableYBelow(x, generator.y) };
 }
 
 function stringArray(value: unknown): string[] {
@@ -929,6 +1550,7 @@ function persistedComfyTasksFromStorage(): PersistedComfyTask[] {
           generationAspectRatio: task.snapshot.aspectRatio,
         }),
         ...h3ModelParametersFromContent(task.snapshot as unknown as JsonObject),
+        diffusionModelName: h3DiffusionModelNameFromContent(task.snapshot as unknown as JsonObject),
         loraBypassed: h3LoraBypassedFromContent(task.snapshot as unknown as JsonObject),
       },
     }));
@@ -968,11 +1590,17 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
       0.5,
     ),
     ...h3ModelParametersFromContent(snapshot),
+    diffusionModelName: h3DiffusionModelNameFromContent(snapshot),
     loraName: h3LoraNameFromContent(snapshot),
     loraStrength: h3LoraStrengthFromContent(snapshot),
     loraStrengthRecorded: typeof snapshot.generationLoraStrength === "number"
       || typeof snapshot.loraStrength === "number",
     loraBypassed: h3LoraBypassedFromContent(snapshot),
+    secondaryLoraName: h3SecondaryLoraNameFromContent(snapshot),
+    secondaryLoraStrength: h3SecondaryLoraStrengthFromContent(snapshot),
+    secondaryLoraStrengthRecorded: typeof snapshot.generationSecondaryLoraStrength === "number"
+      || typeof snapshot.secondaryLoraStrength === "number",
+    secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(snapshot),
     imagePaths: stringArray(snapshot.imagePaths),
     audioPaths: stringArray(snapshot.audioPaths),
     videoPaths: stringArray(snapshot.videoPaths),
@@ -980,6 +1608,34 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
     workflowModuleRevision: typeof snapshot.workflowModuleRevision === "string"
       ? snapshot.workflowModuleRevision
       : "",
+  };
+}
+
+function persistedComfyTaskFromPlaceholder(record: NodeRecord): PersistedComfyTask | null {
+  if (record.kind !== "generated-video" || record.content.generationPlaceholder !== true) {
+    return null;
+  }
+  const clientId = typeof record.content.placeholderClientId === "string"
+    ? record.content.placeholderClientId
+    : "";
+  const sourceGeneratorId = typeof record.content.sourceGeneratorId === "string"
+    ? record.content.sourceGeneratorId
+    : "";
+  const sourcePreviewId = typeof record.content.sourcePreviewId === "string"
+    ? record.content.sourcePreviewId
+    : "";
+  const snapshot = generationSnapshotFromContent(record.content);
+  if (!clientId || !sourceGeneratorId || !snapshot) return null;
+  const parsedStartedAt = Date.parse(record.createdAt);
+  return {
+    clientId,
+    nodeId: sourcePreviewId || sourceGeneratorId,
+    canvasId: record.canvasId,
+    snapshot,
+    startedAt: Number.isFinite(parsedStartedAt) ? parsedStartedAt : Date.now(),
+    kind: sourcePreviewId ? "secondary" : "generation",
+    ...(sourcePreviewId ? { sourceGeneratorId } : {}),
+    placeholderNodeId: record.id,
   };
 }
 
@@ -1180,9 +1836,42 @@ function secondaryVideoResolutionFromContent(content: JsonObject): number {
   );
 }
 
-function isMinimaxH3LoraName(value: string): boolean {
+function primaryVideoStepsFromContent(content: JsonObject, fallback: number): number {
+  return validH3Step(
+    content.generationPrimaryVideoSteps ?? content.primaryVideoSteps,
+    fallback,
+    1000,
+  );
+}
+
+function secondarySchedulerStepsFromContent(content: JsonObject, fallback: number): number {
+  return validH3Step(
+    content.generationSecondarySchedulerSteps ?? content.secondarySchedulerSteps,
+    fallback,
+    10000,
+  );
+}
+
+function isMinimaxH3AssetName(value: string): boolean {
   const [directory, ...filenameParts] = value.trim().replace(/\//g, "\\").split("\\");
   return directory.toLocaleLowerCase() === "minimaxh3" && filenameParts.join("\\").trim().length > 0;
+}
+
+function h3DiffusionModelNameFromContent(content: JsonObject): string {
+  const value = content.diffusionModelName ?? content.generationDiffusionModelName;
+  return typeof value === "string" && isMinimaxH3AssetName(value)
+    ? value
+    : DEFAULT_H3_DIFFUSION_MODEL_NAME;
+}
+
+function sameH3DiffusionModelName(left: string, right: string): boolean {
+  return left.trim().replace(/\//g, "\\").toLowerCase()
+    === right.trim().replace(/\//g, "\\").toLowerCase();
+}
+
+function h3DiffusionModelDisplayName(value: string): string {
+  const parts = value.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? value;
 }
 
 function sameH3LoraName(left: string, right: string): boolean {
@@ -1192,7 +1881,8 @@ function sameH3LoraName(left: string, right: string): boolean {
 
 function h3LoraNameFromContent(content: JsonObject): string {
   const value = content.generationLoraName ?? content.loraName;
-  return typeof value === "string" && isMinimaxH3LoraName(value)
+  if (value === "") return "";
+  return typeof value === "string" && isMinimaxH3AssetName(value)
     ? value
     : DEFAULT_H3_LORA_NAME;
 }
@@ -1208,6 +1898,25 @@ function h3LoraBypassedFromContent(content: JsonObject): boolean {
   return content.generationLoraBypassed === true || content.loraBypassed === true;
 }
 
+function h3SecondaryLoraNameFromContent(content: JsonObject): string {
+  const value = content.generationSecondaryLoraName ?? content.secondaryLoraName;
+  return typeof value === "string" && isMinimaxH3AssetName(value)
+    ? value
+    : "";
+}
+
+function h3SecondaryLoraStrengthFromContent(content: JsonObject): number {
+  const value = content.generationSecondaryLoraStrength ?? content.secondaryLoraStrength;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 2
+    ? Math.round(value * 20) / 20
+    : 1;
+}
+
+function h3SecondaryLoraBypassedFromContent(content: JsonObject): boolean {
+  const value = content.generationSecondaryLoraBypassed ?? content.secondaryLoraBypassed;
+  return typeof value === "boolean" ? value : !h3SecondaryLoraNameFromContent(content);
+}
+
 function h3LoraDisplayName(value: string): string {
   const parts = value.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? value;
@@ -1221,9 +1930,20 @@ function h3LoraPreferenceFromStorage(): H3LoraPreference {
     return {
       loraName: h3LoraNameFromContent(content),
       loraStrength: h3LoraStrengthFromContent(content),
+      loraBypassed: h3LoraBypassedFromContent(content),
+      secondaryLoraName: h3SecondaryLoraNameFromContent(content),
+      secondaryLoraStrength: h3SecondaryLoraStrengthFromContent(content),
+      secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(content),
     };
   } catch {
-    return { loraName: DEFAULT_H3_LORA_NAME, loraStrength: 1 };
+    return {
+      loraName: DEFAULT_H3_LORA_NAME,
+      loraStrength: 1,
+      loraBypassed: false,
+      secondaryLoraName: "",
+      secondaryLoraStrength: 1,
+      secondaryLoraBypassed: true,
+    };
   }
 }
 
@@ -1405,6 +2125,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     relationHighlighted,
     activeTaskCount,
     inputCount,
+    outputCount,
     mediaInputs,
     textInputCount,
     textInputs,
@@ -1432,8 +2153,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [aspectRatioMenuOpen, setAspectRatioMenuOpen] = useState(false);
   const [workflowModuleMenuOpen, setWorkflowModuleMenuOpen] = useState(false);
   const [loraMenuOpen, setLoraMenuOpen] = useState(false);
+  const [secondaryLoraMenuOpen, setSecondaryLoraMenuOpen] = useState(false);
   const [generatedInfoOpen, setGeneratedInfoOpen] = useState(false);
-  const [generatedVideoControlsVisible, setGeneratedVideoControlsVisible] = useState(false);
   const [connectedTextEditor, setConnectedTextEditor] = useState<{
     id: string;
     title: string;
@@ -1454,6 +2175,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const aspectRatioControlRef = useRef<HTMLDivElement>(null);
   const workflowModuleControlRef = useRef<HTMLDivElement>(null);
   const loraControlRef = useRef<HTMLDivElement>(null);
+  const secondaryLoraControlRef = useRef<HTMLDivElement>(null);
   const generatedInfoRef = useRef<HTMLDivElement>(null);
   const audioPreviewRefs = useRef(new Map<string, HTMLAudioElement>());
   const generatedVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -1520,10 +2242,26 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const videoAspectRatio = videoAspectRatioFromContent(record.content);
   const primaryVideoResolution = primaryVideoResolutionFromContent(record.content);
   const secondaryVideoResolution = secondaryVideoResolutionFromContent(record.content);
+  const primaryVideoSteps = primaryVideoStepsFromContent(
+    record.content,
+    selectedNodeWorkflowModule?.defaults.primaryVideoSteps ?? DEFAULT_H3_MODEL_PARAMETERS.primaryVideoSteps,
+  );
+  const secondarySchedulerSteps = secondarySchedulerStepsFromContent(
+    record.content,
+    selectedNodeWorkflowModule?.defaults.secondarySchedulerSteps
+      ?? DEFAULT_H3_MODEL_PARAMETERS.secondarySchedulerSteps,
+  );
+  const primaryVideoStepsMaximum = selectedNodeWorkflowModule?.defaults.primaryAudioSteps ?? 1000;
   const h3LoraName = h3LoraNameFromContent(record.content);
   const h3LoraStrength = h3LoraStrengthFromContent(record.content);
   const h3LoraBypassed = h3LoraBypassedFromContent(record.content);
   const availableH3LoraName = h3LoraOptions.find((lora) => sameH3LoraName(lora, h3LoraName));
+  const h3SecondaryLoraName = h3SecondaryLoraNameFromContent(record.content);
+  const h3SecondaryLoraStrength = h3SecondaryLoraStrengthFromContent(record.content);
+  const h3SecondaryLoraBypassed = h3SecondaryLoraBypassedFromContent(record.content);
+  const availableH3SecondaryLoraName = h3LoraOptions.find(
+    (lora) => sameH3LoraName(lora, h3SecondaryLoraName),
+  );
   const selectableH3Loras = h3LoraOptions;
   const seedMode = seedModeFromContent(record.content);
   const fixedSeed = fixedSeedFromContent(record.content);
@@ -1589,14 +2327,20 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
 
   useEffect(() => {
     if (!isGeneratedVideo || !generatedVideoUrl) return;
-    setGeneratedVideoControlsVisible(false);
     const video = generatedVideoRef.current;
     if (!video) return;
     if (video.getAttribute("src") !== generatedVideoUrl) {
       video.src = generatedVideoUrl;
       video.load();
     }
+    const handleFullscreenChange = () => {
+      if (document.fullscreenElement) return;
+      const body = video.closest(".media-node-body");
+      if (!body?.matches(":hover")) video.pause();
+    };
+    video.addEventListener("fullscreenchange", handleFullscreenChange);
     return () => {
+      video.removeEventListener("fullscreenchange", handleFullscreenChange);
       video.pause();
       if (video.readyState > 0) video.currentTime = 0;
     };
@@ -1749,6 +2493,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   }, [loraMenuOpen]);
 
   useEffect(() => {
+    if (!secondaryLoraMenuOpen) return;
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && secondaryLoraControlRef.current?.contains(target)) return;
+      setSecondaryLoraMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [secondaryLoraMenuOpen]);
+
+
+  useEffect(() => {
     if (!expanded && !connectedTextEditor) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -1830,14 +2586,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const applyNaturalMediaRatio = (naturalWidth: number, naturalHeight: number) => {
     if (savedAspectRatio || naturalWidth <= 0 || naturalHeight <= 0) return;
     const aspectRatio = naturalWidth / naturalHeight;
+    const fittedWidth = isImage && aspectRatio < 1
+      ? GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH
+      : record.width;
     const fittedHeight = isGeneratedVideo
       ? Math.min(
         2400,
-        Math.max(180, record.width / aspectRatio + GENERATED_VIDEO_FOOTER_HEIGHT),
+        Math.max(180, fittedWidth / aspectRatio + GENERATED_VIDEO_FOOTER_HEIGHT),
       )
       : isImage
-        ? Math.min(2400, record.width / aspectRatio + IMAGE_NODE_CHROME_HEIGHT)
-      : mediaNodeHeightForAspectRatio(record.width, aspectRatio);
+        ? Math.min(2400, fittedWidth / aspectRatio + IMAGE_NODE_CHROME_HEIGHT)
+      : mediaNodeHeightForAspectRatio(fittedWidth, aspectRatio);
     onChange(id, {
       content: {
         ...record.content,
@@ -1846,6 +2605,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         naturalHeight,
         ...(isImage ? { imageLayoutVersion: 1 } : {}),
       },
+      width: fittedWidth,
       height: fittedHeight,
     });
   };
@@ -2084,6 +2844,27 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     }
   };
 
+  const playMediaVideoOnHover = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const video = event.currentTarget.querySelector("video");
+    if (!video) return;
+    void video.play().catch(() => {
+      // Some system WebViews may block the first unmuted playback before user interaction.
+    });
+  };
+
+  const pauseMediaVideoOnLeave = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const video = event.currentTarget.querySelector("video");
+    if (!video || document.fullscreenElement === video) return;
+    video.pause();
+  };
+
+  const playGeneratedVideoFullscreen = () => {
+    const video = generatedVideoRef.current;
+    if (!video) return;
+    void video.play().catch(() => {});
+    void video.requestFullscreen().catch(() => {});
+  };
+
   return (
     <article
       className={`canvas-node kind-${record.kind} ${usesSecondaryGreenTheme ? "is-secondary-preview" : ""} ${usesCustomPreviewTheme ? "has-custom-preview-color" : ""} ${relationHighlighted ? "is-relation-highlighted" : ""} ${matched ? "" : "is-dimmed"}`}
@@ -2243,7 +3024,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             if (isGeneratedVideo) stopGeneratedVideoPlayback();
             onDelete(id);
           }}
-          title={isGenerationPlaceholder ? "取消任务并删除占位节点" : "删除节点"}
+          title={isGenerationPlaceholder
+            ? "取消任务并删除占位节点"
+            : "删除节点"}
           aria-label={isGenerationPlaceholder ? "取消任务并删除占位节点" : "删除节点"}
         >
           {isGenerationPlaceholder ? <X size={14} /> : <Trash2 size={14} />}
@@ -2264,7 +3047,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         </div>
       )}
       {(isImage || isAudioAsset || isVideoAsset || isGeneratedVideo) && (
-        <div className={isVideoAsset ? "nodrag media-node-body" : "media-node-body"}>
+        <div
+          className={isVideoAsset ? "nodrag media-node-body" : "media-node-body"}
+          onMouseEnter={isVideoAsset || isGeneratedVideo ? playMediaVideoOnHover : undefined}
+          onMouseLeave={isVideoAsset || isGeneratedVideo ? pauseMediaVideoOnLeave : undefined}
+        >
           {assetPath && isImage ? (
             <img
               src={convertFileSrc(assetPath)}
@@ -2283,8 +3070,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           ) : assetPath && isVideoAsset ? (
             <video
               src={convertFileSrc(assetPath)}
-              controls
               preload="metadata"
+              playsInline
               onLoadedMetadata={(event) => applyNaturalMediaRatio(
                 event.currentTarget.videoWidth,
                 event.currentTarget.videoHeight,
@@ -2300,10 +3087,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <video
                 ref={generatedVideoRef}
                 src={generatedVideoUrl}
-                controls={generatedVideoControlsVisible}
                 preload="metadata"
-                onMouseEnter={() => setGeneratedVideoControlsVisible(true)}
-                onMouseLeave={() => setGeneratedVideoControlsVisible(false)}
+                playsInline
                 onPlay={markGeneratedVideoPlayed}
                 onLoadedMetadata={(event) => applyNaturalMediaRatio(
                   event.currentTarget.videoWidth,
@@ -2342,14 +3127,33 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           ) : isGenerationPlaceholder ? (
             <div className={`generated-video-placeholder ${placeholderActive ? "is-active" : "is-stopped"}`}>
               <div className="generated-video-placeholder-flow" aria-hidden="true">
-                <span className="generated-video-placeholder-blob blob-blue" />
-                <span className="generated-video-placeholder-blob blob-mist" />
-                <span className="generated-video-placeholder-blob blob-sky" />
-                <span className="generated-video-placeholder-blob blob-shadow" />
+                <span
+                  className="generated-video-placeholder-blob blob-blue"
+                  style={generatedPlaceholderPositionStyle(id, 0)}
+                />
+                <span
+                  className="generated-video-placeholder-blob blob-mist"
+                  style={generatedPlaceholderPositionStyle(id, 1)}
+                />
+                <span
+                  className="generated-video-placeholder-blob blob-sky"
+                  style={generatedPlaceholderPositionStyle(id, 2)}
+                />
+                <span
+                  className="generated-video-placeholder-blob blob-shadow"
+                  style={generatedPlaceholderPositionStyle(id, 3)}
+                />
               </div>
-              <span className="generated-video-placeholder-message" title={validationMessage}>
-                {validationMessage || (placeholderActive ? "正在等待 ComfyUI 返回视频…" : "生成任务未完成")}
-              </span>
+              <div className="generated-video-placeholder-status">
+                <span className="generated-video-placeholder-message" title={validationMessage}>
+                  {validationMessage || (placeholderActive ? "正在等待 ComfyUI 返回视频…" : "生成任务未完成")}
+                </span>
+                {placeholderActive && (
+                  <output className="generated-video-placeholder-percent">
+                    {executionProgress === null ? "处理中" : `${Math.round(executionProgress)}%`}
+                  </output>
+                )}
+              </div>
               {placeholderActive && (
                 <div
                   className={`video-execution-progress ${executionProgress === null ? "is-indeterminate" : ""}`}
@@ -2459,8 +3263,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <FolderOpen size={13} />
             </button>
           )}
+          {generatedVideoUrl && (
+            <button
+              type="button"
+              className="nodrag node-action generated-video-fullscreen-button"
+              onClick={playGeneratedVideoFullscreen}
+              title="全屏播放视频"
+              aria-label="全屏播放视频"
+            >
+              <Maximize2 size={13} />
+            </button>
+          )}
           {generatedVideoSnapshot && (
-            <div ref={generatedInfoRef} className="nodrag nowheel generated-video-info-control">
+            <div ref={generatedInfoRef} className="nodrag generated-video-info-control">
               <button
                 type="button"
                 className={`node-action generated-video-info-button ${generatedInfoOpen ? "is-active" : ""}`}
@@ -2475,7 +3290,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <Info size={13} />
               </button>
               {generatedInfoOpen && (
-                <aside className="generated-video-info-panel" aria-label="视频生成信息">
+                <aside
+                  className="generated-video-info-panel"
+                  aria-label="视频生成信息"
+                  onWheel={(event) => {
+                    if (!event.ctrlKey) event.stopPropagation();
+                  }}
+                >
                   <header>
                     <div>
                       <strong>生成信息</strong>
@@ -2505,13 +3326,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       <strong>{formattedGenerationElapsed(record.content)}</strong>
                     </div>
                     <div>
-                      <span>LoRA</span>
+                      <span>模型</span>
+                      <strong title={generatedVideoSnapshot.diffusionModelName}>
+                        {h3DiffusionModelDisplayName(generatedVideoSnapshot.diffusionModelName)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>一采 LoRA</span>
                       <strong title={generatedVideoSnapshot.loraName}>
                         {h3LoraDisplayName(generatedVideoSnapshot.loraName)}
                       </strong>
                     </div>
                     <div>
-                      <span>强度</span>
+                      <span>一采强度</span>
                       <strong>
                         {generatedVideoSnapshot.loraBypassed
                           ? "未应用（Bypass）"
@@ -2536,6 +3363,20 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       <dl>
                         <dt>分辨率</dt><dd>{generatedVideoSnapshot.secondaryResolutionMegapixels.toFixed(1)} MP</dd>
                         <dt>调度 Steps</dt><dd>{generatedVideoSnapshot.secondarySchedulerSteps}</dd>
+                        <dt>LoRA</dt>
+                        <dd title={generatedVideoSnapshot.secondaryLoraName || "二采 Bypass"}>
+                          {generatedVideoSnapshot.secondaryLoraBypassed
+                            ? "未应用（Bypass）"
+                            : h3LoraDisplayName(generatedVideoSnapshot.secondaryLoraName)}
+                        </dd>
+                        <dt>LoRA 强度</dt>
+                        <dd>
+                          {generatedVideoSnapshot.secondaryLoraBypassed
+                            ? "—"
+                            : generatedVideoSnapshot.secondaryLoraStrengthRecorded === false
+                              ? "未记录"
+                              : `×${generatedVideoSnapshot.secondaryLoraStrength.toFixed(2)}`}
+                        </dd>
                         <dt>亮度 / 对比度 / 饱和度</dt>
                         <dd>{generatedVideoSnapshot.secondaryBrightness.toFixed(2)} / {generatedVideoSnapshot.secondaryContrast.toFixed(2)} / {generatedVideoSnapshot.secondarySaturation.toFixed(2)}</dd>
                       </dl>
@@ -2552,7 +3393,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                         aria-label={promptCopied ? "提示词已复制" : "复制提示词"}
                       >
                         {promptCopied ? <Check size={12} /> : <Copy size={12} />}
-                        {promptCopied ? "已复制" : "复制"}
                       </button>
                     </div>
                     <p title={generatedVideoPrompt}>{generatedVideoPrompt || "未记录提示词"}</p>
@@ -2564,11 +3404,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           <button
             type="button"
             className="nodrag node-action danger"
-            onClick={() => {
+            onClick={(event) => {
               stopGeneratedVideoPlayback();
-              onDelete(id);
+              onDelete(id, event.ctrlKey && !isGenerationPlaceholder);
             }}
-            title={isGenerationPlaceholder ? "取消任务并删除占位节点" : "删除节点"}
+            title={isGenerationPlaceholder
+              ? "取消任务并删除占位节点"
+              : "删除视频；Ctrl+点击将跳过确认并永久删除源文件"}
             aria-label={isGenerationPlaceholder ? "取消任务并删除占位节点" : "删除节点"}
           >
             {isGenerationPlaceholder ? <X size={14} /> : <Trash2 size={14} />}
@@ -2577,7 +3419,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         </footer>
       )}
       {isVideoGeneration && (
-        <div className={`nodrag video-node-body ${mediaInputs.length ? "has-media" : ""}`}>
+        <div className="nodrag video-node-body has-media">
           <div className="video-workflow-module-select">
             <span>生成方案</span>
             <div ref={workflowModuleControlRef} className="video-lora-select video-workflow-module-dropdown">
@@ -2594,6 +3436,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 onClick={() => {
                   setAspectRatioMenuOpen(false);
                   setLoraMenuOpen(false);
+                  setSecondaryLoraMenuOpen(false);
                   setWorkflowModuleMenuOpen((open) => !open);
                 }}
                 onPointerDown={(event) => event.stopPropagation()}
@@ -2622,8 +3465,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                             generationMode: module.variant as VideoGenerationMode,
                             workflowModuleId: module.id,
                             workflowModuleRevision: module.revision,
+                            generationDiffusionModelName: module.defaults.diffusionModelName,
                             generationLoraName: module.defaults.loraName,
                             generationLoraStrength: module.defaults.loraStrength,
+                            generationPrimaryVideoSteps: module.defaults.primaryVideoSteps,
+                            generationSecondarySchedulerSteps: module.defaults.secondarySchedulerSteps,
                             status: "idle",
                             validationMessage: "",
                           },
@@ -2669,6 +3515,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 aria-expanded={aspectRatioMenuOpen}
                 onClick={() => {
                   setLoraMenuOpen(false);
+                  setSecondaryLoraMenuOpen(false);
                   setAspectRatioMenuOpen((open) => !open);
                 }}
                 onPointerDown={(event) => event.stopPropagation()}
@@ -2752,8 +3599,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <output>{secondaryVideoResolution.toFixed(1)} MP</output>
             </label>
           </div>
-          <div className={`video-lora-control ${h3LoraBypassed ? "is-bypassed" : ""}`}>
-            <span>H3 LoRA</span>
+          <div className={`video-lora-control is-primary ${h3LoraBypassed ? "is-bypassed" : ""} ${loraMenuOpen ? "is-menu-open" : ""}`}>
+            <span>1采 LoRA</span>
             <div ref={loraControlRef} className="video-lora-select">
               <button
                 type="button"
@@ -2761,15 +3608,20 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 disabled={h3LoraBypassed || !selectableH3Loras.length}
                 aria-haspopup="menu"
                 aria-expanded={loraMenuOpen}
-                title={availableH3LoraName ?? "MinimaxH3 目录中没有可用 LoRA"}
+                title={availableH3LoraName ?? (h3LoraName
+                  ? "所选一采 LoRA 已不在 MinimaxH3 目录中"
+                  : "一采 LoRA 未选择")}
                 onClick={() => {
                   setAspectRatioMenuOpen(false);
                   setWorkflowModuleMenuOpen(false);
+                  setSecondaryLoraMenuOpen(false);
                   setLoraMenuOpen((open) => !open);
                 }}
                 onPointerDown={(event) => event.stopPropagation()}
               >
-                <span>{availableH3LoraName ? h3LoraDisplayName(availableH3LoraName) : "未找到 LoRA"}</span>
+                <span>{availableH3LoraName
+                  ? h3LoraDisplayName(availableH3LoraName)
+                  : h3LoraName ? "未找到 LoRA" : "未选择 LoRA"}</span>
                 <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
               </button>
               {loraMenuOpen && !h3LoraBypassed && (
@@ -2825,14 +3677,56 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               }}
               onPointerDown={(event) => event.stopPropagation()}
             />
-            <output title="LoRA 权重">×{h3LoraStrength.toFixed(2)}</output>
+            <label className="video-lora-strength" title="LoRA 权重">
+              <span aria-hidden="true">×</span>
+              <CompactDecimalInput
+                value={h3LoraStrength}
+                min={0}
+                max={2}
+                disabled={h3LoraBypassed}
+                ariaLabel="手动输入一采 LoRA 权重"
+                onChange={(loraStrength) => {
+                  onH3LoraPreferenceChange({ loraName: h3LoraName, loraStrength });
+                  onChange(id, {
+                    content: {
+                      ...record.content,
+                      generationLoraStrength: loraStrength,
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  });
+                }}
+              />
+            </label>
+            <label className="video-lora-steps" title="一采 Video Steps">
+              <span>S</span>
+              <CompactIntegerInput
+                value={primaryVideoSteps}
+                min={1}
+                max={primaryVideoStepsMaximum}
+                ariaLabel="一采 Video Steps"
+                onChange={(value) => {
+                  onChange(id, {
+                    content: {
+                      ...record.content,
+                      generationPrimaryVideoSteps: value,
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  });
+                }}
+              />
+            </label>
             <button
               type="button"
-              className="video-lora-bypass-button"
-              aria-pressed={h3LoraBypassed}
-              title={h3LoraBypassed ? "LoRA 已旁路，点击恢复" : "旁路 LoRA"}
+              className="video-lora-bypass-switch"
+              role="switch"
+              aria-checked={!h3LoraBypassed}
+              aria-label="启用一采 LoRA"
+              title={h3LoraBypassed ? "LoRA 已关闭，点击启用" : "LoRA 已启用，点击关闭"}
               onClick={() => {
                 setLoraMenuOpen(false);
+                onH3LoraPreferenceChange({ loraBypassed: !h3LoraBypassed });
                 onChange(id, {
                   content: {
                     ...record.content,
@@ -2844,7 +3738,159 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               }}
               onPointerDown={(event) => event.stopPropagation()}
             >
-              Bypass
+              <span aria-hidden="true" />
+            </button>
+          </div>
+          <div className={`video-lora-control is-secondary ${h3SecondaryLoraBypassed ? "is-bypassed" : ""} ${secondaryLoraMenuOpen ? "is-menu-open" : ""}`}>
+            <span>2采 LoRA</span>
+            <div ref={secondaryLoraControlRef} className="video-lora-select">
+              <button
+                type="button"
+                className="nodrag nowheel video-lora-select-toggle"
+                disabled={!selectableH3Loras.length}
+                aria-haspopup="menu"
+                aria-expanded={secondaryLoraMenuOpen}
+                title={availableH3SecondaryLoraName ?? (h3SecondaryLoraName
+                  ? "所选二采 LoRA 已不在 MinimaxH3 目录中"
+                  : "二采 LoRA 未设置")}
+                onClick={() => {
+                  setAspectRatioMenuOpen(false);
+                  setWorkflowModuleMenuOpen(false);
+                  setLoraMenuOpen(false);
+                  setSecondaryLoraMenuOpen((open) => !open);
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <span>{availableH3SecondaryLoraName
+                  ? h3LoraDisplayName(availableH3SecondaryLoraName)
+                  : h3SecondaryLoraName ? "未找到 LoRA" : "未选择 LoRA"}</span>
+                <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
+              </button>
+              {secondaryLoraMenuOpen && (
+                <div className="video-lora-select-menu" role="menu" aria-label="MiniMax H3 二采 LoRA">
+                  {selectableH3Loras.map((lora) => (
+                    <button
+                      key={lora}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={sameH3LoraName(h3SecondaryLoraName, lora)}
+                      className={sameH3LoraName(h3SecondaryLoraName, lora) ? "is-active" : ""}
+                      title={lora}
+                      onClick={() => {
+                        onH3LoraPreferenceChange({
+                          secondaryLoraName: lora,
+                          secondaryLoraStrength: h3SecondaryLoraStrength,
+                          secondaryLoraBypassed: false,
+                        });
+                        onChange(id, {
+                          content: {
+                            ...record.content,
+                            generationSecondaryLoraName: lora,
+                            generationSecondaryLoraStrength: h3SecondaryLoraStrength,
+                            generationSecondaryLoraBypassed: false,
+                            status: "idle",
+                            validationMessage: "",
+                          },
+                        });
+                        setSecondaryLoraMenuOpen(false);
+                      }}
+                    >
+                      {h3LoraDisplayName(lora)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <input
+              className="video-parameter-range"
+              type="range"
+              disabled={h3SecondaryLoraBypassed}
+              min="0"
+              max="2"
+              step="0.05"
+              value={h3SecondaryLoraStrength}
+              title={`二采 LoRA 权重：${h3SecondaryLoraStrength.toFixed(2)}`}
+              aria-label="二采 LoRA 权重"
+              onChange={(event) => {
+                const secondaryLoraStrength = Number(event.currentTarget.value);
+                onH3LoraPreferenceChange({ secondaryLoraStrength });
+                onChange(id, {
+                  content: {
+                    ...record.content,
+                    generationSecondaryLoraStrength: secondaryLoraStrength,
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                });
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+            />
+            <label className="video-lora-strength" title="二采 LoRA 权重">
+              <span aria-hidden="true">×</span>
+              <CompactDecimalInput
+                value={h3SecondaryLoraStrength}
+                min={0}
+                max={2}
+                disabled={h3SecondaryLoraBypassed}
+                ariaLabel="手动输入二采 LoRA 权重"
+                onChange={(secondaryLoraStrength) => {
+                  onH3LoraPreferenceChange({ secondaryLoraStrength });
+                  onChange(id, {
+                    content: {
+                      ...record.content,
+                      generationSecondaryLoraStrength: secondaryLoraStrength,
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  });
+                }}
+              />
+            </label>
+            <label className="video-lora-steps" title="二采基本调度 Steps">
+              <span>S</span>
+              <CompactIntegerInput
+                value={secondarySchedulerSteps}
+                min={1}
+                max={10000}
+                ariaLabel="二采基本调度 Steps"
+                onChange={(value) => {
+                  onChange(id, {
+                    content: {
+                      ...record.content,
+                      generationSecondarySchedulerSteps: value,
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  });
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              className="video-lora-bypass-switch"
+              role="switch"
+              aria-checked={!h3SecondaryLoraBypassed}
+              aria-label="启用二采 LoRA"
+              title={h3SecondaryLoraBypassed
+                ? "二采 LoRA 已关闭，点击启用"
+                : "二采 LoRA 已启用，点击关闭"}
+              onClick={() => {
+                setSecondaryLoraMenuOpen(false);
+                onH3LoraPreferenceChange({
+                  secondaryLoraBypassed: !h3SecondaryLoraBypassed,
+                });
+                onChange(id, {
+                  content: {
+                    ...record.content,
+                    generationSecondaryLoraBypassed: !h3SecondaryLoraBypassed,
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                });
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <span aria-hidden="true" />
             </button>
           </div>
           <div className="video-seed-control">
@@ -3115,7 +4161,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                               {inputAssetPath && input.kind === "image" ? (
                                 <img src={convertFileSrc(inputAssetPath)} alt="" draggable={false} />
                               ) : inputAssetPath && input.kind === "video" ? (
-                                <video src={convertFileSrc(inputAssetPath)} muted preload="metadata" draggable={false} />
+                                <video
+                                  src={convertFileSrc(inputAssetPath)}
+                                  muted
+                                  preload="metadata"
+                                  playsInline
+                                  draggable={false}
+                                  onMouseEnter={(event) => void event.currentTarget.play().catch(() => {})}
+                                  onMouseLeave={(event) => event.currentTarget.pause()}
+                                />
                               ) : input.kind === "image" ? (
                                 <ImageIcon size={16} />
                               ) : input.kind === "audio" ? (
@@ -3360,7 +4414,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         </footer>
       )}
       {(isText || isImage || isAudioAsset || isVideoAsset || isVideoGeneration || isGeneratedVideo) && (
-        <Handle type="source" position={Position.Right} className="node-handle source-handle" />
+        <Handle
+          type="source"
+          position={Position.Right}
+          className={`node-handle source-handle ${outputCount > 0 ? "is-connected" : ""}`}
+        />
       )}
       {expanded && createPortal(
         <div className="expanded-editor-backdrop" onMouseDown={() => setExpanded(false)}>
@@ -3491,7 +4549,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   );
 }
 
-const nodeTypes = { canvasNode: CanvasNode };
+const MemoizedCanvasNode = memo(
+  CanvasNode,
+  (previous, next) => previous.id === next.id
+    && previous.selected === next.selected
+    && previous.data === next.data,
+);
+const nodeTypes = { canvasNode: MemoizedCanvasNode };
 
 function nodePreviewColor(kind: string): string {
   if (kind === "image") return "#4eb9c8";
@@ -3586,7 +4650,11 @@ function CanvasWorkspace() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [canvasBackground, setCanvasBackground] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [activeSettingsSection, setActiveSettingsSection] = useState<"general" | "workflows" | "model" | "privacy" | "security">("general");
+  const [activeSettingsSection, setActiveSettingsSection] = useState<"general" | "workflows" | "model" | "backup" | "privacy" | "security">("general");
+  const [appBackupBusy, setAppBackupBusy] = useState(false);
+  const [appBackupMessage, setAppBackupMessage] = useState("");
+  const [appBackupMessageKind, setAppBackupMessageKind] = useState<"success" | "error">("success");
+  const [appBackupRestorePath, setAppBackupRestorePath] = useState<string | null>(null);
   const [showPrivateProjects, setShowPrivateProjects] = useState(() =>
     window.localStorage.getItem(PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY) !== "false",
   );
@@ -3633,6 +4701,9 @@ function CanvasWorkspace() {
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     window.localStorage.getItem("infinite-canvas:theme") === "light" ? "light" : "dark",
   );
+  const [uiFontSize, setUiFontSize] = useState<UiFontSize>(() =>
+    window.localStorage.getItem(UI_FONT_SIZE_STORAGE_KEY) === "medium" ? "medium" : "small",
+  );
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [search, setSearch] = useState("");
   const [relationAnchorId, setRelationAnchorId] = useState<string | null>(null);
@@ -3647,6 +4718,9 @@ function CanvasWorkspace() {
   const [h3LoraOptions, setH3LoraOptions] = useState<string[]>([DEFAULT_H3_LORA_NAME]);
   const [h3LoraCatalogLoaded, setH3LoraCatalogLoaded] = useState(false);
   const [h3LoraPreference, setH3LoraPreference] = useState(h3LoraPreferenceFromStorage);
+  const [h3DiffusionModelOptions, setH3DiffusionModelOptions] = useState<string[]>([DEFAULT_H3_DIFFUSION_MODEL_NAME]);
+  const [h3DiffusionModelCatalogLoaded, setH3DiffusionModelCatalogLoaded] = useState(false);
+  const [h3DiffusionModelName, setH3DiffusionModelName] = useState(DEFAULT_H3_DIFFUSION_MODEL_NAME);
   const [h3ModelParameters, setH3ModelParameters] = useState(h3ModelParametersFromStorage);
   const [h3ModelParametersDraft, setH3ModelParametersDraft] = useState(h3ModelParameters);
   const [workflowModules, setWorkflowModules] = useState<WorkflowModuleRecord[]>([]);
@@ -3673,12 +4747,18 @@ function CanvasWorkspace() {
   const [activeComfyTaskCounts, setActiveComfyTaskCounts] = useState<Record<string, number>>({});
   const [copiedApi, setCopiedApi] = useState(false);
   const [dropActive, setDropActive] = useState(false);
+  const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuide[]>([]);
+  const [spacingGuides, setSpacingGuides] = useState<SpacingGuide[]>([]);
   const [canvasContextMenu, setCanvasContextMenu] = useState<CanvasContextMenuState | null>(null);
   const [videoDeletionRequest, setVideoDeletionRequest] = useState<VideoDeletionRequest | null>(null);
   const saveTimers = useRef(new Map<string, number>());
   const pendingPatches = useRef(new Map<string, NodePatch>());
   const nodesSnapshot = useRef<CanvasFlowNode[]>([]);
   const edgesSnapshot = useRef<Edge[]>([]);
+  const contentNodesCache = useRef<CanvasFlowNode[]>([]);
+  const visibleNodeCache = useRef(new Map<string, VisibleNodeCacheEntry>());
+  const alignmentGuidesSnapshot = useRef<AlignmentGuide[]>([]);
+  const spacingGuidesSnapshot = useRef<SpacingGuide[]>([]);
   const incomingPlacementReservations = useRef<NodeRecord[]>([]);
   const runningComfyClients = useRef(new Map<string, Set<string>>());
   const cancelledComfyClients = useRef(new Set<string>());
@@ -3699,7 +4779,8 @@ function CanvasWorkspace() {
   const deleteUndoStack = useRef<DeletedBatch[]>([]);
   const nodeDeletionInProgress = useRef(false);
   const nodeClipboard = useRef<NodeClipboard | null>(null);
-  const { setCenter, fitView, screenToFlowPosition } = useReactFlow<CanvasFlowNode, Edge>();
+  const alignedDragPositions = useRef(new Map<string, { x: number; y: number }>());
+  const { setCenter, fitView, screenToFlowPosition, getViewport } = useReactFlow<CanvasFlowNode, Edge>();
 
   const savePersistedComfyTasks = useCallback((tasks: PersistedComfyTask[]) => {
     persistedComfyTasks.current = tasks;
@@ -3746,6 +4827,17 @@ function CanvasWorkspace() {
     nodesSnapshot.current = nodes;
     edgesSnapshot.current = edges;
   }, [edges, nodes]);
+
+  const contentNodes = useMemo(() => {
+    const previous = contentNodesCache.current;
+    const contentUnchanged = previous.length === nodes.length
+      && previous.every((node, index) => (
+        node.id === nodes[index].id && node.data === nodes[index].data
+      ));
+    if (contentUnchanged) return previous;
+    contentNodesCache.current = nodes;
+    return nodes;
+  }, [nodes]);
 
   useEffect(() => {
     const pauseOtherVideos = (event: Event) => {
@@ -3821,6 +4913,11 @@ function CanvasWorkspace() {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem("infinite-canvas:theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.dataset.fontSize = uiFontSize;
+    window.localStorage.setItem(UI_FONT_SIZE_STORAGE_KEY, uiFontSize);
+  }, [uiFontSize]);
 
   useEffect(() => {
     let disposed = false;
@@ -3904,10 +5001,20 @@ function CanvasWorkspace() {
           setH3LoraCatalogLoaded(true);
           if (loras.length) {
             setH3LoraPreference((current) => {
-              if (loras.some((lora) => sameH3LoraName(lora, current.loraName))) return current;
               const fallback = loras.find((lora) => sameH3LoraName(lora, DEFAULT_H3_LORA_NAME))
                 ?? loras[0];
-              return { ...current, loraName: fallback };
+              const primaryAvailable = loras.some(
+                (lora) => sameH3LoraName(lora, current.loraName),
+              );
+              const secondaryAvailable = current.secondaryLoraBypassed || loras.some(
+                (lora) => sameH3LoraName(lora, current.secondaryLoraName),
+              );
+              if (primaryAvailable && secondaryAvailable) return current;
+              return {
+                ...current,
+                ...(!primaryAvailable ? { loraName: fallback } : {}),
+                ...(!secondaryAvailable ? { secondaryLoraName: fallback } : {}),
+              };
             });
           }
         }
@@ -3921,6 +5028,32 @@ function CanvasWorkspace() {
     };
   }, [activeProjectId, defaultH3WorkflowModuleId, workflowModulesReady]);
 
+  useEffect(() => {
+    if (!workflowModulesReady) return;
+    let disposed = false;
+    setH3DiffusionModelCatalogLoaded(false);
+    void invoke<string[]>("get_comfyui_h3_diffusion_models", {
+      serverUrl: COMFYUI_SERVER_URL,
+      workflowModuleId: defaultH3WorkflowModuleId || undefined,
+    }).then((models) => {
+      if (disposed) return;
+      setH3DiffusionModelOptions(models);
+      setH3DiffusionModelCatalogLoaded(true);
+      if (!models.length) return;
+      setH3DiffusionModelName((current) => (
+        models.some((model) => sameH3DiffusionModelName(model, current))
+          ? current
+          : models.find((model) => sameH3DiffusionModelName(model, DEFAULT_H3_DIFFUSION_MODEL_NAME))
+            ?? models[0]
+      ));
+    }).catch(() => {
+      // Preserve the last successful catalog while ComfyUI is temporarily offline.
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [defaultH3WorkflowModuleId, workflowModulesReady]);
+
   const toggleTheme = () => setTheme((current) => current === "dark" ? "light" : "dark");
 
   const reportError = useCallback((error: unknown) => {
@@ -3928,6 +5061,112 @@ function CanvasWorkspace() {
     console.error(error);
     setNotice(`操作失败：${message}`);
   }, []);
+
+  useEffect(() => {
+    void invoke<Record<string, string> | null>("take_restored_frontend_settings")
+      .then((settings) => {
+        if (!settings) return;
+        Object.keys(window.localStorage)
+          .filter((key) => key.startsWith("infinite-canvas:"))
+          .forEach((key) => window.localStorage.removeItem(key));
+        Object.entries(settings).forEach(([key, value]) => {
+          window.localStorage.setItem(key, value);
+        });
+        window.location.reload();
+      })
+      .catch(reportError);
+  }, [reportError]);
+
+  const portableFrontendSettings = useCallback(() => {
+    const settings: Record<string, string> = {};
+    Object.keys(window.localStorage)
+      .filter((key) => key.startsWith("infinite-canvas:") && key !== COMFY_TASK_STORAGE_KEY)
+      .forEach((key) => {
+        const value = window.localStorage.getItem(key);
+        if (value !== null) settings[key] = value;
+      });
+    return settings;
+  }, []);
+
+  const exportFullAppBackup = useCallback(async () => {
+    let destinationPath: string | null;
+    const now = new Date();
+    const timestamp = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0"),
+      "-",
+      String(now.getHours()).padStart(2, "0"),
+      String(now.getMinutes()).padStart(2, "0"),
+      String(now.getSeconds()).padStart(2, "0"),
+    ].join("");
+    try {
+      destinationPath = await saveDialog({
+        title: "保存 SuCanvas 软件备份",
+        defaultPath: `SuCanvas-软件备份-${timestamp}.sucanvas-backup`,
+        filters: [{ name: "SuCanvas 软件备份", extensions: ["sucanvas-backup"] }],
+      });
+    } catch (error) {
+      reportError(error);
+      return;
+    }
+    if (!destinationPath) return;
+    setAppBackupBusy(true);
+    setAppBackupMessage("");
+    try {
+      const result = await invoke<AppBackupSummary>("export_app_backup", {
+        destinationPath,
+        frontendSettings: portableFrontendSettings(),
+      });
+      setAppBackupMessageKind("success");
+      setAppBackupMessage(`备份完成：${result.fileCount} 个数据文件`);
+      setNotice(`软件备份已保存到 ${result.path}`);
+      await revealItemInDir(result.path);
+    } catch (error) {
+      setAppBackupMessageKind("error");
+      setAppBackupMessage(error instanceof Error ? error.message : String(error));
+      reportError(error);
+    } finally {
+      setAppBackupBusy(false);
+    }
+  }, [portableFrontendSettings, reportError]);
+
+  const chooseFullAppBackupToRestore = useCallback(async () => {
+    let bundlePath: string | null;
+    try {
+      bundlePath = await openDialog({
+        directory: false,
+        multiple: false,
+        title: "选择 SuCanvas 软件备份",
+        filters: [{ name: "SuCanvas 软件备份", extensions: ["sucanvas-backup"] }],
+      });
+    } catch (error) {
+      reportError(error);
+      return;
+    }
+    if (bundlePath) setAppBackupRestorePath(bundlePath);
+  }, [reportError]);
+
+  const restoreFullAppBackup = useCallback(async () => {
+    if (!appBackupRestorePath) return;
+    setAppBackupBusy(true);
+    setAppBackupMessage("");
+    try {
+      const result = await invoke<AppRestoreSummary>("stage_app_backup_restore", {
+        bundlePath: appBackupRestorePath,
+      });
+      setAppBackupRestorePath(null);
+      setAppBackupMessageKind("success");
+      setAppBackupMessage(`备份已校验，${result.fileCount} 个数据文件将在下次启动时恢复。请关闭并重新打开软件。`);
+      setNotice("恢复已准备完成，请关闭并重新打开 SuCanvas");
+    } catch (error) {
+      setAppBackupMessageKind("error");
+      setAppBackupMessage(error instanceof Error ? error.message : String(error));
+      reportError(error);
+    } finally {
+      setAppBackupBusy(false);
+    }
+  }, [appBackupRestorePath, reportError]);
 
   const refreshWorkflowModules = useCallback(async (includeDeleted = true) => {
     const modules = await invoke<WorkflowModuleRecord[]>("list_workflow_modules", {
@@ -3961,6 +5200,7 @@ function CanvasWorkspace() {
             sourceWorkflowPath: h3WorkflowPathRef.current,
             defaults: {
               ...h3ModelParameters,
+              diffusionModelName: h3DiffusionModelName,
               loraName: h3LoraPreference.loraName,
               loraStrength: h3LoraPreference.loraStrength,
             },
@@ -4023,6 +5263,7 @@ function CanvasWorkspace() {
     setWorkflowModuleValidation(null);
     setWorkflowModuleReplacementId("");
     setWorkflowModuleBindingsDraft(JSON.stringify(selectedWorkflowModule.bindings, null, 2));
+    setH3DiffusionModelName(selectedWorkflowModule.defaults.diffusionModelName);
   }, [selectedWorkflowModule]);
 
   const workflowModuleUsageCount = useCallback((moduleId: string) => {
@@ -4101,6 +5342,7 @@ function CanvasWorkspace() {
             ? selectedWorkflowModule.defaults
             : {
               ...h3ModelParameters,
+              diffusionModelName: h3DiffusionModelName,
               loraName: h3LoraPreference.loraName,
               loraStrength: h3LoraPreference.loraStrength,
             },
@@ -4119,7 +5361,7 @@ function CanvasWorkspace() {
     } finally {
       setWorkflowModulesBusy(false);
     }
-  }, [h3LoraPreference, h3ModelParameters, refreshWorkflowModules, reportError, selectedWorkflowModule, workflowModuleBindingsDraft, workflowModuleCapabilityDraft, workflowModuleNameDraft, workflowModulePathDraft, workflowModuleRevisionDraft, workflowModuleVariantDraft]);
+  }, [h3DiffusionModelName, h3LoraPreference, h3ModelParameters, refreshWorkflowModules, reportError, selectedWorkflowModule, workflowModuleBindingsDraft, workflowModuleCapabilityDraft, workflowModuleNameDraft, workflowModulePathDraft, workflowModuleRevisionDraft, workflowModuleVariantDraft]);
 
   const setDefaultWorkflowModule = useCallback((module: WorkflowModuleRecord) => {
     setWorkflowModuleDefaults((current) => ({ ...current, [workflowSlotForModule(module)]: module.id }));
@@ -4135,10 +5377,12 @@ function CanvasWorkspace() {
         secondaryContrast: module.defaults.secondaryContrast,
         secondarySaturation: module.defaults.secondarySaturation,
       });
-      setH3LoraPreference({
+      setH3LoraPreference((current) => ({
+        ...current,
         loraName: module.defaults.loraName,
         loraStrength: module.defaults.loraStrength,
-      });
+      }));
+      setH3DiffusionModelName(module.defaults.diffusionModelName);
     }
     setNotice(`“${module.name}”已设为${workflowVariantLabel(module)}默认方案`);
   }, []);
@@ -4435,14 +5679,25 @@ function CanvasWorkspace() {
     [persistPatch, setNodes],
   );
 
-  const rememberH3LoraPreference = useCallback((preference: H3LoraPreference) => {
-    const content: JsonObject = {
-      loraName: preference.loraName,
-      loraStrength: preference.loraStrength,
-    };
-    setH3LoraPreference({
-      loraName: h3LoraNameFromContent(content),
-      loraStrength: h3LoraStrengthFromContent(content),
+  const rememberH3LoraPreference = useCallback((patch: H3LoraPreferencePatch) => {
+    setH3LoraPreference((current) => {
+      const next = { ...current, ...patch };
+      const content: JsonObject = {
+        loraName: next.loraName,
+        loraStrength: next.loraStrength,
+        loraBypassed: next.loraBypassed,
+        secondaryLoraName: next.secondaryLoraName,
+        secondaryLoraStrength: next.secondaryLoraStrength,
+        secondaryLoraBypassed: next.secondaryLoraBypassed,
+      };
+      return {
+        loraName: h3LoraNameFromContent(content),
+        loraStrength: h3LoraStrengthFromContent(content),
+        loraBypassed: h3LoraBypassedFromContent(content),
+        secondaryLoraName: h3SecondaryLoraNameFromContent(content),
+        secondaryLoraStrength: h3SecondaryLoraStrengthFromContent(content),
+        secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(content),
+      };
     });
   }, []);
 
@@ -4454,11 +5709,19 @@ function CanvasWorkspace() {
       const record = node.data.record;
       if (record.kind !== "video-generation") continue;
       const currentLoraName = h3LoraNameFromContent(record.content);
-      if (h3LoraOptions.some((lora) => sameH3LoraName(lora, currentLoraName))) continue;
+      const currentSecondaryLoraName = h3SecondaryLoraNameFromContent(record.content);
+      const primaryNeedsReplacement = Boolean(currentLoraName) && !h3LoraOptions.some(
+        (lora) => sameH3LoraName(lora, currentLoraName),
+      );
+      const secondaryNeedsReplacement = Boolean(currentSecondaryLoraName)
+        && !h3SecondaryLoraBypassedFromContent(record.content)
+        && !h3LoraOptions.some((lora) => sameH3LoraName(lora, currentSecondaryLoraName));
+      if (!primaryNeedsReplacement && !secondaryNeedsReplacement) continue;
       changeNode(record.id, {
         content: {
           ...record.content,
-          generationLoraName: fallback,
+          ...(primaryNeedsReplacement ? { generationLoraName: fallback } : {}),
+          ...(secondaryNeedsReplacement ? { generationSecondaryLoraName: fallback } : {}),
           status: "idle",
           validationMessage: "",
         },
@@ -4518,6 +5781,25 @@ function CanvasWorkspace() {
 
   useEffect(() => {
     if (!activeProjectId) return;
+    const reconstructedTasks = contentNodes
+      .map((node) => node.data.record)
+      .filter((record) => {
+        const status = record.content.status;
+        return status === "running"
+          || status === "cancelling"
+          || (status === "invalid" && record.content.validationMessage === "生成任务已中断或未记录");
+      })
+      .map(persistedComfyTaskFromPlaceholder)
+      .filter((task): task is PersistedComfyTask => Boolean(task))
+      .filter((task) => !persistedComfyTasks.current.some(
+        (candidate) => candidate.clientId === task.clientId,
+      ));
+    if (reconstructedTasks.length) {
+      savePersistedComfyTasks([
+        ...persistedComfyTasks.current,
+        ...reconstructedTasks,
+      ]);
+    }
     const persistedNodeIds = new Set(
       persistedComfyTasks.current
         .filter((task) => task.canvasId === activeProjectId)
@@ -4525,7 +5807,7 @@ function CanvasWorkspace() {
           (nodeId): nodeId is string => Boolean(nodeId),
         )),
     );
-    nodes.forEach((node) => {
+    contentNodes.forEach((node) => {
       const status = node.data.record.content.status;
       if (status !== "running" && status !== "cancelling") return;
       if (persistedNodeIds.has(node.id) || runningComfyClients.current.has(node.id)) return;
@@ -4539,10 +5821,10 @@ function CanvasWorkspace() {
         },
       });
     });
-  }, [activeProjectId, changeNode, nodes]);
+  }, [activeProjectId, changeNode, contentNodes, savePersistedComfyTasks]);
 
   useEffect(() => {
-    const recordsById = new Map(nodes.map((node) => [node.id, node.data.record]));
+    const recordsById = new Map(contentNodes.map((node) => [node.id, node.data.record]));
     const mediaKindsByTarget = new Map<string, string[]>();
     const textInputCountByTarget = new Map<string, number>();
 
@@ -4562,7 +5844,7 @@ function CanvasWorkspace() {
       mediaKindsByTarget.set(edge.target, kinds);
     }
 
-    for (const node of nodes) {
+    for (const node of contentNodes) {
       const record = node.data.record;
       if (record.kind === "audio") {
         if (record.height < AUDIO_NODE_MIN_HEIGHT) {
@@ -4591,7 +5873,7 @@ function CanvasWorkspace() {
           : {}),
       });
     }
-  }, [changeNode, edges, nodes]);
+  }, [changeNode, contentNodes, edges]);
 
   const rememberDeletedBatch = useCallback((batch: DeletedBatch) => {
     deleteUndoStack.current.push(batch);
@@ -4715,12 +5997,18 @@ function CanvasWorkspace() {
   }, [changeNode, forgetComfyTask, unregisterComfyTask]);
 
   const deleteCanvasNodes = useCallback(
-    async (nodesToDelete: CanvasFlowNode[]) => {
+    async (nodesToDelete: CanvasFlowNode[], deleteSourceFiles = false) => {
       if (!nodesToDelete.length || nodeDeletionInProgress.current) return;
       nodeDeletionInProgress.current = true;
       const records = nodesToDelete.map((node) => node.data.record);
       try {
-        const choice = await requestVideoDeletionChoice(records);
+        const generatedVideoRecords = records.filter((record) => (
+          record.content.generationPlaceholder !== true
+          && record.kind === "generated-video"
+        ));
+        const choice = deleteSourceFiles && generatedVideoRecords.length > 0
+          ? "node-and-file"
+          : await requestVideoDeletionChoice(records);
         if (choice === "cancel") return;
 
         const cancelledPlaceholderTaskCount = await cancelTasksForDeletedPlaceholders(records);
@@ -4732,7 +6020,9 @@ function CanvasWorkspace() {
         });
 
         if (choice === "node-and-file") {
-          const filePaths = videoFilePathsForRecords(records);
+          const filePaths = videoFilePathsForRecords(
+            deleteSourceFiles ? generatedVideoRecords : records,
+          );
           try {
             await invoke<number>("delete_video_files", { paths: filePaths });
           } catch (error) {
@@ -4772,9 +6062,9 @@ function CanvasWorkspace() {
   );
 
   const deleteNode = useCallback(
-    async (id: string) => {
+    async (id: string, deleteSourceFile = false) => {
       const node = nodesSnapshot.current.find((candidate) => candidate.id === id);
-      if (node) await deleteCanvasNodes([node]);
+      if (node) await deleteCanvasNodes([node], deleteSourceFile);
     },
     [deleteCanvasNodes],
   );
@@ -4916,6 +6206,7 @@ function CanvasWorkspace() {
           uiSchema: module.uiSchema,
           defaults: {
             ...h3ModelParametersDraft,
+            diffusionModelName: h3DiffusionModelName,
             loraName: h3LoraPreference.loraName,
             loraStrength: h3LoraPreference.loraStrength,
           },
@@ -4935,7 +6226,7 @@ function CanvasWorkspace() {
     );
     setSettingsOpen(false);
     setNotice("模型参数已保存");
-  }, [h3LoraPreference, h3ModelParametersDraft, refreshWorkflowModules, reportError, selectedWorkflowModule, workflowModuleDefaults, workflowModules]);
+  }, [h3DiffusionModelName, h3LoraPreference, h3ModelParametersDraft, refreshWorkflowModules, reportError, selectedWorkflowModule, workflowModuleDefaults, workflowModules]);
 
   const clearAppLockPasswordFields = useCallback(() => {
     setAppLockCurrentPassword("");
@@ -5060,6 +6351,7 @@ function CanvasWorkspace() {
     ));
     const moduleParameters = workflowModule?.defaults ?? {
       ...h3ModelParameters,
+      diffusionModelName: h3DiffusionModelNameFromContent(generator.content),
       loraName: h3LoraNameFromContent(generator.content),
       loraStrength: h3LoraStrengthFromContent(generator.content),
     };
@@ -5071,19 +6363,30 @@ function CanvasWorkspace() {
       aspectRatio: videoAspectRatioFromContent(generator.content),
       primaryResolutionMegapixels: primaryVideoResolutionFromContent(generator.content),
       secondaryResolutionMegapixels: secondaryVideoResolutionFromContent(generator.content),
-      primaryVideoSteps: moduleParameters.primaryVideoSteps,
+      primaryVideoSteps: primaryVideoStepsFromContent(
+        generator.content,
+        moduleParameters.primaryVideoSteps,
+      ),
       primaryAudioSteps: moduleParameters.primaryAudioSteps,
-      secondarySchedulerSteps: moduleParameters.secondarySchedulerSteps,
+      secondarySchedulerSteps: secondarySchedulerStepsFromContent(
+        generator.content,
+        moduleParameters.secondarySchedulerSteps,
+      ),
       primaryBrightness: moduleParameters.primaryBrightness,
       primaryContrast: moduleParameters.primaryContrast,
       primarySaturation: moduleParameters.primarySaturation,
       secondaryBrightness: moduleParameters.secondaryBrightness,
       secondaryContrast: moduleParameters.secondaryContrast,
       secondarySaturation: moduleParameters.secondarySaturation,
+      diffusionModelName: moduleParameters.diffusionModelName,
       loraName: h3LoraNameFromContent(generator.content),
       loraStrength: h3LoraStrengthFromContent(generator.content),
       loraStrengthRecorded: true,
       loraBypassed: h3LoraBypassedFromContent(generator.content),
+      secondaryLoraName: h3SecondaryLoraNameFromContent(generator.content),
+      secondaryLoraStrength: h3SecondaryLoraStrengthFromContent(generator.content),
+      secondaryLoraStrengthRecorded: true,
+      secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(generator.content),
       imagePaths: assetPaths("image"),
       audioPaths: assetPaths("audio"),
       videoPaths: assetPaths("video"),
@@ -5232,14 +6535,48 @@ function CanvasWorkspace() {
     });
   }, [changeNode]);
 
+  const finalizeGenerationPlaceholder = useCallback(async (
+    placeholder: NodeRecord,
+    patch: JsonObject,
+  ): Promise<NodeRecord | null> => {
+    if (completedGenerationPlaceholders.current.has(placeholder.id)) return null;
+    completedGenerationPlaceholders.current.add(placeholder.id);
+    const visiblePlaceholder = nodesSnapshot.current.find(
+      (node) => node.id === placeholder.id,
+    )?.data.record;
+    const latestPlaceholder = visiblePlaceholder?.content.generationPlaceholder === true
+      ? visiblePlaceholder
+      : placeholder;
+    try {
+      await flushNodePatches([placeholder.id]);
+      const record = await invoke<NodeRecord>("update_node", {
+        input: {
+          id: placeholder.id,
+          content: {
+            ...latestPlaceholder.content,
+            ...patch,
+          },
+        },
+      });
+      setNodes((current) => current.map((node) => node.id === placeholder.id
+        ? { ...node, data: { ...node.data, record } }
+        : node));
+      return record;
+    } catch (error) {
+      if (String(error).includes("node not found")) {
+        return null;
+      }
+      completedGenerationPlaceholders.current.delete(placeholder.id);
+      throw error;
+    }
+  }, [flushNodePatches, setNodes]);
+
   const completeGenerationPlaceholder = useCallback(async (
     placeholderNodeId: string | undefined,
     title: string,
     content: JsonObject,
   ): Promise<NodeRecord | null> => {
-    if (!placeholderNodeId || !nodesSnapshot.current.some(
-      (node) => node.id === placeholderNodeId,
-    )) return null;
+    if (!placeholderNodeId) return null;
     completedGenerationPlaceholders.current.add(placeholderNodeId);
     try {
       await flushNodePatches([placeholderNodeId]);
@@ -5317,6 +6654,22 @@ function CanvasWorkspace() {
       setNotice("无法执行：找不到已保存的提示词与素材参数");
       return;
     }
+    if (!snapshot.loraBypassed && !snapshot.loraName) {
+      const message = "请先选择一采 LoRA";
+      changeNode(targetId, {
+        content: { ...target.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(`无法执行：${message}`);
+      return;
+    }
+    if (!snapshot.secondaryLoraBypassed && !snapshot.secondaryLoraName) {
+      const message = "请先选择二采 LoRA";
+      changeNode(targetId, {
+        content: { ...target.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(`无法执行：${message}`);
+      return;
+    }
     if (
       h3LoraCatalogLoaded
       && !snapshot.loraBypassed
@@ -5325,6 +6678,35 @@ function CanvasWorkspace() {
       const message = h3LoraOptions.length
         ? "所选 LoRA 已不在 MinimaxH3 目录中，请重新选择"
         : "MinimaxH3 目录中没有可用 LoRA，请添加 LoRA 或开启 Bypass";
+      changeNode(targetId, {
+        content: { ...target.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(`无法执行：${message}`);
+      return;
+    }
+    if (
+      h3LoraCatalogLoaded
+      && !snapshot.secondaryLoraBypassed
+      && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.secondaryLoraName))
+    ) {
+      const message = h3LoraOptions.length
+        ? "所选二采 LoRA 已不在 MinimaxH3 目录中，请重新选择"
+        : "MinimaxH3 目录中没有可用二采 LoRA，请添加 LoRA 或开启二采 Bypass";
+      changeNode(targetId, {
+        content: { ...target.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(`无法执行：${message}`);
+      return;
+    }
+    if (
+      h3DiffusionModelCatalogLoaded
+      && !h3DiffusionModelOptions.some((model) => (
+        sameH3DiffusionModelName(model, snapshot.diffusionModelName)
+      ))
+    ) {
+      const message = h3DiffusionModelOptions.length
+        ? "所选 MiniMax H3 基础模型已不在 diffusion_models/MinimaxH3 目录中，请重新选择"
+        : "diffusion_models/MinimaxH3 目录中没有可用基础模型";
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
@@ -5374,6 +6756,7 @@ function CanvasWorkspace() {
       : "正在上传素材并提交到远程 ComfyUI…");
 
     let progressSocket: WebSocket | null = null;
+    let preserveComfyTaskRecord = false;
     try {
       progressSocket = await openComfyProgressSocket(clientId);
       if (cancelledComfyClients.current.has(clientId)) {
@@ -5422,9 +6805,13 @@ function CanvasWorkspace() {
           secondaryContrast: snapshot.secondaryContrast,
           secondarySaturation: snapshot.secondarySaturation,
           secondarySamplingEnabled: false,
+          diffusionModelName: snapshot.diffusionModelName,
           loraName: snapshot.loraName,
           loraStrength: snapshot.loraStrength,
           loraBypassed: snapshot.loraBypassed,
+          secondaryLoraName: snapshot.secondaryLoraName,
+          secondaryLoraStrength: snapshot.secondaryLoraStrength,
+          secondaryLoraBypassed: snapshot.secondaryLoraBypassed,
           imagePaths: snapshot.imagePaths,
           audioPaths: snapshot.audioPaths,
           videoPaths: snapshot.videoPaths,
@@ -5597,11 +6984,16 @@ function CanvasWorkspace() {
               : "已取消 ComfyUI 生成",
           },
         });
-        updateGenerationPlaceholder(placeholder.id, {
-          status: "cancelled",
-          executionProgress: null,
-          validationMessage: "已取消 ComfyUI 生成",
-        });
+        try {
+          await finalizeGenerationPlaceholder(placeholder, {
+            status: "cancelled",
+            executionProgress: null,
+            validationMessage: "已取消 ComfyUI 生成",
+          });
+        } catch (error) {
+          preserveComfyTaskRecord = true;
+          reportError(error);
+        }
         setNotice(remainingTaskCount
           ? `已取消一个任务，仍有 ${remainingTaskCount} 个任务`
           : "已取消 ComfyUI 生成");
@@ -5619,20 +7011,25 @@ function CanvasWorkspace() {
             : `生成失败：${message}`,
         },
       });
-      updateGenerationPlaceholder(placeholder.id, {
-        status: "invalid",
-        executionProgress: null,
-        validationMessage: `生成失败：${message}`,
-      });
+      try {
+        await finalizeGenerationPlaceholder(placeholder, {
+          status: "invalid",
+          executionProgress: null,
+          validationMessage: `生成失败：${message}`,
+        });
+      } catch (placeholderError) {
+        preserveComfyTaskRecord = true;
+        reportError(placeholderError);
+      }
       reportError(error);
     } finally {
       progressSocket?.close();
       cancelledComfyClients.current.delete(clientId);
       ownedComfyClients.current.delete(clientId);
-      forgetComfyTask(clientId);
+      if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
       unregisterComfyTask(targetId, clientId);
     }
-  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
+  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
 
   const executeSecondarySample = useCallback(async (previewId: string) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
@@ -5681,31 +7078,61 @@ function CanvasWorkspace() {
     }
     const snapshot: GenerationSnapshot = {
       ...baseSnapshot,
+      diffusionModelName: workflowModule.defaults.diffusionModelName,
       secondaryResolutionMegapixels: sourceGenerator?.kind === "video-generation"
         ? secondaryVideoResolutionFromContent(sourceGenerator.content)
         : baseSnapshot.secondaryResolutionMegapixels,
-      secondarySchedulerSteps: workflowModule.defaults.secondarySchedulerSteps,
+      secondarySchedulerSteps: sourceGenerator?.kind === "video-generation"
+        ? secondarySchedulerStepsFromContent(
+          sourceGenerator.content,
+          workflowModule.defaults.secondarySchedulerSteps,
+        )
+        : baseSnapshot.secondarySchedulerSteps,
       secondaryBrightness: workflowModule.defaults.secondaryBrightness,
       secondaryContrast: workflowModule.defaults.secondaryContrast,
       secondarySaturation: workflowModule.defaults.secondarySaturation,
-      loraName: sourceGenerator?.kind === "video-generation"
-        ? h3LoraNameFromContent(sourceGenerator.content)
-        : baseSnapshot.loraName,
-      loraStrength: sourceGenerator?.kind === "video-generation"
-        ? h3LoraStrengthFromContent(sourceGenerator.content)
-        : baseSnapshot.loraStrength,
-      loraBypassed: sourceGenerator?.kind === "video-generation"
-        ? h3LoraBypassedFromContent(sourceGenerator.content)
-        : baseSnapshot.loraBypassed,
+      secondaryLoraName: sourceGenerator?.kind === "video-generation"
+        ? h3SecondaryLoraNameFromContent(sourceGenerator.content)
+        : baseSnapshot.secondaryLoraName,
+      secondaryLoraStrength: sourceGenerator?.kind === "video-generation"
+        ? h3SecondaryLoraStrengthFromContent(sourceGenerator.content)
+        : baseSnapshot.secondaryLoraStrength,
+      secondaryLoraStrengthRecorded: true,
+      secondaryLoraBypassed: sourceGenerator?.kind === "video-generation"
+        ? h3SecondaryLoraBypassedFromContent(sourceGenerator.content)
+        : baseSnapshot.secondaryLoraBypassed,
     };
+    if (!snapshot.secondaryLoraBypassed && !snapshot.secondaryLoraName) {
+      const message = "请先选择二采 LoRA";
+      changeNode(previewId, {
+        content: { ...preview.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(`无法二采：${message}`);
+      return;
+    }
     if (
       h3LoraCatalogLoaded
-      && !snapshot.loraBypassed
-      && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.loraName))
+      && !snapshot.secondaryLoraBypassed
+      && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.secondaryLoraName))
     ) {
       const message = h3LoraOptions.length
         ? "二采使用的 LoRA 已不在 MinimaxH3 目录中，请重新选择"
         : "MinimaxH3 目录中没有可用 LoRA，请添加 LoRA 或开启 Bypass";
+      changeNode(previewId, {
+        content: { ...preview.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(`无法二采：${message}`);
+      return;
+    }
+    if (
+      h3DiffusionModelCatalogLoaded
+      && !h3DiffusionModelOptions.some((model) => (
+        sameH3DiffusionModelName(model, snapshot.diffusionModelName)
+      ))
+    ) {
+      const message = h3DiffusionModelOptions.length
+        ? "二采使用的基础模型已不在 diffusion_models/MinimaxH3 目录中，请重新选择"
+        : "diffusion_models/MinimaxH3 目录中没有可用基础模型";
       changeNode(previewId, {
         content: { ...preview.content, status: "invalid", validationMessage: message },
       });
@@ -5751,6 +7178,7 @@ function CanvasWorkspace() {
     setNotice("正在上传当前预览并提交二采…");
 
     let progressSocket: WebSocket | null = null;
+    let preserveComfyTaskRecord = false;
     try {
       progressSocket = await openComfyProgressSocket(clientId);
       if (cancelledComfyClients.current.has(clientId)) {
@@ -5838,9 +7266,13 @@ function CanvasWorkspace() {
           secondaryContrast: snapshot.secondaryContrast,
           secondarySaturation: snapshot.secondarySaturation,
           secondarySamplingEnabled: true,
+          diffusionModelName: snapshot.diffusionModelName,
           loraName: snapshot.loraName,
           loraStrength: snapshot.loraStrength,
           loraBypassed: snapshot.loraBypassed,
+          secondaryLoraName: snapshot.secondaryLoraName,
+          secondaryLoraStrength: snapshot.secondaryLoraStrength,
+          secondaryLoraBypassed: snapshot.secondaryLoraBypassed,
           imagePaths: snapshot.imagePaths,
           audioPaths: snapshot.audioPaths,
           videoPaths: snapshot.videoPaths,
@@ -5956,11 +7388,16 @@ function CanvasWorkspace() {
             validationMessage: "已取消 ComfyUI 二采",
           },
         });
-        updateGenerationPlaceholder(placeholder.id, {
-          status: "cancelled",
-          executionProgress: null,
-          validationMessage: "已取消 ComfyUI 二采",
-        });
+        try {
+          await finalizeGenerationPlaceholder(placeholder, {
+            status: "cancelled",
+            executionProgress: null,
+            validationMessage: "已取消 ComfyUI 二采",
+          });
+        } catch (error) {
+          preserveComfyTaskRecord = true;
+          reportError(error);
+        }
         setNotice("已取消 ComfyUI 二采");
         return;
       }
@@ -5973,20 +7410,25 @@ function CanvasWorkspace() {
           validationMessage: `二采失败：${message}`,
         },
       });
-      updateGenerationPlaceholder(placeholder.id, {
-        status: "invalid",
-        executionProgress: null,
-        validationMessage: `二采失败：${message}`,
-      });
+      try {
+        await finalizeGenerationPlaceholder(placeholder, {
+          status: "invalid",
+          executionProgress: null,
+          validationMessage: `二采失败：${message}`,
+        });
+      } catch (placeholderError) {
+        preserveComfyTaskRecord = true;
+        reportError(placeholderError);
+      }
       reportError(error);
     } finally {
       progressSocket?.close();
       cancelledComfyClients.current.delete(clientId);
       ownedComfyClients.current.delete(clientId);
-      forgetComfyTask(clientId);
+      if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
       unregisterComfyTask(previewId, clientId);
     }
-  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModules]);
+  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModules]);
 
   const cancelVideoExecution = useCallback(async (targetId: string) => {
     const clientIds = [...(runningComfyClients.current.get(targetId) ?? [])];
@@ -6184,6 +7626,7 @@ function CanvasWorkspace() {
         relationHighlighted: false,
         activeTaskCount: activeComfyTaskCounts[record.id] ?? 0,
         inputCount: 0,
+        outputCount: 0,
         mediaInputs: [],
         textInputCount: 0,
         textInputs: [],
@@ -6212,11 +7655,26 @@ function CanvasWorkspace() {
   ) => {
     const sourceNode = nodesSnapshot.current.find((node) => node.id === task.nodeId);
     if (!sourceNode || recovered.status !== "success" || !recovered.promptId) return null;
-    const alreadyRestored = nodesSnapshot.current.some((node) => (
+    const alreadyRestored = nodesSnapshot.current.find((node) => (
       node.data.record.kind === "generated-video"
       && node.data.record.content.comfyPromptId === recovered.promptId
     ));
-    if (alreadyRestored) return null;
+    if (alreadyRestored) {
+      if (task.placeholderNodeId && task.placeholderNodeId !== alreadyRestored.id) {
+        await flushNodePatches([task.placeholderNodeId]);
+        try {
+          await invoke("delete_node", { id: task.placeholderNodeId });
+        } catch (error) {
+          if (!String(error).includes("node not found")) throw error;
+        }
+        completedGenerationPlaceholders.current.add(task.placeholderNodeId);
+        setNodes((current) => current.filter((node) => node.id !== task.placeholderNodeId));
+        setEdges((current) => current.filter((edge) => (
+          edge.source !== task.placeholderNodeId && edge.target !== task.placeholderNodeId
+        )));
+      }
+      return sourceNode.data.record.content;
+    }
 
     const secondaryTask = isSecondaryComfyTask(task);
     const source = recordAtCurrentFlowPosition(sourceNode);
@@ -6388,7 +7846,7 @@ function CanvasWorkspace() {
     };
     changeNode(task.nodeId, { content: restoredContent });
     return restoredContent;
-  }, [changeNode, completeGenerationPlaceholder, generatedPreviewHeightForAspectRatio, setEdges, setNodes]);
+  }, [changeNode, completeGenerationPlaceholder, flushNodePatches, generatedPreviewHeightForAspectRatio, setEdges, setNodes]);
 
   useEffect(() => {
     if (!activeProjectId) return;
@@ -7061,9 +8519,15 @@ function CanvasWorkspace() {
             secondarySamplingEnabled: false,
             workflowModuleId: defaultWorkflowModule?.id ?? "",
             workflowModuleRevision: defaultWorkflowModule?.revision ?? "",
-            generationLoraName: defaultWorkflowModule?.defaults.loraName ?? h3LoraPreference.loraName,
-            generationLoraStrength: defaultWorkflowModule?.defaults.loraStrength ?? h3LoraPreference.loraStrength,
+            generationDiffusionModelName: defaultWorkflowModule?.defaults.diffusionModelName ?? h3DiffusionModelName,
+            generationLoraName: "",
+            generationLoraStrength: 1,
             generationLoraBypassed: false,
+            generationSecondaryLoraName: "",
+            generationSecondaryLoraStrength: 1,
+            generationSecondaryLoraBypassed: false,
+            generationPrimaryVideoSteps: 8,
+            generationSecondarySchedulerSteps: 8,
             seedMode: "random",
             generationSeed: DEFAULT_GENERATION_SEED,
             manualHeight: VIDEO_NODE_BASE_HEIGHT,
@@ -7086,20 +8550,20 @@ function CanvasWorkspace() {
     } catch (error) {
       reportError(error);
     }
-  }, [activeProjectId, h3LoraPreference, makeFlowNode, reportError, setCenter, setNodes, workflowModuleDefaults, workflowModules]);
+  }, [activeProjectId, h3DiffusionModelName, makeFlowNode, reportError, setCenter, setNodes, workflowModuleDefaults, workflowModules]);
 
   const openCanvasContextMenu = useCallback((event: MouseEvent | ReactMouseEvent) => {
     event.preventDefault();
     const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-    const menuWidth = 190;
-    const menuHeight = 180;
+    const menuWidth = uiFontSize === "medium" ? 220 : 190;
+    const menuHeight = uiFontSize === "medium" ? 206 : 180;
     setCanvasContextMenu({
       screenX: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
       screenY: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
       flowX: snapCanvasCoordinate(flowPosition.x),
       flowY: snapCanvasCoordinate(flowPosition.y),
     });
-  }, [screenToFlowPosition]);
+  }, [screenToFlowPosition, uiFontSize]);
 
   const createNodeFromContextMenu = useCallback((kind: "text" | "note" | "video-generation") => {
     if (!canvasContextMenu) return;
@@ -7149,7 +8613,42 @@ function CanvasWorkspace() {
             x: basePosition.x + index * CANVAS_GRID_SIZE,
             y: basePosition.y + index * CANVAS_GRID_SIZE,
           });
-          setNodes((current) => [...current, makeFlowNode(result.node)]);
+          let importedNode = result.node;
+          if (importedNode.kind === "image") {
+            const importedAssetPath = typeof importedNode.content.assetPath === "string"
+              ? importedNode.content.assetPath
+              : "";
+            if (importedAssetPath) {
+              try {
+                const naturalSize = await loadImageNaturalSize(importedAssetPath);
+                const aspectRatio = naturalSize.width / naturalSize.height;
+                const fittedWidth = aspectRatio < 1
+                  ? GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH
+                  : importedNode.width;
+                const fittedHeight = Math.min(
+                  2400,
+                  fittedWidth / aspectRatio + IMAGE_NODE_CHROME_HEIGHT,
+                );
+                importedNode = await invoke<NodeRecord>("update_node", {
+                  input: {
+                    id: importedNode.id,
+                    width: fittedWidth,
+                    height: fittedHeight,
+                    content: {
+                      ...importedNode.content,
+                      aspectRatio,
+                      naturalWidth: naturalSize.width,
+                      naturalHeight: naturalSize.height,
+                      imageLayoutVersion: 1,
+                    },
+                  },
+                });
+              } catch {
+                // Fall back to the existing on-load ratio correction if metadata cannot be read here.
+              }
+            }
+          }
+          setNodes((current) => [...current, makeFlowNode(importedNode)]);
           imported += 1;
         } catch (error) {
           failures.push(error instanceof Error ? error.message : String(error));
@@ -7204,8 +8703,8 @@ function CanvasWorkspace() {
       if (!connection.source || !connection.target || connection.source === connection.target) {
         return "无效的节点连接";
       }
-      const source = nodes.find((node) => node.id === connection.source)?.data.record;
-      const target = nodes.find((node) => node.id === connection.target)?.data.record;
+      const source = contentNodes.find((node) => node.id === connection.source)?.data.record;
+      const target = contentNodes.find((node) => node.id === connection.target)?.data.record;
       if (!source || !target) return "找不到要连接的节点";
       if (!(["text", "image", "audio", "video"].includes(source.kind) && target.kind === "video-generation")) {
         return "只能将文字、图片、音频或视频连接到视频生成节点";
@@ -7227,7 +8726,7 @@ function CanvasWorkspace() {
         if (source.kind === "image") {
           const imageCount = edges
             .filter((edge) => edge.target === target.id)
-            .map((edge) => nodes.find((node) => node.id === edge.source)?.data.record)
+            .map((edge) => contentNodes.find((node) => node.id === edge.source)?.data.record)
             .filter((record) => record?.kind === "image")
             .length;
           if (imageCount >= 2) return "首尾帧模式最多只能连接两张图片";
@@ -7236,7 +8735,7 @@ function CanvasWorkspace() {
 
       return null;
     },
-    [edges, nodes],
+    [contentNodes, edges],
   );
 
   const isValidConnection = useCallback(
@@ -7276,10 +8775,20 @@ function CanvasWorkspace() {
     [activeProjectId, connectionValidationError, nodes, reportError, setEdges],
   );
 
-  const deleteSelectedElements = useCallback(async () => {
+  const deleteSelectedElements = useCallback(async (deleteSourceFiles = false) => {
     const selectedNodes = nodesSnapshot.current.filter((node) => node.selected);
     if (selectedNodes.length) {
-      await deleteCanvasNodes(selectedNodes);
+      if (deleteSourceFiles) {
+        const generatedVideos = selectedNodes.filter((node) => (
+          node.data.record.kind === "generated-video"
+          && node.data.record.content.generationPlaceholder !== true
+        ));
+        if (generatedVideos.length) {
+          await deleteCanvasNodes(generatedVideos, true);
+          return;
+        }
+      }
+      await deleteCanvasNodes(selectedNodes, false);
       return;
     }
     const selectedEdges = edgesSnapshot.current.filter((edge) => edge.selected);
@@ -7310,7 +8819,7 @@ function CanvasWorkspace() {
         || edgesSnapshot.current.some((edge) => edge.selected);
       if (!hasSelection) return;
       event.preventDefault();
-      void deleteSelectedElements();
+      void deleteSelectedElements(event.key === "Delete" && event.ctrlKey);
     };
     window.addEventListener("keydown", handleDeleteShortcut);
     return () => window.removeEventListener("keydown", handleDeleteShortcut);
@@ -7318,9 +8827,9 @@ function CanvasWorkspace() {
 
   const matchedIds = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    if (!query) return new Set(nodes.map((node) => node.id));
+    if (!query) return new Set(contentNodes.map((node) => node.id));
     return new Set(
-      nodes
+      contentNodes
         .filter((node) => {
           const record = node.data.record;
           return `${record.title}\n${textFromContent(record.content)}\n${record.source}`
@@ -7329,11 +8838,11 @@ function CanvasWorkspace() {
         })
         .map((node) => node.id),
     );
-  }, [nodes, search]);
+  }, [contentNodes, search]);
 
   useEffect(() => {
     const promptNodeIdsByText = new Map<string, string[]>();
-    nodes.forEach((node) => {
+    contentNodes.forEach((node) => {
       const record = node.data.record;
       if (record.kind !== "text") return;
       const prompt = textFromContent(record.content);
@@ -7345,7 +8854,7 @@ function CanvasWorkspace() {
     });
 
     const updatedVideoIds: string[] = [];
-    nodes.forEach((node) => {
+    contentNodes.forEach((node) => {
       const record = node.data.record;
       if (record.kind !== "generated-video") return;
       const snapshotValue = record.content.generationSnapshot;
@@ -7381,11 +8890,11 @@ function CanvasWorkspace() {
     if (updatedVideoIds.length) {
       void flushNodePatches(updatedVideoIds).catch(reportError);
     }
-  }, [changeNode, flushNodePatches, nodes, reportError]);
+  }, [changeNode, contentNodes, flushNodePatches, reportError]);
 
   const relationHighlightedIds = useMemo(() => {
     if (!relationAnchorId) return new Set<string>();
-    const recordsById = new Map(nodes.map((node) => [node.id, node.data.record]));
+    const recordsById = new Map(contentNodes.map((node) => [node.id, node.data.record]));
     const anchor = recordsById.get(relationAnchorId);
     if (!anchor || (anchor.kind !== "text" && anchor.kind !== "generated-video")) {
       return new Set<string>();
@@ -7393,7 +8902,7 @@ function CanvasWorkspace() {
 
     if (anchor.kind === "text") {
       const relatedIds = new Set<string>([anchor.id]);
-      nodes.forEach((node) => {
+      contentNodes.forEach((node) => {
         const record = node.data.record;
         if (record.kind !== "generated-video") return;
         const snapshot = generationSnapshotFromContent(record.content);
@@ -7413,7 +8922,7 @@ function CanvasWorkspace() {
       if (promptNode?.kind === "text") relatedIds.add(promptNode.id);
     }
     return relatedIds;
-  }, [nodes, relationAnchorId]);
+  }, [contentNodes, relationAnchorId]);
 
   const handleNodeRelationClick = useCallback((node: CanvasFlowNode) => {
     const kind = node.data.record.kind;
@@ -7434,31 +8943,24 @@ function CanvasWorkspace() {
 
   const visibleNodes = useMemo(
     () => {
-      const recordsById = new Map(nodes.map((node) => [node.id, node.data.record]));
-      return nodes.map((node) => {
-        if (node.data.record.kind !== "video-generation") {
-          return {
-            ...node,
-            data: {
-              ...node.data,
-              matched: matchedIds.has(node.id),
-              relationHighlighted: relationHighlightedIds.has(node.id),
-              activeTaskCount: activeComfyTaskCounts[node.id] ?? 0,
-              inputCount: 0,
-              mediaInputs: [],
-              textInputCount: 0,
-              textInputs: [],
-              h3LoraOptions,
-              workflowModules,
-              workflowModuleDefaults,
-            },
-          };
-        }
-
-        const inputRecords = edges
-          .filter((edge) => edge.target === node.id)
-          .map((edge) => recordsById.get(edge.source))
-          .filter((record): record is NodeRecord => Boolean(record));
+      const recordsById = new Map(contentNodes.map((node) => [node.id, node.data.record]));
+      const inputRecordsByTarget = new Map<string, NodeRecord[]>();
+      const outputCountBySource = new Map<string, number>();
+      edges.forEach((edge) => {
+        outputCountBySource.set(edge.source, (outputCountBySource.get(edge.source) ?? 0) + 1);
+        const source = recordsById.get(edge.source);
+        if (!source) return;
+        const inputRecords = inputRecordsByTarget.get(edge.target);
+        if (inputRecords) inputRecords.push(source);
+        else inputRecordsByTarget.set(edge.target, [source]);
+      });
+      const previousCache = visibleNodeCache.current;
+      const nextCache = new Map<string, VisibleNodeCacheEntry>();
+      const results = nodes.map((node) => {
+        const previous = previousCache.get(node.id);
+        const inputRecords = node.data.record.kind === "video-generation"
+          ? inputRecordsByTarget.get(node.id) ?? EMPTY_NODE_RECORDS
+          : EMPTY_NODE_RECORDS;
         const connectedMedia = inputRecords.filter(
           (record) => record.kind === "image" || record.kind === "audio" || record.kind === "video",
         );
@@ -7475,26 +8977,151 @@ function CanvasWorkspace() {
         const orderedIds = new Set(orderedMedia.map((record) => record.id));
         orderedMedia.push(...connectedMedia.filter((record) => !orderedIds.has(record.id)));
 
-        return {
-          ...node,
-          data: {
-            ...node.data,
-            matched: matchedIds.has(node.id),
-            relationHighlighted: relationHighlightedIds.has(node.id),
-            activeTaskCount: activeComfyTaskCounts[node.id] ?? 0,
-            inputCount: inputRecords.length,
-            mediaInputs: orderedMedia,
-            textInputCount: connectedText.length,
-            textInputs: connectedText,
-            h3LoraOptions,
-            workflowModules,
-            workflowModuleDefaults,
-          },
-        };
+        const previousData = previous?.result.data;
+        const mediaInputs = previousData && nodeRecordArraysEqual(previousData.mediaInputs, orderedMedia)
+          ? previousData.mediaInputs
+          : orderedMedia;
+        const textInputs = previousData && nodeRecordArraysEqual(previousData.textInputs, connectedText)
+          ? previousData.textInputs
+          : connectedText;
+        const matched = matchedIds.has(node.id);
+        const relationHighlighted = relationHighlightedIds.has(node.id);
+        const activeTaskCount = activeComfyTaskCounts[node.id] ?? 0;
+        const outputCount = outputCountBySource.get(node.id) ?? 0;
+        const presentationUnchanged = Boolean(
+          previous
+          && previous.source.data === node.data
+          && previousData?.matched === matched
+          && previousData.relationHighlighted === relationHighlighted
+          && previousData.activeTaskCount === activeTaskCount
+          && previousData.inputCount === inputRecords.length
+          && previousData.outputCount === outputCount
+          && previousData.mediaInputs === mediaInputs
+          && previousData.textInputCount === connectedText.length
+          && previousData.textInputs === textInputs
+          && previousData.h3LoraOptions === h3LoraOptions
+          && previousData.workflowModules === workflowModules
+          && previousData.workflowModuleDefaults === workflowModuleDefaults,
+        );
+        const data = presentationUnchanged
+          ? previousData!
+          : {
+              ...node.data,
+              matched,
+              relationHighlighted,
+              activeTaskCount,
+              inputCount: inputRecords.length,
+              outputCount,
+              mediaInputs,
+              textInputCount: connectedText.length,
+              textInputs,
+              h3LoraOptions,
+              workflowModules,
+              workflowModuleDefaults,
+            };
+        const result = previous?.source === node && previous.result.data === data
+          ? previous.result
+          : { ...node, data };
+        nextCache.set(node.id, { source: node, result });
+        return result;
       });
+      visibleNodeCache.current = nextCache;
+      return results;
     },
-    [activeComfyTaskCounts, edges, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, workflowModuleDefaults, workflowModules],
+    [activeComfyTaskCounts, contentNodes, edges, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, workflowModuleDefaults, workflowModules],
   );
+
+  const updateGuideOverlays = useCallback((nextAlignment: AlignmentGuide[], nextSpacing: SpacingGuide[]) => {
+    if (!guidesEqual(alignmentGuidesSnapshot.current, nextAlignment)) {
+      alignmentGuidesSnapshot.current = nextAlignment;
+      setAlignmentGuides(nextAlignment);
+    }
+    if (!guidesEqual(spacingGuidesSnapshot.current, nextSpacing)) {
+      spacingGuidesSnapshot.current = nextSpacing;
+      setSpacingGuides(nextSpacing);
+    }
+  }, []);
+
+  const beginAlignedNodeDrag = useCallback(() => {
+    alignedDragPositions.current.clear();
+    updateGuideOverlays([], []);
+  }, [updateGuideOverlays]);
+
+  const updateAlignedNodeDrag = useCallback((node: CanvasFlowNode, draggedNodes: CanvasFlowNode[]) => {
+    const movingNodes = draggedNodes.length ? draggedNodes : [node];
+    const movingIds = new Set(movingNodes.map((movingNode) => movingNode.id));
+    const candidateNodes = nodesSnapshot.current.filter((candidate) => !movingIds.has(candidate.id));
+    const viewport = getViewport();
+    const zoom = Math.max(viewport.zoom, 0.01);
+    const tolerance = ALIGNMENT_SNAP_TOLERANCE_PX / zoom;
+    const visibleBounds: CanvasNodeBounds = {
+      left: -viewport.x / zoom,
+      right: (window.innerWidth - viewport.x) / zoom,
+      top: -viewport.y / zoom,
+      bottom: (window.innerHeight - viewport.y) / zoom,
+    };
+    const visibleCandidateNodes = candidateNodes.filter((candidate) => (
+      boundsIntersect(canvasNodeBounds(candidate), visibleBounds)
+    ));
+    const edgeAlignment = findEdgeAlignment(movingNodes, visibleCandidateNodes, tolerance);
+    const spacing = findEqualSpacing(movingNodes, visibleCandidateNodes, tolerance);
+    const edgeVerticalGuide = edgeAlignment.guides.find((guide) => guide.orientation === "vertical");
+    const edgeHorizontalGuide = edgeAlignment.guides.find((guide) => guide.orientation === "horizontal");
+    const useHorizontalSpacing = Boolean(
+      spacing.horizontal
+      && (!edgeVerticalGuide || spacing.horizontal.distance <= Math.abs(edgeAlignment.deltaX)),
+    );
+    const useVerticalSpacing = Boolean(
+      spacing.vertical
+      && (!edgeHorizontalGuide || spacing.vertical.distance <= Math.abs(edgeAlignment.deltaY)),
+    );
+    const deltaX = useHorizontalSpacing ? spacing.horizontal!.delta : edgeAlignment.deltaX;
+    const deltaY = useVerticalSpacing ? spacing.vertical!.delta : edgeAlignment.deltaY;
+    const guides = edgeAlignment.guides.filter((guide) => (
+      !(useHorizontalSpacing && guide.orientation === "vertical")
+      && !(useVerticalSpacing && guide.orientation === "horizontal")
+    ));
+    const activeSpacingGuides = [
+      ...(useHorizontalSpacing ? spacing.horizontal!.guides : []),
+      ...(useVerticalSpacing ? spacing.vertical!.guides : []),
+    ];
+    const finalPositions = new Map(
+      movingNodes.map((movingNode) => [
+        movingNode.id,
+        {
+          x: movingNode.position.x + deltaX,
+          y: movingNode.position.y + deltaY,
+        },
+      ]),
+    );
+    alignedDragPositions.current = finalPositions;
+    updateGuideOverlays(guides, activeSpacingGuides);
+
+    if (deltaX === 0 && deltaY === 0) return;
+    setNodes((current) => current.map((candidate) => {
+      const position = finalPositions.get(candidate.id);
+      return position ? { ...candidate, position } : candidate;
+    }));
+  }, [getViewport, setNodes, updateGuideOverlays]);
+
+  const finishAlignedNodeDrag = useCallback((node: CanvasFlowNode, draggedNodes: CanvasFlowNode[]) => {
+    const movedNodes = draggedNodes.length ? draggedNodes : [node];
+    const finalPositions = new Map(
+      movedNodes.map((movedNode) => [
+        movedNode.id,
+        alignedDragPositions.current.get(movedNode.id) ?? movedNode.position,
+      ]),
+    );
+    setNodes((current) => current.map((candidate) => {
+      const position = finalPositions.get(candidate.id);
+      return position ? { ...candidate, position } : candidate;
+    }));
+    finalPositions.forEach((position, nodeId) => {
+      persistPatch(nodeId, { x: position.x, y: position.y });
+    });
+    alignedDragPositions.current.clear();
+    updateGuideOverlays([], []);
+  }, [persistPatch, setNodes, updateGuideOverlays]);
 
   const focusFirstMatch = () => {
     const node = nodes.find((candidate) => matchedIds.has(candidate.id));
@@ -7641,7 +9268,7 @@ function CanvasWorkspace() {
           <div className="project-dialog-icon"><Settings2 size={21} /></div>
           <div>
             <h2>应用设置</h2>
-            <p>管理 SuCanvas 的基础连接、私密项目和本机安全。</p>
+            <p>管理 SuCanvas 的连接、工作流、完整备份和本机安全。</p>
           </div>
         </div>
         <div className="app-settings-body">
@@ -7672,6 +9299,7 @@ function CanvasWorkspace() {
                 ));
                 if (module) {
                   setSelectedWorkflowModuleId(module.id);
+                  setH3DiffusionModelName(module.defaults.diffusionModelName);
                   setH3ModelParametersDraft({
                     primaryVideoSteps: module.defaults.primaryVideoSteps,
                     primaryAudioSteps: module.defaults.primaryAudioSteps,
@@ -7688,7 +9316,15 @@ function CanvasWorkspace() {
               }}
             >
               <SlidersHorizontal size={16} />
-              <span><strong>模型参数</strong><small>一采与二采 Steps</small></span>
+              <span><strong>模型参数</strong><small>模型、音频与画面</small></span>
+            </button>
+            <button
+              type="button"
+              className={activeSettingsSection === "backup" ? "is-active" : ""}
+              onClick={() => setActiveSettingsSection("backup")}
+            >
+              <DatabaseBackup size={16} />
+              <span><strong>数据备份</strong><small>整机迁移与恢复</small></span>
             </button>
             <button
               type="button"
@@ -7712,8 +9348,29 @@ function CanvasWorkspace() {
               <section className="settings-pane general-settings-pane" aria-labelledby="general-settings-title">
                 <div className="settings-pane-heading">
                   <h3 id="general-settings-title">基础设置</h3>
-                  <p>配置远程 ComfyUI 输入和输出目录的 Windows 映射路径。</p>
+                  <p>调整界面显示，并配置远程 ComfyUI 的 Windows 映射路径。</p>
                 </div>
+                <section className="ui-font-size-setting" aria-labelledby="ui-font-size-setting-title">
+                  <div>
+                    <strong id="ui-font-size-setting-title">界面字号</strong>
+                    <small>中字号会同步扩大文字、控件高度和菜单间距。</small>
+                  </div>
+                  <div className="ui-font-size-options" role="radiogroup" aria-label="界面字号">
+                    {(["small", "medium"] as const).map((size) => (
+                      <button
+                        key={size}
+                        type="button"
+                        role="radio"
+                        aria-checked={uiFontSize === size}
+                        className={uiFontSize === size ? "is-active" : ""}
+                        onClick={() => setUiFontSize(size)}
+                      >
+                        <span aria-hidden="true">Aa</span>
+                        {size === "small" ? "小" : "中"}
+                      </button>
+                    ))}
+                  </div>
+                </section>
         <label>
           ComfyUI 输入映射目录
           <input
@@ -8036,6 +9693,7 @@ function CanvasWorkspace() {
                       const module = workflowModules.find((candidate) => candidate.id === value);
                       if (!module) return;
                       setSelectedWorkflowModuleId(module.id);
+                      setH3DiffusionModelName(module.defaults.diffusionModelName);
                       setH3ModelParametersDraft({
                         primaryVideoSteps: module.defaults.primaryVideoSteps,
                         primaryAudioSteps: module.defaults.primaryAudioSteps,
@@ -8047,10 +9705,11 @@ function CanvasWorkspace() {
                         secondaryContrast: module.defaults.secondaryContrast,
                         secondarySaturation: module.defaults.secondarySaturation,
                       });
-                      setH3LoraPreference({
+                      setH3LoraPreference((current) => ({
+                        ...current,
                         loraName: module.defaults.loraName,
                         loraStrength: module.defaults.loraStrength,
-                      });
+                      }));
                     }}
                     ariaLabel="模型参数编辑方案"
                     placeholder="没有可用方案"
@@ -8060,12 +9719,30 @@ function CanvasWorkspace() {
                     }))}
                   />
                 </div>
+                <div className="model-workflow-module-select model-diffusion-model-select">
+                  <span>MiniMax H3 基础模型</span>
+                  <SettingsSelect
+                    value={h3DiffusionModelName}
+                    onChange={setH3DiffusionModelName}
+                    ariaLabel="MiniMax H3 基础模型"
+                    placeholder={h3DiffusionModelCatalogLoaded ? "MinimaxH3 目录中没有可用模型" : "正在读取 ComfyUI 模型…"}
+                    disabled={!h3DiffusionModelOptions.length}
+                    options={h3DiffusionModelOptions.map((model) => ({
+                      value: model,
+                      label: h3DiffusionModelDisplayName(model),
+                    }))}
+                  />
+                  <small>来自 ComfyUI 的 models/diffusion_models/MinimaxH3 目录，保存后应用于当前工作流方案。</small>
+                </div>
                 <section className="h3-model-parameters" aria-label="H3 模型参数">
                   {selectedWorkflowModule?.uiSchema.groups.map((group, groupIndex) => (
                     <div className="h3-model-parameter-group" key={group.id}>
                       <strong>{group.title}</strong>
                       <div className="h3-model-parameters-grid">
-                        {group.fields.map((field, fieldIndex) => (
+                        {group.fields.filter((field) => (
+                          field.key !== "primaryVideoSteps"
+                          && field.key !== "secondarySchedulerSteps"
+                        )).map((field, fieldIndex) => (
                           <label key={field.key}>
                             {field.label}
                             <ModelParameterNumberInput
@@ -8084,10 +9761,70 @@ function CanvasWorkspace() {
                           </label>
                         ))}
                       </div>
-                      {group.note && <small className="h3-model-parameters-note">{group.note}</small>}
+                      {group.id === "sampling-steps"
+                        ? <small className="h3-model-parameters-note">Video Steps 与二采 Steps 已移至视频节点；这里保留一采 Audio Steps。</small>
+                        : group.note && <small className="h3-model-parameters-note">{group.note}</small>}
                     </div>
                   ))}
                 </section>
+              </section>
+            )}
+            {activeSettingsSection === "backup" && (
+              <section className="settings-pane app-backup-settings" aria-labelledby="app-backup-settings-title">
+                <div className="settings-pane-heading">
+                  <h3 id="app-backup-settings-title">数据备份与恢复</h3>
+                  <p>将项目数据库、素材、工作流方案与适配器、方案恢复点和软件设置保存为一个完整备份。</p>
+                </div>
+                <div className="app-backup-card">
+                  <span className="app-backup-card-icon"><DatabaseBackup size={19} /></span>
+                  <div>
+                    <strong>一键备份整个软件</strong>
+                    <p>备份时创建数据库一致性快照，不会直接复制正在写入的数据库。备份文件可以保存到移动硬盘或同步盘。</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() => void exportFullAppBackup()}
+                    disabled={appBackupBusy}
+                  >
+                    {appBackupBusy ? "处理中…" : "立即备份"}
+                  </button>
+                </div>
+                <div className="app-backup-card">
+                  <span className="app-backup-card-icon is-restore"><RotateCcw size={19} /></span>
+                  <div>
+                    <strong>从完整备份恢复</strong>
+                    <p>适用于新电脑安装后的整机恢复。软件会先校验备份，并保留恢复前的数据目录；重新启动后生效。</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="app-backup-restore-button"
+                    onClick={() => void chooseFullAppBackupToRestore()}
+                    disabled={appBackupBusy}
+                  >
+                    选择备份恢复
+                  </button>
+                </div>
+                <div className="app-backup-includes">
+                  <strong>备份内容</strong>
+                  <span>项目和节点数据库</span>
+                  <span>已导入的图片、音频、视频素材</span>
+                  <span>全部工作流与适配器</span>
+                  <span>方案备份、应用锁和界面设置</span>
+                </div>
+                {runtime?.dataPath && (
+                  <p className="app-backup-data-path" title={runtime.dataPath}>
+                    当前数据库：{runtime.dataPath}
+                  </p>
+                )}
+                <p className="app-backup-external-note">
+                  ComfyUI 输出目录中的生成文件属于外部数据，不在软件备份内；如需长期保留，请同时备份 ComfyUI output 目录。
+                </p>
+                {appBackupMessage && (
+                  <p className={`app-backup-message is-${appBackupMessageKind}`} role="status">
+                    {appBackupMessage}
+                  </p>
+                )}
               </section>
             )}
             {activeSettingsSection === "privacy" && (
@@ -8342,6 +10079,51 @@ function CanvasWorkspace() {
             >
               <Trash2 size={14} />
               {workflowModuleDeletionMode === "trash" ? "移入回收站" : "永久删除"}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    {appBackupRestorePath && (
+      <div
+        className="project-dialog-backdrop app-backup-restore-backdrop"
+        onMouseDown={() => {
+          if (!appBackupBusy) setAppBackupRestorePath(null);
+        }}
+      >
+        <div
+          className="project-dialog project-delete-dialog app-backup-restore-dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="app-backup-restore-title"
+          aria-describedby="app-backup-restore-description"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <div className="project-dialog-icon"><RotateCcw size={22} /></div>
+          <div>
+            <h2 id="app-backup-restore-title">恢复整个软件数据？</h2>
+            <p id="app-backup-restore-description">
+              当前项目、素材、工作流和软件设置将在下次启动时被备份中的内容替换。恢复前的 data 目录会自动保留。
+            </p>
+            <p className="app-backup-restore-file" title={appBackupRestorePath}>{appBackupRestorePath}</p>
+          </div>
+          <div className="project-dialog-actions">
+            <button
+              type="button"
+              className="dialog-cancel"
+              autoFocus
+              disabled={appBackupBusy}
+              onClick={() => setAppBackupRestorePath(null)}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={appBackupBusy}
+              onClick={() => void restoreFullAppBackup()}
+            >
+              {appBackupBusy ? "校验中…" : "确认恢复"}
             </button>
           </div>
         </div>
@@ -8635,19 +10417,12 @@ function CanvasWorkspace() {
         }}
         onPaneContextMenu={openCanvasContextMenu}
         isValidConnection={isValidConnection}
-        onNodeDragStop={(_, node, draggedNodes) => {
-          const movedNodes = draggedNodes.length ? draggedNodes : [node];
-          movedNodes.forEach((movedNode) => {
-            persistPatch(movedNode.id, {
-              x: movedNode.position.x,
-              y: movedNode.position.y,
-            });
-          });
-        }}
+        onNodeDragStart={beginAlignedNodeDrag}
+        onNodeDrag={(_, node, draggedNodes) => updateAlignedNodeDrag(node, draggedNodes)}
+        onNodeDragStop={(_, node, draggedNodes) => finishAlignedNodeDrag(node, draggedNodes)}
         minZoom={0.12}
         maxZoom={2.2}
-        snapToGrid
-        snapGrid={CANVAS_SNAP_GRID}
+        onlyRenderVisibleElements
         defaultEdgeOptions={{ type: "canvasEdge", animated: false }}
         connectionLineStyle={{
           stroke: "#646d82",
@@ -8670,6 +10445,42 @@ function CanvasWorkspace() {
           size={1.2}
           color={canvasGridColor(canvasBackground, theme)}
         />
+        <ViewportPortal>
+          {alignmentGuides.map((guide) => (
+            <div
+              key={`${guide.orientation}-${guide.position}`}
+              className={`alignment-guide is-${guide.orientation}`}
+              style={guide.orientation === "vertical"
+                ? {
+                    left: guide.position,
+                    top: guide.start,
+                    height: Math.max(1, guide.end - guide.start),
+                  }
+                : {
+                    left: guide.start,
+                    top: guide.position,
+                    width: Math.max(1, guide.end - guide.start),
+                  }}
+            />
+          ))}
+          {spacingGuides.map((guide, index) => (
+            <div
+              key={`${guide.orientation}-${guide.position}-${guide.start}-${index}`}
+              className={`spacing-guide is-${guide.orientation}`}
+              style={guide.orientation === "horizontal"
+                ? {
+                    left: guide.start,
+                    top: guide.position,
+                    width: Math.max(1, guide.end - guide.start),
+                  }
+                : {
+                    left: guide.position,
+                    top: guide.start,
+                    height: Math.max(1, guide.end - guide.start),
+                  }}
+            />
+          ))}
+        </ViewportPortal>
         <Controls position="bottom-left" showInteractive={false} />
         <MiniMap
           position="bottom-right"
@@ -8869,6 +10680,10 @@ function CanvasWorkspace() {
           onContextMenu={(event) => event.preventDefault()}
         >
           <span className="canvas-context-menu-title">新建节点</span>
+          <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("video-generation")}>
+            <Clapperboard size={15} />
+            <span><strong>视频生成节点</strong><small>连接素材并提交生成</small></span>
+          </button>
           <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("text")}>
             <FileText size={15} />
             <span><strong>文本节点</strong><small>输入提示词或普通文本</small></span>
@@ -8876,10 +10691,6 @@ function CanvasWorkspace() {
           <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("note")}>
             <StickyNote size={15} />
             <span><strong>备注节点</strong><small>记录说明和想法</small></span>
-          </button>
-          <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("video-generation")}>
-            <Clapperboard size={15} />
-            <span><strong>视频生成节点</strong><small>连接素材并提交生成</small></span>
           </button>
         </div>,
         document.body,
@@ -8979,6 +10790,8 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme =
       window.localStorage.getItem("infinite-canvas:theme") === "light" ? "light" : "dark";
+    document.documentElement.dataset.fontSize =
+      window.localStorage.getItem(UI_FONT_SIZE_STORAGE_KEY) === "medium" ? "medium" : "small";
     void checkAppLock();
   }, [checkAppLock]);
 

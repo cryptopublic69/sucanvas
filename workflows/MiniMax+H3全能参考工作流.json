@@ -203,7 +203,7 @@
     "inputs": {
       "frame_rate": 24,
       "loop_count": 0,
-      "filename_prefix": "2026-08-09/Minimax_H3",
+      "filename_prefix": "%date:yyyy-MM-dd%/Minimax_H3",
       "format": "video/h264-mp4",
       "pix_fmt": "yuv420p",
       "crf": 19,
@@ -597,7 +597,7 @@
     "inputs": {
       "frame_rate": 24,
       "loop_count": 0,
-      "filename_prefix": "2026-08-09/Minimax_H3",
+      "filename_prefix": "%date:yyyy-MM-dd%/Minimax_H3",
       "format": "video/h264-mp4",
       "pix_fmt": "yuv420p",
       "crf": 19,

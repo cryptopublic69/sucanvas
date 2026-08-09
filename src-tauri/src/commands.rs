@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -12,6 +12,7 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
+use chrono::Local;
 use reqwest::{multipart, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -19,6 +20,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::{
+    app_backup::{self, BackupSummary, RestoreSummary},
     models::{
         AppLockStatus, ComfyClientTaskStatus, ComfyOutputFile, ComfyQueueSummary, ComfySubmitInput,
         ComfySubmitResult, CreateEdgeInput, CreateNodeInput, CreateNodeResult, CreateProjectInput,
@@ -31,6 +33,58 @@ use crate::{
     },
     ApplicationState, RunningComfyTask,
 };
+
+fn portable_frontend_settings(settings: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    settings
+        .into_iter()
+        .filter(|(key, _)| key.starts_with("infinite-canvas:"))
+        .collect()
+}
+
+#[tauri::command]
+pub async fn export_app_backup(
+    destination_path: String,
+    frontend_settings: BTreeMap<String, String>,
+    state: State<'_, ApplicationState>,
+) -> Result<BackupSummary, String> {
+    let data_dir = state.data_dir.clone();
+    let database = state.database.clone();
+    let destination = PathBuf::from(destination_path.trim().trim_matches('"'));
+    let frontend_settings = portable_frontend_settings(frontend_settings);
+    tauri::async_runtime::spawn_blocking(move || {
+        app_backup::export(&data_dir, &database, &destination, &frontend_settings)
+    })
+    .await
+    .map_err(|error| format!("软件备份任务失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn stage_app_backup_restore(
+    bundle_path: String,
+    state: State<'_, ApplicationState>,
+) -> Result<RestoreSummary, String> {
+    let data_dir = state.data_dir.clone();
+    let bundle_path = PathBuf::from(bundle_path.trim().trim_matches('"'));
+    tauri::async_runtime::spawn_blocking(move || app_backup::stage_restore(&data_dir, &bundle_path))
+        .await
+        .map_err(|error| format!("软件恢复任务失败：{error}"))?
+}
+
+#[tauri::command]
+pub fn take_restored_frontend_settings(
+    state: State<'_, ApplicationState>,
+) -> Result<Option<BTreeMap<String, String>>, String> {
+    let path = app_backup::restored_settings_path(&state.data_dir);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path).map_err(|error| format!("读取恢复设置失败：{error}"))?;
+    let settings = serde_json::from_slice::<BTreeMap<String, String>>(&bytes)
+        .map(portable_frontend_settings)
+        .map_err(|error| format!("解析恢复设置失败：{error}"))?;
+    std::fs::remove_file(path).map_err(|error| format!("完成设置恢复失败：{error}"))?;
+    Ok(Some(settings))
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -506,35 +560,42 @@ pub fn delete_node(id: String, state: State<'_, ApplicationState>) -> Result<(),
 
 fn delete_video_files_blocking(paths: Vec<String>) -> Result<usize, String> {
     if paths.is_empty() {
-        return Err("没有可删除的视频文件".to_owned());
+        return Ok(0);
     }
 
     let mut unique_paths = HashSet::new();
     let mut resolved_paths = Vec::new();
     for path in paths {
-        let resolved = PathBuf::from(&path)
-            .canonicalize()
-            .map_err(|error| format!("无法定位视频文件 {path}: {error}"))?;
+        let candidate = PathBuf::from(&path);
+        let is_video = media_format(&candidate).is_some_and(|format| format.kind == "video");
+        if !is_video {
+            return Err(format!("拒绝删除非视频文件：{}", candidate.display()));
+        }
+        let resolved = match candidate.canonicalize() {
+            Ok(resolved) => resolved,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("无法定位视频文件 {path}: {error}")),
+        };
         let metadata = resolved
             .metadata()
             .map_err(|error| format!("无法读取视频文件信息 {}: {error}", resolved.display()))?;
         if !metadata.is_file() {
             return Err(format!("目标不是文件：{}", resolved.display()));
         }
-        let is_video = media_format(&resolved).is_some_and(|format| format.kind == "video");
-        if !is_video {
-            return Err(format!("拒绝删除非视频文件：{}", resolved.display()));
-        }
         if unique_paths.insert(resolved.clone()) {
             resolved_paths.push(resolved);
         }
     }
 
+    let mut deleted_count = 0;
     for path in &resolved_paths {
-        std::fs::remove_file(path)
-            .map_err(|error| format!("删除视频文件失败 {}: {error}", path.display()))?;
+        match std::fs::remove_file(path) {
+            Ok(()) => deleted_count += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("删除视频文件失败 {}: {error}", path.display())),
+        }
     }
-    Ok(resolved_paths.len())
+    Ok(deleted_count)
 }
 
 #[tauri::command]
@@ -684,13 +745,33 @@ pub fn restore_workflow_module_bundle(
     )
 }
 
-fn is_lora_name_in_directory(value: &str, expected_directory: &str) -> bool {
+fn is_model_name_in_directory(value: &str, expected_directory: &str) -> bool {
     let normalized = value.trim().replace('/', "\\");
     normalized
         .split_once('\\')
         .is_some_and(|(directory, filename)| {
             directory.eq_ignore_ascii_case(expected_directory) && !filename.trim().is_empty()
         })
+}
+
+fn diffusion_models_from_object_info(
+    value: &Value,
+    class_type: &str,
+    directory: &str,
+) -> Vec<String> {
+    let pointer = format!("/{class_type}/input/required/unet_name/0");
+    let mut models = value
+        .pointer(&pointer)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|name| is_model_name_in_directory(name, directory))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    models.sort_by_key(|name| name.to_ascii_lowercase());
+    models.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    models
 }
 
 fn loras_from_object_info(value: &Value, class_type: &str, directory: &str) -> Vec<String> {
@@ -701,7 +782,7 @@ fn loras_from_object_info(value: &Value, class_type: &str, directory: &str) -> V
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .filter(|name| is_lora_name_in_directory(name, directory))
+        .filter(|name| is_model_name_in_directory(name, directory))
         .map(str::to_owned)
         .collect::<Vec<_>>();
     loras.sort_by_key(|name| name.to_ascii_lowercase());
@@ -752,6 +833,49 @@ pub async fn get_comfyui_h3_loras(
     ))
 }
 
+#[tauri::command]
+pub async fn get_comfyui_h3_diffusion_models(
+    server_url: String,
+    workflow_module_id: Option<String>,
+    state: State<'_, ApplicationState>,
+) -> Result<Vec<String>, String> {
+    let bindings = if let Some(module_id) = workflow_module_id.as_deref() {
+        workflow_modules::get(&state.workflow_modules_dir, module_id)?
+            .adapter
+            .bindings
+    } else {
+        WorkflowBindings::default()
+    };
+    let parsed_server =
+        Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let server_url = server_url.trim().trim_end_matches('/');
+    let value = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?
+        .get(format!(
+            "{server_url}/object_info/{}",
+            bindings.diffusion_model_class_type
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("读取 ComfyUI 大模型列表失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("读取 ComfyUI 大模型列表失败：{error}"))?
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("解析 ComfyUI 大模型列表失败：{error}"))?;
+    Ok(diffusion_models_from_object_info(
+        &value,
+        &bindings.diffusion_model_class_type,
+        &bindings.diffusion_model_directory,
+    ))
+}
+
 fn workflow_inputs_mut<'a>(
     workflow: &'a mut Value,
     node_id: &str,
@@ -783,18 +907,51 @@ fn remove_workflow_input(
     Ok(())
 }
 
-fn configure_h3_loras(
+fn configure_h3_diffusion_model(
     workflow: &mut Value,
-    lora_name: &str,
-    lora_strength: f64,
-    lora_bypassed: bool,
+    diffusion_model_name: &str,
     bindings: &WorkflowBindings,
 ) -> Result<(), String> {
-    let mut bypass_replacements = Vec::new();
-    for node_id in [
-        &bindings.primary_lora_node_id,
-        &bindings.secondary_lora_node_id,
-    ] {
+    let node = workflow
+        .get(&bindings.diffusion_model_node_id)
+        .ok_or_else(|| {
+            format!(
+                "API 工作流缺少大模型加载节点 {}",
+                bindings.diffusion_model_node_id
+            )
+        })?;
+    let class_type = node.get("class_type").and_then(Value::as_str).unwrap_or("");
+    if class_type != bindings.diffusion_model_class_type {
+        return Err(format!(
+            "节点 {} 必须是大模型加载器 {}，实际为 {}",
+            bindings.diffusion_model_node_id,
+            bindings.diffusion_model_class_type,
+            if class_type.is_empty() {
+                "<缺失>"
+            } else {
+                class_type
+            }
+        ));
+    }
+    set_workflow_input(
+        workflow,
+        &bindings.diffusion_model_node_id,
+        "unet_name",
+        Value::String(diffusion_model_name.to_owned()),
+    )
+}
+
+fn configure_h3_loras(
+    workflow: &mut Value,
+    primary_lora_name: &str,
+    primary_lora_strength: f64,
+    primary_lora_bypassed: bool,
+    secondary_lora_name: &str,
+    secondary_lora_strength: f64,
+    secondary_lora_bypassed: bool,
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    let read_lora_upstream = |node_id: &str| -> Result<Value, String> {
         let class_type = workflow
             .get(node_id)
             .and_then(|node| node.get("class_type"))
@@ -806,52 +963,73 @@ fn configure_h3_loras(
                 bindings.lora_class_type
             ));
         }
-        let upstream_model = workflow
+        workflow
             .get(node_id)
             .and_then(|node| node.get("inputs"))
             .and_then(|inputs| inputs.get("model"))
             .cloned()
-            .ok_or_else(|| format!("API 工作流 LoRA 节点 {node_id} 缺少上游 model 连接"))?;
-        bypass_replacements.push((node_id, upstream_model));
-    }
+            .ok_or_else(|| format!("API 工作流 LoRA 节点 {node_id} 缺少上游 model 连接"))
+    };
+    let primary_upstream = read_lora_upstream(&bindings.primary_lora_node_id)?;
+    let secondary_upstream = read_lora_upstream(&bindings.secondary_lora_node_id)?;
 
-    if lora_bypassed {
-        let workflow_object = workflow
-            .as_object_mut()
-            .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
-        for node in workflow_object.values_mut() {
-            let Some(inputs) = node.get_mut("inputs").and_then(Value::as_object_mut) else {
-                continue;
-            };
-            for input in inputs.values_mut() {
-                let source_node_id = input
-                    .as_array()
-                    .and_then(|connection| connection.first())
-                    .and_then(Value::as_str);
-                let Some((_, replacement)) = bypass_replacements
-                    .iter()
-                    .find(|(node_id, _)| Some(node_id.as_str()) == source_node_id)
-                else {
-                    continue;
-                };
-                *input = replacement.clone();
-            }
-        }
-        return Ok(());
-    }
-
-    for node_id in [
-        &bindings.primary_lora_node_id,
-        &bindings.secondary_lora_node_id,
-    ] {
+    if !primary_lora_bypassed {
         set_workflow_input(
             workflow,
-            node_id,
+            &bindings.primary_lora_node_id,
             "lora_name",
-            Value::String(lora_name.to_owned()),
+            Value::String(primary_lora_name.to_owned()),
         )?;
-        set_workflow_input(workflow, node_id, "strength_model", json!(lora_strength))?;
+        set_workflow_input(
+            workflow,
+            &bindings.primary_lora_node_id,
+            "strength_model",
+            json!(primary_lora_strength),
+        )?;
     }
+    if !secondary_lora_bypassed {
+        set_workflow_input(
+            workflow,
+            &bindings.secondary_lora_node_id,
+            "lora_name",
+            Value::String(secondary_lora_name.to_owned()),
+        )?;
+        set_workflow_input(
+            workflow,
+            &bindings.secondary_lora_node_id,
+            "strength_model",
+            json!(secondary_lora_strength),
+        )?;
+    }
+
+    let primary_model = if primary_lora_bypassed {
+        primary_upstream
+    } else {
+        json!([bindings.primary_lora_node_id, 0])
+    };
+    let secondary_model = if secondary_lora_bypassed {
+        secondary_upstream
+    } else {
+        json!([bindings.secondary_lora_node_id, 0])
+    };
+    set_workflow_input(
+        workflow,
+        &bindings.primary_sampler_node_id,
+        "model",
+        primary_model,
+    )?;
+    set_workflow_input(
+        workflow,
+        &bindings.secondary_scheduler_node_id,
+        "model",
+        secondary_model.clone(),
+    )?;
+    set_workflow_input(
+        workflow,
+        &bindings.secondary_guider_node_id,
+        "model",
+        secondary_model,
+    )?;
     Ok(())
 }
 
@@ -924,13 +1102,15 @@ fn install_clean_video_output(
     } else {
         &bindings.primary_output_node_id
     };
-    let filename_prefix = workflow
+    let filename_prefix_template = workflow
         .get(source_output_node_id)
         .and_then(|node| node.get("inputs"))
         .and_then(|inputs| inputs.get("filename_prefix"))
         .and_then(Value::as_str)
-        .unwrap_or("SuCanvas/Minimax_H3")
+        .unwrap_or("%date:yyyy-MM-dd%/Minimax_H3")
         .to_owned();
+    let current_date = Local::now().format("%Y-%m-%d").to_string();
+    let filename_prefix = resolve_filename_prefix_date(&filename_prefix_template, &current_date);
     let (image_node_id, audio_node_id, audio_output_index) = if secondary_sampling_enabled {
         (
             bindings.secondary_color_node_id.as_str(),
@@ -978,6 +1158,10 @@ fn install_clean_video_output(
     Ok(())
 }
 
+fn resolve_filename_prefix_date(filename_prefix: &str, current_date: &str) -> String {
+    filename_prefix.replace("%date:yyyy-MM-dd%", current_date)
+}
+
 fn configure_h3_generation(
     workflow: &mut Value,
     prompt: &str,
@@ -999,6 +1183,9 @@ fn configure_h3_generation(
     lora_name: &str,
     lora_strength: f64,
     lora_bypassed: bool,
+    secondary_lora_name: &str,
+    secondary_lora_strength: f64,
+    secondary_lora_bypassed: bool,
     bindings: &WorkflowBindings,
 ) -> Result<(), String> {
     set_workflow_input(
@@ -1057,7 +1244,16 @@ fn configure_h3_generation(
         secondary_saturation,
         bindings,
     )?;
-    configure_h3_loras(workflow, lora_name, lora_strength, lora_bypassed, bindings)?;
+    configure_h3_loras(
+        workflow,
+        lora_name,
+        lora_strength,
+        lora_bypassed,
+        secondary_lora_name,
+        secondary_lora_strength,
+        secondary_lora_bypassed,
+        bindings,
+    )?;
     install_clean_video_output(workflow, secondary_sampling_enabled, bindings)?;
     Ok(())
 }
@@ -1474,7 +1670,7 @@ async fn submit_comfyui_workflow_inner(
         }
     }
     let lora_name = input.lora_name.trim();
-    if !is_lora_name_in_directory(lora_name, &bindings.lora_directory) {
+    if !is_model_name_in_directory(lora_name, &bindings.lora_directory) {
         return Err(format!(
             "LoRA 只能选择 {} 目录中的模型",
             bindings.lora_directory
@@ -1482,6 +1678,31 @@ async fn submit_comfyui_workflow_inner(
     }
     if !input.lora_strength.is_finite() || input.lora_strength < 0.0 || input.lora_strength > 2.0 {
         return Err("LoRA 权重必须在0.0到2.0之间".to_owned());
+    }
+    let secondary_lora_name = input.secondary_lora_name.as_deref().unwrap_or("").trim();
+    let secondary_lora_bypassed =
+        secondary_lora_name.is_empty() || input.secondary_lora_bypassed.unwrap_or(false);
+    let secondary_lora_strength = input.secondary_lora_strength.unwrap_or(1.0);
+    if !secondary_lora_bypassed
+        && !is_model_name_in_directory(secondary_lora_name, &bindings.lora_directory)
+    {
+        return Err(format!(
+            "二采 LoRA 只能选择 {} 目录中的模型；未设置二采 LoRA 时请开启 Bypass",
+            bindings.lora_directory
+        ));
+    }
+    if !secondary_lora_strength.is_finite()
+        || secondary_lora_strength < 0.0
+        || secondary_lora_strength > 2.0
+    {
+        return Err("二采 LoRA 权重必须在0.0到2.0之间".to_owned());
+    }
+    let diffusion_model_name = input.diffusion_model_name.trim();
+    if !is_model_name_in_directory(diffusion_model_name, &bindings.diffusion_model_directory) {
+        return Err(format!(
+            "基础模型只能选择 diffusion_models/{} 目录中的模型",
+            bindings.diffusion_model_directory
+        ));
     }
 
     let workflow_bytes = tokio::fs::read(&workflow_path).await.map_err(|error| {
@@ -1503,6 +1724,7 @@ async fn submit_comfyui_workflow_inner(
     if workflow_object.contains_key("nodes") || workflow_object.contains_key("links") {
         return Err("这是普通 UI 工作流，请改用 Export Workflow (API Format)".to_owned());
     }
+    configure_h3_diffusion_model(&mut workflow, diffusion_model_name, bindings)?;
 
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -1553,6 +1775,9 @@ async fn submit_comfyui_workflow_inner(
         lora_name,
         input.lora_strength,
         input.lora_bypassed,
+        secondary_lora_name,
+        secondary_lora_strength,
+        secondary_lora_bypassed,
         &bindings,
     )?;
     for (index, node_id) in bindings.image_node_ids.iter().enumerate() {
@@ -2148,14 +2373,23 @@ pub fn get_runtime_info(state: State<'_, ApplicationState>) -> RuntimeInfo {
 mod tests {
     use super::{
         comfy_execution_elapsed_seconds, comfy_input_task_path, comfy_queue_summary_from_value,
-        configure_h3_generation, configure_secondary_source_video, delete_video_files_blocking,
-        hash_app_lock_password, loras_from_object_info, media_format, resolve_generation_seed,
-        validate_new_app_lock_password, verify_app_lock_hash, MediaFormat, WorkflowBindings,
-        AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
+        configure_h3_diffusion_model, configure_h3_generation, configure_secondary_source_video,
+        delete_video_files_blocking, diffusion_models_from_object_info, hash_app_lock_password,
+        loras_from_object_info, media_format, resolve_filename_prefix_date,
+        resolve_generation_seed, validate_new_app_lock_password, verify_app_lock_hash, MediaFormat,
+        WorkflowBindings, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
     use serde_json::json;
     use std::{fs, path::Path};
     use uuid::Uuid;
+
+    #[test]
+    fn resolves_date_template_before_submitting_save_video() {
+        assert_eq!(
+            resolve_filename_prefix_date("%date:yyyy-MM-dd%/Minimax_H3", "2026-08-10"),
+            "2026-08-10/Minimax_H3"
+        );
+    }
 
     fn resolution_test_workflow() -> serde_json::Value {
         json!({
@@ -2215,6 +2449,13 @@ mod tests {
                     "model": ["353", 0]
                 },
                 "class_type": "LoraLoaderModelOnly"
+            },
+            "358": {
+                "inputs": {
+                    "unet_name": "MinimaxH3\\old-model.safetensors",
+                    "weight_dtype": "default"
+                },
+                "class_type": "UNETLoader"
             }
         })
     }
@@ -2315,6 +2556,9 @@ mod tests {
             r"MinimaxH3\test.safetensors",
             0.75,
             false,
+            r"MinimaxH3\secondary-test.safetensors",
+            0.55,
+            false,
             &WorkflowBindings::default(),
         )
         .unwrap();
@@ -2382,6 +2626,9 @@ mod tests {
             r"MinimaxH3\selected.safetensors",
             0.65,
             false,
+            r"MinimaxH3\secondary-selected.safetensors",
+            0.45,
+            false,
             &WorkflowBindings::default(),
         )
         .unwrap();
@@ -2432,16 +2679,26 @@ mod tests {
             workflow.pointer("/403/inputs/saturation"),
             Some(&json!(1.05))
         );
-        for node_id in ["354", "401"] {
-            assert_eq!(
-                workflow.pointer(&format!("/{node_id}/inputs/lora_name")),
-                Some(&json!(r"MinimaxH3\selected.safetensors"))
-            );
-            assert_eq!(
-                workflow.pointer(&format!("/{node_id}/inputs/strength_model")),
-                Some(&json!(0.65))
-            );
-        }
+        assert_eq!(
+            workflow.pointer("/354/inputs/lora_name"),
+            Some(&json!(r"MinimaxH3\selected.safetensors"))
+        );
+        assert_eq!(
+            workflow.pointer("/354/inputs/strength_model"),
+            Some(&json!(0.65))
+        );
+        assert_eq!(
+            workflow.pointer("/401/inputs/lora_name"),
+            Some(&json!(r"MinimaxH3\secondary-selected.safetensors"))
+        );
+        assert_eq!(
+            workflow.pointer("/401/inputs/strength_model"),
+            Some(&json!(0.45))
+        );
+        assert_eq!(
+            workflow.pointer("/393/inputs/model"),
+            Some(&json!(["401", 0]))
+        );
         assert!(workflow.get("360").is_none());
         assert!(workflow.get("397").is_none());
         assert_eq!(
@@ -2482,6 +2739,9 @@ mod tests {
             r"MinimaxH3\test.safetensors",
             1.0,
             false,
+            "",
+            1.0,
+            true,
             &WorkflowBindings::default(),
         )
         .unwrap();
@@ -2537,6 +2797,42 @@ mod tests {
     }
 
     #[test]
+    fn filters_and_applies_minimax_h3_diffusion_models() {
+        let object_info = json!({
+            "UNETLoader": {
+                "input": {
+                    "required": {
+                        "unet_name": [[
+                            "Other\\ignored.safetensors",
+                            "MinimaxH3\\quality.safetensors",
+                            "minimaxh3/fast.safetensors"
+                        ]]
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            diffusion_models_from_object_info(&object_info, "UNETLoader", "MinimaxH3"),
+            vec![
+                "minimaxh3/fast.safetensors".to_owned(),
+                "MinimaxH3\\quality.safetensors".to_owned(),
+            ]
+        );
+
+        let mut workflow = resolution_test_workflow();
+        configure_h3_diffusion_model(
+            &mut workflow,
+            r"MinimaxH3\quality.safetensors",
+            &WorkflowBindings::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            workflow.pointer("/358/inputs/unet_name"),
+            Some(&json!(r"MinimaxH3\quality.safetensors"))
+        );
+    }
+
+    #[test]
     fn rejects_the_new_turbo_lora_loader_workflow() {
         let mut workflow = resolution_test_workflow();
         workflow["354"]["class_type"] = json!("MiniMaxH3TurboLoRA");
@@ -2561,6 +2857,9 @@ mod tests {
             r"MinimaxH3\legacy.safetensors",
             0.8,
             false,
+            "",
+            1.0,
+            true,
             &WorkflowBindings::default(),
         )
         .unwrap_err();
@@ -2591,6 +2890,9 @@ mod tests {
             r"MinimaxH3\selected.safetensors",
             0.8,
             true,
+            r"MinimaxH3\secondary-selected.safetensors",
+            0.6,
+            true,
             &WorkflowBindings::default(),
         )
         .unwrap();
@@ -2610,6 +2912,59 @@ mod tests {
         assert_eq!(
             workflow.pointer("/354/inputs/lora_name"),
             Some(&json!(r"MinimaxH3\old-primary.safetensors"))
+        );
+        assert_eq!(
+            workflow.pointer("/401/inputs/lora_name"),
+            Some(&json!(r"MinimaxH3\old-secondary.safetensors"))
+        );
+    }
+
+    #[test]
+    fn missing_secondary_lora_bypasses_only_the_secondary_stage() {
+        let mut workflow = resolution_test_workflow();
+        configure_h3_generation(
+            &mut workflow,
+            "prompt",
+            42,
+            6.0,
+            "16:9 (Widescreen)",
+            0.4,
+            0.5,
+            6,
+            8,
+            4,
+            1.0,
+            0.9,
+            0.9,
+            1.0,
+            0.9,
+            1.0,
+            true,
+            r"MinimaxH3\primary-selected.safetensors",
+            0.8,
+            false,
+            "",
+            1.0,
+            true,
+            &WorkflowBindings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            workflow.pointer("/357/inputs/model"),
+            Some(&json!(["354", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/391/inputs/model"),
+            Some(&json!(["353", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/393/inputs/model"),
+            Some(&json!(["353", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/354/inputs/lora_name"),
+            Some(&json!(r"MinimaxH3\primary-selected.safetensors"))
         );
         assert_eq!(
             workflow.pointer("/401/inputs/lora_name"),
@@ -2679,17 +3034,30 @@ mod tests {
         fs::write(&video_path, b"video").unwrap();
         fs::write(&text_path, b"text").unwrap();
 
+        assert_eq!(delete_video_files_blocking(Vec::new()), Ok(0));
+
         assert_eq!(
             delete_video_files_blocking(vec![video_path.to_string_lossy().into_owned()]),
             Ok(1)
         );
         assert!(!video_path.exists());
+        let missing_video_path = test_dir.join("already-deleted.mp4");
+        assert_eq!(
+            delete_video_files_blocking(vec![missing_video_path.to_string_lossy().into_owned()]),
+            Ok(0)
+        );
         assert!(
             delete_video_files_blocking(vec![text_path.to_string_lossy().into_owned()])
                 .unwrap_err()
                 .contains("拒绝删除非视频文件")
         );
         assert!(text_path.exists());
+        assert!(delete_video_files_blocking(vec![test_dir
+            .join("already-deleted.txt")
+            .to_string_lossy()
+            .into_owned()])
+        .unwrap_err()
+        .contains("拒绝删除非视频文件"));
 
         fs::remove_dir_all(test_dir).unwrap();
     }

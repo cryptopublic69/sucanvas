@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::Path,
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -126,6 +127,74 @@ impl Database {
             params![DEFAULT_CANVAS_ID, now],
         )?;
         Ok(())
+    }
+
+    pub fn rewrite_asset_paths(
+        &self,
+        legacy_assets_dir: &Path,
+        assets_dir: &Path,
+    ) -> CanvasResult<usize> {
+        if legacy_assets_dir == assets_dir {
+            return Ok(0);
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let rows = {
+            let mut statement = transaction.prepare("SELECT id, content_json FROM nodes")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut updated = 0;
+
+        for (id, content_json) in rows {
+            let mut content: serde_json::Value = serde_json::from_str(&content_json)?;
+            if rewrite_asset_paths_in_value(&mut content, legacy_assets_dir, assets_dir) {
+                transaction.execute(
+                    "UPDATE nodes SET content_json = ?2 WHERE id = ?1",
+                    params![id, serde_json::to_string(&content)?],
+                )?;
+                updated += 1;
+            }
+        }
+
+        transaction.commit()?;
+        Ok(updated)
+    }
+
+    pub fn backup_to(&self, destination: &Path) -> CanvasResult<()> {
+        if destination.exists() {
+            return Err(CanvasError::Validation(format!(
+                "backup database already exists: {}",
+                destination.display()
+            )));
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let destination = destination.to_str().ok_or_else(|| {
+            CanvasError::Validation("backup database path is not valid UTF-8".to_owned())
+        })?;
+        let connection = self.lock()?;
+        connection.execute("VACUUM INTO ?1", [destination])?;
+        Ok(())
+    }
+
+    pub fn verify_integrity(&self) -> CanvasResult<()> {
+        let connection = self.lock()?;
+        let result =
+            connection.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))?;
+        if result.eq_ignore_ascii_case("ok") {
+            Ok(())
+        } else {
+            Err(CanvasError::Validation(format!(
+                "database integrity check failed: {result}"
+            )))
+        }
     }
 
     pub fn list_projects(&self) -> CanvasResult<Vec<WorkspaceSnapshot>> {
@@ -570,6 +639,38 @@ impl Database {
     }
 }
 
+fn rewrite_asset_paths_in_value(
+    value: &mut serde_json::Value,
+    legacy_assets_dir: &Path,
+    assets_dir: &Path,
+) -> bool {
+    match value {
+        serde_json::Value::String(path) => {
+            let candidate = Path::new(path);
+            let Ok(relative) = candidate.strip_prefix(legacy_assets_dir) else {
+                return false;
+            };
+            *path = assets_dir.join(relative).to_string_lossy().into_owned();
+            true
+        }
+        serde_json::Value::Array(values) => {
+            let mut changed = false;
+            for item in values {
+                changed |= rewrite_asset_paths_in_value(item, legacy_assets_dir, assets_dir);
+            }
+            changed
+        }
+        serde_json::Value::Object(values) => {
+            let mut changed = false;
+            for item in values.values_mut() {
+                changed |= rewrite_asset_paths_in_value(item, legacy_assets_dir, assets_dir);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
 fn load_workspace_from_connection(
     connection: &Connection,
     canvas_id: &str,
@@ -906,6 +1007,76 @@ mod tests {
         assert_eq!(updated.content["text"], "Revised");
         assert_eq!(updated.x, 900.0);
         assert_eq!(updated.width, 480.0);
+    }
+
+    #[test]
+    fn rewrites_legacy_asset_paths_without_touching_other_strings() {
+        let database = Database::in_memory().unwrap();
+        let legacy_assets = Path::new(r"C:\Users\Raydio\AppData\Local\InfiniteCanvas\assets");
+        let new_assets = Path::new(r"D:\Data\SuCanvasData\data\assets");
+        let mut input = text_node("Imported image", "asset-path-migration");
+        input.kind = Some("image".to_owned());
+        input.content = json!({
+            "assetPath": legacy_assets.join("asset-one.png").to_string_lossy(),
+            "nested": {
+                "sourcePath": legacy_assets.join("asset-two.mp3").to_string_lossy(),
+                "label": "C:\\unrelated\\file.txt"
+            }
+        });
+        let created = database.create_node(input).unwrap();
+
+        assert_eq!(
+            database
+                .rewrite_asset_paths(legacy_assets, new_assets)
+                .unwrap(),
+            1
+        );
+        let migrated = database
+            .load_project(DEFAULT_CANVAS_ID)
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|node| node.id == created.node.id)
+            .unwrap();
+
+        assert_eq!(
+            migrated.content["assetPath"],
+            json!(new_assets.join("asset-one.png").to_string_lossy())
+        );
+        assert_eq!(
+            migrated.content["nested"]["sourcePath"],
+            json!(new_assets.join("asset-two.mp3").to_string_lossy())
+        );
+        assert_eq!(
+            migrated.content["nested"]["label"],
+            "C:\\unrelated\\file.txt"
+        );
+        assert_eq!(
+            database
+                .rewrite_asset_paths(legacy_assets, new_assets)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn creates_a_consistent_database_backup() {
+        let database = Database::in_memory().unwrap();
+        database
+            .create_node(text_node("Backed up", "database-backup"))
+            .unwrap();
+        let path =
+            std::env::temp_dir().join(format!("infinite-canvas-backup-{}.sqlite3", Uuid::new_v4()));
+
+        database.backup_to(&path).unwrap();
+        let restored = Database::open(&path).unwrap();
+        restored.verify_integrity().unwrap();
+        assert_eq!(
+            restored.load_project(DEFAULT_CANVAS_ID).unwrap().nodes[0].title,
+            "Backed up"
+        );
+        drop(restored);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

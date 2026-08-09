@@ -214,11 +214,19 @@ pub struct ComfySubmitInput {
     #[serde(default = "default_secondary_saturation")]
     pub secondary_saturation: f64,
     pub secondary_sampling_enabled: bool,
+    #[serde(default = "default_diffusion_model_name")]
+    pub diffusion_model_name: String,
     pub lora_name: String,
     #[serde(default = "default_lora_strength")]
     pub lora_strength: f64,
     #[serde(default)]
     pub lora_bypassed: bool,
+    #[serde(default)]
+    pub secondary_lora_name: Option<String>,
+    #[serde(default)]
+    pub secondary_lora_strength: Option<f64>,
+    #[serde(default)]
+    pub secondary_lora_bypassed: Option<bool>,
     #[serde(default)]
     pub image_paths: Vec<String>,
     #[serde(default)]
@@ -231,6 +239,10 @@ pub struct ComfySubmitInput {
 
 fn default_lora_strength() -> f64 {
     1.0
+}
+
+fn default_diffusion_model_name() -> String {
+    r"MinimaxH3\minimax_h3_fl2va_pruned_int8_convrot.safetensors".to_owned()
 }
 
 fn default_primary_video_steps() -> u32 {

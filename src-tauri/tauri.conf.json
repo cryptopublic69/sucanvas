@@ -26,7 +26,8 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/AppData/Local/InfiniteCanvas/assets/**"
+          "$HOME/AppData/Local/InfiniteCanvas/assets/**",
+          "D:/Data/SuCanvasData/data/assets/**"
         ]
       }
     }
