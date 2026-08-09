@@ -25,6 +25,10 @@ use crate::{
         DeleteNodesInput, DeletedBatch, EdgeRecord, NodeRecord, RuntimeInfo, SetAppLockInput,
         SetProjectPrivacyInput, UpdateNodeInput, UpdateProjectInput, WorkspaceSnapshot,
     },
+    workflow_modules::{
+        self, SaveWorkflowModuleInput, WorkflowBindings, WorkflowModuleRecord,
+        WorkflowModuleValidation,
+    },
     ApplicationState, RunningComfyTask,
 };
 
@@ -494,28 +498,10 @@ pub fn update_node(
 
 #[tauri::command]
 pub fn delete_node(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
-    let asset_path = state
-        .database
-        .get_node(&id)
-        .map_err(|error| error.to_string())?
-        .filter(|node| node.kind == "image" || node.kind == "audio" || node.kind == "video")
-        .and_then(|node| node.content.get("assetPath")?.as_str().map(PathBuf::from));
-
     state
         .database
         .delete_node(&id)
-        .map_err(|error| error.to_string())?;
-
-    if let Some(asset_path) = asset_path {
-        let assets_dir = state.assets_dir.canonicalize().ok();
-        let asset_path = asset_path.canonicalize().ok();
-        if let (Some(assets_dir), Some(asset_path)) = (assets_dir, asset_path) {
-            if asset_path.starts_with(assets_dir) {
-                let _ = std::fs::remove_file(asset_path);
-            }
-        }
-    }
-    Ok(())
+        .map_err(|error| error.to_string())
 }
 
 fn delete_video_files_blocking(paths: Vec<String>) -> Result<usize, String> {
@@ -599,41 +585,123 @@ pub fn delete_edge(id: String, state: State<'_, ApplicationState>) -> Result<(),
         .map_err(|error| error.to_string())
 }
 
-const H3_PROMPT_NODE_ID: &str = "339";
-const H3_SEED_NODE_ID: &str = "348";
-const H3_DURATION_NODE_ID: &str = "350";
-const H3_PRIMARY_RESOLUTION_NODE_ID: &str = "340";
-const H3_SECONDARY_RESOLUTION_NODE_ID: &str = "398";
-const H3_PRIMARY_LORA_NODE_ID: &str = "354";
-const H3_SECONDARY_LORA_NODE_ID: &str = "401";
-const H3_PRIMARY_OUTPUT_NODE_ID: &str = "360";
-const H3_SECONDARY_OUTPUT_NODE_ID: &str = "397";
-const H3_CLEAN_VIDEO_NODE_ID: &str = "9000";
-const H3_CLEAN_SAVE_NODE_ID: &str = "9001";
-const H3_SECONDARY_VIDEO_INPUT_NODE_ID: &str = "9002";
-const H3_CONDITIONING_NODE_ID: &str = "363";
-const H3_AUDIO_NODE_IDS: [&str; 2] = ["374", "416"];
-const H3_IMAGE_NODE_IDS: [&str; 9] = [
-    "362", "364", "365", "367", "368", "369", "370", "371", "372",
-];
+#[tauri::command]
+pub fn list_workflow_modules(
+    include_deleted: Option<bool>,
+    state: State<'_, ApplicationState>,
+) -> Result<Vec<WorkflowModuleRecord>, String> {
+    workflow_modules::list(
+        &state.workflow_modules_dir,
+        include_deleted.unwrap_or(false),
+    )
+}
 
-fn is_minimax_h3_lora_name(value: &str) -> bool {
+#[tauri::command]
+pub fn save_workflow_module(
+    input: SaveWorkflowModuleInput,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkflowModuleRecord, String> {
+    workflow_modules::save(&state.workflow_modules_dir, input)
+}
+
+#[tauri::command]
+pub fn validate_workflow_module_source(
+    source_workflow_path: String,
+    adapter_kind: Option<String>,
+    bindings: Option<WorkflowBindings>,
+) -> Result<WorkflowModuleValidation, String> {
+    workflow_modules::validate_source(
+        Path::new(source_workflow_path.trim().trim_matches('"')),
+        adapter_kind
+            .as_deref()
+            .unwrap_or(workflow_modules::WORKFLOW_PACKAGE_ENGINE),
+        &bindings.unwrap_or_default(),
+    )
+}
+
+#[tauri::command]
+pub fn trash_workflow_module(
+    id: String,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkflowModuleRecord, String> {
+    workflow_modules::trash(&state.workflow_modules_dir, &id)
+}
+
+#[tauri::command]
+pub fn restore_workflow_module(
+    id: String,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkflowModuleRecord, String> {
+    workflow_modules::restore_from_trash(&state.workflow_modules_dir, &id)
+}
+
+#[tauri::command]
+pub fn purge_workflow_module(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
+    workflow_modules::purge(&state.workflow_modules_dir, &id)
+}
+
+#[tauri::command]
+pub fn restore_workflow_module_backup(
+    id: String,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkflowModuleRecord, String> {
+    workflow_modules::restore_latest_backup(&state.workflow_modules_dir, &id)
+}
+
+#[tauri::command]
+pub fn export_workflow_module(
+    id: String,
+    state: State<'_, ApplicationState>,
+) -> Result<String, String> {
+    workflow_modules::export(
+        &state.workflow_modules_dir,
+        &state.workflow_module_exports_dir,
+        &id,
+    )
+}
+
+#[tauri::command]
+pub fn import_workflow_module_bundle(
+    bundle_path: String,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkflowModuleRecord, String> {
+    workflow_modules::import_bundle(
+        &state.workflow_modules_dir,
+        Path::new(bundle_path.trim().trim_matches('"')),
+    )
+}
+
+#[tauri::command]
+pub fn restore_workflow_module_bundle(
+    id: String,
+    bundle_path: String,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkflowModuleRecord, String> {
+    workflow_modules::restore_bundle(
+        &state.workflow_modules_dir,
+        &id,
+        Path::new(bundle_path.trim().trim_matches('"')),
+    )
+}
+
+fn is_lora_name_in_directory(value: &str, expected_directory: &str) -> bool {
     let normalized = value.trim().replace('/', "\\");
     normalized
         .split_once('\\')
         .is_some_and(|(directory, filename)| {
-            directory.eq_ignore_ascii_case("MinimaxH3") && !filename.trim().is_empty()
+            directory.eq_ignore_ascii_case(expected_directory) && !filename.trim().is_empty()
         })
 }
 
-fn minimax_h3_loras_from_object_info(value: &Value) -> Vec<String> {
+fn loras_from_object_info(value: &Value, class_type: &str, directory: &str) -> Vec<String> {
+    let pointer = format!("/{class_type}/input/required/lora_name/0");
     let mut loras = value
-        .pointer("/LoraLoaderModelOnly/input/required/lora_name/0")
+        .pointer(&pointer)
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .filter(|name| is_minimax_h3_lora_name(name))
+        .filter(|name| is_lora_name_in_directory(name, directory))
         .map(str::to_owned)
         .collect::<Vec<_>>();
     loras.sort_by_key(|name| name.to_ascii_lowercase());
@@ -642,7 +710,18 @@ fn minimax_h3_loras_from_object_info(value: &Value) -> Vec<String> {
 }
 
 #[tauri::command]
-pub async fn get_comfyui_h3_loras(server_url: String) -> Result<Vec<String>, String> {
+pub async fn get_comfyui_h3_loras(
+    server_url: String,
+    workflow_module_id: Option<String>,
+    state: State<'_, ApplicationState>,
+) -> Result<Vec<String>, String> {
+    let bindings = if let Some(module_id) = workflow_module_id.as_deref() {
+        workflow_modules::get(&state.workflow_modules_dir, module_id)?
+            .adapter
+            .bindings
+    } else {
+        WorkflowBindings::default()
+    };
     let parsed_server =
         Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
     if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
@@ -654,7 +733,10 @@ pub async fn get_comfyui_h3_loras(server_url: String) -> Result<Vec<String>, Str
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?
-        .get(format!("{server_url}/object_info/LoraLoaderModelOnly"))
+        .get(format!(
+            "{server_url}/object_info/{}",
+            bindings.lora_class_type
+        ))
         .send()
         .await
         .map_err(|error| format!("读取 ComfyUI LoRA 列表失败：{error}"))?
@@ -663,7 +745,11 @@ pub async fn get_comfyui_h3_loras(server_url: String) -> Result<Vec<String>, Str
         .json::<Value>()
         .await
         .map_err(|error| format!("解析 ComfyUI LoRA 列表失败：{error}"))?;
-    Ok(minimax_h3_loras_from_object_info(&value))
+    Ok(loras_from_object_info(
+        &value,
+        &bindings.lora_class_type,
+        &bindings.lora_directory,
+    ))
 }
 
 fn workflow_inputs_mut<'a>(
@@ -697,14 +783,146 @@ fn remove_workflow_input(
     Ok(())
 }
 
+fn configure_h3_loras(
+    workflow: &mut Value,
+    lora_name: &str,
+    lora_strength: f64,
+    lora_bypassed: bool,
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    let mut bypass_replacements = Vec::new();
+    for node_id in [
+        &bindings.primary_lora_node_id,
+        &bindings.secondary_lora_node_id,
+    ] {
+        let class_type = workflow
+            .get(node_id)
+            .and_then(|node| node.get("class_type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if class_type != bindings.lora_class_type {
+            return Err(format!(
+                "API 工作流节点 {node_id} 必须是 LoRA 加载器 {}",
+                bindings.lora_class_type
+            ));
+        }
+        let upstream_model = workflow
+            .get(node_id)
+            .and_then(|node| node.get("inputs"))
+            .and_then(|inputs| inputs.get("model"))
+            .cloned()
+            .ok_or_else(|| format!("API 工作流 LoRA 节点 {node_id} 缺少上游 model 连接"))?;
+        bypass_replacements.push((node_id, upstream_model));
+    }
+
+    if lora_bypassed {
+        let workflow_object = workflow
+            .as_object_mut()
+            .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
+        for node in workflow_object.values_mut() {
+            let Some(inputs) = node.get_mut("inputs").and_then(Value::as_object_mut) else {
+                continue;
+            };
+            for input in inputs.values_mut() {
+                let source_node_id = input
+                    .as_array()
+                    .and_then(|connection| connection.first())
+                    .and_then(Value::as_str);
+                let Some((_, replacement)) = bypass_replacements
+                    .iter()
+                    .find(|(node_id, _)| Some(node_id.as_str()) == source_node_id)
+                else {
+                    continue;
+                };
+                *input = replacement.clone();
+            }
+        }
+        return Ok(());
+    }
+
+    for node_id in [
+        &bindings.primary_lora_node_id,
+        &bindings.secondary_lora_node_id,
+    ] {
+        set_workflow_input(
+            workflow,
+            node_id,
+            "lora_name",
+            Value::String(lora_name.to_owned()),
+        )?;
+        set_workflow_input(workflow, node_id, "strength_model", json!(lora_strength))?;
+    }
+    Ok(())
+}
+
+fn configure_h3_steps(
+    workflow: &mut Value,
+    primary_video_steps: u32,
+    primary_audio_steps: u32,
+    secondary_scheduler_steps: u32,
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    set_workflow_input(
+        workflow,
+        &bindings.primary_sampler_node_id,
+        "video_steps",
+        json!(primary_video_steps),
+    )?;
+    set_workflow_input(
+        workflow,
+        &bindings.primary_sampler_node_id,
+        "audio_steps",
+        json!(primary_audio_steps),
+    )?;
+    set_workflow_input(
+        workflow,
+        &bindings.secondary_scheduler_node_id,
+        "steps",
+        json!(secondary_scheduler_steps),
+    )?;
+    Ok(())
+}
+
+fn configure_h3_color_adjustments(
+    workflow: &mut Value,
+    primary_brightness: f64,
+    primary_contrast: f64,
+    primary_saturation: f64,
+    secondary_brightness: f64,
+    secondary_contrast: f64,
+    secondary_saturation: f64,
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    for (node_id, brightness, contrast, saturation) in [
+        (
+            bindings.primary_color_node_id.as_str(),
+            primary_brightness,
+            primary_contrast,
+            primary_saturation,
+        ),
+        (
+            bindings.secondary_color_node_id.as_str(),
+            secondary_brightness,
+            secondary_contrast,
+            secondary_saturation,
+        ),
+    ] {
+        set_workflow_input(workflow, node_id, "brightness", json!(brightness))?;
+        set_workflow_input(workflow, node_id, "contrast", json!(contrast))?;
+        set_workflow_input(workflow, node_id, "saturation", json!(saturation))?;
+    }
+    Ok(())
+}
+
 fn install_clean_video_output(
     workflow: &mut Value,
     secondary_sampling_enabled: bool,
+    bindings: &WorkflowBindings,
 ) -> Result<(), String> {
     let source_output_node_id = if secondary_sampling_enabled {
-        H3_SECONDARY_OUTPUT_NODE_ID
+        &bindings.secondary_output_node_id
     } else {
-        H3_PRIMARY_OUTPUT_NODE_ID
+        &bindings.primary_output_node_id
     };
     let filename_prefix = workflow
         .get(source_output_node_id)
@@ -714,17 +932,25 @@ fn install_clean_video_output(
         .unwrap_or("SuCanvas/Minimax_H3")
         .to_owned();
     let (image_node_id, audio_node_id, audio_output_index) = if secondary_sampling_enabled {
-        ("403", "382", 0)
+        (
+            bindings.secondary_color_node_id.as_str(),
+            bindings.secondary_audio_output_node_id.as_str(),
+            bindings.secondary_audio_output_index,
+        )
     } else {
-        ("405", "356", 1)
+        (
+            bindings.primary_color_node_id.as_str(),
+            bindings.primary_audio_output_node_id.as_str(),
+            bindings.primary_audio_output_index,
+        )
     };
     let workflow_object = workflow
         .as_object_mut()
         .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
-    workflow_object.remove(H3_PRIMARY_OUTPUT_NODE_ID);
-    workflow_object.remove(H3_SECONDARY_OUTPUT_NODE_ID);
+    workflow_object.remove(&bindings.primary_output_node_id);
+    workflow_object.remove(&bindings.secondary_output_node_id);
     workflow_object.insert(
-        H3_CLEAN_VIDEO_NODE_ID.to_owned(),
+        bindings.clean_video_node_id.clone(),
         json!({
             "inputs": {
                 "images": [image_node_id, 0],
@@ -737,10 +963,10 @@ fn install_clean_video_output(
         }),
     );
     workflow_object.insert(
-        H3_CLEAN_SAVE_NODE_ID.to_owned(),
+        bindings.clean_save_node_id.clone(),
         json!({
             "inputs": {
-                "video": [H3_CLEAN_VIDEO_NODE_ID, 0],
+                "video": [bindings.clean_video_node_id, 0],
                 "filename_prefix": filename_prefix,
                 "format": "mp4",
                 "codec": "auto"
@@ -760,59 +986,79 @@ fn configure_h3_generation(
     aspect_ratio: &str,
     primary_resolution_megapixels: f64,
     secondary_resolution_megapixels: f64,
+    primary_video_steps: u32,
+    primary_audio_steps: u32,
+    secondary_scheduler_steps: u32,
+    primary_brightness: f64,
+    primary_contrast: f64,
+    primary_saturation: f64,
+    secondary_brightness: f64,
+    secondary_contrast: f64,
+    secondary_saturation: f64,
     secondary_sampling_enabled: bool,
     lora_name: &str,
     lora_strength: f64,
+    lora_bypassed: bool,
+    bindings: &WorkflowBindings,
 ) -> Result<(), String> {
     set_workflow_input(
         workflow,
-        H3_PROMPT_NODE_ID,
+        &bindings.prompt_node_id,
         "value",
         Value::String(prompt.to_owned()),
     )?;
-    set_workflow_input(workflow, H3_SEED_NODE_ID, "noise_seed", json!(seed))?;
+    set_workflow_input(workflow, &bindings.seed_node_id, "noise_seed", json!(seed))?;
     set_workflow_input(
         workflow,
-        H3_DURATION_NODE_ID,
+        &bindings.duration_node_id,
         "value",
         json!(duration_seconds),
     )?;
     set_workflow_input(
         workflow,
-        H3_PRIMARY_RESOLUTION_NODE_ID,
+        &bindings.primary_resolution_node_id,
         "aspect_ratio",
         Value::String(aspect_ratio.to_owned()),
     )?;
     set_workflow_input(
         workflow,
-        H3_PRIMARY_RESOLUTION_NODE_ID,
+        &bindings.primary_resolution_node_id,
         "megapixels",
         json!(primary_resolution_megapixels),
     )?;
     if secondary_sampling_enabled {
         set_workflow_input(
             workflow,
-            H3_SECONDARY_RESOLUTION_NODE_ID,
+            &bindings.secondary_resolution_node_id,
             "aspect_ratio",
             Value::String(aspect_ratio.to_owned()),
         )?;
         set_workflow_input(
             workflow,
-            H3_SECONDARY_RESOLUTION_NODE_ID,
+            &bindings.secondary_resolution_node_id,
             "megapixels",
             json!(secondary_resolution_megapixels),
         )?;
     }
-    for node_id in [H3_PRIMARY_LORA_NODE_ID, H3_SECONDARY_LORA_NODE_ID] {
-        set_workflow_input(
-            workflow,
-            node_id,
-            "lora_name",
-            Value::String(lora_name.to_owned()),
-        )?;
-        set_workflow_input(workflow, node_id, "strength_model", json!(lora_strength))?;
-    }
-    install_clean_video_output(workflow, secondary_sampling_enabled)?;
+    configure_h3_steps(
+        workflow,
+        primary_video_steps,
+        primary_audio_steps,
+        secondary_scheduler_steps,
+        bindings,
+    )?;
+    configure_h3_color_adjustments(
+        workflow,
+        primary_brightness,
+        primary_contrast,
+        primary_saturation,
+        secondary_brightness,
+        secondary_contrast,
+        secondary_saturation,
+        bindings,
+    )?;
+    configure_h3_loras(workflow, lora_name, lora_strength, lora_bypassed, bindings)?;
+    install_clean_video_output(workflow, secondary_sampling_enabled, bindings)?;
     Ok(())
 }
 
@@ -1013,12 +1259,13 @@ fn append_cleanup_warning(message: String, cleanup_warning: Option<String>) -> S
 fn configure_secondary_source_video(
     workflow: &mut Value,
     uploaded_video: &str,
+    bindings: &WorkflowBindings,
 ) -> Result<(), String> {
     let workflow_object = workflow
         .as_object_mut()
         .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
     workflow_object.insert(
-        H3_SECONDARY_VIDEO_INPUT_NODE_ID.to_owned(),
+        bindings.secondary_video_input_node_id.clone(),
         json!({
             "inputs": {
                 "video": uploaded_video,
@@ -1035,21 +1282,21 @@ fn configure_secondary_source_video(
     );
     set_workflow_input(
         workflow,
-        "383",
+        &bindings.secondary_resize_node_id,
         "image",
-        json!([H3_SECONDARY_VIDEO_INPUT_NODE_ID, 0]),
+        json!([bindings.secondary_video_input_node_id, 0]),
     )?;
     set_workflow_input(
         workflow,
-        "388",
+        &bindings.secondary_audio_encode_node_id,
         "audio",
-        json!([H3_SECONDARY_VIDEO_INPUT_NODE_ID, 2]),
+        json!([bindings.secondary_video_input_node_id, 2]),
     )?;
     set_workflow_input(
         workflow,
-        H3_CLEAN_VIDEO_NODE_ID,
+        &bindings.clean_video_node_id,
         "audio",
-        json!([H3_SECONDARY_VIDEO_INPUT_NODE_ID, 2]),
+        json!([bindings.secondary_video_input_node_id, 2]),
     )?;
     Ok(())
 }
@@ -1137,6 +1384,7 @@ fn ensure_comfy_task_active(cancelled: &AtomicBool) -> Result<(), String> {
 async fn submit_comfyui_workflow_inner(
     input: ComfySubmitInput,
     task: Arc<RunningComfyTask>,
+    workflow_modules_dir: &Path,
 ) -> Result<ComfySubmitResult, String> {
     ensure_comfy_task_active(&task.cancelled)?;
     let parsed_server = Url::parse(input.server_url.trim())
@@ -1151,21 +1399,38 @@ async fn submit_comfyui_workflow_inner(
     if input.prompt.trim().is_empty() {
         return Err("提示词不能为空".to_owned());
     }
+    let (workflow_path, adapter) = if let Some(module_id) = input.workflow_module_id.as_deref() {
+        let module = workflow_modules::get(workflow_modules_dir, module_id)?;
+        (module.workflow_path, module.adapter)
+    } else {
+        (
+            input.workflow_path.clone(),
+            workflow_modules::WorkflowAdapter::current_h3(WorkflowBindings::default()),
+        )
+    };
+    let contract = &adapter.input_contract;
+    let bindings = &adapter.bindings;
     let generation_seed = resolve_generation_seed(&input.seed_mode, &input.seed)?;
-    if input.image_paths.len() > H3_IMAGE_NODE_IDS.len() {
+    if input.image_paths.len() < contract.image_min || input.image_paths.len() > contract.image_max
+    {
         return Err(format!(
-            "当前工作流最多支持 {} 张参考图片",
-            H3_IMAGE_NODE_IDS.len()
+            "当前方案要求参考图片数量为 {}–{} 张",
+            contract.image_min, contract.image_max
         ));
     }
-    if input.audio_paths.len() > H3_AUDIO_NODE_IDS.len() {
+    if input.audio_paths.len() < contract.audio_min || input.audio_paths.len() > contract.audio_max
+    {
         return Err(format!(
-            "当前工作流最多支持 {} 个参考音频",
-            H3_AUDIO_NODE_IDS.len()
+            "当前方案要求参考音频数量为 {}–{} 个",
+            contract.audio_min, contract.audio_max
         ));
     }
-    if !input.video_paths.is_empty() {
-        return Err("当前 API 工作流没有参考视频输入节点".to_owned());
+    if input.video_paths.len() < contract.video_min || input.video_paths.len() > contract.video_max
+    {
+        return Err(format!(
+            "当前方案要求参考视频数量为 {}–{} 个",
+            contract.video_min, contract.video_max
+        ));
     }
     if !input.duration_seconds.is_finite()
         || input.duration_seconds < 2.0
@@ -1187,26 +1452,48 @@ async fn submit_comfyui_workflow_inner(
     {
         return Err("二采分辨率必须在0.2到2.0 MP之间".to_owned());
     }
+    if !(1..=1000).contains(&input.primary_video_steps) {
+        return Err("一采 Video Steps 必须在1到1000之间".to_owned());
+    }
+    if !(input.primary_video_steps..=1000).contains(&input.primary_audio_steps) {
+        return Err("一采 Audio Steps 必须在1到1000之间，且不能小于 Video Steps".to_owned());
+    }
+    if !(1..=10000).contains(&input.secondary_scheduler_steps) {
+        return Err("二采基本调度器 Steps 必须在1到10000之间".to_owned());
+    }
+    for (label, value) in [
+        ("一采亮度", input.primary_brightness),
+        ("一采对比度", input.primary_contrast),
+        ("一采饱和度", input.primary_saturation),
+        ("二采亮度", input.secondary_brightness),
+        ("二采对比度", input.secondary_contrast),
+        ("二采饱和度", input.secondary_saturation),
+    ] {
+        if !value.is_finite() || !(0.0..=3.0).contains(&value) {
+            return Err(format!("{label}必须在0.00到3.00之间"));
+        }
+    }
     let lora_name = input.lora_name.trim();
-    if !is_minimax_h3_lora_name(lora_name) {
-        return Err("LoRA 只能选择 MinimaxH3 目录中的模型".to_owned());
+    if !is_lora_name_in_directory(lora_name, &bindings.lora_directory) {
+        return Err(format!(
+            "LoRA 只能选择 {} 目录中的模型",
+            bindings.lora_directory
+        ));
     }
     if !input.lora_strength.is_finite() || input.lora_strength < 0.0 || input.lora_strength > 2.0 {
         return Err("LoRA 权重必须在0.0到2.0之间".to_owned());
     }
 
-    let workflow_bytes = tokio::fs::read(&input.workflow_path)
-        .await
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "H3 API 工作流文件不存在：{}。请在应用设置中更新工作流路径",
-                    input.workflow_path
-                )
-            } else {
-                format!("读取 H3 API 工作流失败（{}）：{error}", input.workflow_path)
-            }
-        })?;
+    let workflow_bytes = tokio::fs::read(&workflow_path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "H3 API 工作流文件不存在：{}。请在应用设置中更新工作流路径",
+                workflow_path
+            )
+        } else {
+            format!("读取 H3 API 工作流失败（{}）：{error}", workflow_path)
+        }
+    })?;
     ensure_comfy_task_active(&task.cancelled)?;
     let mut workflow: Value = serde_json::from_slice(&workflow_bytes)
         .map_err(|error| format!("解析 API 工作流失败：{error}"))?;
@@ -1253,11 +1540,22 @@ async fn submit_comfyui_workflow_inner(
         aspect_ratio,
         input.primary_resolution_megapixels,
         input.secondary_resolution_megapixels,
+        input.primary_video_steps,
+        input.primary_audio_steps,
+        input.secondary_scheduler_steps,
+        input.primary_brightness,
+        input.primary_contrast,
+        input.primary_saturation,
+        input.secondary_brightness,
+        input.secondary_contrast,
+        input.secondary_saturation,
         input.secondary_sampling_enabled || uploaded_secondary_source.is_some(),
         lora_name,
         input.lora_strength,
+        input.lora_bypassed,
+        &bindings,
     )?;
-    for (index, node_id) in H3_IMAGE_NODE_IDS.iter().enumerate() {
+    for (index, node_id) in bindings.image_node_ids.iter().enumerate() {
         let input_name = format!("ref_images.ref_image_{index}");
         if let Some(uploaded_name) = uploaded_images.get(index) {
             set_workflow_input(
@@ -1270,11 +1568,11 @@ async fn submit_comfyui_workflow_inner(
             workflow
                 .as_object_mut()
                 .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?
-                .remove(*node_id);
-            remove_workflow_input(&mut workflow, H3_CONDITIONING_NODE_ID, &input_name)?;
+                .remove(node_id);
+            remove_workflow_input(&mut workflow, &bindings.conditioning_node_id, &input_name)?;
         }
     }
-    for (index, node_id) in H3_AUDIO_NODE_IDS.iter().enumerate() {
+    for (index, node_id) in bindings.audio_node_ids.iter().enumerate() {
         let input_name = format!("ref_audios.ref_audio_{index}");
         if let Some(uploaded_name) = uploaded_audios.get(index) {
             set_workflow_input(
@@ -1287,12 +1585,12 @@ async fn submit_comfyui_workflow_inner(
             workflow
                 .as_object_mut()
                 .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?
-                .remove(*node_id);
-            remove_workflow_input(&mut workflow, H3_CONDITIONING_NODE_ID, &input_name)?;
+                .remove(node_id);
+            remove_workflow_input(&mut workflow, &bindings.conditioning_node_id, &input_name)?;
         }
     }
     if let Some(uploaded_video) = uploaded_secondary_source.as_deref() {
-        configure_secondary_source_video(&mut workflow, uploaded_video)?;
+        configure_secondary_source_video(&mut workflow, uploaded_video, &bindings)?;
     }
 
     ensure_comfy_task_active(&task.cancelled)?;
@@ -1427,7 +1725,9 @@ pub async fn submit_comfyui_workflow(
         .map_err(|_| "ComfyUI 任务列表锁已损坏".to_owned())?
         .insert(client_id.clone(), task.clone());
 
-    let mut result = submit_comfyui_workflow_inner(input, task.clone()).await;
+    let workflow_modules_dir = state.workflow_modules_dir.clone();
+    let mut result =
+        submit_comfyui_workflow_inner(input, task.clone(), &workflow_modules_dir).await;
     if !task.submitted.load(Ordering::SeqCst) {
         if let Some(cleanup_warning) = cleanup_comfy_task_inputs(&task).await {
             result = match result {
@@ -1469,7 +1769,11 @@ fn comfy_prompt_id_from_queue_item(item: &Value) -> Option<&str> {
 }
 
 fn comfy_seed_from_prompt(prompt: &Value) -> Option<String> {
-    let value = prompt.pointer(&format!("/2/{H3_SEED_NODE_ID}/inputs/noise_seed"))?;
+    let value = prompt
+        .get(2)?
+        .as_object()?
+        .values()
+        .find_map(|node| node.get("inputs")?.get("noise_seed"))?;
     value
         .as_u64()
         .map(|seed| seed.to_string())
@@ -1845,8 +2149,8 @@ mod tests {
     use super::{
         comfy_execution_elapsed_seconds, comfy_input_task_path, comfy_queue_summary_from_value,
         configure_h3_generation, configure_secondary_source_video, delete_video_files_blocking,
-        hash_app_lock_password, media_format, minimax_h3_loras_from_object_info,
-        resolve_generation_seed, validate_new_app_lock_password, verify_app_lock_hash, MediaFormat,
+        hash_app_lock_password, loras_from_object_info, media_format, resolve_generation_seed,
+        validate_new_app_lock_password, verify_app_lock_hash, MediaFormat, WorkflowBindings,
         AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
     use serde_json::json;
@@ -1859,13 +2163,59 @@ mod tests {
             "340": { "inputs": { "aspect_ratio": "16:9 (Widescreen)", "megapixels": 0.4 } },
             "348": { "inputs": { "noise_seed": 0 } },
             "350": { "inputs": { "value": 15.0 } },
-            "354": { "inputs": { "lora_name": "MinimaxH3\\old-primary.safetensors", "strength_model": 1.0 } },
+            "357": {
+                "inputs": {
+                    "video_steps": 6,
+                    "audio_steps": 8,
+                    "model": ["354", 0]
+                },
+                "class_type": "MiniMaxH3MultiRateSamplerEXPT8"
+            },
+            "354": {
+                "inputs": {
+                    "lora_name": "MinimaxH3\\old-primary.safetensors",
+                    "strength_model": 1.0,
+                    "model": ["353", 0]
+                },
+                "class_type": "LoraLoaderModelOnly"
+            },
             "360": { "inputs": { "save_output": false, "filename_prefix": "primary/video" } },
             "383": { "inputs": { "image": ["381", 0] } },
             "388": { "inputs": { "audio": ["382", 0] } },
+            "391": {
+                "inputs": {
+                    "scheduler": "simple",
+                    "steps": 4,
+                    "denoise": 0.2,
+                    "model": ["401", 0]
+                },
+                "class_type": "BasicScheduler"
+            },
+            "393": {
+                "inputs": {
+                    "model": ["354", 0],
+                    "conditioning": ["363", 0]
+                },
+                "class_type": "BasicGuider"
+            },
             "397": { "inputs": { "save_output": true, "filename_prefix": "secondary/video" } },
-            "398": { "inputs": { "aspect_ratio": "16:9 (Widescreen)", "megapixels": 0.5 } }
-            ,"401": { "inputs": { "lora_name": "MinimaxH3\\old-secondary.safetensors", "strength_model": 1.0 } }
+            "398": { "inputs": { "aspect_ratio": "16:9 (Widescreen)", "megapixels": 0.5 } },
+            "403": {
+                "inputs": { "brightness": 1.0, "contrast": 0.9, "saturation": 1.0 },
+                "class_type": "LayerColor: BrightnessContrastV2"
+            },
+            "405": {
+                "inputs": { "brightness": 1.0, "contrast": 0.9, "saturation": 0.9 },
+                "class_type": "LayerColor: BrightnessContrastV2"
+            },
+            "401": {
+                "inputs": {
+                    "lora_name": "MinimaxH3\\old-secondary.safetensors",
+                    "strength_model": 1.0,
+                    "model": ["353", 0]
+                },
+                "class_type": "LoraLoaderModelOnly"
+            }
         })
     }
 
@@ -1952,12 +2302,28 @@ mod tests {
             "3:4 (Portrait Standard)",
             0.4,
             0.8,
+            6,
+            8,
+            4,
+            1.0,
+            0.9,
+            0.9,
+            1.0,
+            0.9,
+            1.0,
             true,
             r"MinimaxH3\test.safetensors",
             0.75,
+            false,
+            &WorkflowBindings::default(),
         )
         .unwrap();
-        configure_secondary_source_video(&mut workflow, "infinite-canvas/job/source.mp4").unwrap();
+        configure_secondary_source_video(
+            &mut workflow,
+            "infinite-canvas/job/source.mp4",
+            &WorkflowBindings::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             workflow.pointer("/9002/class_type"),
@@ -2003,9 +2369,20 @@ mod tests {
             "9:16 (Portrait Widescreen)",
             0.3,
             2.0,
+            7,
+            9,
+            5,
+            1.1,
+            0.8,
+            0.7,
+            1.2,
+            0.85,
+            1.05,
             true,
             r"MinimaxH3\selected.safetensors",
             0.65,
+            false,
+            &WorkflowBindings::default(),
         )
         .unwrap();
 
@@ -2033,6 +2410,27 @@ mod tests {
         assert_eq!(
             workflow.pointer("/398/inputs/aspect_ratio"),
             Some(&json!("9:16 (Portrait Widescreen)"))
+        );
+        assert_eq!(workflow.pointer("/357/inputs/video_steps"), Some(&json!(7)));
+        assert_eq!(workflow.pointer("/357/inputs/audio_steps"), Some(&json!(9)));
+        assert_eq!(workflow.pointer("/391/inputs/steps"), Some(&json!(5)));
+        assert_eq!(
+            workflow.pointer("/405/inputs/brightness"),
+            Some(&json!(1.1))
+        );
+        assert_eq!(workflow.pointer("/405/inputs/contrast"), Some(&json!(0.8)));
+        assert_eq!(
+            workflow.pointer("/405/inputs/saturation"),
+            Some(&json!(0.7))
+        );
+        assert_eq!(
+            workflow.pointer("/403/inputs/brightness"),
+            Some(&json!(1.2))
+        );
+        assert_eq!(workflow.pointer("/403/inputs/contrast"), Some(&json!(0.85)));
+        assert_eq!(
+            workflow.pointer("/403/inputs/saturation"),
+            Some(&json!(1.05))
         );
         for node_id in ["354", "401"] {
             assert_eq!(
@@ -2071,9 +2469,20 @@ mod tests {
             "16:9 (Widescreen)",
             0.2,
             0.8,
+            6,
+            8,
+            4,
+            1.0,
+            0.9,
+            0.9,
+            1.0,
+            0.9,
+            1.0,
             false,
             r"MinimaxH3\test.safetensors",
             1.0,
+            false,
+            &WorkflowBindings::default(),
         )
         .unwrap();
 
@@ -2109,6 +2518,7 @@ mod tests {
                     "required": {
                         "lora_name": [[
                             "Other\\ignored.safetensors",
+                            "MinimaxH3\\minimax_h3_turbo_v4_step600_ema.safetensors",
                             "MinimaxH3\\turbo.safetensors",
                             "minimaxh3/quality.safetensors"
                         ]]
@@ -2117,11 +2527,93 @@ mod tests {
             }
         });
         assert_eq!(
-            minimax_h3_loras_from_object_info(&object_info),
+            loras_from_object_info(&object_info, "LoraLoaderModelOnly", "MinimaxH3"),
             vec![
                 "minimaxh3/quality.safetensors".to_owned(),
+                "MinimaxH3\\minimax_h3_turbo_v4_step600_ema.safetensors".to_owned(),
                 "MinimaxH3\\turbo.safetensors".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn rejects_the_new_turbo_lora_loader_workflow() {
+        let mut workflow = resolution_test_workflow();
+        workflow["354"]["class_type"] = json!("MiniMaxH3TurboLoRA");
+        let error = configure_h3_generation(
+            &mut workflow,
+            "prompt",
+            42,
+            6.0,
+            "16:9 (Widescreen)",
+            0.4,
+            0.5,
+            6,
+            8,
+            4,
+            1.0,
+            0.9,
+            0.9,
+            1.0,
+            0.9,
+            1.0,
+            false,
+            r"MinimaxH3\legacy.safetensors",
+            0.8,
+            false,
+            &WorkflowBindings::default(),
+        )
+        .unwrap_err();
+        assert!(error.contains("节点 354 必须是 LoRA 加载器 LoraLoaderModelOnly"));
+    }
+
+    #[test]
+    fn bypasses_lora_in_both_sampling_stages() {
+        let mut workflow = resolution_test_workflow();
+        configure_h3_generation(
+            &mut workflow,
+            "prompt",
+            42,
+            6.0,
+            "16:9 (Widescreen)",
+            0.4,
+            0.5,
+            6,
+            8,
+            4,
+            1.0,
+            0.9,
+            0.9,
+            1.0,
+            0.9,
+            1.0,
+            true,
+            r"MinimaxH3\selected.safetensors",
+            0.8,
+            true,
+            &WorkflowBindings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            workflow.pointer("/357/inputs/model"),
+            Some(&json!(["353", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/393/inputs/model"),
+            Some(&json!(["353", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/391/inputs/model"),
+            Some(&json!(["353", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/354/inputs/lora_name"),
+            Some(&json!(r"MinimaxH3\old-primary.safetensors"))
+        );
+        assert_eq!(
+            workflow.pointer("/401/inputs/lora_name"),
+            Some(&json!(r"MinimaxH3\old-secondary.safetensors"))
         );
     }
 

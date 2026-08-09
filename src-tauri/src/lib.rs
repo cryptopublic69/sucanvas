@@ -2,6 +2,7 @@ mod api;
 mod commands;
 mod db;
 mod models;
+mod workflow_modules;
 
 use std::{
     collections::HashMap,
@@ -30,6 +31,8 @@ pub struct ApplicationState {
     database: Database,
     runtime: RuntimeInfo,
     assets_dir: PathBuf,
+    workflow_modules_dir: PathBuf,
+    workflow_module_exports_dir: PathBuf,
     app_lock_path: PathBuf,
     app_lock_guard: Arc<Mutex<()>>,
     active_canvas_id: Arc<RwLock<String>>,
@@ -46,12 +49,17 @@ fn local_data_dir(app: &tauri::App) -> Result<PathBuf, Box<dyn std::error::Error
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = local_data_dir(app)?;
             std::fs::create_dir_all(&data_dir)?;
             let assets_dir = data_dir.join("assets");
             std::fs::create_dir_all(&assets_dir)?;
+            let workflow_modules_dir = data_dir.join("workflow-modules");
+            std::fs::create_dir_all(&workflow_modules_dir)?;
+            let workflow_module_exports_dir = data_dir.join("workflow-module-exports");
+            std::fs::create_dir_all(&workflow_module_exports_dir)?;
             let database_path = data_dir.join("infinite-canvas.sqlite3");
             let config_path = data_dir.join("api.json");
             let app_lock_path = data_dir.join("app-lock.json");
@@ -80,6 +88,8 @@ pub fn run() {
                     canvas_id: DEFAULT_CANVAS_ID.to_owned(),
                 },
                 assets_dir,
+                workflow_modules_dir,
+                workflow_module_exports_dir,
                 app_lock_path,
                 app_lock_guard: Arc::new(Mutex::new(())),
                 active_canvas_id: active_canvas_id.clone(),
@@ -120,6 +130,16 @@ pub fn run() {
             commands::get_comfyui_queue_summary,
             commands::get_comfyui_h3_loras,
             commands::get_comfyui_client_task_statuses,
+            commands::list_workflow_modules,
+            commands::save_workflow_module,
+            commands::validate_workflow_module_source,
+            commands::trash_workflow_module,
+            commands::restore_workflow_module,
+            commands::purge_workflow_module,
+            commands::restore_workflow_module_backup,
+            commands::export_workflow_module,
+            commands::import_workflow_module_bundle,
+            commands::restore_workflow_module_bundle,
             commands::get_runtime_info,
             commands::get_app_lock_status,
             commands::verify_app_lock_password,

@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { createPortal } from "react-dom";
 import {
   BaseEdge,
@@ -20,6 +21,7 @@ import {
   Position,
   ReactFlow,
   ReactFlowProvider,
+  SelectionMode,
   getBezierPath,
   useEdgesState,
   useNodesState,
@@ -28,6 +30,8 @@ import {
 import {
   ArrowLeft,
   Check,
+  ChevronDown,
+  ChevronUp,
   Clapperboard,
   Copy,
   Dices,
@@ -37,6 +41,7 @@ import {
   FolderKanban,
   GripVertical,
   Image as ImageIcon,
+  Info,
   Link2,
   LockKeyhole,
   Moon,
@@ -44,7 +49,6 @@ import {
   Music,
   Pause,
   Palette,
-  PenLine,
   Pencil,
   Play,
   Plus,
@@ -52,6 +56,7 @@ import {
   RotateCcw,
   Search,
   Settings2,
+  SlidersHorizontal,
   Sparkles,
   Square,
   StickyNote,
@@ -176,11 +181,24 @@ interface GenerationSnapshot {
   aspectRatio: VideoAspectRatio;
   primaryResolutionMegapixels: number;
   secondaryResolutionMegapixels: number;
+  primaryVideoSteps: number;
+  primaryAudioSteps: number;
+  secondarySchedulerSteps: number;
+  primaryBrightness: number;
+  primaryContrast: number;
+  primarySaturation: number;
+  secondaryBrightness: number;
+  secondaryContrast: number;
+  secondarySaturation: number;
   loraName: string;
   loraStrength: number;
+  loraStrengthRecorded?: boolean;
+  loraBypassed: boolean;
   imagePaths: string[];
   audioPaths: string[];
   videoPaths: string[];
+  workflowModuleId: string;
+  workflowModuleRevision: string;
 }
 
 interface PersistedComfyTask {
@@ -224,6 +242,259 @@ interface H3LoraPreference {
   loraStrength: number;
 }
 
+interface H3ModelParameters {
+  primaryVideoSteps: number;
+  primaryAudioSteps: number;
+  secondarySchedulerSteps: number;
+  primaryBrightness: number;
+  primaryContrast: number;
+  primarySaturation: number;
+  secondaryBrightness: number;
+  secondaryContrast: number;
+  secondarySaturation: number;
+}
+
+type WorkflowCapability = "video-generation" | "image-generation";
+type WorkflowVariant = "reference-to-video" | "first-last-frame" | "text-to-video" | "image-generation";
+type WorkflowModuleSlot = "video-generation:reference-to-video"
+  | "video-generation:first-last-frame"
+  | "video-generation:text-to-video"
+  | "image-generation";
+
+interface WorkflowModuleDefaults extends H3ModelParameters {
+  loraName: string;
+  loraStrength: number;
+}
+
+interface WorkflowBindings {
+  promptNodeId: string;
+  seedNodeId: string;
+  durationNodeId: string;
+  primaryResolutionNodeId: string;
+  secondaryResolutionNodeId: string;
+  primaryLoraNodeId: string;
+  secondaryLoraNodeId: string;
+  primarySamplerNodeId: string;
+  secondarySchedulerNodeId: string;
+  primaryOutputNodeId: string;
+  secondaryOutputNodeId: string;
+  primaryColorNodeId: string;
+  secondaryColorNodeId: string;
+  cleanVideoNodeId: string;
+  cleanSaveNodeId: string;
+  secondaryVideoInputNodeId: string;
+  conditioningNodeId: string;
+  audioNodeIds: string[];
+  imageNodeIds: string[];
+  primaryAudioOutputNodeId: string;
+  primaryAudioOutputIndex: number;
+  secondaryAudioOutputNodeId: string;
+  secondaryAudioOutputIndex: number;
+  secondaryResizeNodeId: string;
+  secondaryAudioEncodeNodeId: string;
+  loraClassType: string;
+  loraDirectory: string;
+}
+
+interface WorkflowAdapter {
+  schemaVersion: number;
+  engineApiVersion: string;
+  adapterId: string;
+  capability: WorkflowCapability;
+  variant: WorkflowVariant;
+  bindings: WorkflowBindings;
+}
+
+interface WorkflowUiField {
+  key: keyof H3ModelParameters;
+  label: string;
+  type: "number";
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+  minKey?: keyof H3ModelParameters;
+}
+
+interface WorkflowUiGroup {
+  id: string;
+  title: string;
+  fields: WorkflowUiField[];
+  note: string;
+}
+
+interface WorkflowUiSchema {
+  schemaVersion: number;
+  groups: WorkflowUiGroup[];
+}
+
+interface WorkflowModuleRecord {
+  id: string;
+  name: string;
+  capability: WorkflowCapability;
+  variant: WorkflowVariant;
+  revision: string;
+  packageSchemaVersion: number;
+  engineApiVersion: string;
+  adapterKind: string;
+  adapterEntry: string;
+  uiSchemaEntry: string;
+  sourceWorkflowName: string;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+  bindings: WorkflowBindings;
+  defaults: WorkflowModuleDefaults;
+  workflowPath: string;
+  adapterPath: string;
+  uiSchemaPath: string;
+  adapter: WorkflowAdapter;
+  uiSchema: WorkflowUiSchema;
+  backupCount: number;
+}
+
+interface WorkflowModuleValidation {
+  compatible: boolean;
+  issues: string[];
+}
+
+interface ModelParameterNumberInputProps {
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  autoFocus?: boolean;
+  onChange: (value: number) => void;
+}
+
+function ModelParameterNumberInput({
+  value,
+  min,
+  max,
+  step,
+  autoFocus = false,
+  onChange,
+}: ModelParameterNumberInputProps) {
+  const precision = step.toString().split(".")[1]?.length ?? 0;
+  const adjust = (direction: -1 | 1) => {
+    const current = Number.isFinite(value) ? value : min;
+    const next = Math.min(max, Math.max(min, current + direction * step));
+    onChange(Number(next.toFixed(precision)));
+  };
+  return (
+    <div className="model-parameter-number-input">
+      <input
+        autoFocus={autoFocus}
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(event) => onChange(Number(event.currentTarget.value))}
+      />
+      <span className="model-parameter-stepper">
+        <button type="button" onClick={() => adjust(1)} title="增加" aria-label="增加">
+          <ChevronUp size={12} strokeWidth={2} />
+        </button>
+        <button type="button" onClick={() => adjust(-1)} title="减少" aria-label="减少">
+          <ChevronDown size={12} strokeWidth={2} />
+        </button>
+      </span>
+    </div>
+  );
+}
+
+interface SettingsSelectOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+function SettingsSelect({
+  value,
+  options,
+  onChange,
+  disabled = false,
+  ariaLabel,
+  placeholder = "请选择",
+}: {
+  value: string;
+  options: SettingsSelectOption[];
+  onChange: (value: string) => void;
+  disabled?: boolean;
+  ariaLabel: string;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const controlRef = useRef<HTMLDivElement>(null);
+  const selectedOption = options.find((option) => option.value === value);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && controlRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOnOutsidePointer);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnOutsidePointer);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  return (
+    <div ref={controlRef} className="settings-custom-select">
+      <button
+        type="button"
+        className="settings-custom-select-toggle"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            setOpen(true);
+          }
+        }}
+      >
+        <span>{selectedOption?.label ?? placeholder}</span>
+        <ChevronDown className="settings-custom-select-arrow" size={13} strokeWidth={1.8} aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="settings-custom-select-menu" role="listbox" aria-label={ariaLabel}>
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="option"
+              aria-selected={option.value === value}
+              className={option.value === value ? "is-active" : ""}
+              disabled={option.disabled}
+              onClick={() => {
+                onChange(option.value);
+                setOpen(false);
+              }}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface CanvasNodeData extends Record<string, unknown> {
   record: NodeRecord;
   matched: boolean;
@@ -234,6 +505,8 @@ interface CanvasNodeData extends Record<string, unknown> {
   textInputCount: number;
   textInputs: NodeRecord[];
   h3LoraOptions: string[];
+  workflowModules: WorkflowModuleRecord[];
+  workflowModuleDefaults: Partial<Record<WorkflowModuleSlot, string>>;
   onH3LoraPreferenceChange: (preference: H3LoraPreference) => void;
   onChange: (id: string, patch: NodePatch) => void;
   onExecutionCheck: (message: string, valid: boolean) => void;
@@ -279,14 +552,49 @@ const CANVAS_SNAP_GRID: [number, number] = [CANVAS_GRID_SIZE, CANVAS_GRID_SIZE];
 const AUDIO_NODE_MIN_HEIGHT = 240;
 const VIDEO_NODE_BASE_HEIGHT = 480;
 const MEDIA_NODE_CHROME_HEIGHT = 73;
-const GENERATED_VIDEO_PREVIEW_WIDTH = 360;
+const IMAGE_NODE_CHROME_HEIGHT = 38;
+const GENERATED_VIDEO_FOOTER_HEIGHT = 38;
+const LEGACY_GENERATED_VIDEO_PREVIEW_WIDTH = 360;
+const GENERATED_VIDEO_PREVIEW_WIDTH = 420;
+const GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH = 300;
+const GENERATED_VIDEO_PREVIEW_LAYOUT_VERSION = 5;
 const DEFAULT_GENERATED_VIDEO_ASPECT_RATIO = 16 / 9;
+const SHOW_NODE_SEARCH = false;
 const COMFYUI_SERVER_URL = "http://192.168.5.108:8188";
 const DEFAULT_GENERATION_SEED = "56456340597885880";
 const DEFAULT_H3_LORA_NAME = "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors";
 const H3_LORA_PREFERENCE_STORAGE_KEY = "infinite-canvas:h3-lora-preference";
-const DEFAULT_H3_REFERENCE_WORKFLOW_PATH = "D:\\Downloads\\MiniMax+H3全能参考工作流.json";
+const DEFAULT_H3_MODEL_PARAMETERS: H3ModelParameters = {
+  primaryVideoSteps: 6,
+  primaryAudioSteps: 8,
+  secondarySchedulerSteps: 4,
+  primaryBrightness: 1,
+  primaryContrast: 0.9,
+  primarySaturation: 0.9,
+  secondaryBrightness: 1,
+  secondaryContrast: 0.9,
+  secondarySaturation: 1,
+};
+const H3_MODEL_PARAMETERS_STORAGE_KEY = "infinite-canvas:h3-model-parameters";
+const DEFAULT_H3_REFERENCE_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3全能参考工作流.json";
 const H3_REFERENCE_WORKFLOW_STORAGE_KEY = "infinite-canvas:h3-reference-workflow-path";
+const WORKFLOW_MODULE_DEFAULTS_STORAGE_KEY = "infinite-canvas:workflow-module-defaults";
+const WORKFLOW_PACKAGE_ENGINE = "workflow-package-v1";
+const WORKFLOW_CAPABILITIES: Array<{ value: WorkflowCapability; label: string }> = [
+  { value: "video-generation", label: "视频生成" },
+  { value: "image-generation", label: "图片生成" },
+];
+const WORKFLOW_VIDEO_VARIANTS: Array<{ value: Exclude<WorkflowVariant, "image-generation">; label: string }> = [
+  { value: "reference-to-video", label: "多参生视频" },
+  { value: "first-last-frame", label: "首尾帧" },
+  { value: "text-to-video", label: "文生视频" },
+];
+const WORKFLOW_MODULE_SLOTS: WorkflowModuleSlot[] = [
+  "video-generation:reference-to-video",
+  "video-generation:first-last-frame",
+  "video-generation:text-to-video",
+  "image-generation",
+];
 const COMFY_TASK_STORAGE_KEY = "infinite-canvas:comfy-tasks";
 const PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY = "infinite-canvas:show-private-projects";
 const VIDEO_RESIZE_CONTROLS = [
@@ -336,6 +644,12 @@ type VideoGenerationMode = typeof VIDEO_GENERATION_MODES[number]["value"];
 type VideoAspectRatio = typeof VIDEO_ASPECT_RATIO_OPTIONS[number]["value"];
 type FrameRole = "first" | "last";
 type SeedMode = "random" | "fixed";
+
+function generatedVideoPreviewWidthForRatio(aspectRatio: number): number {
+  return aspectRatio < 1
+    ? GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH
+    : GENERATED_VIDEO_PREVIEW_WIDTH;
+}
 
 function comfyWebSocketUrl(serverUrl: string, clientId: string): string {
   const url = new URL(serverUrl);
@@ -614,6 +928,8 @@ function persistedComfyTasksFromStorage(): PersistedComfyTask[] {
         aspectRatio: videoAspectRatioFromContent({
           generationAspectRatio: task.snapshot.aspectRatio,
         }),
+        ...h3ModelParametersFromContent(task.snapshot as unknown as JsonObject),
+        loraBypassed: h3LoraBypassedFromContent(task.snapshot as unknown as JsonObject),
       },
     }));
   } catch {
@@ -651,11 +967,19 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
       snapshot.secondaryResolutionMegapixels,
       0.5,
     ),
+    ...h3ModelParametersFromContent(snapshot),
     loraName: h3LoraNameFromContent(snapshot),
     loraStrength: h3LoraStrengthFromContent(snapshot),
+    loraStrengthRecorded: typeof snapshot.generationLoraStrength === "number"
+      || typeof snapshot.loraStrength === "number",
+    loraBypassed: h3LoraBypassedFromContent(snapshot),
     imagePaths: stringArray(snapshot.imagePaths),
     audioPaths: stringArray(snapshot.audioPaths),
     videoPaths: stringArray(snapshot.videoPaths),
+    workflowModuleId: typeof snapshot.workflowModuleId === "string" ? snapshot.workflowModuleId : "",
+    workflowModuleRevision: typeof snapshot.workflowModuleRevision === "string"
+      ? snapshot.workflowModuleRevision
+      : "",
   };
 }
 
@@ -687,6 +1011,56 @@ function videoGenerationModeFromContent(content: JsonObject): VideoGenerationMod
     : "reference-to-video";
 }
 
+function workflowCapabilityForVideoMode(mode: VideoGenerationMode): WorkflowCapability {
+  void mode;
+  return "video-generation";
+}
+
+function workflowSlotForVideoMode(mode: VideoGenerationMode): WorkflowModuleSlot {
+  return `video-generation:${mode}`;
+}
+
+function workflowSlotForModule(module: Pick<WorkflowModuleRecord, "capability" | "variant">): WorkflowModuleSlot {
+  return module.capability === "image-generation"
+    ? "image-generation"
+    : `video-generation:${module.variant as VideoGenerationMode}`;
+}
+
+function workflowVariantLabel(module: Pick<WorkflowModuleRecord, "capability" | "variant">): string {
+  if (module.capability === "image-generation") return "图片生成";
+  return WORKFLOW_VIDEO_VARIANTS.find((variant) => variant.value === module.variant)?.label ?? module.variant;
+}
+
+function workflowModuleDefaultsFromStorage(): Partial<Record<WorkflowModuleSlot, string>> {
+  try {
+    const raw = window.localStorage.getItem(WORKFLOW_MODULE_DEFAULTS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const legacyReferenceDefault = typeof parsed["multi-reference-video"] === "string"
+      ? parsed["multi-reference-video"]
+      : "";
+    return Object.fromEntries(
+      WORKFLOW_MODULE_SLOTS
+        .map((slot) => [
+          slot,
+          typeof parsed[slot] === "string"
+            ? parsed[slot]
+            : slot === "video-generation:reference-to-video"
+              ? legacyReferenceDefault
+              : "",
+        ] as const)
+        .filter(([, moduleId]) => moduleId),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function workflowBindingsFromDraft(value: string): WorkflowBindings | undefined {
+  const trimmed = value.trim();
+  return trimmed ? JSON.parse(trimmed) as WorkflowBindings : undefined;
+}
+
 function videoDurationFromContent(content: JsonObject): number {
   const value = content.generationDuration;
   return typeof value === "number" && Number.isInteger(value) && value >= 2 && value <= 15
@@ -716,6 +1090,85 @@ function validVideoResolution(value: unknown, fallback: number): number {
     : fallback;
 }
 
+function validH3Step(value: unknown, fallback: number, maximum: number): number {
+  return typeof value === "number"
+    && Number.isInteger(value)
+    && value >= 1
+    && value <= maximum
+    ? value
+    : fallback;
+}
+
+function validH3ColorAdjustment(value: unknown, fallback: number): number {
+  return typeof value === "number"
+    && Number.isFinite(value)
+    && value >= 0
+    && value <= 3
+    ? Math.round(value * 100) / 100
+    : fallback;
+}
+
+function h3ModelParametersFromContent(content: JsonObject): H3ModelParameters {
+  const primaryVideoSteps = validH3Step(
+    content.primaryVideoSteps,
+    DEFAULT_H3_MODEL_PARAMETERS.primaryVideoSteps,
+    1000,
+  );
+  const primaryAudioSteps = Math.max(
+    primaryVideoSteps,
+    validH3Step(
+      content.primaryAudioSteps,
+      DEFAULT_H3_MODEL_PARAMETERS.primaryAudioSteps,
+      1000,
+    ),
+  );
+  return {
+    primaryVideoSteps,
+    primaryAudioSteps,
+    secondarySchedulerSteps: validH3Step(
+      content.secondarySchedulerSteps,
+      DEFAULT_H3_MODEL_PARAMETERS.secondarySchedulerSteps,
+      10000,
+    ),
+    primaryBrightness: validH3ColorAdjustment(
+      content.primaryBrightness,
+      DEFAULT_H3_MODEL_PARAMETERS.primaryBrightness,
+    ),
+    primaryContrast: validH3ColorAdjustment(
+      content.primaryContrast,
+      DEFAULT_H3_MODEL_PARAMETERS.primaryContrast,
+    ),
+    primarySaturation: validH3ColorAdjustment(
+      content.primarySaturation,
+      DEFAULT_H3_MODEL_PARAMETERS.primarySaturation,
+    ),
+    secondaryBrightness: validH3ColorAdjustment(
+      content.secondaryBrightness,
+      DEFAULT_H3_MODEL_PARAMETERS.secondaryBrightness,
+    ),
+    secondaryContrast: validH3ColorAdjustment(
+      content.secondaryContrast,
+      DEFAULT_H3_MODEL_PARAMETERS.secondaryContrast,
+    ),
+    secondarySaturation: validH3ColorAdjustment(
+      content.secondarySaturation,
+      DEFAULT_H3_MODEL_PARAMETERS.secondarySaturation,
+    ),
+  };
+}
+
+function h3ModelParametersFromStorage(): H3ModelParameters {
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(H3_MODEL_PARAMETERS_STORAGE_KEY) ?? "null",
+    );
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    return h3ModelParametersFromContent(parsed as JsonObject);
+  } catch {
+    return { ...DEFAULT_H3_MODEL_PARAMETERS };
+  }
+}
+
 function primaryVideoResolutionFromContent(content: JsonObject): number {
   return validVideoResolution(content.generationPrimaryResolution, 0.4);
 }
@@ -732,6 +1185,11 @@ function isMinimaxH3LoraName(value: string): boolean {
   return directory.toLocaleLowerCase() === "minimaxh3" && filenameParts.join("\\").trim().length > 0;
 }
 
+function sameH3LoraName(left: string, right: string): boolean {
+  return left.trim().replace(/\//g, "\\").toLowerCase()
+    === right.trim().replace(/\//g, "\\").toLowerCase();
+}
+
 function h3LoraNameFromContent(content: JsonObject): string {
   const value = content.generationLoraName ?? content.loraName;
   return typeof value === "string" && isMinimaxH3LoraName(value)
@@ -744,6 +1202,10 @@ function h3LoraStrengthFromContent(content: JsonObject): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 2
     ? Math.round(value * 20) / 20
     : 1;
+}
+
+function h3LoraBypassedFromContent(content: JsonObject): boolean {
+  return content.generationLoraBypassed === true || content.loraBypassed === true;
 }
 
 function h3LoraDisplayName(value: string): string {
@@ -947,6 +1409,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     textInputCount,
     textInputs,
     h3LoraOptions,
+    workflowModules,
     onH3LoraPreferenceChange,
     onChange,
     onExecutionCheck,
@@ -960,12 +1423,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   } = data;
   const [copied, setCopied] = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
+  const [errorCopied, setErrorCopied] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(record.title);
   const [titleOverflowing, setTitleOverflowing] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [previewColorMenuOpen, setPreviewColorMenuOpen] = useState(false);
   const [aspectRatioMenuOpen, setAspectRatioMenuOpen] = useState(false);
+  const [workflowModuleMenuOpen, setWorkflowModuleMenuOpen] = useState(false);
+  const [loraMenuOpen, setLoraMenuOpen] = useState(false);
+  const [generatedInfoOpen, setGeneratedInfoOpen] = useState(false);
+  const [generatedVideoControlsVisible, setGeneratedVideoControlsVisible] = useState(false);
   const [connectedTextEditor, setConnectedTextEditor] = useState<{
     id: string;
     title: string;
@@ -984,6 +1452,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const titleDisplayRef = useRef<HTMLSpanElement>(null);
   const previewColorControlRef = useRef<HTMLDivElement>(null);
   const aspectRatioControlRef = useRef<HTMLDivElement>(null);
+  const workflowModuleControlRef = useRef<HTMLDivElement>(null);
+  const loraControlRef = useRef<HTMLDivElement>(null);
+  const generatedInfoRef = useRef<HTMLDivElement>(null);
   const audioPreviewRefs = useRef(new Map<string, HTMLAudioElement>());
   const generatedVideoRef = useRef<HTMLVideoElement | null>(null);
   const videoResizeBaseRef = useRef<{
@@ -1035,15 +1506,25 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       } as CSSProperties
     : undefined;
   const videoGenerationMode = videoGenerationModeFromContent(record.content);
+  const availableWorkflowModules = workflowModules.filter(
+    (module) => !module.deletedAt
+      && module.capability === "video-generation",
+  );
+  const configuredWorkflowModuleId = typeof record.content.workflowModuleId === "string"
+    ? record.content.workflowModuleId
+    : "";
+  const selectedNodeWorkflowModule = availableWorkflowModules.find(
+    (module) => module.id === configuredWorkflowModuleId,
+  ) ?? null;
   const videoDuration = videoDurationFromContent(record.content);
   const videoAspectRatio = videoAspectRatioFromContent(record.content);
   const primaryVideoResolution = primaryVideoResolutionFromContent(record.content);
   const secondaryVideoResolution = secondaryVideoResolutionFromContent(record.content);
   const h3LoraName = h3LoraNameFromContent(record.content);
   const h3LoraStrength = h3LoraStrengthFromContent(record.content);
-  const selectableH3Loras = h3LoraOptions.includes(h3LoraName)
-    ? h3LoraOptions
-    : [h3LoraName, ...h3LoraOptions];
+  const h3LoraBypassed = h3LoraBypassedFromContent(record.content);
+  const availableH3LoraName = h3LoraOptions.find((lora) => sameH3LoraName(lora, h3LoraName));
+  const selectableH3Loras = h3LoraOptions;
   const seedMode = seedModeFromContent(record.content);
   const fixedSeed = fixedSeedFromContent(record.content);
   const validationStatus = record.content.status === "ready"
@@ -1067,6 +1548,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const savedAspectRatio = typeof record.content.aspectRatio === "number"
     ? record.content.aspectRatio
     : null;
+  const videoChromeHeight = isGeneratedVideo
+    ? GENERATED_VIDEO_FOOTER_HEIGHT
+    : isImage
+      ? IMAGE_NODE_CHROME_HEIGHT
+      : MEDIA_NODE_CHROME_HEIGHT;
   const generatedVideoUrl = typeof record.content.videoUrl === "string"
     ? record.content.videoUrl
     : "";
@@ -1078,7 +1564,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const generatedVideoSeed = typeof record.content.seed === "string"
     ? record.content.seed
     : "";
-  const generatedVideoPrompt = generationSnapshotFromContent(record.content)?.prompt ?? "";
+  const generatedVideoSnapshot = isGeneratedVideo
+    ? generationSnapshotFromContent(record.content)
+    : null;
+  const generatedVideoPrompt = generatedVideoSnapshot?.prompt ?? "";
   const isUnplayedGeneratedVideo = isGeneratedVideo
     && Boolean(generatedVideoUrl)
     && record.content.hasBeenPlayed === false;
@@ -1100,6 +1589,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
 
   useEffect(() => {
     if (!isGeneratedVideo || !generatedVideoUrl) return;
+    setGeneratedVideoControlsVisible(false);
     const video = generatedVideoRef.current;
     if (!video) return;
     if (video.getAttribute("src") !== generatedVideoUrl) {
@@ -1111,6 +1601,48 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       if (video.readyState > 0) video.currentTime = 0;
     };
   }, [generatedVideoUrl, isGeneratedVideo]);
+
+  useEffect(() => {
+    if (
+      !isGeneratedVideo
+      || !savedAspectRatio
+      || record.content.previewLayoutVersion === GENERATED_VIDEO_PREVIEW_LAYOUT_VERSION
+    ) return;
+    const usesPreviousDefaultWidth = [
+      LEGACY_GENERATED_VIDEO_PREVIEW_WIDTH,
+      GENERATED_VIDEO_PREVIEW_WIDTH,
+    ].some((width) => Math.abs(record.width - width) < 0.5);
+    const fittedWidth = usesPreviousDefaultWidth
+      ? generatedVideoPreviewWidthForRatio(savedAspectRatio)
+      : record.width;
+    const fittedHeight = Math.min(
+      2400,
+      Math.max(180, fittedWidth / savedAspectRatio + GENERATED_VIDEO_FOOTER_HEIGHT),
+    );
+    onChange(id, {
+      width: fittedWidth,
+      height: fittedHeight,
+      content: {
+        ...record.content,
+        previewLayoutVersion: GENERATED_VIDEO_PREVIEW_LAYOUT_VERSION,
+      },
+    });
+  }, [id, isGeneratedVideo, onChange, record.content, record.width, savedAspectRatio]);
+
+  useEffect(() => {
+    if (!isImage || !savedAspectRatio || record.content.imageLayoutVersion === 1) return;
+    const fittedHeight = Math.min(
+      2400,
+      record.width / savedAspectRatio + IMAGE_NODE_CHROME_HEIGHT,
+    );
+    onChange(id, {
+      height: fittedHeight,
+      content: {
+        ...record.content,
+        imageLayoutVersion: 1,
+      },
+    });
+  }, [id, isImage, onChange, record.content, record.width, savedAspectRatio]);
 
   useEffect(() => {
     if (!isGeneratedVideo) return;
@@ -1184,6 +1716,39 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   }, [aspectRatioMenuOpen]);
 
   useEffect(() => {
+    if (!workflowModuleMenuOpen) return;
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && workflowModuleControlRef.current?.contains(target)) return;
+      setWorkflowModuleMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [workflowModuleMenuOpen]);
+
+  useEffect(() => {
+    if (!generatedInfoOpen) return;
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && generatedInfoRef.current?.contains(target)) return;
+      setGeneratedInfoOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [generatedInfoOpen]);
+
+  useEffect(() => {
+    if (!loraMenuOpen) return;
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && loraControlRef.current?.contains(target)) return;
+      setLoraMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [loraMenuOpen]);
+
+  useEffect(() => {
     if (!expanded && !connectedTextEditor) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -1237,6 +1802,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     window.setTimeout(() => setPromptCopied(false), 1200);
   };
 
+  const copyValidationError = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    if (!validationMessage) return;
+    onCopy(validationMessage);
+    setErrorCopied(true);
+    window.setTimeout(() => setErrorCopied(false), 1200);
+  };
+
   const markGeneratedVideoPlayed = () => {
     if (!isUnplayedGeneratedVideo) return;
     onChange(id, {
@@ -1257,13 +1830,21 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const applyNaturalMediaRatio = (naturalWidth: number, naturalHeight: number) => {
     if (savedAspectRatio || naturalWidth <= 0 || naturalHeight <= 0) return;
     const aspectRatio = naturalWidth / naturalHeight;
-    const fittedHeight = mediaNodeHeightForAspectRatio(record.width, aspectRatio);
+    const fittedHeight = isGeneratedVideo
+      ? Math.min(
+        2400,
+        Math.max(180, record.width / aspectRatio + GENERATED_VIDEO_FOOTER_HEIGHT),
+      )
+      : isImage
+        ? Math.min(2400, record.width / aspectRatio + IMAGE_NODE_CHROME_HEIGHT)
+      : mediaNodeHeightForAspectRatio(record.width, aspectRatio);
     onChange(id, {
       content: {
         ...record.content,
         aspectRatio,
         naturalWidth,
         naturalHeight,
+        ...(isImage ? { imageLayoutVersion: 1 } : {}),
       },
       height: fittedHeight,
     });
@@ -1280,18 +1861,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       height: record.height,
     };
     const aspectRatio = savedAspectRatio
-      ?? base.width / Math.max(1, base.height - MEDIA_NODE_CHROME_HEIGHT);
+      ?? base.width / Math.max(1, base.height - videoChromeHeight);
     let width: number;
     let height: number;
+    const minimumHeight = isImage ? IMAGE_NODE_CHROME_HEIGHT + 1 : 180;
     if (direction[0] !== 0) {
       width = Math.max(260, params.width);
-      height = width / aspectRatio + MEDIA_NODE_CHROME_HEIGHT;
+      height = width / aspectRatio + videoChromeHeight;
     } else {
-      height = Math.max(180, params.height);
-      width = (height - MEDIA_NODE_CHROME_HEIGHT) * aspectRatio;
+      height = Math.max(minimumHeight, params.height);
+      width = (height - videoChromeHeight) * aspectRatio;
       if (width < 260) {
         width = 260;
-        height = width / aspectRatio + MEDIA_NODE_CHROME_HEIGHT;
+        height = width / aspectRatio + videoChromeHeight;
       }
     }
     const horizontalDirection = direction[0] ?? 0;
@@ -1351,7 +1933,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     let height = base.height;
     if (horizontalDirection !== 0 && verticalDirection !== 0) {
       const aspectRatio = savedAspectRatio
-        ?? base.width / Math.max(1, base.height - MEDIA_NODE_CHROME_HEIGHT);
+        ?? base.width / Math.max(1, base.height - videoChromeHeight);
       const widthDelta = (
         horizontalDirection * deltaX
         + verticalDirection * deltaY / aspectRatio
@@ -1510,7 +2092,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       <NodeResizer
         minWidth={260}
         minHeight={isAudioAsset ? AUDIO_NODE_MIN_HEIGHT : 180}
-        isVisible={selected && !isVideoAsset && !isGeneratedVideo}
+        isVisible={selected && !isImage && !isVideoAsset && !isGeneratedVideo}
         lineClassName="node-resize-line"
         handleClassName="node-resize-handle"
         onResizeEnd={(_, params) => {
@@ -1523,7 +2105,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           });
         }}
       />
-      {selected && (isVideoAsset || isGeneratedVideo) && VIDEO_RESIZE_CONTROLS.map((control) => (
+      {selected && (isImage || isVideoAsset || isGeneratedVideo) && VIDEO_RESIZE_CONTROLS.map((control) => (
         <div
           key={control.position}
           className={`nodrag video-ratio-resizer is-${control.position}`}
@@ -1538,6 +2120,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       {(isVideoGeneration || isGeneratedVideo) && (
         <Handle type="target" position={Position.Left} className="node-handle target-handle" />
       )}
+      {!isGeneratedVideo && !isImage && !isAudioAsset && (
       <header className="node-header">
         <span className="node-kind-icon">
           {isImage
@@ -1649,32 +2232,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             )}
           </div>
         )}
-        {isGeneratedVideo && generatedVideoUrl && (
-          <button
-            className={`nodrag node-action generated-video-secondary-action ${executionRunning ? "is-cancel" : ""}`}
-            disabled={executionCancelling}
-            onClick={() => {
-              if (executionRunning) void onCancelExecution(id);
-              else void onSecondarySample(id);
-            }}
-            title={executionRunning ? "取消这次二采" : "单独对当前预览视频进行二采"}
-            aria-label={executionRunning ? "取消二采" : "二采当前视频"}
-          >
-            {executionRunning
-              ? <Square size={11} fill="currentColor" />
-              : <Sparkles size={12} />}
-          </button>
-        )}
-        {isGeneratedVideo && generatedVideoUrl && (
-          <button
-            className="nodrag node-action"
-            onClick={() => void onRevealGeneratedVideo(id)}
-            title="在 Windows 资源管理器中定位视频"
-            aria-label="在 Windows 资源管理器中定位视频"
-          >
-            <FolderOpen size={13} />
-          </button>
-        )}
         {(isText || isNote) && (
           <button className="nodrag node-action" onClick={copyText} title="复制内容">
             {copied ? <Check size={14} /> : <Copy size={14} />}
@@ -1692,6 +2249,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           {isGenerationPlaceholder ? <X size={14} /> : <Trash2 size={14} />}
         </button>
       </header>
+      )}
       {(isText || isNote) && (
         <div className="text-editor-shell">
           <textarea
@@ -1706,7 +2264,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         </div>
       )}
       {(isImage || isAudioAsset || isVideoAsset || isGeneratedVideo) && (
-        <div className="nodrag media-node-body">
+        <div className={isVideoAsset ? "nodrag media-node-body" : "media-node-body"}>
           {assetPath && isImage ? (
             <img
               src={convertFileSrc(assetPath)}
@@ -1720,7 +2278,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           ) : assetPath && isAudioAsset ? (
             <div className="audio-node-player">
               <Music size={28} />
-              <audio src={convertFileSrc(assetPath)} controls preload="metadata" />
+              <audio className="nodrag nowheel" src={convertFileSrc(assetPath)} controls preload="metadata" />
             </div>
           ) : assetPath && isVideoAsset ? (
             <video
@@ -1742,8 +2300,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <video
                 ref={generatedVideoRef}
                 src={generatedVideoUrl}
-                controls
+                controls={generatedVideoControlsVisible}
                 preload="metadata"
+                onMouseEnter={() => setGeneratedVideoControlsVisible(true)}
+                onMouseLeave={() => setGeneratedVideoControlsVisible(false)}
                 onPlay={markGeneratedVideoPlayed}
                 onLoadedMetadata={(event) => applyNaturalMediaRatio(
                   event.currentTarget.videoWidth,
@@ -1753,6 +2313,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               {validationStatus && validationMessage && (
                 <div className={`generated-video-execution is-${validationStatus}`}>
                   <span title={validationMessage}>{validationMessage}</span>
+                  {validationStatus === "invalid" && (
+                    <button
+                      type="button"
+                      className="nodrag video-error-copy-button"
+                      onClick={copyValidationError}
+                      title={errorCopied ? "已复制完整报错信息" : "复制完整报错信息"}
+                      aria-label={errorCopied ? "已复制完整报错信息" : "复制完整报错信息"}
+                    >
+                      {errorCopied ? <Check size={12} /> : <Copy size={12} />}
+                    </button>
+                  )}
                   {executionRunning && (
                     <div
                       className={`video-execution-progress ${executionProgress === null ? "is-indeterminate" : ""}`}
@@ -1797,27 +2368,275 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           )}
         </div>
       )}
+      {isGeneratedVideo && (
+        <footer className="generated-video-footer">
+          <div className="generated-video-footer-status">
+            <span className={`source-dot ${isSecondaryPreview ? "is-secondary" : ""}`} />
+            <span>
+              {isGenerationPlaceholder
+                ? placeholderActive ? "处理中" : "未完成"
+                : formattedGenerationElapsed(record.content)}
+            </span>
+          </div>
+          <span className="generated-video-footer-spacer" />
+          <div className="generated-video-actions" aria-label="视频预览操作">
+            {generatedVideoUrl && (
+              <button
+                type="button"
+                className={`nodrag node-action generated-video-secondary-action ${executionRunning ? "is-cancel" : ""}`}
+                disabled={executionCancelling}
+                onClick={() => {
+                  if (executionRunning) void onCancelExecution(id);
+                  else void onSecondarySample(id);
+                }}
+                title={executionRunning ? "取消这次二采" : "单独对当前预览视频进行二采"}
+                aria-label={executionRunning ? "取消二采" : "二采当前视频"}
+              >
+                {executionRunning
+                  ? <Square size={11} fill="currentColor" />
+                  : <Sparkles size={12} />}
+              </button>
+            )}
+            {supportsPreviewColor && (
+              <div
+                ref={previewColorControlRef}
+                className="nodrag node-preview-color-control"
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  className="node-preview-color-picker"
+                  onClick={() => {
+                    setGeneratedInfoOpen(false);
+                    setPreviewColorMenuOpen((open) => !open);
+                  }}
+                  title="选择视频预览颜色"
+                  aria-label="选择视频预览颜色"
+                  aria-expanded={previewColorMenuOpen}
+                >
+                  <Palette size={13} />
+                </button>
+                {previewColorMenuOpen && (
+                  <div className="node-preview-color-presets" role="menu" aria-label="视频预览颜色预设">
+                    {VIDEO_PREVIEW_COLOR_PRESETS.map((preset) => (
+                      <button
+                        key={preset.value}
+                        type="button"
+                        role="menuitem"
+                        className={previewDisplayColor === preset.value ? "is-active" : ""}
+                        style={{ "--preview-preset-color": preset.value } as CSSProperties}
+                        onClick={() => {
+                          onChange(id, {
+                            content: {
+                              ...record.content,
+                              previewThemeColor: preset.value,
+                            },
+                          });
+                          setPreviewColorMenuOpen(false);
+                        }}
+                        title={preset.label}
+                        aria-label={preset.label}
+                      >
+                        <span
+                          className={preset.value === VIDEO_PREVIEW_DEFAULT_COLOR ? "is-default" : ""}
+                          aria-hidden="true"
+                        />
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          {generatedVideoUrl && (
+            <button
+              type="button"
+              className="nodrag node-action"
+              onClick={() => void onRevealGeneratedVideo(id)}
+              title="在 Windows 资源管理器中定位视频"
+              aria-label="在 Windows 资源管理器中定位视频"
+            >
+              <FolderOpen size={13} />
+            </button>
+          )}
+          {generatedVideoSnapshot && (
+            <div ref={generatedInfoRef} className="nodrag nowheel generated-video-info-control">
+              <button
+                type="button"
+                className={`node-action generated-video-info-button ${generatedInfoOpen ? "is-active" : ""}`}
+                onClick={() => {
+                  setPreviewColorMenuOpen(false);
+                  setGeneratedInfoOpen((open) => !open);
+                }}
+                title="查看生成信息"
+                aria-label="查看生成信息"
+                aria-expanded={generatedInfoOpen}
+              >
+                <Info size={13} />
+              </button>
+              {generatedInfoOpen && (
+                <aside className="generated-video-info-panel" aria-label="视频生成信息">
+                  <header>
+                    <div>
+                      <strong>生成信息</strong>
+                      <span>{isSecondaryPreview ? "二采预览" : "一采预览"}</span>
+                    </div>
+                  </header>
+                  <section className="generated-video-info-summary">
+                    <div>
+                      <span>Seed</span>
+                      <strong title={generatedVideoSeed || "未记录"}>{generatedVideoSeed || "未记录"}</strong>
+                      <button
+                        type="button"
+                        disabled={!generatedVideoSeed}
+                        onClick={copyGeneratedSeed}
+                        title={copied ? "Seed 已复制" : "复制 Seed"}
+                        aria-label={copied ? "Seed 已复制" : "复制 Seed"}
+                      >
+                        {copied ? <Check size={12} /> : <Copy size={12} />}
+                      </button>
+                    </div>
+                    <div>
+                      <span>基础</span>
+                      <strong>{generatedVideoSnapshot.durationSeconds} 秒 · {generatedVideoSnapshot.aspectRatio}</strong>
+                    </div>
+                    <div>
+                      <span>耗时</span>
+                      <strong>{formattedGenerationElapsed(record.content)}</strong>
+                    </div>
+                    <div>
+                      <span>LoRA</span>
+                      <strong title={generatedVideoSnapshot.loraName}>
+                        {h3LoraDisplayName(generatedVideoSnapshot.loraName)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>强度</span>
+                      <strong>
+                        {generatedVideoSnapshot.loraBypassed
+                          ? "未应用（Bypass）"
+                          : generatedVideoSnapshot.loraStrengthRecorded === false
+                            ? "未记录"
+                            : `×${generatedVideoSnapshot.loraStrength.toFixed(2)}`}
+                      </strong>
+                    </div>
+                  </section>
+                  <section className="generated-video-stage-info">
+                    <h4>一采</h4>
+                    <dl>
+                      <dt>分辨率</dt><dd>{generatedVideoSnapshot.primaryResolutionMegapixels.toFixed(1)} MP</dd>
+                      <dt>视频 / 音频 Steps</dt><dd>{generatedVideoSnapshot.primaryVideoSteps} / {generatedVideoSnapshot.primaryAudioSteps}</dd>
+                      <dt>亮度 / 对比度 / 饱和度</dt>
+                      <dd>{generatedVideoSnapshot.primaryBrightness.toFixed(2)} / {generatedVideoSnapshot.primaryContrast.toFixed(2)} / {generatedVideoSnapshot.primarySaturation.toFixed(2)}</dd>
+                    </dl>
+                  </section>
+                  {isSecondaryPreview && (
+                    <section className="generated-video-stage-info">
+                      <h4>二采</h4>
+                      <dl>
+                        <dt>分辨率</dt><dd>{generatedVideoSnapshot.secondaryResolutionMegapixels.toFixed(1)} MP</dd>
+                        <dt>调度 Steps</dt><dd>{generatedVideoSnapshot.secondarySchedulerSteps}</dd>
+                        <dt>亮度 / 对比度 / 饱和度</dt>
+                        <dd>{generatedVideoSnapshot.secondaryBrightness.toFixed(2)} / {generatedVideoSnapshot.secondaryContrast.toFixed(2)} / {generatedVideoSnapshot.secondarySaturation.toFixed(2)}</dd>
+                      </dl>
+                    </section>
+                  )}
+                  <section className="generated-video-prompt-info">
+                    <div>
+                      <h4>提示词</h4>
+                      <button
+                        type="button"
+                        disabled={!generatedVideoPrompt}
+                        onClick={copyGeneratedPrompt}
+                        title={promptCopied ? "提示词已复制" : "复制提示词"}
+                        aria-label={promptCopied ? "提示词已复制" : "复制提示词"}
+                      >
+                        {promptCopied ? <Check size={12} /> : <Copy size={12} />}
+                        {promptCopied ? "已复制" : "复制"}
+                      </button>
+                    </div>
+                    <p title={generatedVideoPrompt}>{generatedVideoPrompt || "未记录提示词"}</p>
+                  </section>
+                </aside>
+              )}
+            </div>
+          )}
+          <button
+            type="button"
+            className="nodrag node-action danger"
+            onClick={() => {
+              stopGeneratedVideoPlayback();
+              onDelete(id);
+            }}
+            title={isGenerationPlaceholder ? "取消任务并删除占位节点" : "删除节点"}
+            aria-label={isGenerationPlaceholder ? "取消任务并删除占位节点" : "删除节点"}
+          >
+            {isGenerationPlaceholder ? <X size={14} /> : <Trash2 size={14} />}
+          </button>
+          </div>
+        </footer>
+      )}
       {isVideoGeneration && (
         <div className={`nodrag video-node-body ${mediaInputs.length ? "has-media" : ""}`}>
-          <div className="video-mode-selector" aria-label="视频生成模式">
-            {VIDEO_GENERATION_MODES.map((mode) => (
+          <div className="video-workflow-module-select">
+            <span>生成方案</span>
+            <div ref={workflowModuleControlRef} className="video-lora-select video-workflow-module-dropdown">
               <button
-                key={mode.value}
                 type="button"
-                className={videoGenerationMode === mode.value ? "is-active" : ""}
-                aria-pressed={videoGenerationMode === mode.value}
-                onClick={() => onChange(id, {
-                  content: {
-                    ...record.content,
-                    generationMode: mode.value,
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                })}
+                className="nodrag nowheel video-lora-select-toggle"
+                disabled={!availableWorkflowModules.length}
+                aria-haspopup="menu"
+                aria-expanded={workflowModuleMenuOpen}
+                aria-label="当前节点的工作流方案"
+                title={selectedNodeWorkflowModule
+                  ? `${selectedNodeWorkflowModule.name} · ${selectedNodeWorkflowModule.revision}`
+                  : availableWorkflowModules.length ? "请选择方案" : "未配置可用方案"}
+                onClick={() => {
+                  setAspectRatioMenuOpen(false);
+                  setLoraMenuOpen(false);
+                  setWorkflowModuleMenuOpen((open) => !open);
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
               >
-                {mode.label}
+                <span>
+                  {selectedNodeWorkflowModule
+                    ? `${selectedNodeWorkflowModule.name} · ${selectedNodeWorkflowModule.revision}`
+                    : availableWorkflowModules.length ? "请选择方案" : "未配置可用方案"}
+                </span>
+                <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
               </button>
-            ))}
+              {workflowModuleMenuOpen && (
+                <div className="video-lora-select-menu video-workflow-module-menu" role="menu" aria-label="视频生成方案">
+                  {availableWorkflowModules.map((module) => (
+                    <button
+                      key={module.id}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={selectedNodeWorkflowModule?.id === module.id}
+                      className={selectedNodeWorkflowModule?.id === module.id ? "is-active" : ""}
+                      title={`${module.name} · ${module.revision}`}
+                      onClick={() => {
+                        onChange(id, {
+                          content: {
+                            ...record.content,
+                            generationMode: module.variant as VideoGenerationMode,
+                            workflowModuleId: module.id,
+                            workflowModuleRevision: module.revision,
+                            generationLoraName: module.defaults.loraName,
+                            generationLoraStrength: module.defaults.loraStrength,
+                            status: "idle",
+                            validationMessage: "",
+                          },
+                        });
+                        setWorkflowModuleMenuOpen(false);
+                      }}
+                    >
+                      {module.name} · {module.revision}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
           <div className="video-duration-control">
             <label className="video-duration-inline">
@@ -1848,7 +2667,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 className="nodrag nowheel video-aspect-ratio-toggle"
                 aria-haspopup="menu"
                 aria-expanded={aspectRatioMenuOpen}
-                onClick={() => setAspectRatioMenuOpen((open) => !open)}
+                onClick={() => {
+                  setLoraMenuOpen(false);
+                  setAspectRatioMenuOpen((open) => !open);
+                }}
                 onPointerDown={(event) => event.stopPropagation()}
               >
                 <span className="video-aspect-ratio-label">画面比例</span>
@@ -1930,34 +2752,59 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <output>{secondaryVideoResolution.toFixed(1)} MP</output>
             </label>
           </div>
-          <div className="video-lora-control">
+          <div className={`video-lora-control ${h3LoraBypassed ? "is-bypassed" : ""}`}>
             <span>H3 LoRA</span>
-            <select
-              className="nodrag nowheel"
-              value={h3LoraName}
-              title={h3LoraName}
-              aria-label="MiniMax H3 LoRA"
-              onChange={(event) => {
-                const loraName = event.currentTarget.value;
-                onH3LoraPreferenceChange({ loraName, loraStrength: h3LoraStrength });
-                onChange(id, {
-                  content: {
-                    ...record.content,
-                    generationLoraName: loraName,
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                });
-              }}
-              onPointerDown={(event) => event.stopPropagation()}
-            >
-              {selectableH3Loras.map((lora) => (
-                <option key={lora} value={lora}>{h3LoraDisplayName(lora)}</option>
-              ))}
-            </select>
+            <div ref={loraControlRef} className="video-lora-select">
+              <button
+                type="button"
+                className="nodrag nowheel video-lora-select-toggle"
+                disabled={h3LoraBypassed || !selectableH3Loras.length}
+                aria-haspopup="menu"
+                aria-expanded={loraMenuOpen}
+                title={availableH3LoraName ?? "MinimaxH3 目录中没有可用 LoRA"}
+                onClick={() => {
+                  setAspectRatioMenuOpen(false);
+                  setWorkflowModuleMenuOpen(false);
+                  setLoraMenuOpen((open) => !open);
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <span>{availableH3LoraName ? h3LoraDisplayName(availableH3LoraName) : "未找到 LoRA"}</span>
+                <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
+              </button>
+              {loraMenuOpen && !h3LoraBypassed && (
+                <div className="video-lora-select-menu" role="menu" aria-label="MiniMax H3 LoRA">
+                  {selectableH3Loras.map((lora) => (
+                    <button
+                      key={lora}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={sameH3LoraName(h3LoraName, lora)}
+                      className={sameH3LoraName(h3LoraName, lora) ? "is-active" : ""}
+                      title={lora}
+                      onClick={() => {
+                        onH3LoraPreferenceChange({ loraName: lora, loraStrength: h3LoraStrength });
+                        onChange(id, {
+                          content: {
+                            ...record.content,
+                            generationLoraName: lora,
+                            status: "idle",
+                            validationMessage: "",
+                          },
+                        });
+                        setLoraMenuOpen(false);
+                      }}
+                    >
+                      {h3LoraDisplayName(lora)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <input
               className="video-parameter-range"
               type="range"
+              disabled={h3LoraBypassed}
               min="0"
               max="2"
               step="0.05"
@@ -1979,6 +2826,26 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               onPointerDown={(event) => event.stopPropagation()}
             />
             <output title="LoRA 权重">×{h3LoraStrength.toFixed(2)}</output>
+            <button
+              type="button"
+              className="video-lora-bypass-button"
+              aria-pressed={h3LoraBypassed}
+              title={h3LoraBypassed ? "LoRA 已旁路，点击恢复" : "旁路 LoRA"}
+              onClick={() => {
+                setLoraMenuOpen(false);
+                onChange(id, {
+                  content: {
+                    ...record.content,
+                    generationLoraBypassed: !h3LoraBypassed,
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                });
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              Bypass
+            </button>
           </div>
           <div className="video-seed-control">
             <span>生成种子</span>
@@ -2398,6 +3265,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   title={validationMessage}
                 >
                   <span>{validationMessage}</span>
+                  {validationStatus === "invalid" && (
+                    <button
+                      type="button"
+                      className="nodrag video-error-copy-button"
+                      onClick={copyValidationError}
+                      title={errorCopied ? "已复制完整报错信息" : "复制完整报错信息"}
+                      aria-label={errorCopied ? "已复制完整报错信息" : "复制完整报错信息"}
+                    >
+                      {errorCopied ? <Check size={12} /> : <Copy size={12} />}
+                    </button>
+                  )}
                   {executionRunning && (
                     <div
                       className={`video-execution-progress ${executionProgress === null ? "is-indeterminate" : ""}`}
@@ -2454,60 +3332,33 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           </div>
         </div>
       )}
-      <footer className="node-footer">
-        <span className={`source-dot ${record.source === "manual" ? "manual" : "external"}`} />
-        <span>
-          {isGeneratedVideo
-            ? isGenerationPlaceholder
-              ? placeholderActive ? "正在生成" : "生成未完成"
-              : formattedGenerationElapsed(record.content)
-            : record.source === "manual"
-              ? "手动创建"
-              : record.source}
-        </span>
-        {isGeneratedVideo && !isGenerationPlaceholder && generatedVideoPrompt && (
-          <button
-            type="button"
-            className="nodrag generated-video-prompt-copy"
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              copyGeneratedPrompt();
-            }}
-            title={promptCopied ? "提示词已复制" : "复制生成提示词"}
-            aria-label={promptCopied ? "提示词已复制" : "复制生成提示词"}
-          >
-            {promptCopied ? <Check size={12} /> : <PenLine size={12} />}
-          </button>
-        )}
-        <span className="node-footer-spacer" />
-        {isGeneratedVideo && generatedVideoSeed ? (
-          <div className="generated-video-seed">
-            <span title={`Seed ${generatedVideoSeed}`}>Seed {generatedVideoSeed}</span>
-            <button
-              type="button"
-              className="nodrag generated-video-seed-copy"
-              onClick={copyGeneratedSeed}
-              title={copied ? "Seed 已复制" : "复制 Seed"}
-              aria-label={copied ? "Seed 已复制" : "复制 Seed"}
-            >
-              {copied ? <Check size={12} /> : <Copy size={12} />}
-            </button>
-          </div>
-        ) : (
-          <span>
+      {!isGeneratedVideo && (
+        <footer className="node-footer">
+          <span className={`source-dot ${record.source === "manual" ? "manual" : "external"}`} />
+          <span>{record.source === "manual" ? "手动创建" : record.source}</span>
+          <span className="node-footer-spacer" />
+          <span className="node-footer-detail">
             {(isText || isNote)
               ? `${textDraft.length.toLocaleString()} 字符`
-              : (isImage || isAudioAsset || isVideoAsset || isGeneratedVideo)
-                ? isGenerationPlaceholder
-                  ? isSecondaryPreview ? "二采预览占位" : "视频预览占位"
-                  : originalName
+              : (isImage || isAudioAsset || isVideoAsset)
+                ? originalName
                 : mediaInputs.length
                   ? `${mediaInputs.length} 个媒体输入`
                   : "尚未生成"}
           </span>
-        )}
-      </footer>
+          {(isImage || isAudioAsset) && (
+            <button
+              type="button"
+              className="nodrag node-action danger media-footer-delete"
+              onClick={() => onDelete(id)}
+              title="删除节点"
+              aria-label="删除节点"
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
+        </footer>
+      )}
       {(isText || isImage || isAudioAsset || isVideoAsset || isVideoGeneration || isGeneratedVideo) && (
         <Handle type="source" position={Position.Right} className="node-handle source-handle" />
       )}
@@ -2735,7 +3586,7 @@ function CanvasWorkspace() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [canvasBackground, setCanvasBackground] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [activeSettingsSection, setActiveSettingsSection] = useState<"general" | "privacy" | "security">("general");
+  const [activeSettingsSection, setActiveSettingsSection] = useState<"general" | "workflows" | "model" | "privacy" | "security">("general");
   const [showPrivateProjects, setShowPrivateProjects] = useState(() =>
     window.localStorage.getItem(PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY) !== "false",
   );
@@ -2786,6 +3637,7 @@ function CanvasWorkspace() {
   const [search, setSearch] = useState("");
   const [relationAnchorId, setRelationAnchorId] = useState<string | null>(null);
   const [spacePanActive, setSpacePanActive] = useState(false);
+  const [middlePanActive, setMiddlePanActive] = useState(false);
   const [notice, setNotice] = useState("正在打开画布…");
   const [comfyQueueCounts, setComfyQueueCounts] = useState<ComfyQueueSummary>({
     runningCount: 0,
@@ -2793,7 +3645,31 @@ function CanvasWorkspace() {
     totalCount: 0,
   });
   const [h3LoraOptions, setH3LoraOptions] = useState<string[]>([DEFAULT_H3_LORA_NAME]);
+  const [h3LoraCatalogLoaded, setH3LoraCatalogLoaded] = useState(false);
   const [h3LoraPreference, setH3LoraPreference] = useState(h3LoraPreferenceFromStorage);
+  const [h3ModelParameters, setH3ModelParameters] = useState(h3ModelParametersFromStorage);
+  const [h3ModelParametersDraft, setH3ModelParametersDraft] = useState(h3ModelParameters);
+  const [workflowModules, setWorkflowModules] = useState<WorkflowModuleRecord[]>([]);
+  const [workflowModuleDefaults, setWorkflowModuleDefaults] = useState(workflowModuleDefaultsFromStorage);
+  const [workflowModulesReady, setWorkflowModulesReady] = useState(false);
+  const [workflowModulesBusy, setWorkflowModulesBusy] = useState(false);
+  const [showDeletedWorkflowModules, setShowDeletedWorkflowModules] = useState(false);
+  const [selectedWorkflowModuleId, setSelectedWorkflowModuleId] = useState("");
+  const [workflowModuleNameDraft, setWorkflowModuleNameDraft] = useState("MiniMax H3 全能参考");
+  const [workflowModuleRevisionDraft, setWorkflowModuleRevisionDraft] = useState("当前");
+  const [workflowModuleCapabilityDraft, setWorkflowModuleCapabilityDraft] = useState<WorkflowCapability>("video-generation");
+  const [workflowModuleVariantDraft, setWorkflowModuleVariantDraft] = useState<WorkflowVariant>("reference-to-video");
+  const [workflowModulePathDraft, setWorkflowModulePathDraft] = useState(h3WorkflowPath);
+  const [workflowModuleValidation, setWorkflowModuleValidation] = useState<WorkflowModuleValidation | null>(null);
+  const [workflowModuleReplacementId, setWorkflowModuleReplacementId] = useState("");
+  const [workflowModuleBindingsDraft, setWorkflowModuleBindingsDraft] = useState("");
+  const [workflowModuleDeletionMode, setWorkflowModuleDeletionMode] = useState<"trash" | "purge" | null>(null);
+  const [workflowModuleRestoreRequest, setWorkflowModuleRestoreRequest] = useState<{
+    moduleId: string;
+    moduleName: string;
+    bundlePath: string;
+  } | null>(null);
+  const workflowModulesInitializationRef = useRef<Promise<WorkflowModuleRecord[]> | null>(null);
   const [activeComfyTaskCounts, setActiveComfyTaskCounts] = useState<Record<string, number>>({});
   const [copiedApi, setCopiedApi] = useState(false);
   const [dropActive, setDropActive] = useState(false);
@@ -2908,6 +3784,29 @@ function CanvasWorkspace() {
   }, []);
 
   useEffect(() => {
+    const stopMiddlePan = () => setMiddlePanActive(false);
+    const preventMiddleAutoScroll = (event: MouseEvent) => {
+      if (event.button !== 1) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest(".react-flow")) {
+        event.preventDefault();
+      }
+    };
+    document.addEventListener("mousedown", preventMiddleAutoScroll, true);
+    document.addEventListener("auxclick", preventMiddleAutoScroll, true);
+    window.addEventListener("pointerup", stopMiddlePan);
+    window.addEventListener("pointercancel", stopMiddlePan);
+    window.addEventListener("blur", stopMiddlePan);
+    return () => {
+      document.removeEventListener("mousedown", preventMiddleAutoScroll, true);
+      document.removeEventListener("auxclick", preventMiddleAutoScroll, true);
+      window.removeEventListener("pointerup", stopMiddlePan);
+      window.removeEventListener("pointercancel", stopMiddlePan);
+      window.removeEventListener("blur", stopMiddlePan);
+    };
+  }, []);
+
+  useEffect(() => {
     window.localStorage.setItem("infinite-canvas:project-columns", String(projectColumns));
   }, [projectColumns]);
 
@@ -2983,19 +3882,44 @@ function CanvasWorkspace() {
     };
   }, []);
 
+  const defaultH3WorkflowModuleId = workflowModuleDefaults["video-generation:reference-to-video"] ?? "";
+
   useEffect(() => {
+    if (!activeProjectId || !workflowModulesReady) return;
     let disposed = false;
-    void invoke<string[]>("get_comfyui_h3_loras", { serverUrl: COMFYUI_SERVER_URL })
-      .then((loras) => {
-        if (!disposed && loras.length) setH3LoraOptions(loras);
-      })
-      .catch(() => {
-        // Keep the workflow's default H3 LoRA available while ComfyUI is offline.
-      });
+    const refresh = async () => {
+      setH3LoraCatalogLoaded(false);
+      try {
+        const loras = await invoke<string[]>("get_comfyui_h3_loras", {
+          serverUrl: COMFYUI_SERVER_URL,
+          workflowModuleId: defaultH3WorkflowModuleId || undefined,
+        });
+        if (!disposed) {
+          setH3LoraOptions((current) => (
+            current.length === loras.length
+            && current.every((item, index) => sameH3LoraName(item, loras[index]))
+              ? current
+              : loras
+          ));
+          setH3LoraCatalogLoaded(true);
+          if (loras.length) {
+            setH3LoraPreference((current) => {
+              if (loras.some((lora) => sameH3LoraName(lora, current.loraName))) return current;
+              const fallback = loras.find((lora) => sameH3LoraName(lora, DEFAULT_H3_LORA_NAME))
+                ?? loras[0];
+              return { ...current, loraName: fallback };
+            });
+          }
+        }
+      } catch {
+        // Preserve the last successful catalog while ComfyUI is temporarily offline.
+      }
+    };
+    void refresh();
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [activeProjectId, defaultH3WorkflowModuleId, workflowModulesReady]);
 
   const toggleTheme = () => setTheme((current) => current === "dark" ? "light" : "dark");
 
@@ -3004,6 +3928,464 @@ function CanvasWorkspace() {
     console.error(error);
     setNotice(`操作失败：${message}`);
   }, []);
+
+  const refreshWorkflowModules = useCallback(async (includeDeleted = true) => {
+    const modules = await invoke<WorkflowModuleRecord[]>("list_workflow_modules", {
+      includeDeleted,
+    });
+    setWorkflowModules(modules);
+    return modules;
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      WORKFLOW_MODULE_DEFAULTS_STORAGE_KEY,
+      JSON.stringify(workflowModuleDefaults),
+    );
+  }, [workflowModuleDefaults]);
+
+  useEffect(() => {
+    let disposed = false;
+    const loadOrCreate = async () => {
+      let modules = await invoke<WorkflowModuleRecord[]>("list_workflow_modules", {
+        includeDeleted: true,
+      });
+      if (!modules.length) {
+        const created = await invoke<WorkflowModuleRecord>("save_workflow_module", {
+          input: {
+            name: "MiniMax H3 全能参考",
+            capability: "video-generation",
+            variant: "reference-to-video",
+            revision: "当前",
+            adapterKind: WORKFLOW_PACKAGE_ENGINE,
+            sourceWorkflowPath: h3WorkflowPathRef.current,
+            defaults: {
+              ...h3ModelParameters,
+              loraName: h3LoraPreference.loraName,
+              loraStrength: h3LoraPreference.loraStrength,
+            },
+          },
+        });
+        modules = [created];
+      }
+      return modules;
+    };
+    const initialize = async () => {
+      try {
+        if (!workflowModulesInitializationRef.current) {
+          workflowModulesInitializationRef.current = loadOrCreate().catch((error) => {
+            workflowModulesInitializationRef.current = null;
+            throw error;
+          });
+        }
+        const modules = await workflowModulesInitializationRef.current;
+        if (disposed) return;
+        setWorkflowModules(modules);
+        const activeModules = modules.filter((module) => !module.deletedAt);
+        setWorkflowModuleDefaults((current) => {
+          const next = { ...current };
+          for (const slot of WORKFLOW_MODULE_SLOTS) {
+            const configured = next[slot];
+            if (configured && activeModules.some((module) => module.id === configured && workflowSlotForModule(module) === slot)) {
+              continue;
+            }
+            const fallback = activeModules.find((module) => workflowSlotForModule(module) === slot);
+            if (fallback) next[slot] = fallback.id;
+            else delete next[slot];
+          }
+          return next;
+        });
+        const selected = activeModules[0] ?? modules[0];
+        if (selected) setSelectedWorkflowModuleId(selected.id);
+      } catch (error) {
+        if (!disposed) reportError(error);
+      } finally {
+        if (!disposed) setWorkflowModulesReady(true);
+      }
+    };
+    void initialize();
+    return () => {
+      disposed = true;
+    };
+  }, [reportError]);
+
+  const selectedWorkflowModule = workflowModules.find(
+    (module) => module.id === selectedWorkflowModuleId,
+  ) ?? null;
+
+  useEffect(() => {
+    if (!selectedWorkflowModule) return;
+    setWorkflowModuleNameDraft(selectedWorkflowModule.name);
+    setWorkflowModuleRevisionDraft(selectedWorkflowModule.revision);
+    setWorkflowModuleCapabilityDraft(selectedWorkflowModule.capability);
+    setWorkflowModuleVariantDraft(selectedWorkflowModule.variant);
+    setWorkflowModulePathDraft(selectedWorkflowModule.workflowPath);
+    setWorkflowModuleValidation(null);
+    setWorkflowModuleReplacementId("");
+    setWorkflowModuleBindingsDraft(JSON.stringify(selectedWorkflowModule.bindings, null, 2));
+  }, [selectedWorkflowModule]);
+
+  const workflowModuleUsageCount = useCallback((moduleId: string) => {
+    const records = new Map<string, NodeRecord>();
+    for (const project of projects) {
+      for (const record of project.nodes) records.set(record.id, record);
+    }
+    for (const node of nodesSnapshot.current) records.set(node.id, node.data.record);
+    let count = 0;
+    for (const record of records.values()) {
+      const explicitModuleId = typeof record.content.workflowModuleId === "string"
+        ? record.content.workflowModuleId
+        : "";
+      const implicitModuleId = record.kind === "video-generation"
+        ? workflowModuleDefaults[workflowSlotForVideoMode(videoGenerationModeFromContent(record.content))] ?? ""
+        : "";
+      if ((explicitModuleId || implicitModuleId) === moduleId) count += 1;
+      const snapshot = record.content.generationSnapshot;
+      if (
+        snapshot
+        && typeof snapshot === "object"
+        && !Array.isArray(snapshot)
+      ) {
+        const snapshotModuleId = typeof (snapshot as JsonObject).workflowModuleId === "string"
+          ? (snapshot as JsonObject).workflowModuleId as string
+          : workflowModuleDefaults["video-generation:reference-to-video"] ?? "";
+        if (snapshotModuleId === moduleId) count += 1;
+      }
+    }
+    return count;
+  }, [projects, workflowModuleDefaults]);
+
+  const validateWorkflowModuleDraft = useCallback(async () => {
+    setWorkflowModulesBusy(true);
+    try {
+      const validation = await invoke<WorkflowModuleValidation>("validate_workflow_module_source", {
+        sourceWorkflowPath: workflowModulePathDraft,
+        adapterKind: selectedWorkflowModule?.adapterKind ?? WORKFLOW_PACKAGE_ENGINE,
+        bindings: workflowBindingsFromDraft(workflowModuleBindingsDraft),
+      });
+      setWorkflowModuleValidation(validation);
+      setNotice(validation.compatible ? "工作流与当前适配规则兼容" : "工作流兼容性检查未通过");
+    } catch (error) {
+      setWorkflowModuleValidation(null);
+      reportError(error);
+    } finally {
+      setWorkflowModulesBusy(false);
+    }
+  }, [reportError, selectedWorkflowModule, workflowModuleBindingsDraft, workflowModulePathDraft]);
+
+  const saveWorkflowModuleDraft = useCallback(async (overwrite: boolean) => {
+    if (overwrite && !selectedWorkflowModule) return;
+    setWorkflowModulesBusy(true);
+    try {
+      const bindings = workflowBindingsFromDraft(workflowModuleBindingsDraft);
+      const saved = await invoke<WorkflowModuleRecord>("save_workflow_module", {
+        input: {
+          id: overwrite ? selectedWorkflowModule?.id : undefined,
+          name: workflowModuleNameDraft,
+          capability: workflowModuleCapabilityDraft,
+          variant: workflowModuleVariantDraft,
+          revision: workflowModuleRevisionDraft,
+          adapterKind: selectedWorkflowModule?.adapterKind ?? WORKFLOW_PACKAGE_ENGINE,
+          sourceWorkflowPath: workflowModulePathDraft,
+          bindings,
+          adapter: overwrite && selectedWorkflowModule
+            ? {
+              ...selectedWorkflowModule.adapter,
+              capability: workflowModuleCapabilityDraft,
+              variant: workflowModuleVariantDraft,
+              bindings: bindings ?? selectedWorkflowModule.bindings,
+            }
+            : undefined,
+          uiSchema: overwrite ? selectedWorkflowModule?.uiSchema : undefined,
+          defaults: overwrite && selectedWorkflowModule
+            ? selectedWorkflowModule.defaults
+            : {
+              ...h3ModelParameters,
+              loraName: h3LoraPreference.loraName,
+              loraStrength: h3LoraPreference.loraStrength,
+            },
+        },
+      });
+      await refreshWorkflowModules(true);
+      setSelectedWorkflowModuleId(saved.id);
+      const savedSlot = workflowSlotForModule(saved);
+      setWorkflowModuleDefaults((current) => current[savedSlot]
+        ? current
+        : { ...current, [savedSlot]: saved.id });
+      setWorkflowModuleValidation({ compatible: true, issues: [] });
+      setNotice(overwrite ? `方案“${saved.name}”已覆盖，并建立恢复点` : `方案“${saved.name}”已创建`);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setWorkflowModulesBusy(false);
+    }
+  }, [h3LoraPreference, h3ModelParameters, refreshWorkflowModules, reportError, selectedWorkflowModule, workflowModuleBindingsDraft, workflowModuleCapabilityDraft, workflowModuleNameDraft, workflowModulePathDraft, workflowModuleRevisionDraft, workflowModuleVariantDraft]);
+
+  const setDefaultWorkflowModule = useCallback((module: WorkflowModuleRecord) => {
+    setWorkflowModuleDefaults((current) => ({ ...current, [workflowSlotForModule(module)]: module.id }));
+    if (module.capability === "video-generation" && module.variant === "reference-to-video") {
+      setH3ModelParameters({
+        primaryVideoSteps: module.defaults.primaryVideoSteps,
+        primaryAudioSteps: module.defaults.primaryAudioSteps,
+        secondarySchedulerSteps: module.defaults.secondarySchedulerSteps,
+        primaryBrightness: module.defaults.primaryBrightness,
+        primaryContrast: module.defaults.primaryContrast,
+        primarySaturation: module.defaults.primarySaturation,
+        secondaryBrightness: module.defaults.secondaryBrightness,
+        secondaryContrast: module.defaults.secondaryContrast,
+        secondarySaturation: module.defaults.secondarySaturation,
+      });
+      setH3LoraPreference({
+        loraName: module.defaults.loraName,
+        loraStrength: module.defaults.loraStrength,
+      });
+    }
+    setNotice(`“${module.name}”已设为${workflowVariantLabel(module)}默认方案`);
+  }, []);
+
+  const replaceWorkflowModuleReferences = useCallback(async (
+    sourceModuleId: string,
+    replacement: WorkflowModuleRecord,
+  ) => {
+    const records = new Map<string, NodeRecord>();
+    for (const project of projects) {
+      for (const record of project.nodes) records.set(record.id, record);
+    }
+    for (const node of nodesSnapshot.current) records.set(node.id, node.data.record);
+    const updatedRecords = new Map<string, NodeRecord>();
+    for (const record of records.values()) {
+      let changed = false;
+      let content = record.content;
+      const contentModuleId = typeof content.workflowModuleId === "string"
+        ? content.workflowModuleId
+        : "";
+      const implicitContentModuleId = record.kind === "video-generation"
+        ? workflowModuleDefaults[workflowSlotForVideoMode(videoGenerationModeFromContent(content))] ?? ""
+        : "";
+      if ((contentModuleId || implicitContentModuleId) === sourceModuleId) {
+        content = {
+          ...content,
+          workflowModuleReplacedFrom: typeof content.workflowModuleReplacedFrom === "string"
+            ? content.workflowModuleReplacedFrom
+            : sourceModuleId,
+          workflowModuleId: replacement.id,
+          workflowModuleRevision: replacement.revision,
+        };
+        changed = true;
+      }
+      const snapshotValue = content.generationSnapshot;
+      if (
+        snapshotValue
+        && typeof snapshotValue === "object"
+        && !Array.isArray(snapshotValue)
+      ) {
+        const snapshotModuleId = typeof (snapshotValue as JsonObject).workflowModuleId === "string"
+          ? (snapshotValue as JsonObject).workflowModuleId as string
+          : workflowModuleDefaults["video-generation:reference-to-video"] ?? "";
+        if (snapshotModuleId === sourceModuleId) {
+          content = {
+            ...content,
+            generationSnapshot: {
+              ...(snapshotValue as JsonObject),
+              workflowModuleReplacedFrom: typeof (snapshotValue as JsonObject).workflowModuleReplacedFrom === "string"
+                ? (snapshotValue as JsonObject).workflowModuleReplacedFrom
+                : sourceModuleId,
+              workflowModuleId: replacement.id,
+              workflowModuleRevision: replacement.revision,
+            },
+          };
+          changed = true;
+        }
+      }
+      if (!changed) continue;
+      const updated = await invoke<NodeRecord>("update_node", {
+        input: { id: record.id, content },
+      });
+      updatedRecords.set(updated.id, updated);
+    }
+    if (!updatedRecords.size) return;
+    setProjects((current) => current.map((project) => ({
+      ...project,
+      nodes: project.nodes.map((record) => updatedRecords.get(record.id) ?? record),
+    })));
+    setNodes((current) => current.map((node) => {
+      const updated = updatedRecords.get(node.id);
+      return updated ? { ...node, data: { ...node.data, record: updated } } : node;
+    }));
+  }, [projects, setNodes, workflowModuleDefaults]);
+
+  const trashSelectedWorkflowModule = useCallback(async () => {
+    if (!selectedWorkflowModule || selectedWorkflowModule.deletedAt) return;
+    const replacement = workflowModules.find((module) => (
+      !module.deletedAt
+      && module.id === workflowModuleReplacementId
+      && workflowSlotForModule(module) === workflowSlotForModule(selectedWorkflowModule)
+    ));
+    setWorkflowModulesBusy(true);
+    try {
+      if (replacement) {
+        await replaceWorkflowModuleReferences(selectedWorkflowModule.id, replacement);
+      }
+      await invoke("trash_workflow_module", { id: selectedWorkflowModule.id });
+      const modules = await refreshWorkflowModules(true);
+      const next = modules.find((module) => !module.deletedAt);
+      setSelectedWorkflowModuleId(next?.id ?? selectedWorkflowModule.id);
+      setWorkflowModuleDefaults((current) => {
+        const nextDefaults = { ...current };
+        const slot = workflowSlotForModule(selectedWorkflowModule);
+        if (nextDefaults[slot] === selectedWorkflowModule.id) {
+          const fallback = modules.find((module) => !module.deletedAt && workflowSlotForModule(module) === slot);
+          if (fallback) nextDefaults[slot] = fallback.id;
+          else delete nextDefaults[slot];
+        }
+        return nextDefaults;
+      });
+      setNotice(`方案“${selectedWorkflowModule.name}”已移入回收站`);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setWorkflowModulesBusy(false);
+    }
+  }, [refreshWorkflowModules, replaceWorkflowModuleReferences, reportError, selectedWorkflowModule, workflowModuleReplacementId, workflowModules]);
+
+  const restoreSelectedWorkflowModule = useCallback(async () => {
+    if (!selectedWorkflowModule?.deletedAt) return;
+    setWorkflowModulesBusy(true);
+    try {
+      const restored = await invoke<WorkflowModuleRecord>("restore_workflow_module", {
+        id: selectedWorkflowModule.id,
+      });
+      await refreshWorkflowModules(true);
+      setSelectedWorkflowModuleId(restored.id);
+      setNotice(`方案“${restored.name}”已恢复`);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setWorkflowModulesBusy(false);
+    }
+  }, [refreshWorkflowModules, reportError, selectedWorkflowModule]);
+
+  const purgeSelectedWorkflowModule = useCallback(async () => {
+    if (!selectedWorkflowModule?.deletedAt) return;
+    setWorkflowModulesBusy(true);
+    try {
+      await invoke("purge_workflow_module", { id: selectedWorkflowModule.id });
+      const modules = await refreshWorkflowModules(true);
+      setSelectedWorkflowModuleId(modules[0]?.id ?? "");
+      setNotice("方案已彻底删除");
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setWorkflowModulesBusy(false);
+    }
+  }, [refreshWorkflowModules, reportError, selectedWorkflowModule]);
+
+  const restoreSelectedWorkflowModuleBackup = useCallback(async () => {
+    if (!selectedWorkflowModule) return;
+    setWorkflowModulesBusy(true);
+    try {
+      const restored = await invoke<WorkflowModuleRecord>("restore_workflow_module_backup", {
+        id: selectedWorkflowModule.id,
+      });
+      await refreshWorkflowModules(true);
+      setSelectedWorkflowModuleId(restored.id);
+      setNotice(`方案“${restored.name}”已恢复到上一个覆盖前状态`);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setWorkflowModulesBusy(false);
+    }
+  }, [refreshWorkflowModules, reportError, selectedWorkflowModule]);
+
+  const exportSelectedWorkflowModule = useCallback(async () => {
+    if (!selectedWorkflowModule) return;
+    setWorkflowModulesBusy(true);
+    try {
+      const exportPath = await invoke<string>("export_workflow_module", {
+        id: selectedWorkflowModule.id,
+      });
+      await revealItemInDir(exportPath);
+      setNotice(`方案已导出到 ${exportPath}`);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setWorkflowModulesBusy(false);
+    }
+  }, [reportError, selectedWorkflowModule]);
+
+  const importWorkflowModuleBundle = useCallback(async () => {
+    let bundlePath: string | null;
+    try {
+      bundlePath = await openDialog({
+        directory: false,
+        multiple: false,
+        title: "选择工作流方案备份",
+        filters: [{ name: "工作流方案备份", extensions: ["zip"] }],
+      });
+    } catch (error) {
+      reportError(error);
+      return;
+    }
+    if (!bundlePath) return;
+    setWorkflowModulesBusy(true);
+    try {
+      const imported = await invoke<WorkflowModuleRecord>("import_workflow_module_bundle", {
+        bundlePath,
+      });
+      await refreshWorkflowModules(true);
+      setSelectedWorkflowModuleId(imported.id);
+      const importedSlot = workflowSlotForModule(imported);
+      setWorkflowModuleDefaults((current) => current[importedSlot]
+        ? current
+        : { ...current, [importedSlot]: imported.id });
+      setNotice(`备份已导入为新方案“${imported.name}”`);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setWorkflowModulesBusy(false);
+    }
+  }, [refreshWorkflowModules, reportError]);
+
+  const requestWorkflowModuleRestore = useCallback(async () => {
+    if (!selectedWorkflowModule) return;
+    let bundlePath: string | null;
+    try {
+      bundlePath = await openDialog({
+        directory: false,
+        multiple: false,
+        title: "选择用于恢复当前方案的备份",
+        filters: [{ name: "工作流方案备份", extensions: ["zip"] }],
+      });
+    } catch (error) {
+      reportError(error);
+      return;
+    }
+    if (!bundlePath) return;
+    setWorkflowModuleRestoreRequest({
+      moduleId: selectedWorkflowModule.id,
+      moduleName: selectedWorkflowModule.name,
+      bundlePath,
+    });
+  }, [reportError, selectedWorkflowModule]);
+
+  const restoreWorkflowModuleFromBundle = useCallback(async () => {
+    if (!workflowModuleRestoreRequest) return;
+    setWorkflowModulesBusy(true);
+    try {
+      const restored = await invoke<WorkflowModuleRecord>("restore_workflow_module_bundle", {
+        id: workflowModuleRestoreRequest.moduleId,
+        bundlePath: workflowModuleRestoreRequest.bundlePath,
+      });
+      await refreshWorkflowModules(true);
+      setSelectedWorkflowModuleId(restored.id);
+      setWorkflowModuleRestoreRequest(null);
+      setNotice(`当前方案已从备份恢复为“${restored.name}”，覆盖前状态已保存为恢复点`);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setWorkflowModulesBusy(false);
+    }
+  }, [refreshWorkflowModules, reportError, workflowModuleRestoreRequest]);
 
   const persistPatch = useCallback(
     (id: string, patch: NodePatch) => {
@@ -3063,6 +4445,76 @@ function CanvasWorkspace() {
       loraStrength: h3LoraStrengthFromContent(content),
     });
   }, []);
+
+  useEffect(() => {
+    if (!h3LoraCatalogLoaded || !h3LoraOptions.length) return;
+    const fallback = h3LoraOptions.find((lora) => sameH3LoraName(lora, DEFAULT_H3_LORA_NAME))
+      ?? h3LoraOptions[0];
+    for (const node of nodesSnapshot.current) {
+      const record = node.data.record;
+      if (record.kind !== "video-generation") continue;
+      const currentLoraName = h3LoraNameFromContent(record.content);
+      if (h3LoraOptions.some((lora) => sameH3LoraName(lora, currentLoraName))) continue;
+      changeNode(record.id, {
+        content: {
+          ...record.content,
+          generationLoraName: fallback,
+          status: "idle",
+          validationMessage: "",
+        },
+      });
+    }
+  }, [changeNode, h3LoraCatalogLoaded, h3LoraOptions]);
+
+  useEffect(() => {
+    if (!workflowModulesReady) return;
+    const activeModules = workflowModules.filter((module) => !module.deletedAt);
+    for (const node of nodesSnapshot.current) {
+      const record = node.data.record;
+      if (record.kind === "video-generation") {
+        const configuredId = typeof record.content.workflowModuleId === "string"
+          ? record.content.workflowModuleId
+          : "";
+        if (configuredId) continue;
+        const slot = workflowSlotForVideoMode(videoGenerationModeFromContent(record.content));
+        const fallbackId = workflowModuleDefaults[slot] ?? "";
+        const fallback = activeModules.find((module) => module.id === fallbackId && workflowSlotForModule(module) === slot);
+        if (!fallback) continue;
+        changeNode(record.id, {
+          content: {
+            ...record.content,
+            workflowModuleId: fallback.id,
+            workflowModuleRevision: fallback.revision,
+          },
+        });
+        continue;
+      }
+      if (record.kind !== "generated-video") continue;
+      const snapshotValue = record.content.generationSnapshot;
+      if (!snapshotValue || typeof snapshotValue !== "object" || Array.isArray(snapshotValue)) continue;
+      const snapshot = snapshotValue as JsonObject;
+      if (typeof snapshot.workflowModuleId === "string" && snapshot.workflowModuleId) continue;
+      const sourceGeneratorId = typeof record.content.sourceGeneratorId === "string"
+        ? record.content.sourceGeneratorId
+        : "";
+      const sourceGenerator = nodesSnapshot.current.find((candidate) => candidate.id === sourceGeneratorId)?.data.record;
+      const sourceModuleId = sourceGenerator && typeof sourceGenerator.content.workflowModuleId === "string"
+        ? sourceGenerator.content.workflowModuleId
+        : workflowModuleDefaults["video-generation:reference-to-video"] ?? "";
+      const fallback = activeModules.find((module) => module.id === sourceModuleId);
+      if (!fallback) continue;
+      changeNode(record.id, {
+        content: {
+          ...record.content,
+          generationSnapshot: {
+            ...snapshot,
+            workflowModuleId: fallback.id,
+            workflowModuleRevision: fallback.revision,
+          },
+        },
+      });
+    }
+  }, [changeNode, workflowModuleDefaults, workflowModules, workflowModulesReady]);
 
   useEffect(() => {
     if (!activeProjectId) return;
@@ -3395,6 +4847,96 @@ function CanvasWorkspace() {
     setNotice("ComfyUI 设置已保存");
   }, [comfyInputRootDraft, comfyOutputRootDraft, h3WorkflowPathDraft]);
 
+  const saveH3ModelParameters = useCallback(async () => {
+    const {
+      primaryVideoSteps,
+      primaryAudioSteps,
+      secondarySchedulerSteps,
+      primaryBrightness,
+      primaryContrast,
+      primarySaturation,
+      secondaryBrightness,
+      secondaryContrast,
+      secondarySaturation,
+    } = h3ModelParametersDraft;
+    if (!Number.isInteger(primaryVideoSteps) || primaryVideoSteps < 1 || primaryVideoSteps > 1000) {
+      setNotice("一采 Video Steps 必须是 1 到 1000 的整数");
+      return;
+    }
+    if (!Number.isInteger(primaryAudioSteps) || primaryAudioSteps < primaryVideoSteps || primaryAudioSteps > 1000) {
+      setNotice("一采 Audio Steps 必须是 1 到 1000 的整数，且不能小于 Video Steps");
+      return;
+    }
+    if (!Number.isInteger(secondarySchedulerSteps) || secondarySchedulerSteps < 1 || secondarySchedulerSteps > 10000) {
+      setNotice("二采基本调度器 Steps 必须是 1 到 10000 的整数");
+      return;
+    }
+    const invalidColorAdjustment = ([
+      ["一采亮度", primaryBrightness],
+      ["一采对比度", primaryContrast],
+      ["一采饱和度", primarySaturation],
+      ["二采亮度", secondaryBrightness],
+      ["二采对比度", secondaryContrast],
+      ["二采饱和度", secondarySaturation],
+    ] as const).find(([, value]) => (
+      typeof value !== "number"
+      || !Number.isFinite(value)
+      || value < 0
+      || value > 3
+    ));
+    if (invalidColorAdjustment) {
+      setNotice(`${invalidColorAdjustment[0]}必须是 0.00 到 3.00 之间的数值`);
+      return;
+    }
+    const module = selectedWorkflowModule?.capability === "video-generation"
+      && selectedWorkflowModule.variant === "reference-to-video"
+      && !selectedWorkflowModule.deletedAt
+      ? selectedWorkflowModule
+      : workflowModules.find((candidate) => (
+        !candidate.deletedAt
+        && candidate.id === workflowModuleDefaults["video-generation:reference-to-video"]
+      ));
+    if (!module) {
+      setNotice("没有可保存模型参数的多参生视频方案");
+      return;
+    }
+    setWorkflowModulesBusy(true);
+    try {
+      await invoke<WorkflowModuleRecord>("save_workflow_module", {
+        input: {
+          id: module.id,
+          name: module.name,
+          capability: module.capability,
+          variant: module.variant,
+          revision: module.revision,
+          adapterKind: module.adapterKind,
+          sourceWorkflowPath: module.workflowPath,
+          bindings: module.bindings,
+          adapter: module.adapter,
+          uiSchema: module.uiSchema,
+          defaults: {
+            ...h3ModelParametersDraft,
+            loraName: h3LoraPreference.loraName,
+            loraStrength: h3LoraPreference.loraStrength,
+          },
+        },
+      });
+      await refreshWorkflowModules(true);
+    } catch (error) {
+      reportError(error);
+      return;
+    } finally {
+      setWorkflowModulesBusy(false);
+    }
+    setH3ModelParameters(h3ModelParametersDraft);
+    window.localStorage.setItem(
+      H3_MODEL_PARAMETERS_STORAGE_KEY,
+      JSON.stringify(h3ModelParametersDraft),
+    );
+    setSettingsOpen(false);
+    setNotice("模型参数已保存");
+  }, [h3LoraPreference, h3ModelParametersDraft, refreshWorkflowModules, reportError, selectedWorkflowModule, workflowModuleDefaults, workflowModules]);
+
   const clearAppLockPasswordFields = useCallback(() => {
     setAppLockCurrentPassword("");
     setAppLockNewPassword("");
@@ -3504,6 +5046,23 @@ function CanvasWorkspace() {
       .filter((record) => record.kind === kind)
       .map((record) => typeof record.content.assetPath === "string" ? record.content.assetPath : "")
       .filter(Boolean);
+    const mode = videoGenerationModeFromContent(generator.content);
+    const capability = workflowCapabilityForVideoMode(mode);
+    const slot = workflowSlotForVideoMode(mode);
+    const configuredModuleId = typeof generator.content.workflowModuleId === "string"
+      ? generator.content.workflowModuleId
+      : workflowModuleDefaults[slot] ?? "";
+    const workflowModule = workflowModules.find((module) => (
+      !module.deletedAt
+      && module.capability === capability
+      && module.variant === mode
+      && module.id === configuredModuleId
+    ));
+    const moduleParameters = workflowModule?.defaults ?? {
+      ...h3ModelParameters,
+      loraName: h3LoraNameFromContent(generator.content),
+      loraStrength: h3LoraStrengthFromContent(generator.content),
+    };
     return {
       prompt: textInputs.length === 1 ? textFromContent(textInputs[0].content) : "",
       promptNodeId: textInputs.length === 1 ? textInputs[0].id : "",
@@ -3512,18 +5071,36 @@ function CanvasWorkspace() {
       aspectRatio: videoAspectRatioFromContent(generator.content),
       primaryResolutionMegapixels: primaryVideoResolutionFromContent(generator.content),
       secondaryResolutionMegapixels: secondaryVideoResolutionFromContent(generator.content),
+      primaryVideoSteps: moduleParameters.primaryVideoSteps,
+      primaryAudioSteps: moduleParameters.primaryAudioSteps,
+      secondarySchedulerSteps: moduleParameters.secondarySchedulerSteps,
+      primaryBrightness: moduleParameters.primaryBrightness,
+      primaryContrast: moduleParameters.primaryContrast,
+      primarySaturation: moduleParameters.primarySaturation,
+      secondaryBrightness: moduleParameters.secondaryBrightness,
+      secondaryContrast: moduleParameters.secondaryContrast,
+      secondarySaturation: moduleParameters.secondarySaturation,
       loraName: h3LoraNameFromContent(generator.content),
       loraStrength: h3LoraStrengthFromContent(generator.content),
+      loraStrengthRecorded: true,
+      loraBypassed: h3LoraBypassedFromContent(generator.content),
       imagePaths: assetPaths("image"),
       audioPaths: assetPaths("audio"),
       videoPaths: assetPaths("video"),
+      workflowModuleId: workflowModule?.id ?? "",
+      workflowModuleRevision: workflowModule?.revision ?? "",
     };
-  }, []);
+  }, [h3ModelParameters, workflowModuleDefaults, workflowModules]);
 
   const generatedPreviewHeightForAspectRatio = useCallback((aspectRatio: VideoAspectRatio) => {
-    return mediaNodeHeightForAspectRatio(
-      GENERATED_VIDEO_PREVIEW_WIDTH,
-      videoAspectRatioValue(aspectRatio),
+    const previewWidth = generatedVideoPreviewWidthForRatio(videoAspectRatioValue(aspectRatio));
+    return Math.min(
+      2400,
+      Math.max(
+        180,
+        previewWidth / videoAspectRatioValue(aspectRatio)
+          + GENERATED_VIDEO_FOOTER_HEIGHT,
+      ),
     );
   }, []);
 
@@ -3540,7 +5117,7 @@ function CanvasWorkspace() {
     secondary: boolean;
     sourceGeneratorId: string;
   }) => {
-    const previewWidth = GENERATED_VIDEO_PREVIEW_WIDTH;
+    const previewWidth = generatedVideoPreviewWidthForRatio(videoAspectRatioValue(snapshot.aspectRatio));
     const previewHeight = generatedPreviewHeightForAspectRatio(snapshot.aspectRatio);
     const position = generatedPreviewPosition(
       source,
@@ -3712,10 +5289,22 @@ function CanvasWorkspace() {
       return;
     }
     const mode = videoGenerationModeFromContent(target.content);
-    if (mode !== "reference-to-video") {
-      const message = mode === "first-last-frame"
-        ? "首尾帧 API 工作流尚未配置"
-        : "文生视频 API 工作流尚未配置";
+    const capability = workflowCapabilityForVideoMode(mode);
+    const slot = workflowSlotForVideoMode(mode);
+    const configuredModuleId = typeof target.content.workflowModuleId === "string"
+      ? target.content.workflowModuleId
+      : workflowModuleDefaults[slot] ?? "";
+    const configuredModule = workflowModules.find((module) => (
+      !module.deletedAt
+      && module.capability === capability
+      && module.variant === mode
+      && module.id === configuredModuleId
+    ));
+    if (!configuredModule) {
+      const label = WORKFLOW_VIDEO_VARIANTS.find((item) => item.value === mode)?.label ?? mode;
+      const message = configuredModuleId
+        ? `当前节点绑定的${label}方案已缺失，请重新选择`
+        : `${label}尚未配置工作流方案`;
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
@@ -3726,6 +5315,20 @@ function CanvasWorkspace() {
     const snapshot = generationSnapshotForGenerator(targetId);
     if (!snapshot?.prompt.trim()) {
       setNotice("无法执行：找不到已保存的提示词与素材参数");
+      return;
+    }
+    if (
+      h3LoraCatalogLoaded
+      && !snapshot.loraBypassed
+      && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.loraName))
+    ) {
+      const message = h3LoraOptions.length
+        ? "所选 LoRA 已不在 MinimaxH3 目录中，请重新选择"
+        : "MinimaxH3 目录中没有可用 LoRA，请添加 LoRA 或开启 Bypass";
+      changeNode(targetId, {
+        content: { ...target.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(`无法执行：${message}`);
       return;
     }
     const clientId = crypto.randomUUID();
@@ -3798,6 +5401,7 @@ function CanvasWorkspace() {
       const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow", {
         input: {
           serverUrl: COMFYUI_SERVER_URL,
+          workflowModuleId: snapshot.workflowModuleId,
           workflowPath: h3WorkflowPathRef.current,
           inputRootPath: comfyInputRootRef.current,
           clientId,
@@ -3808,9 +5412,19 @@ function CanvasWorkspace() {
           aspectRatio: snapshot.aspectRatio,
           primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
           secondaryResolutionMegapixels: snapshot.secondaryResolutionMegapixels,
+          primaryVideoSteps: snapshot.primaryVideoSteps,
+          primaryAudioSteps: snapshot.primaryAudioSteps,
+          secondarySchedulerSteps: snapshot.secondarySchedulerSteps,
+          primaryBrightness: snapshot.primaryBrightness,
+          primaryContrast: snapshot.primaryContrast,
+          primarySaturation: snapshot.primarySaturation,
+          secondaryBrightness: snapshot.secondaryBrightness,
+          secondaryContrast: snapshot.secondaryContrast,
+          secondarySaturation: snapshot.secondarySaturation,
           secondarySamplingEnabled: false,
           loraName: snapshot.loraName,
           loraStrength: snapshot.loraStrength,
+          loraBypassed: snapshot.loraBypassed,
           imagePaths: snapshot.imagePaths,
           audioPaths: snapshot.audioPaths,
           videoPaths: snapshot.videoPaths,
@@ -3821,7 +5435,7 @@ function CanvasWorkspace() {
       if (cancelledComfyClients.current.has(clientId)) return;
       const generationElapsedSeconds = validExecutionElapsedSeconds(result.executionElapsedSeconds);
 
-      const previewWidth = GENERATED_VIDEO_PREVIEW_WIDTH;
+      const previewWidth = generatedVideoPreviewWidthForRatio(videoAspectRatioValue(snapshot.aspectRatio));
       const previewHeight = generatedPreviewHeightForAspectRatio(snapshot.aspectRatio);
       const placementRecords = [
         ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
@@ -4018,7 +5632,7 @@ function CanvasWorkspace() {
       forgetComfyTask(clientId);
       unregisterComfyTask(targetId, clientId);
     }
-  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder]);
+  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
 
   const executeSecondarySample = useCallback(async (previewId: string) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
@@ -4052,12 +5666,52 @@ function CanvasWorkspace() {
       setNotice("无法二采：当前预览缺少生成 seed");
       return;
     }
+    const workflowModule = workflowModules.find((module) => (
+      !module.deletedAt && module.id === baseSnapshot.workflowModuleId
+    ));
+    if (!workflowModule) {
+      const message = baseSnapshot.workflowModuleId
+        ? "该视频生成时使用的工作流方案已缺失，请先恢复方案"
+        : "该视频没有记录工作流方案，无法安全二采";
+      changeNode(previewId, {
+        content: { ...preview.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(`无法二采：${message}`);
+      return;
+    }
     const snapshot: GenerationSnapshot = {
       ...baseSnapshot,
       secondaryResolutionMegapixels: sourceGenerator?.kind === "video-generation"
         ? secondaryVideoResolutionFromContent(sourceGenerator.content)
         : baseSnapshot.secondaryResolutionMegapixels,
+      secondarySchedulerSteps: workflowModule.defaults.secondarySchedulerSteps,
+      secondaryBrightness: workflowModule.defaults.secondaryBrightness,
+      secondaryContrast: workflowModule.defaults.secondaryContrast,
+      secondarySaturation: workflowModule.defaults.secondarySaturation,
+      loraName: sourceGenerator?.kind === "video-generation"
+        ? h3LoraNameFromContent(sourceGenerator.content)
+        : baseSnapshot.loraName,
+      loraStrength: sourceGenerator?.kind === "video-generation"
+        ? h3LoraStrengthFromContent(sourceGenerator.content)
+        : baseSnapshot.loraStrength,
+      loraBypassed: sourceGenerator?.kind === "video-generation"
+        ? h3LoraBypassedFromContent(sourceGenerator.content)
+        : baseSnapshot.loraBypassed,
     };
+    if (
+      h3LoraCatalogLoaded
+      && !snapshot.loraBypassed
+      && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.loraName))
+    ) {
+      const message = h3LoraOptions.length
+        ? "二采使用的 LoRA 已不在 MinimaxH3 目录中，请重新选择"
+        : "MinimaxH3 目录中没有可用 LoRA，请添加 LoRA 或开启 Bypass";
+      changeNode(previewId, {
+        content: { ...preview.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(`无法二采：${message}`);
+      return;
+    }
     const clientId = crypto.randomUUID();
     const taskSubmittedAt = Date.now();
     let placeholder: NodeRecord;
@@ -4163,6 +5817,7 @@ function CanvasWorkspace() {
       const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow", {
         input: {
           serverUrl: COMFYUI_SERVER_URL,
+          workflowModuleId: snapshot.workflowModuleId,
           workflowPath: h3WorkflowPathRef.current,
           inputRootPath: comfyInputRootRef.current,
           clientId,
@@ -4173,9 +5828,19 @@ function CanvasWorkspace() {
           aspectRatio: snapshot.aspectRatio,
           primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
           secondaryResolutionMegapixels: snapshot.secondaryResolutionMegapixels,
+          primaryVideoSteps: snapshot.primaryVideoSteps,
+          primaryAudioSteps: snapshot.primaryAudioSteps,
+          secondarySchedulerSteps: snapshot.secondarySchedulerSteps,
+          primaryBrightness: snapshot.primaryBrightness,
+          primaryContrast: snapshot.primaryContrast,
+          primarySaturation: snapshot.primarySaturation,
+          secondaryBrightness: snapshot.secondaryBrightness,
+          secondaryContrast: snapshot.secondaryContrast,
+          secondarySaturation: snapshot.secondarySaturation,
           secondarySamplingEnabled: true,
           loraName: snapshot.loraName,
           loraStrength: snapshot.loraStrength,
+          loraBypassed: snapshot.loraBypassed,
           imagePaths: snapshot.imagePaths,
           audioPaths: snapshot.audioPaths,
           videoPaths: snapshot.videoPaths,
@@ -4186,7 +5851,7 @@ function CanvasWorkspace() {
       if (cancelledComfyClients.current.has(clientId)) return;
       const generationElapsedSeconds = validExecutionElapsedSeconds(result.executionElapsedSeconds);
 
-      const previewWidth = GENERATED_VIDEO_PREVIEW_WIDTH;
+      const previewWidth = generatedVideoPreviewWidthForRatio(videoAspectRatioValue(snapshot.aspectRatio));
       const previewHeight = generatedPreviewHeightForAspectRatio(snapshot.aspectRatio);
       const placementRecords = nodesSnapshot.current.map(recordAtCurrentFlowPosition);
       const createdNodes: CanvasFlowNode[] = [];
@@ -4321,7 +5986,7 @@ function CanvasWorkspace() {
       forgetComfyTask(clientId);
       unregisterComfyTask(previewId, clientId);
     }
-  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder]);
+  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModules]);
 
   const cancelVideoExecution = useCallback(async (targetId: string) => {
     const clientIds = [...(runningComfyClients.current.get(targetId) ?? [])];
@@ -4523,6 +6188,8 @@ function CanvasWorkspace() {
         textInputCount: 0,
         textInputs: [],
         h3LoraOptions,
+        workflowModules,
+        workflowModuleDefaults,
         onH3LoraPreferenceChange: rememberH3LoraPreference,
         onChange: changeNode,
         onExecutionCheck: reportExecutionCheck,
@@ -4535,7 +6202,7 @@ function CanvasWorkspace() {
         onCopy: copyText,
       },
     }),
-    [activeComfyTaskCounts, cancelVideoExecution, changeNode, copyText, deleteNode, executeSecondarySample, executeVideoNode, h3LoraOptions, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo],
+    [activeComfyTaskCounts, cancelVideoExecution, changeNode, copyText, deleteNode, executeSecondarySample, executeVideoNode, h3LoraOptions, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, workflowModuleDefaults, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -4562,7 +6229,7 @@ function CanvasWorkspace() {
     const generationElapsedSeconds = validExecutionElapsedSeconds(
       recovered.executionElapsedSeconds,
     );
-    const previewWidth = GENERATED_VIDEO_PREVIEW_WIDTH;
+    const previewWidth = generatedVideoPreviewWidthForRatio(videoAspectRatioValue(task.snapshot.aspectRatio));
     const previewHeight = generatedPreviewHeightForAspectRatio(task.snapshot.aspectRatio);
     const placementRecords = [
       ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
@@ -5370,6 +7037,12 @@ function CanvasWorkspace() {
 
   const addVideoNode = useCallback(async (position?: { x: number; y: number }) => {
     if (!activeProjectId) return;
+    const defaultWorkflowModule = workflowModules.find((module) => (
+      !module.deletedAt
+      && module.capability === "video-generation"
+      && module.variant === "reference-to-video"
+      && module.id === workflowModuleDefaults["video-generation:reference-to-video"]
+    ));
     try {
       const result = await invoke<CreateNodeResult>("create_node", {
         input: {
@@ -5386,8 +7059,11 @@ function CanvasWorkspace() {
             generationPrimaryResolution: 0.3,
             generationSecondaryResolution: 0.7,
             secondarySamplingEnabled: false,
-            generationLoraName: h3LoraPreference.loraName,
-            generationLoraStrength: h3LoraPreference.loraStrength,
+            workflowModuleId: defaultWorkflowModule?.id ?? "",
+            workflowModuleRevision: defaultWorkflowModule?.revision ?? "",
+            generationLoraName: defaultWorkflowModule?.defaults.loraName ?? h3LoraPreference.loraName,
+            generationLoraStrength: defaultWorkflowModule?.defaults.loraStrength ?? h3LoraPreference.loraStrength,
+            generationLoraBypassed: false,
             seedMode: "random",
             generationSeed: DEFAULT_GENERATION_SEED,
             manualHeight: VIDEO_NODE_BASE_HEIGHT,
@@ -5410,7 +7086,7 @@ function CanvasWorkspace() {
     } catch (error) {
       reportError(error);
     }
-  }, [activeProjectId, h3LoraPreference, makeFlowNode, reportError, setCenter, setNodes]);
+  }, [activeProjectId, h3LoraPreference, makeFlowNode, reportError, setCenter, setNodes, workflowModuleDefaults, workflowModules]);
 
   const openCanvasContextMenu = useCallback((event: MouseEvent | ReactMouseEvent) => {
     event.preventDefault();
@@ -5773,6 +7449,8 @@ function CanvasWorkspace() {
               textInputCount: 0,
               textInputs: [],
               h3LoraOptions,
+              workflowModules,
+              workflowModuleDefaults,
             },
           };
         }
@@ -5809,11 +7487,13 @@ function CanvasWorkspace() {
             textInputCount: connectedText.length,
             textInputs: connectedText,
             h3LoraOptions,
+            workflowModules,
+            workflowModuleDefaults,
           },
         };
       });
     },
-    [activeComfyTaskCounts, edges, h3LoraOptions, matchedIds, nodes, relationHighlightedIds],
+    [activeComfyTaskCounts, edges, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, workflowModuleDefaults, workflowModules],
   );
 
   const focusFirstMatch = () => {
@@ -5893,6 +7573,7 @@ function CanvasWorkspace() {
     setComfyOutputRootDraft(comfyOutputRoot);
     setComfyInputRootDraft(comfyInputRoot);
     setH3WorkflowPathDraft(h3WorkflowPath);
+    setH3ModelParametersDraft(h3ModelParameters);
     clearAppLockPasswordFields();
     setAppLockMessage("");
     setPrivateProjectSearch("");
@@ -5922,13 +7603,37 @@ function CanvasWorkspace() {
     ? projects
     : projects.filter((project) => !project.canvas.isPrivate);
 
+  const workflowModuleDeletionUsage = selectedWorkflowModule
+    ? workflowModuleUsageCount(selectedWorkflowModule.id)
+    : 0;
+  const workflowModuleDeletionReplacement = selectedWorkflowModule
+    ? workflowModules.find((module) => (
+      !module.deletedAt
+      && module.id === workflowModuleReplacementId
+      && workflowSlotForModule(module) === workflowSlotForModule(selectedWorkflowModule)
+    ))
+    : undefined;
+  const workflowModuleDeletionDescription = selectedWorkflowModule && workflowModuleDeletionMode === "trash"
+    ? workflowModuleDeletionUsage
+      ? workflowModuleDeletionReplacement
+        ? `仍有 ${workflowModuleDeletionUsage} 个节点或生成快照引用该方案。继续后会先替换为“${workflowModuleDeletionReplacement.name}”，再移入回收站。`
+        : `仍有 ${workflowModuleDeletionUsage} 个节点或生成快照引用该方案。继续后这些节点会显示方案缺失。`
+      : `“${selectedWorkflowModule.name}”将移入方案回收站，之后仍可恢复。`
+    : selectedWorkflowModule
+      ? `“${selectedWorkflowModule.name}”及其全部恢复点将被永久删除，此操作无法撤销。`
+      : "";
+
   const appSettingsDialog = settingsOpen && createPortal(
-    <div className="project-dialog-backdrop" onMouseDown={() => setSettingsOpen(false)}>
+    <>
+    <div className="project-dialog-backdrop" onMouseDown={() => {
+      if (!workflowModuleDeletionMode && !workflowModuleRestoreRequest) setSettingsOpen(false);
+    }}>
       <form
         className="project-dialog app-settings-dialog"
         onSubmit={(event) => {
           event.preventDefault();
           if (activeSettingsSection === "general") saveComfySettings();
+          if (activeSettingsSection === "model") void saveH3ModelParameters();
         }}
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -5947,7 +7652,43 @@ function CanvasWorkspace() {
               onClick={() => setActiveSettingsSection("general")}
             >
               <Settings2 size={16} />
-              <span><strong>基础设置</strong><small>工作流与目录</small></span>
+              <span><strong>基础设置</strong><small>ComfyUI 映射目录</small></span>
+            </button>
+            <button
+              type="button"
+              className={activeSettingsSection === "workflows" ? "is-active" : ""}
+              onClick={() => setActiveSettingsSection("workflows")}
+            >
+              <Clapperboard size={16} />
+              <span><strong>工作流方案</strong><small>多功能与多套方案</small></span>
+            </button>
+            <button
+              type="button"
+              className={activeSettingsSection === "model" ? "is-active" : ""}
+              onClick={() => {
+                const module = workflowModules.find((candidate) => (
+                  !candidate.deletedAt
+                  && candidate.id === workflowModuleDefaults["video-generation:reference-to-video"]
+                ));
+                if (module) {
+                  setSelectedWorkflowModuleId(module.id);
+                  setH3ModelParametersDraft({
+                    primaryVideoSteps: module.defaults.primaryVideoSteps,
+                    primaryAudioSteps: module.defaults.primaryAudioSteps,
+                    secondarySchedulerSteps: module.defaults.secondarySchedulerSteps,
+                    primaryBrightness: module.defaults.primaryBrightness,
+                    primaryContrast: module.defaults.primaryContrast,
+                    primarySaturation: module.defaults.primarySaturation,
+                    secondaryBrightness: module.defaults.secondaryBrightness,
+                    secondaryContrast: module.defaults.secondaryContrast,
+                    secondarySaturation: module.defaults.secondarySaturation,
+                  });
+                }
+                setActiveSettingsSection("model");
+              }}
+            >
+              <SlidersHorizontal size={16} />
+              <span><strong>模型参数</strong><small>一采与二采 Steps</small></span>
             </button>
             <button
               type="button"
@@ -5971,27 +7712,8 @@ function CanvasWorkspace() {
               <section className="settings-pane general-settings-pane" aria-labelledby="general-settings-title">
                 <div className="settings-pane-heading">
                   <h3 id="general-settings-title">基础设置</h3>
-                  <p>配置 H3 API 工作流，以及远程 ComfyUI 输入和输出目录的 Windows 映射路径。</p>
+                  <p>配置远程 ComfyUI 输入和输出目录的 Windows 映射路径。</p>
                 </div>
-        <label>
-          H3 API 工作流文件
-          <input
-            autoFocus
-            value={h3WorkflowPathDraft}
-            onChange={(event) => setH3WorkflowPathDraft(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setSettingsOpen(false);
-              }
-            }}
-            placeholder="例如：D:\\SuCanvas\\workflows\\MiniMax-H3-api.json"
-            spellCheck={false}
-          />
-          <small>
-            请填写本机 H3 API 格式工作流 JSON 的完整路径。移动或重命名文件后，只需在这里更新路径。
-          </small>
-        </label>
         <label>
           ComfyUI 输入映射目录
           <input
@@ -6030,6 +7752,342 @@ function CanvasWorkspace() {
             请选择或填写远端 ComfyUI 的 output 根目录，不要包含生成任务的子文件夹和文件名。
           </small>
         </label>
+              </section>
+            )}
+            {activeSettingsSection === "workflows" && (
+              <section className="settings-pane workflow-settings-pane" aria-labelledby="workflow-settings-title">
+                <div className="settings-pane-heading workflow-settings-heading">
+                  <div>
+                    <h3 id="workflow-settings-title">工作流方案</h3>
+                    <p>每个功能可并存多套方案；每套方案独立保存工作流、节点映射、参数默认值和恢复点。</p>
+                  </div>
+                  <label className="workflow-trash-toggle">
+                    <input
+                      type="checkbox"
+                      checked={showDeletedWorkflowModules}
+                      onChange={(event) => setShowDeletedWorkflowModules(event.currentTarget.checked)}
+                    />
+                    显示回收站
+                  </label>
+                </div>
+                <div className="workflow-module-manager">
+                  <aside className="workflow-module-list" aria-label="工作流方案列表">
+                    {WORKFLOW_CAPABILITIES.map((capability) => {
+                      const modules = workflowModules.filter((module) => (
+                        module.capability === capability.value
+                        && (showDeletedWorkflowModules || !module.deletedAt)
+                      ));
+                      return (
+                        <section key={capability.value} className="workflow-module-group">
+                          <header>
+                            <strong>{capability.label}</strong>
+                            <span>{modules.length}</span>
+                          </header>
+                          {modules.map((module) => (
+                            <button
+                              key={module.id}
+                              type="button"
+                              className={`${selectedWorkflowModuleId === module.id ? "is-active" : ""} ${module.deletedAt ? "is-deleted" : ""}`}
+                              onClick={() => setSelectedWorkflowModuleId(module.id)}
+                            >
+                              <span>{module.name}</span>
+                              <small>
+                                {workflowVariantLabel(module)} · {module.revision}
+                                {workflowModuleDefaults[workflowSlotForModule(module)] === module.id ? " · 默认" : ""}
+                                {module.deletedAt ? " · 回收站" : ""}
+                              </small>
+                            </button>
+                          ))}
+                          {!modules.length && <p>尚无方案</p>}
+                        </section>
+                      );
+                    })}
+                    <button
+                      type="button"
+                      className="workflow-module-new"
+                      onClick={() => {
+                        setSelectedWorkflowModuleId("");
+                        setWorkflowModuleNameDraft("新工作流方案");
+                        setWorkflowModuleRevisionDraft("当前");
+                        setWorkflowModuleCapabilityDraft("video-generation");
+                        setWorkflowModuleVariantDraft("reference-to-video");
+                        setWorkflowModulePathDraft(h3WorkflowPathDraft || DEFAULT_H3_REFERENCE_WORKFLOW_PATH);
+                        setWorkflowModuleValidation(null);
+                        setWorkflowModuleBindingsDraft("");
+                      }}
+                    >
+                      <Plus size={14} /> 新建方案
+                    </button>
+                    <button
+                      type="button"
+                      className="workflow-module-new"
+                      onClick={() => void importWorkflowModuleBundle()}
+                      disabled={workflowModulesBusy}
+                    >
+                      <Upload size={13} /> 导入备份为新方案
+                    </button>
+                  </aside>
+                  <div className="workflow-module-editor">
+                    <div className="workflow-module-editor-title">
+                      <div>
+                        <strong>{selectedWorkflowModule ? "编辑方案" : "新建方案"}</strong>
+                        <small>{selectedWorkflowModule?.adapter.adapterId ?? WORKFLOW_PACKAGE_ENGINE}</small>
+                      </div>
+                      {selectedWorkflowModule && !selectedWorkflowModule.deletedAt && (
+                        <div className="workflow-module-title-actions">
+                          <button
+                            type="button"
+                            className={workflowModuleDefaults[workflowSlotForModule(selectedWorkflowModule)] === selectedWorkflowModule.id ? "is-default" : ""}
+                            onClick={() => setDefaultWorkflowModule(selectedWorkflowModule)}
+                          >
+                            {workflowModuleDefaults[workflowSlotForModule(selectedWorkflowModule)] === selectedWorkflowModule.id
+                              ? "当前默认"
+                              : "设为此功能默认"}
+                          </button>
+                          <button
+                            type="button"
+                            className="workflow-module-delete-icon"
+                            aria-label="删除方案"
+                            title="删除方案"
+                            disabled={workflowModulesBusy}
+                            onClick={() => setWorkflowModuleDeletionMode("trash")}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <div className="workflow-module-fields">
+                      <label>
+                        方案名称
+                        <input
+                          value={workflowModuleNameDraft}
+                          onChange={(event) => setWorkflowModuleNameDraft(event.currentTarget.value)}
+                          disabled={Boolean(selectedWorkflowModule?.deletedAt)}
+                        />
+                      </label>
+                      <label>
+                        修订名称
+                        <input
+                          value={workflowModuleRevisionDraft}
+                          onChange={(event) => setWorkflowModuleRevisionDraft(event.currentTarget.value)}
+                          placeholder="例如：v1、稳定版、当前"
+                          disabled={Boolean(selectedWorkflowModule?.deletedAt)}
+                        />
+                      </label>
+                      <div className="workflow-module-field">
+                        <span>功能类型</span>
+                        <SettingsSelect
+                          value={workflowModuleCapabilityDraft}
+                          onChange={(value) => {
+                            const capability = value as WorkflowCapability;
+                            setWorkflowModuleCapabilityDraft(capability);
+                            setWorkflowModuleVariantDraft(capability === "image-generation"
+                              ? "image-generation"
+                              : "reference-to-video");
+                          }}
+                          disabled={Boolean(selectedWorkflowModule?.deletedAt)}
+                          ariaLabel="工作流功能类型"
+                          options={WORKFLOW_CAPABILITIES.map((capability) => ({
+                            value: capability.value,
+                            label: `${capability.label}${capability.value === "video-generation" ? "" : "（等待对应适配器）"}`,
+                            disabled: capability.value !== "video-generation",
+                          }))}
+                        />
+                      </div>
+                      {workflowModuleCapabilityDraft === "video-generation" && (
+                        <div className="workflow-module-field">
+                          <span>视频生成子类型</span>
+                          <SettingsSelect
+                            value={workflowModuleVariantDraft}
+                            onChange={(value) => setWorkflowModuleVariantDraft(value as WorkflowVariant)}
+                            disabled={Boolean(selectedWorkflowModule?.deletedAt)}
+                            ariaLabel="视频生成子类型"
+                            options={WORKFLOW_VIDEO_VARIANTS.map((variant) => ({
+                              value: variant.value,
+                              label: `${variant.label}${variant.value === "reference-to-video" ? "" : "（等待对应适配器）"}`,
+                              disabled: variant.value !== "reference-to-video",
+                            }))}
+                          />
+                        </div>
+                      )}
+                    </div>
+                    <label className="workflow-module-path-field">
+                      API 工作流 JSON
+                      <input
+                        value={workflowModulePathDraft}
+                        onChange={(event) => {
+                          setWorkflowModulePathDraft(event.currentTarget.value);
+                          setWorkflowModuleValidation(null);
+                        }}
+                        placeholder="D:\\...\\workflow_api.json"
+                        spellCheck={false}
+                        disabled={Boolean(selectedWorkflowModule?.deletedAt)}
+                      />
+                      <small>
+                        保存后会复制到应用的独立方案仓库，原始 JSON 后续移动或删除不会影响已保存方案。
+                      </small>
+                    </label>
+                    <details className="workflow-bindings-editor">
+                      <summary>高级节点映射</summary>
+                      <p>工作流节点 ID 变化时在这里调整映射。留空会使用当前 H3 多参默认映射。</p>
+                      <textarea
+                        value={workflowModuleBindingsDraft}
+                        onChange={(event) => {
+                          setWorkflowModuleBindingsDraft(event.currentTarget.value);
+                          setWorkflowModuleValidation(null);
+                        }}
+                        spellCheck={false}
+                        disabled={Boolean(selectedWorkflowModule?.deletedAt)}
+                        placeholder="留空使用默认节点映射"
+                      />
+                    </details>
+                    {workflowModuleValidation && (
+                      <div className={`workflow-module-validation ${workflowModuleValidation.compatible ? "is-valid" : "is-invalid"}`}>
+                        <strong>{workflowModuleValidation.compatible ? "兼容性检查通过" : "兼容性检查未通过"}</strong>
+                        {workflowModuleValidation.issues.map((issue) => <span key={issue}>{issue}</span>)}
+                      </div>
+                    )}
+                    {selectedWorkflowModule && (
+                      <div className="workflow-module-meta">
+                        <span>内部副本：{selectedWorkflowModule.sourceWorkflowName}</span>
+                        <span>恢复点：{selectedWorkflowModule.backupCount}</span>
+                        <span>引用：{workflowModuleUsageCount(selectedWorkflowModule.id)}</span>
+                      </div>
+                    )}
+                    {selectedWorkflowModule && !selectedWorkflowModule.deletedAt && workflowModuleUsageCount(selectedWorkflowModule.id) > 0 && (
+                      <div className="workflow-module-replacement">
+                        <span>删除时替换引用（可选）</span>
+                        <SettingsSelect
+                          value={workflowModuleReplacementId}
+                          onChange={setWorkflowModuleReplacementId}
+                          ariaLabel="删除方案时替换引用"
+                          options={[
+                            { value: "", label: "不替换，相关节点显示方案缺失" },
+                            ...workflowModules.filter((module) => (
+                              !module.deletedAt
+                              && module.id !== selectedWorkflowModule.id
+                              && workflowSlotForModule(module) === workflowSlotForModule(selectedWorkflowModule)
+                            )).map((module) => ({
+                              value: module.id,
+                              label: `${module.name} · ${module.revision}`,
+                            })),
+                          ]}
+                        />
+                      </div>
+                    )}
+                    <div className="workflow-module-actions">
+                      {!selectedWorkflowModule?.deletedAt ? (
+                        <>
+                          <button type="button" onClick={() => void validateWorkflowModuleDraft()} disabled={workflowModulesBusy}>
+                            验证适配
+                          </button>
+                          <button type="button" onClick={() => void saveWorkflowModuleDraft(false)} disabled={workflowModulesBusy}>
+                            另存为新方案
+                          </button>
+                          {selectedWorkflowModule && (
+                            <button type="button" onClick={() => void exportSelectedWorkflowModule()} disabled={workflowModulesBusy}>
+                              导出备份
+                            </button>
+                          )}
+                          {selectedWorkflowModule && (
+                            <button type="button" onClick={() => void requestWorkflowModuleRestore()} disabled={workflowModulesBusy}>
+                              从备份恢复当前方案
+                            </button>
+                          )}
+                          {selectedWorkflowModule && selectedWorkflowModule.backupCount > 0 && (
+                            <button type="button" onClick={() => void restoreSelectedWorkflowModuleBackup()} disabled={workflowModulesBusy}>
+                              恢复到覆盖前状态
+                            </button>
+                          )}
+                          {selectedWorkflowModule && (
+                            <button type="button" className="primary-button workflow-module-save-button" onClick={() => void saveWorkflowModuleDraft(true)} disabled={workflowModulesBusy}>
+                              保存
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <button type="button" className="primary-button" onClick={() => void restoreSelectedWorkflowModule()} disabled={workflowModulesBusy}>
+                            恢复方案
+                          </button>
+                          <button type="button" className="dialog-danger" onClick={() => setWorkflowModuleDeletionMode("purge")} disabled={workflowModulesBusy}>
+                            彻底删除
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    {!workflowModulesReady && <p className="workflow-module-loading">正在读取工作流方案…</p>}
+                  </div>
+                </div>
+              </section>
+            )}
+            {activeSettingsSection === "model" && (
+              <section className="settings-pane model-settings-pane" aria-labelledby="model-settings-title">
+                <div className="settings-pane-heading">
+                  <h3 id="model-settings-title">模型参数</h3>
+                  <p>参数独立保存在所选工作流方案中，不会影响其他并存方案。</p>
+                </div>
+                <div className="model-workflow-module-select">
+                  <span>编辑方案</span>
+                  <SettingsSelect
+                    value={selectedWorkflowModule?.capability === "video-generation" && selectedWorkflowModule.variant === "reference-to-video" ? selectedWorkflowModule.id : ""}
+                    onChange={(value) => {
+                      const module = workflowModules.find((candidate) => candidate.id === value);
+                      if (!module) return;
+                      setSelectedWorkflowModuleId(module.id);
+                      setH3ModelParametersDraft({
+                        primaryVideoSteps: module.defaults.primaryVideoSteps,
+                        primaryAudioSteps: module.defaults.primaryAudioSteps,
+                        secondarySchedulerSteps: module.defaults.secondarySchedulerSteps,
+                        primaryBrightness: module.defaults.primaryBrightness,
+                        primaryContrast: module.defaults.primaryContrast,
+                        primarySaturation: module.defaults.primarySaturation,
+                        secondaryBrightness: module.defaults.secondaryBrightness,
+                        secondaryContrast: module.defaults.secondaryContrast,
+                        secondarySaturation: module.defaults.secondarySaturation,
+                      });
+                      setH3LoraPreference({
+                        loraName: module.defaults.loraName,
+                        loraStrength: module.defaults.loraStrength,
+                      });
+                    }}
+                    ariaLabel="模型参数编辑方案"
+                    placeholder="没有可用方案"
+                    options={workflowModules.filter((module) => !module.deletedAt && module.capability === "video-generation" && module.variant === "reference-to-video").map((module) => ({
+                      value: module.id,
+                      label: `${module.name} · ${module.revision}`,
+                    }))}
+                  />
+                </div>
+                <section className="h3-model-parameters" aria-label="H3 模型参数">
+                  {selectedWorkflowModule?.uiSchema.groups.map((group, groupIndex) => (
+                    <div className="h3-model-parameter-group" key={group.id}>
+                      <strong>{group.title}</strong>
+                      <div className="h3-model-parameters-grid">
+                        {group.fields.map((field, fieldIndex) => (
+                          <label key={field.key}>
+                            {field.label}
+                            <ModelParameterNumberInput
+                              autoFocus={groupIndex === 0 && fieldIndex === 0}
+                              min={field.minKey
+                                ? h3ModelParametersDraft[field.minKey] || field.min
+                                : field.min}
+                              max={field.max}
+                              step={field.step}
+                              value={h3ModelParametersDraft[field.key]}
+                              onChange={(value) => setH3ModelParametersDraft((current) => ({
+                                ...current,
+                                [field.key]: value,
+                              }))}
+                            />
+                          </label>
+                        ))}
+                      </div>
+                      {group.note && <small className="h3-model-parameters-note">{group.note}</small>}
+                    </div>
+                  ))}
+                </section>
               </section>
             )}
             {activeSettingsSection === "privacy" && (
@@ -6228,9 +8286,114 @@ function CanvasWorkspace() {
               保存基础设置
             </button>
           )}
+          {activeSettingsSection === "model" && (
+            <button type="submit" className="primary-button">
+              保存模型参数
+            </button>
+          )}
         </div>
       </form>
-    </div>,
+    </div>
+    {workflowModuleDeletionMode && selectedWorkflowModule && (
+      <div
+        className="project-dialog-backdrop workflow-delete-dialog-backdrop"
+        onMouseDown={() => {
+          if (!workflowModulesBusy) setWorkflowModuleDeletionMode(null);
+        }}
+      >
+        <div
+          className="project-dialog project-delete-dialog workflow-delete-dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="workflow-delete-title"
+          aria-describedby="workflow-delete-description"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <div className="project-dialog-icon"><Trash2 size={22} /></div>
+          <div>
+            <h2 id="workflow-delete-title">
+              {workflowModuleDeletionMode === "trash" ? "将方案移入回收站？" : "彻底删除工作流方案？"}
+            </h2>
+            <p id="workflow-delete-description">{workflowModuleDeletionDescription}</p>
+            {workflowModuleDeletionMode === "purge" && (
+              <p className="workflow-delete-warning">方案文件和恢复点删除后无法找回。</p>
+            )}
+          </div>
+          <div className="project-dialog-actions">
+            <button
+              type="button"
+              className="dialog-cancel"
+              autoFocus
+              disabled={workflowModulesBusy}
+              onClick={() => setWorkflowModuleDeletionMode(null)}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="dialog-danger"
+              disabled={workflowModulesBusy}
+              onClick={() => {
+                const mode = workflowModuleDeletionMode;
+                setWorkflowModuleDeletionMode(null);
+                if (mode === "trash") void trashSelectedWorkflowModule();
+                else void purgeSelectedWorkflowModule();
+              }}
+            >
+              <Trash2 size={14} />
+              {workflowModuleDeletionMode === "trash" ? "移入回收站" : "永久删除"}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    {workflowModuleRestoreRequest && (
+      <div
+        className="project-dialog-backdrop workflow-delete-dialog-backdrop"
+        onMouseDown={() => {
+          if (!workflowModulesBusy) setWorkflowModuleRestoreRequest(null);
+        }}
+      >
+        <div
+          className="project-dialog project-delete-dialog workflow-delete-dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="workflow-restore-title"
+          aria-describedby="workflow-restore-description"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <div className="project-dialog-icon"><RotateCcw size={22} /></div>
+          <div>
+            <h2 id="workflow-restore-title">从备份恢复当前方案？</h2>
+            <p id="workflow-restore-description">
+              将使用“{workflowModuleRestoreRequest.bundlePath.split(/[\\/]/).pop()}”完整替换当前方案“{workflowModuleRestoreRequest.moduleName}”。
+            </p>
+            <p className="workflow-delete-warning">当前内容会先自动保存为恢复点，需要时仍可撤回。</p>
+          </div>
+          <div className="project-dialog-actions">
+            <button
+              type="button"
+              className="dialog-cancel"
+              autoFocus
+              disabled={workflowModulesBusy}
+              onClick={() => setWorkflowModuleRestoreRequest(null)}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={workflowModulesBusy}
+              onClick={() => void restoreWorkflowModuleFromBundle()}
+            >
+              <RotateCcw size={14} />
+              {workflowModulesBusy ? "正在恢复…" : "确认恢复"}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>,
     document.body,
   );
 
@@ -6448,9 +8611,15 @@ function CanvasWorkspace() {
     <main
       className="app-shell"
       style={canvasBackground ? { background: canvasBackground } : undefined}
+      onPointerDownCapture={(event) => {
+        if (event.button === 1) setMiddlePanActive(true);
+      }}
     >
       <ReactFlow<CanvasFlowNode, Edge>
-        className={spacePanActive ? "is-space-pan-active" : undefined}
+        className={[
+          spacePanActive ? "is-space-pan-active" : "",
+          middlePanActive ? "is-middle-pan-active" : "",
+        ].filter(Boolean).join(" ") || undefined}
         nodes={visibleNodes}
         edges={interactiveEdges}
         nodeTypes={nodeTypes}
@@ -6486,10 +8655,12 @@ function CanvasWorkspace() {
           vectorEffect: "non-scaling-stroke",
         }}
         deleteKeyCode={null}
-        selectionKeyCode="Control"
+        selectionKeyCode={null}
         multiSelectionKeyCode="Control"
-        selectionOnDrag={false}
+        selectionOnDrag
+        selectionMode={SelectionMode.Partial}
         panActivationKeyCode="Space"
+        panOnDrag={[1]}
         panOnScroll
         fitView
       >
@@ -6557,21 +8728,23 @@ function CanvasWorkspace() {
           </div>
         </Panel>
 
-        <Panel position="top-center" className="toolbar-panel">
-          <label className="search-field">
-            <Search size={15} />
-            <input
-              value={search}
-              onChange={(event) => setSearch(event.currentTarget.value)}
-              onKeyDown={(event) => event.key === "Enter" && focusFirstMatch()}
-              placeholder="搜索节点"
-            />
-            {search && (
-              <button onClick={() => setSearch("")} title="清空搜索"><X size={13} /></button>
-            )}
-          </label>
-          {search && <span className="match-count">{matchedIds.size} 个结果</span>}
-        </Panel>
+        {SHOW_NODE_SEARCH && (
+          <Panel position="top-center" className="toolbar-panel">
+            <label className="search-field">
+              <Search size={15} />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.currentTarget.value)}
+                onKeyDown={(event) => event.key === "Enter" && focusFirstMatch()}
+                placeholder="搜索节点"
+              />
+              {search && (
+                <button onClick={() => setSearch("")} title="清空搜索"><X size={13} /></button>
+              )}
+            </label>
+            {search && <span className="match-count">{matchedIds.size} 个结果</span>}
+          </Panel>
+        )}
 
         <Panel position="top-right" className="api-panel">
           <span className="live-indicator"><Radio size={14} /> 本地 API</span>

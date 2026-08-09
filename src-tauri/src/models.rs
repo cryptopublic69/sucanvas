@@ -181,6 +181,8 @@ pub struct SetAppLockInput {
 #[serde(rename_all = "camelCase")]
 pub struct ComfySubmitInput {
     pub server_url: String,
+    #[serde(default)]
+    pub workflow_module_id: Option<String>,
     pub workflow_path: String,
     #[serde(default)]
     pub input_root_path: String,
@@ -193,10 +195,30 @@ pub struct ComfySubmitInput {
     pub aspect_ratio: String,
     pub primary_resolution_megapixels: f64,
     pub secondary_resolution_megapixels: f64,
+    #[serde(default = "default_primary_video_steps")]
+    pub primary_video_steps: u32,
+    #[serde(default = "default_primary_audio_steps")]
+    pub primary_audio_steps: u32,
+    #[serde(default = "default_secondary_scheduler_steps")]
+    pub secondary_scheduler_steps: u32,
+    #[serde(default = "default_primary_brightness")]
+    pub primary_brightness: f64,
+    #[serde(default = "default_primary_contrast")]
+    pub primary_contrast: f64,
+    #[serde(default = "default_primary_saturation")]
+    pub primary_saturation: f64,
+    #[serde(default = "default_secondary_brightness")]
+    pub secondary_brightness: f64,
+    #[serde(default = "default_secondary_contrast")]
+    pub secondary_contrast: f64,
+    #[serde(default = "default_secondary_saturation")]
+    pub secondary_saturation: f64,
     pub secondary_sampling_enabled: bool,
     pub lora_name: String,
     #[serde(default = "default_lora_strength")]
     pub lora_strength: f64,
+    #[serde(default)]
+    pub lora_bypassed: bool,
     #[serde(default)]
     pub image_paths: Vec<String>,
     #[serde(default)]
@@ -208,6 +230,42 @@ pub struct ComfySubmitInput {
 }
 
 fn default_lora_strength() -> f64 {
+    1.0
+}
+
+fn default_primary_video_steps() -> u32 {
+    6
+}
+
+fn default_primary_audio_steps() -> u32 {
+    8
+}
+
+fn default_secondary_scheduler_steps() -> u32 {
+    4
+}
+
+fn default_primary_brightness() -> f64 {
+    1.0
+}
+
+fn default_primary_contrast() -> f64 {
+    0.9
+}
+
+fn default_primary_saturation() -> f64 {
+    0.9
+}
+
+fn default_secondary_brightness() -> f64 {
+    1.0
+}
+
+fn default_secondary_contrast() -> f64 {
+    0.9
+}
+
+fn default_secondary_saturation() -> f64 {
     1.0
 }
 

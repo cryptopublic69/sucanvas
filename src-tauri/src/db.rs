@@ -355,11 +355,6 @@ impl Database {
         Ok(node)
     }
 
-    pub fn get_node(&self, id: &str) -> CanvasResult<Option<NodeRecord>> {
-        let connection = self.lock()?;
-        get_node_by_id(&connection, id)
-    }
-
     pub fn delete_node(&self, id: &str) -> CanvasResult<()> {
         let connection = self.lock()?;
         let canvas_id = get_node_by_id(&connection, id)?

@@ -31,3 +31,5 @@ tower-http = { version = "0.7.0", features = ["cors", "limit", "trace"] }
 thiserror = "2.0.19"
 reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 argon2 = "0.5"
+tauri-plugin-dialog = "2"
+zip = { version = "6.0.0", default-features = false, features = ["deflate"] }
