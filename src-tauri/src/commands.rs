@@ -8,20 +8,151 @@ use std::{
     time::Duration,
 };
 
+use argon2::{
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use reqwest::{multipart, Client, Url};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::State;
 use uuid::Uuid;
 
 use crate::{
     models::{
-        ComfyClientTaskStatus, ComfyOutputFile, ComfyQueueSummary, ComfySubmitInput,
+        AppLockStatus, ComfyClientTaskStatus, ComfyOutputFile, ComfyQueueSummary, ComfySubmitInput,
         ComfySubmitResult, CreateEdgeInput, CreateNodeInput, CreateNodeResult, CreateProjectInput,
-        DeleteNodesInput, DeletedBatch, EdgeRecord, NodeRecord, RuntimeInfo, UpdateNodeInput,
-        UpdateProjectInput, WorkspaceSnapshot,
+        DeleteNodesInput, DeletedBatch, EdgeRecord, NodeRecord, RuntimeInfo, SetAppLockInput,
+        SetProjectPrivacyInput, UpdateNodeInput, UpdateProjectInput, WorkspaceSnapshot,
     },
     ApplicationState, RunningComfyTask,
 };
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppLockConfig {
+    password_hash: String,
+}
+
+fn read_app_lock_config(path: &Path) -> Result<Option<AppLockConfig>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path).map_err(|error| format!("无法读取应用锁配置：{error}"))?;
+    let config = serde_json::from_slice::<AppLockConfig>(&bytes)
+        .map_err(|error| format!("应用锁配置已损坏：{error}"))?;
+    if config.password_hash.trim().is_empty() {
+        return Err("应用锁配置已损坏：密码哈希为空".to_owned());
+    }
+    Ok(Some(config))
+}
+
+fn password_character_count(password: &str) -> usize {
+    password.chars().count()
+}
+
+fn validate_new_app_lock_password(password: &str) -> Result<(), String> {
+    let length = password_character_count(password);
+    if length < 4 {
+        return Err("新密码至少需要 4 个字符".to_owned());
+    }
+    if length > 128 {
+        return Err("新密码不能超过 128 个字符".to_owned());
+    }
+    Ok(())
+}
+
+fn hash_app_lock_password(password: &str) -> Result<String, String> {
+    let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
+        .map_err(|error| format!("无法生成密码盐：{error}"))?;
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|error| format!("无法创建密码哈希：{error}"))
+}
+
+fn verify_app_lock_hash(password: &str, encoded_hash: &str) -> Result<bool, String> {
+    let parsed_hash =
+        PasswordHash::new(encoded_hash).map_err(|error| format!("应用锁配置已损坏：{error}"))?;
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok())
+}
+
+fn write_app_lock_config(path: &Path, config: &AppLockConfig) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(config)
+        .map_err(|error| format!("无法序列化应用锁配置：{error}"))?;
+    std::fs::write(path, bytes).map_err(|error| format!("无法保存应用锁配置：{error}"))
+}
+
+#[tauri::command]
+pub fn get_app_lock_status(state: State<'_, ApplicationState>) -> Result<AppLockStatus, String> {
+    let _guard = state
+        .app_lock_guard
+        .lock()
+        .map_err(|_| "应用锁状态不可用".to_owned())?;
+    Ok(AppLockStatus {
+        enabled: read_app_lock_config(&state.app_lock_path)?.is_some(),
+    })
+}
+
+#[tauri::command]
+pub async fn verify_app_lock_password(
+    password: String,
+    state: State<'_, ApplicationState>,
+) -> Result<bool, String> {
+    let path = state.app_lock_path.clone();
+    let guard = state.app_lock_guard.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard.lock().map_err(|_| "应用锁状态不可用".to_owned())?;
+        let config = read_app_lock_config(&path)?.ok_or_else(|| "应用锁尚未启用".to_owned())?;
+        verify_app_lock_hash(&password, &config.password_hash)
+    })
+    .await
+    .map_err(|error| format!("应用锁验证任务失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn set_app_lock_password(
+    input: SetAppLockInput,
+    state: State<'_, ApplicationState>,
+) -> Result<(), String> {
+    validate_new_app_lock_password(&input.new_password)?;
+    let path = state.app_lock_path.clone();
+    let guard = state.app_lock_guard.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard.lock().map_err(|_| "应用锁状态不可用".to_owned())?;
+        if let Some(config) = read_app_lock_config(&path)? {
+            let current_password = input.current_password.as_deref().unwrap_or_default();
+            if !verify_app_lock_hash(current_password, &config.password_hash)? {
+                return Err("当前密码错误".to_owned());
+            }
+        }
+        let password_hash = hash_app_lock_password(&input.new_password)?;
+        write_app_lock_config(&path, &AppLockConfig { password_hash })
+    })
+    .await
+    .map_err(|error| format!("应用锁设置任务失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn disable_app_lock(
+    password: String,
+    state: State<'_, ApplicationState>,
+) -> Result<(), String> {
+    let path = state.app_lock_path.clone();
+    let guard = state.app_lock_guard.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard.lock().map_err(|_| "应用锁状态不可用".to_owned())?;
+        let config = read_app_lock_config(&path)?.ok_or_else(|| "应用锁尚未启用".to_owned())?;
+        if !verify_app_lock_hash(&password, &config.password_hash)? {
+            return Err("当前密码错误".to_owned());
+        }
+        std::fs::remove_file(&path).map_err(|error| format!("无法关闭应用锁：{error}"))
+    })
+    .await
+    .map_err(|error| format!("关闭应用锁任务失败：{error}"))?
+}
 
 #[tauri::command]
 pub fn load_workspace(
@@ -74,6 +205,17 @@ pub fn update_project(
     state
         .database
         .rename_project(&input.id, &input.name)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_project_private(
+    input: SetProjectPrivacyInput,
+    state: State<'_, ApplicationState>,
+) -> Result<crate::models::CanvasRecord, String> {
+    state
+        .database
+        .set_project_private(&input.id, input.is_private)
         .map_err(|error| error.to_string())
 }
 
@@ -376,6 +518,46 @@ pub fn delete_node(id: String, state: State<'_, ApplicationState>) -> Result<(),
     Ok(())
 }
 
+fn delete_video_files_blocking(paths: Vec<String>) -> Result<usize, String> {
+    if paths.is_empty() {
+        return Err("没有可删除的视频文件".to_owned());
+    }
+
+    let mut unique_paths = HashSet::new();
+    let mut resolved_paths = Vec::new();
+    for path in paths {
+        let resolved = PathBuf::from(&path)
+            .canonicalize()
+            .map_err(|error| format!("无法定位视频文件 {path}: {error}"))?;
+        let metadata = resolved
+            .metadata()
+            .map_err(|error| format!("无法读取视频文件信息 {}: {error}", resolved.display()))?;
+        if !metadata.is_file() {
+            return Err(format!("目标不是文件：{}", resolved.display()));
+        }
+        let is_video = media_format(&resolved).is_some_and(|format| format.kind == "video");
+        if !is_video {
+            return Err(format!("拒绝删除非视频文件：{}", resolved.display()));
+        }
+        if unique_paths.insert(resolved.clone()) {
+            resolved_paths.push(resolved);
+        }
+    }
+
+    for path in &resolved_paths {
+        std::fs::remove_file(path)
+            .map_err(|error| format!("删除视频文件失败 {}: {error}", path.display()))?;
+    }
+    Ok(resolved_paths.len())
+}
+
+#[tauri::command]
+pub async fn delete_video_files(paths: Vec<String>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_video_files_blocking(paths))
+        .await
+        .map_err(|error| format!("视频文件删除任务失败: {error}"))?
+}
+
 #[tauri::command]
 pub fn delete_nodes_undoable(
     input: DeleteNodesInput,
@@ -529,7 +711,7 @@ fn install_clean_video_output(
         .and_then(|node| node.get("inputs"))
         .and_then(|inputs| inputs.get("filename_prefix"))
         .and_then(Value::as_str)
-        .unwrap_or("InfiniteCanvas/Minimax_H3")
+        .unwrap_or("SuCanvas/Minimax_H3")
         .to_owned();
     let (image_node_id, audio_node_id, audio_output_index) = if secondary_sampling_enabled {
         ("403", "382", 0)
@@ -575,6 +757,7 @@ fn configure_h3_generation(
     prompt: &str,
     seed: u64,
     duration_seconds: f64,
+    aspect_ratio: &str,
     primary_resolution_megapixels: f64,
     secondary_resolution_megapixels: f64,
     secondary_sampling_enabled: bool,
@@ -597,10 +780,22 @@ fn configure_h3_generation(
     set_workflow_input(
         workflow,
         H3_PRIMARY_RESOLUTION_NODE_ID,
+        "aspect_ratio",
+        Value::String(aspect_ratio.to_owned()),
+    )?;
+    set_workflow_input(
+        workflow,
+        H3_PRIMARY_RESOLUTION_NODE_ID,
         "megapixels",
         json!(primary_resolution_megapixels),
     )?;
     if secondary_sampling_enabled {
+        set_workflow_input(
+            workflow,
+            H3_SECONDARY_RESOLUTION_NODE_ID,
+            "aspect_ratio",
+            Value::String(aspect_ratio.to_owned()),
+        )?;
         set_workflow_input(
             workflow,
             H3_SECONDARY_RESOLUTION_NODE_ID,
@@ -619,6 +814,19 @@ fn configure_h3_generation(
     }
     install_clean_video_output(workflow, secondary_sampling_enabled)?;
     Ok(())
+}
+
+fn h3_workflow_aspect_ratio(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "16:9" => Some("16:9 (Widescreen)"),
+        "9:16" => Some("9:16 (Portrait Widescreen)"),
+        "4:3" => Some("4:3 (Standard)"),
+        "3:4" => Some("3:4 (Portrait Standard)"),
+        "2:3" => Some("2:3 (Portrait Photo)"),
+        "3:2" => Some("3:2 (Photo)"),
+        "1:1" => Some("1:1 (Square)"),
+        _ => None,
+    }
 }
 
 fn resolve_generation_seed(seed_mode: &str, seed: &str) -> Result<u64, String> {
@@ -965,6 +1173,8 @@ async fn submit_comfyui_workflow_inner(
     {
         return Err("生成时长必须在2到15秒之间".to_owned());
     }
+    let aspect_ratio = h3_workflow_aspect_ratio(&input.aspect_ratio)
+        .ok_or_else(|| "画面比例必须是 16:9、9:16、4:3、3:4、2:3、3:2 或 1:1".to_owned())?;
     if !input.primary_resolution_megapixels.is_finite()
         || input.primary_resolution_megapixels < 0.2
         || input.primary_resolution_megapixels > 2.0
@@ -987,7 +1197,16 @@ async fn submit_comfyui_workflow_inner(
 
     let workflow_bytes = tokio::fs::read(&input.workflow_path)
         .await
-        .map_err(|error| format!("读取 API 工作流失败：{error}"))?;
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "H3 API 工作流文件不存在：{}。请在应用设置中更新工作流路径",
+                    input.workflow_path
+                )
+            } else {
+                format!("读取 H3 API 工作流失败（{}）：{error}", input.workflow_path)
+            }
+        })?;
     ensure_comfy_task_active(&task.cancelled)?;
     let mut workflow: Value = serde_json::from_slice(&workflow_bytes)
         .map_err(|error| format!("解析 API 工作流失败：{error}"))?;
@@ -1031,6 +1250,7 @@ async fn submit_comfyui_workflow_inner(
         &input.prompt,
         generation_seed,
         input.duration_seconds,
+        aspect_ratio,
         input.primary_resolution_megapixels,
         input.secondary_resolution_megapixels,
         input.secondary_sampling_enabled || uploaded_secondary_source.is_some(),
@@ -1624,17 +1844,19 @@ pub fn get_runtime_info(state: State<'_, ApplicationState>) -> RuntimeInfo {
 mod tests {
     use super::{
         comfy_execution_elapsed_seconds, comfy_input_task_path, comfy_queue_summary_from_value,
-        configure_h3_generation, configure_secondary_source_video, media_format,
-        minimax_h3_loras_from_object_info, resolve_generation_seed, MediaFormat, AUDIO_MAX_BYTES,
-        IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
+        configure_h3_generation, configure_secondary_source_video, delete_video_files_blocking,
+        hash_app_lock_password, media_format, minimax_h3_loras_from_object_info,
+        resolve_generation_seed, validate_new_app_lock_password, verify_app_lock_hash, MediaFormat,
+        AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
     use serde_json::json;
-    use std::path::Path;
+    use std::{fs, path::Path};
+    use uuid::Uuid;
 
     fn resolution_test_workflow() -> serde_json::Value {
         json!({
             "339": { "inputs": { "value": "old prompt" } },
-            "340": { "inputs": { "megapixels": 0.4 } },
+            "340": { "inputs": { "aspect_ratio": "16:9 (Widescreen)", "megapixels": 0.4 } },
             "348": { "inputs": { "noise_seed": 0 } },
             "350": { "inputs": { "value": 15.0 } },
             "354": { "inputs": { "lora_name": "MinimaxH3\\old-primary.safetensors", "strength_model": 1.0 } },
@@ -1642,9 +1864,24 @@ mod tests {
             "383": { "inputs": { "image": ["381", 0] } },
             "388": { "inputs": { "audio": ["382", 0] } },
             "397": { "inputs": { "save_output": true, "filename_prefix": "secondary/video" } },
-            "398": { "inputs": { "megapixels": 0.5 } }
+            "398": { "inputs": { "aspect_ratio": "16:9 (Widescreen)", "megapixels": 0.5 } }
             ,"401": { "inputs": { "lora_name": "MinimaxH3\\old-secondary.safetensors", "strength_model": 1.0 } }
         })
+    }
+
+    #[test]
+    fn app_lock_hash_accepts_only_the_original_password() {
+        let hash = hash_app_lock_password("本机锁密码123").unwrap();
+        assert!(verify_app_lock_hash("本机锁密码123", &hash).unwrap());
+        assert!(!verify_app_lock_hash("错误密码", &hash).unwrap());
+        assert!(!hash.contains("本机锁密码123"));
+    }
+
+    #[test]
+    fn app_lock_password_length_is_bounded() {
+        assert!(validate_new_app_lock_password("123").is_err());
+        assert!(validate_new_app_lock_password("1234").is_ok());
+        assert!(validate_new_app_lock_password(&"a".repeat(129)).is_err());
     }
 
     #[test]
@@ -1712,6 +1949,7 @@ mod tests {
             "prompt",
             42,
             8.0,
+            "3:4 (Portrait Standard)",
             0.4,
             0.8,
             true,
@@ -1762,6 +2000,7 @@ mod tests {
             "new prompt",
             u64::MAX,
             8.0,
+            "9:16 (Portrait Widescreen)",
             0.3,
             2.0,
             true,
@@ -1784,8 +2023,16 @@ mod tests {
             Some(&json!(0.3))
         );
         assert_eq!(
+            workflow.pointer("/340/inputs/aspect_ratio"),
+            Some(&json!("9:16 (Portrait Widescreen)"))
+        );
+        assert_eq!(
             workflow.pointer("/398/inputs/megapixels"),
             Some(&json!(2.0))
+        );
+        assert_eq!(
+            workflow.pointer("/398/inputs/aspect_ratio"),
+            Some(&json!("9:16 (Portrait Widescreen)"))
         );
         for node_id in ["354", "401"] {
             assert_eq!(
@@ -1821,6 +2068,7 @@ mod tests {
             "prompt",
             42,
             6.0,
+            "16:9 (Widescreen)",
             0.2,
             0.8,
             false,
@@ -1925,5 +2173,32 @@ mod tests {
             })
         );
         assert_eq!(media_format(Path::new("vector.svg")), None);
+    }
+
+    #[test]
+    fn deletes_only_supported_video_files() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "infinite-canvas-delete-video-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&test_dir).unwrap();
+        let video_path = test_dir.join("preview.mp4");
+        let text_path = test_dir.join("notes.txt");
+        fs::write(&video_path, b"video").unwrap();
+        fs::write(&text_path, b"text").unwrap();
+
+        assert_eq!(
+            delete_video_files_blocking(vec![video_path.to_string_lossy().into_owned()]),
+            Ok(1)
+        );
+        assert!(!video_path.exists());
+        assert!(
+            delete_video_files_blocking(vec![text_path.to_string_lossy().into_owned()])
+                .unwrap_err()
+                .contains("拒绝删除非视频文件")
+        );
+        assert!(text_path.exists());
+
+        fs::remove_dir_all(test_dir).unwrap();
     }
 }

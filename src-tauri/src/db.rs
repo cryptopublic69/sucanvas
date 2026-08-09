@@ -71,6 +71,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS canvases (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
+                is_private INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -110,6 +111,13 @@ impl Database {
                 ON edges(canvas_id);
             ",
         )?;
+
+        if !table_has_column(&connection, "canvases", "is_private")? {
+            connection.execute(
+                "ALTER TABLE canvases ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
 
         let now = now();
         connection.execute(
@@ -156,14 +164,46 @@ impl Database {
         }
         connection
             .query_row(
-                "SELECT id, name, created_at, updated_at FROM canvases WHERE id = ?1",
+                "SELECT id, name, is_private, created_at, updated_at FROM canvases WHERE id = ?1",
                 [id],
                 |row| {
                     Ok(CanvasRecord {
                         id: row.get(0)?,
                         name: row.get(1)?,
-                        created_at: row.get(2)?,
-                        updated_at: row.get(3)?,
+                        is_private: row.get::<_, i64>(2)? != 0,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(CanvasError::Database)
+    }
+
+    pub fn set_project_private(&self, id: &str, is_private: bool) -> CanvasResult<CanvasRecord> {
+        if id.trim().is_empty() {
+            return Err(CanvasError::Validation(
+                "project id cannot be empty".to_owned(),
+            ));
+        }
+        let connection = self.lock()?;
+        let changed = connection.execute(
+            "UPDATE canvases SET is_private = ?2 WHERE id = ?1",
+            params![id, i64::from(is_private)],
+        )?;
+        if changed == 0 {
+            return Err(CanvasError::Validation(format!("project not found: {id}")));
+        }
+        connection
+            .query_row(
+                "SELECT id, name, is_private, created_at, updated_at FROM canvases WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(CanvasRecord {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        is_private: row.get::<_, i64>(2)? != 0,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
                     })
                 },
             )
@@ -540,14 +580,15 @@ fn load_workspace_from_connection(
     canvas_id: &str,
 ) -> CanvasResult<WorkspaceSnapshot> {
     let canvas = connection.query_row(
-        "SELECT id, name, created_at, updated_at FROM canvases WHERE id = ?1",
+        "SELECT id, name, is_private, created_at, updated_at FROM canvases WHERE id = ?1",
         [canvas_id],
         |row| {
             Ok(CanvasRecord {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                created_at: row.get(2)?,
-                updated_at: row.get(3)?,
+                is_private: row.get::<_, i64>(2)? != 0,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
             })
         },
     )?;
@@ -575,6 +616,14 @@ fn load_workspace_from_connection(
         nodes,
         edges,
     })
+}
+
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> CanvasResult<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|name| name == column))
 }
 
 fn touch_canvas(connection: &Connection, canvas_id: &str) -> CanvasResult<()> {
@@ -941,6 +990,50 @@ mod tests {
 
         assert_eq!(updated.name, "Final name");
         assert_eq!(reloaded.canvas.name, "Final name");
+    }
+
+    #[test]
+    fn marks_a_project_private_and_persists_the_flag() {
+        let database = Database::in_memory().unwrap();
+        let project = database.create_project("Private project").unwrap();
+        assert!(!project.canvas.is_private);
+
+        let updated = database
+            .set_project_private(&project.canvas.id, true)
+            .unwrap();
+        let reloaded = database.load_project(&project.canvas.id).unwrap();
+
+        assert!(updated.is_private);
+        assert!(reloaded.canvas.is_private);
+    }
+
+    #[test]
+    fn migrates_existing_canvas_tables_with_private_flag_defaulting_to_false() {
+        let path = std::env::temp_dir().join(format!(
+            "infinite-canvas-private-migration-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE canvases (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO canvases (id, name, created_at, updated_at)
+                VALUES ('canvas:legacy', 'Legacy', '2026-01-01', '2026-01-01');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let database = Database::open(&path).unwrap();
+        let project = database.load_project("canvas:legacy").unwrap();
+        assert!(!project.canvas.is_private);
+        drop(database);
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -1,0 +1,686 @@
+{
+  "339": {
+    "inputs": {
+      "value": "subject_definitions:\n<Subject 1> (S1) is Yennie, a young woman with a digital-host look: her facial features, hairstyle and youthful age appearance come from <Picture 1>, and her outfit from <Picture 2>. She is the first speaker, sitting on the left half of the sofa.\n<Subject 2> (S2) is Linsey, a young woman: her facial features, hairstyle and youthful age appearance come from <Picture 4>, and her outfit from <Picture 3>. She is the second speaker, sitting on the right half of the sofa.\n<Picture 5> is the living-room scene reference providing the environment, spatial layout, the sofa, and the environment lighting for all shots.\n<Audio 1> is the voice-timbre reference for <Subject 1> (S1). Only the vocal timbre, texture, speaking quality, and delivery character are referenced; the original signal, wording, phonemes, breaths, pauses, timing, and background sounds are not copied.\n\nsummary:\nreference generation - Two digital-host friends sit side by side on a sofa in a living room at night and chat in shot/reverse-shot about H3's facial expression acting, each demonstrating a different expression live to test it, ending with laughter.\n\nretention_analysis:\n<Picture 1> (Yennie's facial features, in [Shot 1] and [Shot 3]): fully_preserved - face, hairstyle, age and expression base stay identical to the reference across shots.\n<Picture 2> (Yennie's outfit, in [Shot 1] and [Shot 3]): fully_preserved - her clothing stays exactly as in the reference, never changes.\n<Picture 3> (Linsey's outfit, in [Shot 1] and [Shot 2]): fully_preserved - her clothing stays exactly as in the reference, never changes.\n<Picture 4> (Linsey's facial features, in [Shot 1] and [Shot 2]): fully_preserved - face, hairstyle, age and expression base stay identical to the reference.\n<Picture 5> (living room at night, all shots): fully_preserved - the environment, spatial layout, the sofa and its evening lighting are preserved as-is from the reference in every shot.\n<Audio 1> (voice reference for <Subject 1> (S1) in [Shot 1] and [Shot 3]): reference - only the vocal timbre, texture, speaking quality, and delivery character are referenced. The original signal, wording, phonemes, breaths, pauses, timing, and background sounds are not copied.\n\ndetailed_description:\nThe entire video contains no visible text of any kind, including subtitles, captions, titles, logos, watermarks, brand marks, signs, interface text, symbols, icons, stickers, or text-like graphics. No subtitles are rendered at any opacity; subtitle visibility is zero.\nHandheld camera with gentle natural sway and slow breathing drift throughout.\n\n[Shot 1] Medium two-shot: <Subject 1> (S1) Yennie and <Subject 2> (S2) Linsey sit side by side on the sofa, turned slightly toward each other, their faces and outfits matching their reference pictures; both blink naturally. Yennie turns her head toward Linsey to catch her attention, then says in a confident, show-off tone, <d>[Chinese] H3 表情演技真的强，你看，我先来个得意的。</d> while saying it she raises one eyebrow, curls the corner of her mouth into a smug smile and lifts her chin, holding the proud expression for half a second so Linsey can see it, then relaxes with a small wink. A soft fabric rustle accompanies her turn.\n\n[Shot 2] At 00:05.000, over-the-shoulder single close-up of <Subject 2> (S2) Linsey from Yennie's side: Linsey first tilts her head and studies Yennie's expression appraisingly, gives a small nod, then says in a measured, slightly amused tone, <d>[Chinese] 嗯，像那么回事。那我来个高冷的，准备好了。</d> as she speaks she lets her face go flat and cool — eyes dropping downcast, chin lifted, lips pressed into a calm line — holding the aloof look for about a second before raising one eyebrow as if waiting for judgment. Yennie's shoulder stays in the left frame edge. She blinks naturally. Hard cut.\n\n[Shot 3] At 00:10.000, single close-up of <Subject 1> (S1) Yennie with Linsey's shoulder at the right frame edge: the moment Yennie sees Linsey's aloof face she breaks into a \"噗\" laugh, her shoulders shaking lightly, then points at Linsey and says in a teasing, laughing tone, <d>[Chinese] 噗哈哈哈，你这也太端了，还是我自然。</d> she ends by doing a relaxed natural expression — a quick blink and an easy grin — and the two exchange a laughing glance as the shot holds for a moment of afterglow. Both blink naturally. Hard cut at the end.\n\noverall_soundscape:\nSoft room ambience at night: low air-conditioning hum and faint distant city sound, light fabric rustles as the two shift and turn on the sofa, gentle room reverb on voices. Non-verbal reactions: Yennie's burst of laughter with light shoulder-shaking in Shot 3, soft amused breaths between lines. Levels stay natural and intimate, matching the handheld breathing feel.\n\nnon_diegetic_music:\nN/A"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Input Text (Prompt)"
+    }
+  },
+  "340": {
+    "inputs": {
+      "aspect_ratio": "16:9 (Widescreen)",
+      "megapixels": 0.4,
+      "multiple": 32
+    },
+    "class_type": "ResolutionSelector",
+    "_meta": {
+      "title": "一采尺寸"
+    }
+  },
+  "343": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "345": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "346": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "347": {
+    "inputs": {
+      "model": [
+        "357",
+        0
+      ],
+      "conditioning": [
+        "363",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "基本引导器"
+    }
+  },
+  "348": {
+    "inputs": {
+      "noise_seed": 56456340597885880
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "349": {
+    "inputs": {
+      "noise": [
+        "348",
+        0
+      ],
+      "guider": [
+        "347",
+        0
+      ],
+      "sampler": [
+        "357",
+        1
+      ],
+      "sigmas": [
+        "357",
+        2
+      ],
+      "latent_image": [
+        "363",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "350": {
+    "inputs": {
+      "value": 15
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float (Duration)"
+    }
+  },
+  "351": {
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "350",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "数学表达式"
+    }
+  },
+  "353": {
+    "inputs": {
+      "model": [
+        "358",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
+    "_meta": {
+      "title": "MiniMax H3 Mem Eff Sage Attention Patch"
+    }
+  },
+  "354": {
+    "inputs": {
+      "lora_name": "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors",
+      "strength_model": 1,
+      "model": [
+        "353",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器（仅模型）"
+    }
+  },
+  "356": {
+    "inputs": {
+      "av_latent": [
+        "349",
+        0
+      ],
+      "video_vae": [
+        "345",
+        0
+      ],
+      "audio_vae": [
+        "346",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3AVDecodeT8",
+    "_meta": {
+      "title": "MiniMax H3 AV Decode (T8)"
+    }
+  },
+  "357": {
+    "inputs": {
+      "video_steps": 6,
+      "audio_steps": 8,
+      "shift_video": 12,
+      "shift_audio": 3,
+      "model": [
+        "354",
+        0
+      ],
+      "av_latent": [
+        "363",
+        1
+      ]
+    },
+    "class_type": "MiniMaxH3MultiRateSamplerEXPT8",
+    "_meta": {
+      "title": "EXP 4 video / 10 audio (10 full H3 calls)"
+    }
+  },
+  "358": {
+    "inputs": {
+      "unet_name": "MinimaxH3\\minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "360": {
+    "inputs": {
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "2026-08-09/Minimax_H3",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": false,
+      "images": [
+        "405",
+        0
+      ],
+      "audio": [
+        "356",
+        1
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Video Combine 🎥🅥🅗🅢"
+    }
+  },
+  "362": {
+    "inputs": {
+      "image": "915ec194-5ff3-410d-bf6a-e15e1cfd5e52.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "363": {
+    "inputs": {
+      "prompt": [
+        "339",
+        0
+      ],
+      "width": [
+        "340",
+        0
+      ],
+      "height": [
+        "340",
+        1
+      ],
+      "length": [
+        "351",
+        1
+      ],
+      "task_type": "Ref2VA",
+      "audio_mode": "native",
+      "audio_denoise_strength": 1,
+      "add_source_as_reference": false,
+      "prompt_primary_audio_ordinal": 0,
+      "strict_prompt_tags": false,
+      "ref_image_size": "max",
+      "reference_video_policy": "official_2_to_15s",
+      "clip": [
+        "343",
+        0
+      ],
+      "video_vae": [
+        "345",
+        0
+      ],
+      "audio_vae": [
+        "346",
+        0
+      ],
+      "ref_images.ref_image_0": [
+        "362",
+        0
+      ],
+      "ref_images.ref_image_1": [
+        "364",
+        0
+      ],
+      "ref_images.ref_image_2": [
+        "365",
+        0
+      ],
+      "ref_images.ref_image_3": [
+        "367",
+        0
+      ],
+      "ref_images.ref_image_4": [
+        "368",
+        0
+      ],
+      "ref_images.ref_image_5": [
+        "369",
+        0
+      ],
+      "ref_images.ref_image_6": [
+        "370",
+        0
+      ],
+      "ref_images.ref_image_7": [
+        "371",
+        0
+      ],
+      "ref_images.ref_image_8": [
+        "372",
+        0
+      ],
+      "ref_audios.ref_audio_0": [
+        "374",
+        0
+      ],
+      "ref_audios.ref_audio_1": [
+        "416",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3AudioConditioningT8",
+    "_meta": {
+      "title": "MiniMax H3 Audio Conditioning (T8)"
+    }
+  },
+  "364": {
+    "inputs": {
+      "image": "94ffbcf9-7f34-4cce-8b7a-ced96f3882a1_裁切_449x668.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "365": {
+    "inputs": {
+      "image": "6dfbf05d-0cc9-49c4-8187-10e8d02dd6b5_裁切_470x835_裁切_386x574.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "367": {
+    "inputs": {
+      "image": "5156ee31-38ab-4e5d-bba8-ba1ab8421e9e.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "368": {
+    "inputs": {
+      "image": "6b48123f-311b-43ef-af2a-0109a9bd131a.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "369": {
+    "inputs": {
+      "image": "images (1).jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "370": {
+    "inputs": {
+      "image": "6b48123f-311b-43ef-af2a-0109a9bd131a.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "371": {
+    "inputs": {
+      "image": "6b48123f-311b-43ef-af2a-0109a9bd131a.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "372": {
+    "inputs": {
+      "image": "6b48123f-311b-43ef-af2a-0109a9bd131a.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "374": {
+    "inputs": {
+      "audio": "66e54111-7237-4b2f-b8c2-ecac633883cd.MP3"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "加载音频"
+    }
+  },
+  "381": {
+    "inputs": {
+      "samples": [
+        "349",
+        0
+      ],
+      "vae": [
+        "345",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "382": {
+    "inputs": {
+      "samples": [
+        "356",
+        3
+      ],
+      "vae": [
+        "346",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAE解码（音频）"
+    }
+  },
+  "383": {
+    "inputs": {
+      "width": [
+        "398",
+        0
+      ],
+      "height": [
+        "398",
+        1
+      ],
+      "upscale_method": "nvidia_rtx_vsr",
+      "keep_proportion": "crop",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 32,
+      "device": "cpu",
+      "image": [
+        "381",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJv2",
+    "_meta": {
+      "title": "Resize Image v2"
+    }
+  },
+  "386": {
+    "inputs": {
+      "pixels": [
+        "383",
+        0
+      ],
+      "vae": [
+        "345",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE编码"
+    }
+  },
+  "387": {
+    "inputs": {
+      "noise": [
+        "348",
+        0
+      ],
+      "guider": [
+        "393",
+        0
+      ],
+      "sampler": [
+        "389",
+        0
+      ],
+      "sigmas": [
+        "391",
+        0
+      ],
+      "latent_image": [
+        "390",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "388": {
+    "inputs": {
+      "audio": [
+        "382",
+        0
+      ],
+      "vae": [
+        "346",
+        0
+      ]
+    },
+    "class_type": "VAEEncodeAudio",
+    "_meta": {
+      "title": "VAE编码（音频）"
+    }
+  },
+  "389": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "390": {
+    "inputs": {
+      "video_latent": [
+        "386",
+        0
+      ],
+      "audio_latent": [
+        "388",
+        0
+      ]
+    },
+    "class_type": "PT_H3ConcatAVLatent",
+    "_meta": {
+      "title": "PT H3 Concat AV Latent"
+    }
+  },
+  "391": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 4,
+      "denoise": 0.2,
+      "model": [
+        "401",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "基本调度器"
+    }
+  },
+  "393": {
+    "inputs": {
+      "model": [
+        "354",
+        0
+      ],
+      "conditioning": [
+        "363",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "基本引导器"
+    }
+  },
+  "395": {
+    "inputs": {
+      "samples": [
+        "387",
+        0
+      ],
+      "vae": [
+        "345",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "397": {
+    "inputs": {
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "2026-08-09/Minimax_H3",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "403",
+        0
+      ],
+      "audio": [
+        "382",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Video Combine 🎥🅥🅗🅢"
+    }
+  },
+  "398": {
+    "inputs": {
+      "aspect_ratio": "16:9 (Widescreen)",
+      "megapixels": 0.5,
+      "multiple": 32
+    },
+    "class_type": "ResolutionSelector",
+    "_meta": {
+      "title": "二采尺寸"
+    }
+  },
+  "401": {
+    "inputs": {
+      "lora_name": "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors",
+      "strength_model": 1,
+      "model": [
+        "353",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器（仅模型）"
+    }
+  },
+  "403": {
+    "inputs": {
+      "brightness": 1,
+      "contrast": 0.9,
+      "saturation": 1,
+      "image": [
+        "395",
+        0
+      ]
+    },
+    "class_type": "LayerColor: BrightnessContrastV2",
+    "_meta": {
+      "title": "图层颜色：亮度对比度 V2"
+    }
+  },
+  "405": {
+    "inputs": {
+      "brightness": 1,
+      "contrast": 0.9,
+      "saturation": 0.9,
+      "image": [
+        "356",
+        0
+      ]
+    },
+    "class_type": "LayerColor: BrightnessContrastV2",
+    "_meta": {
+      "title": "图层颜色：亮度对比度 V2"
+    }
+  },
+  "416": {
+    "inputs": {
+      "audio": "66e54111-7237-4b2f-b8c2-ecac633883cd.MP3"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "加载音频"
+    }
+  }
+}

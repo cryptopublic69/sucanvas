@@ -70,7 +70,7 @@ fn router(state: ApiState) -> Router {
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
-        service: "InfiniteCanvas",
+        service: "SuCanvas",
         version: env!("CARGO_PKG_VERSION"),
     })
 }

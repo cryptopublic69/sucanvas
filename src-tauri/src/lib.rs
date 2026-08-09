@@ -30,6 +30,8 @@ pub struct ApplicationState {
     database: Database,
     runtime: RuntimeInfo,
     assets_dir: PathBuf,
+    app_lock_path: PathBuf,
+    app_lock_guard: Arc<Mutex<()>>,
     active_canvas_id: Arc<RwLock<String>>,
     running_comfy_tasks: Arc<Mutex<HashMap<String, Arc<RunningComfyTask>>>>,
 }
@@ -52,6 +54,7 @@ pub fn run() {
             std::fs::create_dir_all(&assets_dir)?;
             let database_path = data_dir.join("infinite-canvas.sqlite3");
             let config_path = data_dir.join("api.json");
+            let app_lock_path = data_dir.join("app-lock.json");
             let database = Database::open(&database_path)?;
             let active_canvas_id = Arc::new(RwLock::new(DEFAULT_CANVAS_ID.to_owned()));
 
@@ -77,6 +80,8 @@ pub fn run() {
                     canvas_id: DEFAULT_CANVAS_ID.to_owned(),
                 },
                 assets_dir,
+                app_lock_path,
+                app_lock_guard: Arc::new(Mutex::new(())),
                 active_canvas_id: active_canvas_id.clone(),
                 running_comfy_tasks: Arc::new(Mutex::new(HashMap::new())),
             });
@@ -89,7 +94,7 @@ pub fn run() {
             };
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = api::serve(listener, api_state).await {
-                    eprintln!("InfiniteCanvas API stopped: {error}");
+                    eprintln!("SuCanvas API stopped: {error}");
                 }
             });
             Ok(())
@@ -99,11 +104,13 @@ pub fn run() {
             commands::list_projects,
             commands::create_project,
             commands::update_project,
+            commands::set_project_private,
             commands::delete_project,
             commands::create_node,
             commands::import_media,
             commands::update_node,
             commands::delete_node,
+            commands::delete_video_files,
             commands::delete_nodes_undoable,
             commands::restore_deleted_nodes,
             commands::create_edge,
@@ -114,7 +121,11 @@ pub fn run() {
             commands::get_comfyui_h3_loras,
             commands::get_comfyui_client_task_statuses,
             commands::get_runtime_info,
+            commands::get_app_lock_status,
+            commands::verify_app_lock_password,
+            commands::set_app_lock_password,
+            commands::disable_app_lock,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running InfiniteCanvas");
+        .expect("error while running SuCanvas");
 }

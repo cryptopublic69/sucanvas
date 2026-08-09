@@ -38,17 +38,18 @@ import {
   GripVertical,
   Image as ImageIcon,
   Link2,
+  LockKeyhole,
   Moon,
   Maximize2,
   Music,
   Pause,
   Palette,
+  PenLine,
   Pencil,
   Play,
   Plus,
   Radio,
   RotateCcw,
-  Save,
   Search,
   Settings2,
   Sparkles,
@@ -57,10 +58,13 @@ import {
   Sun,
   Trash2,
   Upload,
+  Eye,
+  EyeOff,
   X,
 } from "lucide-react";
 import {
   ChangeEvent,
+  CSSProperties,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   useCallback,
@@ -76,6 +80,7 @@ type JsonObject = Record<string, unknown>;
 interface CanvasRecord {
   id: string;
   name: string;
+  isPrivate: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -117,6 +122,10 @@ interface RuntimeInfo {
   baseUrl: string;
   dataPath: string;
   canvasId: string;
+}
+
+interface AppLockStatus {
+  enabled: boolean;
 }
 
 interface CreateNodeResult {
@@ -161,7 +170,10 @@ interface ComfyClientTaskStatus {
 
 interface GenerationSnapshot {
   prompt: string;
+  promptNodeId: string;
+  promptNodeIdSource: "captured" | "verified" | "";
   durationSeconds: number;
+  aspectRatio: VideoAspectRatio;
   primaryResolutionMegapixels: number;
   secondaryResolutionMegapixels: number;
   loraName: string;
@@ -177,6 +189,9 @@ interface PersistedComfyTask {
   canvasId: string;
   snapshot: GenerationSnapshot;
   startedAt: number;
+  kind?: "generation" | "secondary";
+  sourceGeneratorId?: string;
+  placeholderNodeId?: string;
 }
 
 interface NodePatch {
@@ -196,17 +211,31 @@ interface CanvasContextMenuState {
   flowY: number;
 }
 
+type VideoDeletionChoice = "cancel" | "node-only" | "node-and-file";
+
+interface VideoDeletionRequest {
+  videoCount: number;
+  filePaths: string[];
+  resolve: (choice: VideoDeletionChoice) => void;
+}
+
+interface H3LoraPreference {
+  loraName: string;
+  loraStrength: number;
+}
+
 interface CanvasNodeData extends Record<string, unknown> {
   record: NodeRecord;
   matched: boolean;
+  relationHighlighted: boolean;
   activeTaskCount: number;
   inputCount: number;
   mediaInputs: NodeRecord[];
   textInputCount: number;
   textInputs: NodeRecord[];
   h3LoraOptions: string[];
+  onH3LoraPreferenceChange: (preference: H3LoraPreference) => void;
   onChange: (id: string, patch: NodePatch) => void;
-  onSave: (id: string, patch: NodePatch) => Promise<boolean>;
   onExecutionCheck: (message: string, valid: boolean) => void;
   onExecute: (id: string) => Promise<void>;
   onSecondarySample: (id: string) => Promise<void>;
@@ -250,11 +279,16 @@ const CANVAS_SNAP_GRID: [number, number] = [CANVAS_GRID_SIZE, CANVAS_GRID_SIZE];
 const AUDIO_NODE_MIN_HEIGHT = 240;
 const VIDEO_NODE_BASE_HEIGHT = 480;
 const MEDIA_NODE_CHROME_HEIGHT = 73;
+const GENERATED_VIDEO_PREVIEW_WIDTH = 360;
+const DEFAULT_GENERATED_VIDEO_ASPECT_RATIO = 16 / 9;
 const COMFYUI_SERVER_URL = "http://192.168.5.108:8188";
 const DEFAULT_GENERATION_SEED = "56456340597885880";
 const DEFAULT_H3_LORA_NAME = "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors";
-const H3_REFERENCE_WORKFLOW_PATH = "D:\\Downloads\\MiniMax+H3全能参考工作流.json";
+const H3_LORA_PREFERENCE_STORAGE_KEY = "infinite-canvas:h3-lora-preference";
+const DEFAULT_H3_REFERENCE_WORKFLOW_PATH = "D:\\Downloads\\MiniMax+H3全能参考工作流.json";
+const H3_REFERENCE_WORKFLOW_STORAGE_KEY = "infinite-canvas:h3-reference-workflow-path";
 const COMFY_TASK_STORAGE_KEY = "infinite-canvas:comfy-tasks";
+const PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY = "infinite-canvas:show-private-projects";
 const VIDEO_RESIZE_CONTROLS = [
   { position: "top", direction: [0, -1] },
   { position: "right", direction: [1, 0] },
@@ -270,8 +304,36 @@ const VIDEO_GENERATION_MODES = [
   { value: "first-last-frame", label: "首尾帧" },
   { value: "text-to-video", label: "文生视频" },
 ] as const;
+const VIDEO_ASPECT_RATIO_OPTIONS = [
+  { value: "16:9", ratio: 16 / 9 },
+  { value: "9:16", ratio: 9 / 16 },
+  { value: "4:3", ratio: 4 / 3 },
+  { value: "3:4", ratio: 3 / 4 },
+  { value: "3:2", ratio: 3 / 2 },
+  { value: "2:3", ratio: 2 / 3 },
+  { value: "1:1", ratio: 1 },
+] as const;
+const VIDEO_PREVIEW_DEFAULT_COLOR = "#6fb5df";
+const VIDEO_PREVIEW_SECONDARY_COLOR = "#2f6f50";
+const VIDEO_PREVIEW_DEFAULT_HIGHLIGHT_COLOR = "#8b7cf6";
+const VIDEO_PREVIEW_SECONDARY_HIGHLIGHT_COLOR = "#59d58a";
+const VIDEO_PREVIEW_COLOR_PRESETS = [
+  { value: VIDEO_PREVIEW_DEFAULT_COLOR, highlight: VIDEO_PREVIEW_DEFAULT_HIGHLIGHT_COLOR, label: "默认颜色" },
+  { value: VIDEO_PREVIEW_SECONDARY_COLOR, highlight: VIDEO_PREVIEW_SECONDARY_HIGHLIGHT_COLOR, label: "墨绿色" },
+  { value: "#7a343b", highlight: "#ff6b7a", label: "暗红色" },
+  { value: "#7a6728", highlight: "#f0c84b", label: "暗黄色" },
+  { value: "#315b80", highlight: "#5bbcff", label: "暗蓝色" },
+] as const;
+
+function mediaNodeHeightForAspectRatio(width: number, aspectRatio: number): number {
+  return Math.min(
+    2400,
+    Math.max(180, width / aspectRatio + MEDIA_NODE_CHROME_HEIGHT),
+  );
+}
 
 type VideoGenerationMode = typeof VIDEO_GENERATION_MODES[number]["value"];
+type VideoAspectRatio = typeof VIDEO_ASPECT_RATIO_OPTIONS[number]["value"];
 type FrameRole = "first" | "last";
 type SeedMode = "random" | "fixed";
 
@@ -395,7 +457,6 @@ function videoGenerationAutoHeight(
   textInputCount = 0,
   nodeWidth = 360,
 ): number {
-  if (!mediaKinds.length && !textInputCount) return VIDEO_NODE_BASE_HEIGHT;
   const groupCount = new Set(mediaKinds).size;
   const imageCount = mediaKinds.filter((kind) => kind === "image").length;
   const audioCount = mediaKinds.filter((kind) => kind === "audio").length;
@@ -403,12 +464,13 @@ function videoGenerationAutoHeight(
   const listMediaRows = videoCount + Math.ceil(audioCount / 2);
   const imageColumns = Math.max(1, Math.floor((Math.max(180, nodeWidth - 32) + 6) / 66));
   const imageRows = imageCount ? Math.ceil(imageCount / imageColumns) : 0;
+  const textRows = Math.max(1, textInputCount);
   const contentHeight = 439
     + listMediaRows * 51
     + imageRows * 66
     + groupCount * 30
-    + textInputCount * 51
-    + (textInputCount ? 30 : 0);
+    + textRows * 51
+    + 30;
   return Math.min(
     2400,
     Math.max(
@@ -472,6 +534,11 @@ function validExecutionElapsedSeconds(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
+function previewThemeColorFromContent(content: JsonObject): string | null {
+  const value = content.previewThemeColor;
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value : null;
+}
+
 function generatedPreviewPosition(
   generator: NodeRecord,
   existingNodes: NodeRecord[],
@@ -530,10 +597,32 @@ function persistedComfyTasksFromStorage(): PersistedComfyTask[] {
       && typeof task.canvasId === "string"
       && typeof task.startedAt === "number"
       && task.snapshot && typeof task.snapshot === "object"
-    ));
+      && (task.kind === undefined || task.kind === "generation" || task.kind === "secondary")
+      && (task.sourceGeneratorId === undefined || typeof task.sourceGeneratorId === "string")
+      && (task.placeholderNodeId === undefined || typeof task.placeholderNodeId === "string")
+    )).map((task) => ({
+      ...task,
+      snapshot: {
+        ...task.snapshot,
+        promptNodeId: typeof task.snapshot.promptNodeId === "string"
+          ? task.snapshot.promptNodeId
+          : "",
+        promptNodeIdSource: task.snapshot.promptNodeIdSource === "captured"
+          || task.snapshot.promptNodeIdSource === "verified"
+          ? task.snapshot.promptNodeIdSource
+          : "",
+        aspectRatio: videoAspectRatioFromContent({
+          generationAspectRatio: task.snapshot.aspectRatio,
+        }),
+      },
+    }));
   } catch {
     return [];
   }
+}
+
+function isSecondaryComfyTask(task: PersistedComfyTask): boolean {
+  return task.kind === "secondary";
 }
 
 function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot | null {
@@ -543,9 +632,17 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
   if (typeof snapshot.prompt !== "string" || !snapshot.prompt.trim()) return null;
   return {
     prompt: snapshot.prompt,
+    promptNodeId: typeof snapshot.promptNodeId === "string" ? snapshot.promptNodeId : "",
+    promptNodeIdSource: snapshot.promptNodeIdSource === "captured"
+      || snapshot.promptNodeIdSource === "verified"
+      ? snapshot.promptNodeIdSource
+      : "",
     durationSeconds: typeof snapshot.durationSeconds === "number"
       ? snapshot.durationSeconds
       : 15,
+    aspectRatio: videoAspectRatioFromContent({
+      generationAspectRatio: snapshot.aspectRatio,
+    }),
     primaryResolutionMegapixels: validVideoResolution(
       snapshot.primaryResolutionMegapixels,
       0.4,
@@ -597,6 +694,19 @@ function videoDurationFromContent(content: JsonObject): number {
     : 15;
 }
 
+function videoAspectRatioFromContent(content: JsonObject): VideoAspectRatio {
+  const value = content.generationAspectRatio ?? content.aspectRatioLabel;
+  return typeof value === "string"
+    && VIDEO_ASPECT_RATIO_OPTIONS.some((option) => option.value === value)
+    ? value as VideoAspectRatio
+    : "16:9";
+}
+
+function videoAspectRatioValue(value: VideoAspectRatio): number {
+  return VIDEO_ASPECT_RATIO_OPTIONS.find((option) => option.value === value)?.ratio
+    ?? DEFAULT_GENERATED_VIDEO_ASPECT_RATIO;
+}
+
 function validVideoResolution(value: unknown, fallback: number): number {
   return typeof value === "number"
     && Number.isFinite(value)
@@ -639,6 +749,20 @@ function h3LoraStrengthFromContent(content: JsonObject): number {
 function h3LoraDisplayName(value: string): string {
   const parts = value.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? value;
+}
+
+function h3LoraPreferenceFromStorage(): H3LoraPreference {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(H3_LORA_PREFERENCE_STORAGE_KEY) ?? "null");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    const content = parsed as JsonObject;
+    return {
+      loraName: h3LoraNameFromContent(content),
+      loraStrength: h3LoraStrengthFromContent(content),
+    };
+  } catch {
+    return { loraName: DEFAULT_H3_LORA_NAME, loraStrength: 1 };
+  }
 }
 
 function seedModeFromContent(content: JsonObject): SeedMode {
@@ -687,7 +811,7 @@ function validateVideoExecution(
       return { valid: false, message: "文生视频至少需要连接一个文字节点" };
     }
     if (!textInputs.some((input) => textFromContent(input.content).trim())) {
-      return { valid: false, message: "已连接的文字节点内容为空，请先填写并保存" };
+      return { valid: false, message: "已连接的文字节点内容为空，请先填写" };
     }
     return { valid: true, message: "文生视频条件检查通过" };
   }
@@ -716,7 +840,7 @@ function validateVideoExecution(
     return { valid: false, message: "当前参考工作流必须且只能连接一个文字提示词节点" };
   }
   if (!textFromContent(textInputs[0].content).trim()) {
-    return { valid: false, message: "已连接的文字节点内容为空，请先填写并保存" };
+    return { valid: false, message: "已连接的文字节点内容为空，请先填写" };
   }
   if (images.length > 9) {
     return { valid: false, message: "当前参考工作流最多支持9张图片" };
@@ -816,14 +940,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const {
     record,
     matched,
+    relationHighlighted,
     activeTaskCount,
     inputCount,
     mediaInputs,
     textInputCount,
     textInputs,
     h3LoraOptions,
+    onH3LoraPreferenceChange,
     onChange,
-    onSave,
     onExecutionCheck,
     onExecute,
     onSecondarySample,
@@ -834,16 +959,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onCopy,
   } = data;
   const [copied, setCopied] = useState(false);
+  const [promptCopied, setPromptCopied] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(record.title);
+  const [titleOverflowing, setTitleOverflowing] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [previewColorMenuOpen, setPreviewColorMenuOpen] = useState(false);
+  const [aspectRatioMenuOpen, setAspectRatioMenuOpen] = useState(false);
   const [connectedTextEditor, setConnectedTextEditor] = useState<{
     id: string;
     title: string;
     content: JsonObject;
     text: string;
-    savedText: string;
-    saving: boolean;
   } | null>(null);
   const [draggedMediaId, setDraggedMediaId] = useState<string | null>(null);
   const [dragOverMediaId, setDragOverMediaId] = useState<string | null>(null);
@@ -852,10 +979,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [imageIdsPendingClear, setImageIdsPendingClear] = useState<string[] | null>(null);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
   const [textDraft, setTextDraft] = useState(() => textFromContent(record.content));
-  const [textDirty, setTextDirty] = useState(false);
-  const [savingText, setSavingText] = useState(false);
   const [textEditorFocused, setTextEditorFocused] = useState(false);
   const titleInputRef = useRef<HTMLInputElement>(null);
+  const titleDisplayRef = useRef<HTMLSpanElement>(null);
+  const previewColorControlRef = useRef<HTMLDivElement>(null);
+  const aspectRatioControlRef = useRef<HTMLDivElement>(null);
   const audioPreviewRefs = useRef(new Map<string, HTMLAudioElement>());
   const generatedVideoRef = useRef<HTMLVideoElement | null>(null);
   const videoResizeBaseRef = useRef<{
@@ -880,8 +1008,35 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const isVideoAsset = record.kind === "video";
   const isVideoGeneration = record.kind === "video-generation";
   const isGeneratedVideo = record.kind === "generated-video";
+  const isSecondaryPreview = isGeneratedVideo
+    && typeof record.content.sourcePreviewId === "string";
+  const supportsPreviewColor = isText || (
+    isGeneratedVideo
+    && typeof record.content.videoUrl === "string"
+    && Boolean(record.content.videoUrl)
+  );
+  const previewThemeColor = previewThemeColorFromContent(record.content);
+  const previewDisplayColor = previewThemeColor
+    ?? (isSecondaryPreview ? VIDEO_PREVIEW_SECONDARY_COLOR : VIDEO_PREVIEW_DEFAULT_COLOR);
+  const usesDefaultPreviewTheme = previewDisplayColor === VIDEO_PREVIEW_DEFAULT_COLOR;
+  const usesSecondaryGreenTheme = isGeneratedVideo
+    && previewDisplayColor === VIDEO_PREVIEW_SECONDARY_COLOR;
+  const usesCustomPreviewTheme = supportsPreviewColor
+    && Boolean(previewThemeColor)
+    && !usesDefaultPreviewTheme
+    && !usesSecondaryGreenTheme;
+  const previewHighlightColor = VIDEO_PREVIEW_COLOR_PRESETS.find(
+    (preset) => preset.value === previewDisplayColor,
+  )?.highlight ?? previewDisplayColor;
+  const previewThemeStyle = supportsPreviewColor
+    ? {
+        "--preview-theme-color": previewDisplayColor,
+        "--preview-highlight-color": previewHighlightColor,
+      } as CSSProperties
+    : undefined;
   const videoGenerationMode = videoGenerationModeFromContent(record.content);
   const videoDuration = videoDurationFromContent(record.content);
+  const videoAspectRatio = videoAspectRatioFromContent(record.content);
   const primaryVideoResolution = primaryVideoResolutionFromContent(record.content);
   const secondaryVideoResolution = secondaryVideoResolutionFromContent(record.content);
   const h3LoraName = h3LoraNameFromContent(record.content);
@@ -915,9 +1070,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const generatedVideoUrl = typeof record.content.videoUrl === "string"
     ? record.content.videoUrl
     : "";
+  const isGenerationPlaceholder = isGeneratedVideo
+    && record.content.generationPlaceholder === true
+    && !generatedVideoUrl;
+  const placeholderActive = record.content.status === "running"
+    || record.content.status === "cancelling";
   const generatedVideoSeed = typeof record.content.seed === "string"
     ? record.content.seed
     : "";
+  const generatedVideoPrompt = generationSnapshotFromContent(record.content)?.prompt ?? "";
+  const isUnplayedGeneratedVideo = isGeneratedVideo
+    && Boolean(generatedVideoUrl)
+    && record.content.hasBeenPlayed === false;
   const executionRunning = activeTaskCount > 0;
   const executionCancelling = record.content.status === "cancelling";
   const executionProgress = typeof record.content.executionProgress === "number"
@@ -967,8 +1131,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   }, [id, isGeneratedVideo, onChange, record.content, validationMessage]);
 
   useEffect(() => {
-    if (!textDirty) setTextDraft(savedText);
-  }, [savedText, textDirty]);
+    setTextDraft(savedText);
+  }, [savedText]);
 
   useEffect(() => () => {
     if (videoResizeFrameRef.current !== null) {
@@ -981,6 +1145,43 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     titleInputRef.current?.focus();
     titleInputRef.current?.select();
   }, [editingTitle]);
+
+  useEffect(() => {
+    const titleElement = titleDisplayRef.current;
+    if (!titleElement || editingTitle) {
+      setTitleOverflowing(false);
+      return;
+    }
+    const measureOverflow = () => {
+      setTitleOverflowing(titleElement.scrollWidth > titleElement.clientWidth + 1);
+    };
+    measureOverflow();
+    const observer = new ResizeObserver(measureOverflow);
+    observer.observe(titleElement);
+    return () => observer.disconnect();
+  }, [editingTitle, record.title]);
+
+  useEffect(() => {
+    if (!previewColorMenuOpen) return;
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && previewColorControlRef.current?.contains(target)) return;
+      setPreviewColorMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [previewColorMenuOpen]);
+
+  useEffect(() => {
+    if (!aspectRatioMenuOpen) return;
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && aspectRatioControlRef.current?.contains(target)) return;
+      setAspectRatioMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [aspectRatioMenuOpen]);
 
   useEffect(() => {
     if (!expanded && !connectedTextEditor) return;
@@ -1001,17 +1202,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const changeText = (event: ChangeEvent<HTMLTextAreaElement>) => {
     const nextText = event.currentTarget.value;
     setTextDraft(nextText);
-    setTextDirty(nextText !== savedText);
-  };
-
-  const saveText = async () => {
-    if (!textDirty || savingText) return;
-    setSavingText(true);
-    const saved = await onSave(id, {
-      content: { ...record.content, text: textDraft },
+    onChange(id, {
+      content: { ...record.content, text: nextText },
     });
-    if (saved) setTextDirty(false);
-    setSavingText(false);
   };
 
   const openConnectedTextEditor = (input: NodeRecord) => {
@@ -1021,27 +1214,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       title: input.title || "未命名文本",
       content: input.content,
       text: inputText,
-      savedText: inputText,
-      saving: false,
-    });
-  };
-
-  const saveConnectedText = async () => {
-    if (
-      !connectedTextEditor
-      || connectedTextEditor.saving
-      || connectedTextEditor.text === connectedTextEditor.savedText
-    ) return;
-    const editorId = connectedTextEditor.id;
-    const textToSave = connectedTextEditor.text;
-    const nextContent = { ...connectedTextEditor.content, text: textToSave };
-    setConnectedTextEditor((current) => current ? { ...current, saving: true } : current);
-    const saved = await onSave(editorId, { content: nextContent });
-    setConnectedTextEditor((current) => {
-      if (!current || current.id !== editorId) return current;
-      return saved
-        ? { ...current, content: nextContent, savedText: textToSave, saving: false }
-        : { ...current, saving: false };
     });
   };
 
@@ -1058,6 +1230,23 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     window.setTimeout(() => setCopied(false), 1200);
   };
 
+  const copyGeneratedPrompt = () => {
+    if (!generatedVideoPrompt) return;
+    onCopy(generatedVideoPrompt);
+    setPromptCopied(true);
+    window.setTimeout(() => setPromptCopied(false), 1200);
+  };
+
+  const markGeneratedVideoPlayed = () => {
+    if (!isUnplayedGeneratedVideo) return;
+    onChange(id, {
+      content: {
+        ...record.content,
+        hasBeenPlayed: true,
+      },
+    });
+  };
+
   const stopGeneratedVideoPlayback = () => {
     const video = generatedVideoRef.current;
     if (!video) return;
@@ -1068,10 +1257,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const applyNaturalMediaRatio = (naturalWidth: number, naturalHeight: number) => {
     if (savedAspectRatio || naturalWidth <= 0 || naturalHeight <= 0) return;
     const aspectRatio = naturalWidth / naturalHeight;
-    const fittedHeight = Math.min(
-      2400,
-      Math.max(180, record.width / aspectRatio + MEDIA_NODE_CHROME_HEIGHT),
-    );
+    const fittedHeight = mediaNodeHeightForAspectRatio(record.width, aspectRatio);
     onChange(id, {
       content: {
         ...record.content,
@@ -1317,7 +1503,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   };
 
   return (
-    <article className={`canvas-node kind-${record.kind} ${matched ? "" : "is-dimmed"}`}>
+    <article
+      className={`canvas-node kind-${record.kind} ${usesSecondaryGreenTheme ? "is-secondary-preview" : ""} ${usesCustomPreviewTheme ? "has-custom-preview-color" : ""} ${relationHighlighted ? "is-relation-highlighted" : ""} ${matched ? "" : "is-dimmed"}`}
+      style={previewThemeStyle}
+    >
       <NodeResizer
         minWidth={260}
         minHeight={isAudioAsset ? AUDIO_NODE_MIN_HEIGHT : 180}
@@ -1386,8 +1575,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             />
           ) : (
             <span
+              ref={titleDisplayRef}
               className="node-title node-title-display"
-              title="双击修改标题"
+              title={titleOverflowing ? (record.title || "未命名节点") : "双击修改标题"}
               onDoubleClick={(event) => {
                 event.stopPropagation();
                 setEditingTitle(true);
@@ -1406,6 +1596,58 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           >
             <Maximize2 size={13} />
           </button>
+        )}
+        {supportsPreviewColor && (
+          <div
+            ref={previewColorControlRef}
+            className="nodrag node-preview-color-control"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="node-preview-color-picker"
+              onClick={() => setPreviewColorMenuOpen((open) => !open)}
+              title={isText ? "选择文本节点颜色" : "选择视频预览颜色"}
+              aria-label={isText ? "选择文本节点颜色" : "选择视频预览颜色"}
+              aria-expanded={previewColorMenuOpen}
+            >
+              <Palette size={13} />
+            </button>
+            {previewColorMenuOpen && (
+              <div
+                className="node-preview-color-presets"
+                role="menu"
+                aria-label={isText ? "文本节点颜色预设" : "视频预览颜色预设"}
+              >
+                {VIDEO_PREVIEW_COLOR_PRESETS.map((preset) => (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    role="menuitem"
+                    className={previewDisplayColor === preset.value ? "is-active" : ""}
+                    style={{ "--preview-preset-color": preset.value } as CSSProperties}
+                    onClick={() => {
+                      onChange(id, {
+                        content: {
+                          ...record.content,
+                          previewThemeColor: preset.value,
+                        },
+                      });
+                      setPreviewColorMenuOpen(false);
+                    }}
+                    title={preset.label}
+                    aria-label={preset.label}
+                  >
+                    <span
+                      className={preset.value === VIDEO_PREVIEW_DEFAULT_COLOR ? "is-default" : ""}
+                      aria-hidden="true"
+                    />
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
         {isGeneratedVideo && generatedVideoUrl && (
           <button
@@ -1444,9 +1686,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             if (isGeneratedVideo) stopGeneratedVideoPlayback();
             onDelete(id);
           }}
-          title="删除节点"
+          title={isGenerationPlaceholder ? "取消任务并删除占位节点" : "删除节点"}
+          aria-label={isGenerationPlaceholder ? "取消任务并删除占位节点" : "删除节点"}
         >
-          <Trash2 size={14} />
+          {isGenerationPlaceholder ? <X size={14} /> : <Trash2 size={14} />}
         </button>
       </header>
       {(isText || isNote) && (
@@ -1457,24 +1700,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             onChange={changeText}
             onFocus={() => setTextEditorFocused(true)}
             onBlur={() => setTextEditorFocused(false)}
-            onKeyDown={(event) => {
-              if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-                event.preventDefault();
-                void saveText();
-              }
-            }}
             aria-label="文本内容"
             spellCheck={false}
           />
-          <button
-            type="button"
-            className="nodrag node-text-save"
-            onClick={() => void saveText()}
-            disabled={!textDirty || savingText}
-            title={textDirty ? "保存文本（Ctrl+S）" : "内容已保存"}
-          >
-            <Save size={13} />
-          </button>
         </div>
       )}
       {(isImage || isAudioAsset || isVideoAsset || isGeneratedVideo) && (
@@ -1506,11 +1734,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             />
           ) : generatedVideoUrl && isGeneratedVideo ? (
             <>
+              {isUnplayedGeneratedVideo && (
+                <span className="generated-video-new-badge" aria-label="新生成且尚未播放">
+                  NEW
+                </span>
+              )}
               <video
                 ref={generatedVideoRef}
                 src={generatedVideoUrl}
                 controls
                 preload="metadata"
+                onPlay={markGeneratedVideoPlayed}
                 onLoadedMetadata={(event) => applyNaturalMediaRatio(
                   event.currentTarget.videoWidth,
                   event.currentTarget.videoHeight,
@@ -1534,6 +1768,30 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 </div>
               )}
             </>
+          ) : isGenerationPlaceholder ? (
+            <div className={`generated-video-placeholder ${placeholderActive ? "is-active" : "is-stopped"}`}>
+              <div className="generated-video-placeholder-flow" aria-hidden="true">
+                <span className="generated-video-placeholder-blob blob-blue" />
+                <span className="generated-video-placeholder-blob blob-mist" />
+                <span className="generated-video-placeholder-blob blob-sky" />
+                <span className="generated-video-placeholder-blob blob-shadow" />
+              </div>
+              <span className="generated-video-placeholder-message" title={validationMessage}>
+                {validationMessage || (placeholderActive ? "正在等待 ComfyUI 返回视频…" : "生成任务未完成")}
+              </span>
+              {placeholderActive && (
+                <div
+                  className={`video-execution-progress ${executionProgress === null ? "is-indeterminate" : ""}`}
+                  role="progressbar"
+                  aria-label={isSecondaryPreview ? "二次采样生成进度" : "视频生成进度"}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={executionProgress ?? undefined}
+                >
+                  <span style={executionProgress === null ? undefined : { width: `${executionProgress}%` }} />
+                </div>
+              )}
+            </div>
           ) : (
             <div className="asset-error">媒体资源不可用</div>
           )}
@@ -1561,29 +1819,71 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               </button>
             ))}
           </div>
-          <label className="video-duration-control">
-            <span>生成时长</span>
-            <span className="video-parameter-toggle-spacer" aria-hidden="true" />
-            <input
-              className="video-parameter-range"
-              type="range"
-              min="2"
-              max="15"
-              step="1"
-              value={videoDuration}
-              onChange={(event) => onChange(id, {
-                content: {
-                  ...record.content,
-                  generationDuration: Number(event.currentTarget.value),
-                  status: "idle",
-                  validationMessage: "",
-                },
-              })}
-              onPointerDown={(event) => event.stopPropagation()}
-              aria-label="生成时长"
-            />
-            <output className="video-parameter-value">{videoDuration} 秒</output>
-          </label>
+          <div className="video-duration-control">
+            <label className="video-duration-inline">
+              <span>时长</span>
+              <input
+                className="video-parameter-range"
+                type="range"
+                min="2"
+                max="15"
+                step="1"
+                value={videoDuration}
+                onChange={(event) => onChange(id, {
+                  content: {
+                    ...record.content,
+                    generationDuration: Number(event.currentTarget.value),
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                })}
+                onPointerDown={(event) => event.stopPropagation()}
+                aria-label="生成时长"
+              />
+              <output>{videoDuration} 秒</output>
+            </label>
+            <div ref={aspectRatioControlRef} className="video-aspect-ratio-inline">
+              <button
+                type="button"
+                className="nodrag nowheel video-aspect-ratio-toggle"
+                aria-haspopup="menu"
+                aria-expanded={aspectRatioMenuOpen}
+                onClick={() => setAspectRatioMenuOpen((open) => !open)}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <span className="video-aspect-ratio-label">画面比例</span>
+                <span className="video-aspect-ratio-value">{videoAspectRatio}</span>
+                <span className="video-aspect-ratio-arrow" aria-hidden="true">▾</span>
+              </button>
+              {aspectRatioMenuOpen && (
+                <div className="video-aspect-ratio-menu" role="menu" aria-label="画面比例">
+                  {VIDEO_ASPECT_RATIO_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={videoAspectRatio === option.value}
+                      className={videoAspectRatio === option.value ? "is-active" : ""}
+                      onClick={() => {
+                        onChange(id, {
+                          content: {
+                            ...record.content,
+                            generationAspectRatio: option.value,
+                            status: "idle",
+                            validationMessage: "",
+                          },
+                        });
+                        setAspectRatioMenuOpen(false);
+                      }}
+                    >
+                      {option.value}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Native select option fonts are ignored by Windows WebView2, so this menu is custom. */}
+            </div>
+          </div>
           <div className="video-resolution-pair" aria-label="一采和二采分辨率">
             <label className="video-resolution-inline">
               <span>一采</span>
@@ -1637,14 +1937,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               value={h3LoraName}
               title={h3LoraName}
               aria-label="MiniMax H3 LoRA"
-              onChange={(event) => onChange(id, {
-                content: {
-                  ...record.content,
-                  generationLoraName: event.currentTarget.value,
-                  status: "idle",
-                  validationMessage: "",
-                },
-              })}
+              onChange={(event) => {
+                const loraName = event.currentTarget.value;
+                onH3LoraPreferenceChange({ loraName, loraStrength: h3LoraStrength });
+                onChange(id, {
+                  content: {
+                    ...record.content,
+                    generationLoraName: loraName,
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                });
+              }}
               onPointerDown={(event) => event.stopPropagation()}
             >
               {selectableH3Loras.map((lora) => (
@@ -1660,14 +1964,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               value={h3LoraStrength}
               title={`LoRA 权重：${h3LoraStrength.toFixed(2)}`}
               aria-label="LoRA 权重"
-              onChange={(event) => onChange(id, {
-                content: {
-                  ...record.content,
-                  generationLoraStrength: Number(event.currentTarget.value),
-                  status: "idle",
-                  validationMessage: "",
-                },
-              })}
+              onChange={(event) => {
+                const loraStrength = Number(event.currentTarget.value);
+                onH3LoraPreferenceChange({ loraName: h3LoraName, loraStrength });
+                onChange(id, {
+                  content: {
+                    ...record.content,
+                    generationLoraStrength: loraStrength,
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                });
+              }}
               onPointerDown={(event) => event.stopPropagation()}
             />
             <output title="LoRA 权重">×{h3LoraStrength.toFixed(2)}</output>
@@ -1737,15 +2045,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <span className="video-seed-hint">每次生成自动更换</span>
             )}
           </div>
-          {textInputs.length > 0 && (
-            <section className="video-input-group is-text video-text-input-group">
-              <div className="video-input-group-heading">
-                <FileText size={13} />
-                <strong>文本</strong>
-                <span>{textInputs.length}</span>
-              </div>
-              <ol className="video-input-list" aria-label="文本输入">
-                {textInputs.map((input, index) => {
+          <section className="video-input-group is-text video-text-input-group">
+            <div className="video-input-group-heading">
+              <FileText size={13} />
+              <strong>文本</strong>
+              <span>{textInputs.length}</span>
+            </div>
+            <ol className="video-input-list" aria-label="文本输入">
+              {textInputs.length ? (
+                textInputs.map((input, index) => {
                   const inputText = textFromContent(input.content).trim().replace(/\s+/g, " ");
                   return (
                     <li key={input.id} className="video-input-item">
@@ -1782,10 +2090,21 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       </button>
                     </li>
                   );
-                })}
-              </ol>
-            </section>
-          )}
+                })
+              ) : (
+                <li className="video-input-item is-empty">
+                  <span className="video-input-index">—</span>
+                  <span className="video-input-preview is-text">
+                    <FileText size={16} />
+                  </span>
+                  <span className="video-input-copy">
+                    <strong>无</strong>
+                    <span className="video-text-input-preview">未连接提示词</span>
+                  </span>
+                </li>
+              )}
+            </ol>
+          </section>
           {mediaInputs.length ? (
             <>
               <div className="video-input-heading">
@@ -2139,11 +2458,28 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         <span className={`source-dot ${record.source === "manual" ? "manual" : "external"}`} />
         <span>
           {isGeneratedVideo
-            ? formattedGenerationElapsed(record.content)
+            ? isGenerationPlaceholder
+              ? placeholderActive ? "正在生成" : "生成未完成"
+              : formattedGenerationElapsed(record.content)
             : record.source === "manual"
               ? "手动创建"
               : record.source}
         </span>
+        {isGeneratedVideo && !isGenerationPlaceholder && generatedVideoPrompt && (
+          <button
+            type="button"
+            className="nodrag generated-video-prompt-copy"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              copyGeneratedPrompt();
+            }}
+            title={promptCopied ? "提示词已复制" : "复制生成提示词"}
+            aria-label={promptCopied ? "提示词已复制" : "复制生成提示词"}
+          >
+            {promptCopied ? <Check size={12} /> : <PenLine size={12} />}
+          </button>
+        )}
         <span className="node-footer-spacer" />
         {isGeneratedVideo && generatedVideoSeed ? (
           <div className="generated-video-seed">
@@ -2163,7 +2499,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             {(isText || isNote)
               ? `${textDraft.length.toLocaleString()} 字符`
               : (isImage || isAudioAsset || isVideoAsset || isGeneratedVideo)
-                ? originalName
+                ? isGenerationPlaceholder
+                  ? isSecondaryPreview ? "二采预览占位" : "视频预览占位"
+                  : originalName
                 : mediaInputs.length
                   ? `${mediaInputs.length} 个媒体输入`
                   : "尚未生成"}
@@ -2188,17 +2526,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               </span>
               <div>
                 <strong>{record.title || "未命名节点"}</strong>
-                <span>{textDraft.length.toLocaleString()} 字符{textDirty ? " · 未保存" : ""}</span>
+                <span>{textDraft.length.toLocaleString()} 字符 · 自动保存</span>
               </div>
-              <button
-                className="expanded-save-button"
-                onClick={() => void saveText()}
-                disabled={!textDirty || savingText}
-                title={textDirty ? "保存文本（Ctrl+S）" : "内容已保存"}
-              >
-                <Save size={15} />
-                <span>{savingText ? "保存中" : "保存"}</span>
-              </button>
               <button onClick={() => setExpanded(false)} title="关闭" aria-label="关闭放大编辑器">
                 <X size={17} />
               </button>
@@ -2207,12 +2536,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               className="expanded-text-editor"
               value={textDraft}
               onChange={changeText}
-              onKeyDown={(event) => {
-                if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-                  event.preventDefault();
-                  void saveText();
-                }
-              }}
               autoFocus
               spellCheck={false}
               aria-label="放大文本内容"
@@ -2237,27 +2560,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <span className="node-kind-icon"><FileText size={15} /></span>
               <div>
                 <strong>{connectedTextEditor.title}</strong>
-                <span>
-                  {connectedTextEditor.text.length.toLocaleString()} 字符
-                  {connectedTextEditor.text !== connectedTextEditor.savedText ? " · 未保存" : ""}
-                </span>
+                <span>{connectedTextEditor.text.length.toLocaleString()} 字符 · 自动保存</span>
               </div>
-              <button
-                className="expanded-save-button"
-                onClick={() => void saveConnectedText()}
-                disabled={
-                  connectedTextEditor.saving
-                  || connectedTextEditor.text === connectedTextEditor.savedText
-                }
-                title={
-                  connectedTextEditor.text !== connectedTextEditor.savedText
-                    ? "保存文本（Ctrl+S）"
-                    : "内容已保存"
-                }
-              >
-                <Save size={15} />
-                <span>{connectedTextEditor.saving ? "保存中" : "保存"}</span>
-              </button>
               <button
                 onClick={() => setConnectedTextEditor(null)}
                 title="关闭"
@@ -2271,15 +2575,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               value={connectedTextEditor.text}
               onChange={(event) => {
                 const nextText = event.currentTarget.value;
+                const nextContent = { ...connectedTextEditor.content, text: nextText };
                 setConnectedTextEditor((current) => (
-                  current ? { ...current, text: nextText } : current
+                  current ? { ...current, content: nextContent, text: nextText } : current
                 ));
-              }}
-              onKeyDown={(event) => {
-                if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-                  event.preventDefault();
-                  void saveConnectedText();
-                }
+                onChange(connectedTextEditor.id, { content: nextContent });
               }}
               autoFocus
               spellCheck={false}
@@ -2428,13 +2728,28 @@ function ProjectThumbnail({ project }: { project: WorkspaceSnapshot }) {
 function CanvasWorkspace() {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasFlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [canvasName, setCanvasName] = useState("Infinite Canvas");
+  const [canvasName, setCanvasName] = useState("SuCanvas");
   const [editingProjectName, setEditingProjectName] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const [projects, setProjects] = useState<WorkspaceSnapshot[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [canvasBackground, setCanvasBackground] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [activeSettingsSection, setActiveSettingsSection] = useState<"general" | "privacy" | "security">("general");
+  const [showPrivateProjects, setShowPrivateProjects] = useState(() =>
+    window.localStorage.getItem(PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY) !== "false",
+  );
+  const [privateProjectSearch, setPrivateProjectSearch] = useState("");
+  const [privateProjectBusyId, setPrivateProjectBusyId] = useState<string | null>(null);
+  const [appLockEnabled, setAppLockEnabled] = useState(false);
+  const [appLockStatusReady, setAppLockStatusReady] = useState(false);
+  const [appLockCurrentPassword, setAppLockCurrentPassword] = useState("");
+  const [appLockNewPassword, setAppLockNewPassword] = useState("");
+  const [appLockConfirmPassword, setAppLockConfirmPassword] = useState("");
+  const [appLockPasswordVisible, setAppLockPasswordVisible] = useState(false);
+  const [appLockBusy, setAppLockBusy] = useState(false);
+  const [appLockMessage, setAppLockMessage] = useState("");
+  const [appLockMessageKind, setAppLockMessageKind] = useState<"success" | "error">("success");
   const [comfyOutputRoot, setComfyOutputRoot] = useState(() =>
     window.localStorage.getItem("infinite-canvas:comfy-output-root") ?? "",
   );
@@ -2446,6 +2761,14 @@ function CanvasWorkspace() {
   );
   const [comfyInputRootDraft, setComfyInputRootDraft] = useState(() =>
     window.localStorage.getItem("infinite-canvas:comfy-input-root") ?? "",
+  );
+  const [h3WorkflowPath, setH3WorkflowPath] = useState(() =>
+    window.localStorage.getItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY)
+      ?? DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
+  );
+  const [h3WorkflowPathDraft, setH3WorkflowPathDraft] = useState(() =>
+    window.localStorage.getItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY)
+      ?? DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
   );
   const [projectHomeReady, setProjectHomeReady] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
@@ -2461,6 +2784,7 @@ function CanvasWorkspace() {
   );
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [search, setSearch] = useState("");
+  const [relationAnchorId, setRelationAnchorId] = useState<string | null>(null);
   const [spacePanActive, setSpacePanActive] = useState(false);
   const [notice, setNotice] = useState("正在打开画布…");
   const [comfyQueueCounts, setComfyQueueCounts] = useState<ComfyQueueSummary>({
@@ -2469,10 +2793,12 @@ function CanvasWorkspace() {
     totalCount: 0,
   });
   const [h3LoraOptions, setH3LoraOptions] = useState<string[]>([DEFAULT_H3_LORA_NAME]);
+  const [h3LoraPreference, setH3LoraPreference] = useState(h3LoraPreferenceFromStorage);
   const [activeComfyTaskCounts, setActiveComfyTaskCounts] = useState<Record<string, number>>({});
   const [copiedApi, setCopiedApi] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const [canvasContextMenu, setCanvasContextMenu] = useState<CanvasContextMenuState | null>(null);
+  const [videoDeletionRequest, setVideoDeletionRequest] = useState<VideoDeletionRequest | null>(null);
   const saveTimers = useRef(new Map<string, number>());
   const pendingPatches = useRef(new Map<string, NodePatch>());
   const nodesSnapshot = useRef<CanvasFlowNode[]>([]);
@@ -2486,13 +2812,16 @@ function CanvasWorkspace() {
   const recoveredComfySockets = useRef(new Map<string, WebSocket>());
   const connectingRecoveredComfyClients = useRef(new Set<string>());
   const recoveredNodeActiveKeys = useRef(new Map<string, string>());
+  const completedGenerationPlaceholders = useRef(new Set<string>());
   const persistedComfyTasks = useRef<PersistedComfyTask[]>(persistedComfyTasksFromStorage());
   const comfyOutputRootRef = useRef(comfyOutputRoot);
   const comfyInputRootRef = useRef(comfyInputRoot);
+  const h3WorkflowPathRef = useRef(h3WorkflowPath);
   const makeFlowNodeRef = useRef<((record: NodeRecord, matched?: boolean) => CanvasFlowNode) | null>(null);
   const activeProjectIdRef = useRef<string | null>(null);
   const projectNameInputRef = useRef<HTMLInputElement>(null);
   const deleteUndoStack = useRef<DeletedBatch[]>([]);
+  const nodeDeletionInProgress = useRef(false);
   const nodeClipboard = useRef<NodeClipboard | null>(null);
   const { setCenter, fitView, screenToFlowPosition } = useReactFlow<CanvasFlowNode, Edge>();
 
@@ -2543,6 +2872,18 @@ function CanvasWorkspace() {
   }, [edges, nodes]);
 
   useEffect(() => {
+    const pauseOtherVideos = (event: Event) => {
+      const playingVideo = event.target;
+      if (!(playingVideo instanceof HTMLVideoElement)) return;
+      document.querySelectorAll("video").forEach((video) => {
+        if (video !== playingVideo && !video.paused) video.pause();
+      });
+    };
+    document.addEventListener("play", pauseOtherVideos, true);
+    return () => document.removeEventListener("play", pauseOtherVideos, true);
+  }, []);
+
+  useEffect(() => {
     const isEditableTarget = (target: EventTarget | null) => (
       target instanceof HTMLElement
       && (target.isContentEditable || target.matches("input, textarea, select"))
@@ -2571,9 +2912,43 @@ function CanvasWorkspace() {
   }, [projectColumns]);
 
   useEffect(() => {
+    window.localStorage.setItem(
+      PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY,
+      String(showPrivateProjects),
+    );
+  }, [showPrivateProjects]);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem("infinite-canvas:theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    let disposed = false;
+    void invoke<AppLockStatus>("get_app_lock_status")
+      .then((status) => {
+        if (!disposed) setAppLockEnabled(status.enabled);
+      })
+      .catch((error) => {
+        if (disposed) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setAppLockMessageKind("error");
+        setAppLockMessage(`无法读取应用锁状态：${message}`);
+      })
+      .finally(() => {
+        if (!disposed) setAppLockStatusReady(true);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      H3_LORA_PREFERENCE_STORAGE_KEY,
+      JSON.stringify(h3LoraPreference),
+    );
+  }, [h3LoraPreference]);
 
   useEffect(() => {
     comfyOutputRootRef.current = comfyOutputRoot;
@@ -2582,6 +2957,10 @@ function CanvasWorkspace() {
   useEffect(() => {
     comfyInputRootRef.current = comfyInputRoot;
   }, [comfyInputRoot]);
+
+  useEffect(() => {
+    h3WorkflowPathRef.current = h3WorkflowPath;
+  }, [h3WorkflowPath]);
 
   useEffect(() => {
     let disposed = false;
@@ -2674,23 +3053,37 @@ function CanvasWorkspace() {
     [persistPatch, setNodes],
   );
 
+  const rememberH3LoraPreference = useCallback((preference: H3LoraPreference) => {
+    const content: JsonObject = {
+      loraName: preference.loraName,
+      loraStrength: preference.loraStrength,
+    };
+    setH3LoraPreference({
+      loraName: h3LoraNameFromContent(content),
+      loraStrength: h3LoraStrengthFromContent(content),
+    });
+  }, []);
+
   useEffect(() => {
     if (!activeProjectId) return;
     const persistedNodeIds = new Set(
       persistedComfyTasks.current
         .filter((task) => task.canvasId === activeProjectId)
-        .map((task) => task.nodeId),
+        .flatMap((task) => [task.nodeId, task.placeholderNodeId].filter(
+          (nodeId): nodeId is string => Boolean(nodeId),
+        )),
     );
     nodes.forEach((node) => {
       const status = node.data.record.content.status;
       if (status !== "running" && status !== "cancelling") return;
       if (persistedNodeIds.has(node.id) || runningComfyClients.current.has(node.id)) return;
+      const isPlaceholder = node.data.record.content.generationPlaceholder === true;
       changeNode(node.id, {
         content: {
           ...node.data.record.content,
-          status: "idle",
+          status: isPlaceholder ? "invalid" : "idle",
           executionProgress: null,
-          validationMessage: "",
+          validationMessage: isPlaceholder ? "生成任务已中断或未记录" : "",
         },
       });
     });
@@ -2764,37 +3157,174 @@ function CanvasWorkspace() {
     }));
   }, []);
 
-  const saveNode = useCallback(
-    async (id: string, patch: NodePatch): Promise<boolean> => {
+  const videoFilePathsForRecords = useCallback((records: NodeRecord[]) => {
+    const paths = records.flatMap((record) => {
+      if (record.kind === "video") {
+        const assetPath = typeof record.content.assetPath === "string"
+          ? record.content.assetPath.trim()
+          : "";
+        return assetPath ? [assetPath] : [];
+      }
+      if (record.kind === "generated-video") {
+        const mappedPath = mappedComfyOutputPath(comfyOutputRootRef.current, record.content);
+        return mappedPath ? [mappedPath] : [];
+      }
+      return [];
+    });
+    return [...new Set(paths)];
+  }, []);
+
+  const requestVideoDeletionChoice = useCallback((records: NodeRecord[]) => {
+    const videoRecords = records.filter(
+      (record) => record.content.generationPlaceholder !== true
+        && (record.kind === "video" || record.kind === "generated-video"),
+    );
+    if (!videoRecords.length) return Promise.resolve<VideoDeletionChoice>("node-only");
+    const filePaths = videoFilePathsForRecords(videoRecords);
+    return new Promise<VideoDeletionChoice>((resolve) => {
+      setVideoDeletionRequest({
+        videoCount: videoRecords.length,
+        filePaths,
+        resolve,
+      });
+    });
+  }, [videoFilePathsForRecords]);
+
+  const finishVideoDeletionChoice = useCallback((choice: VideoDeletionChoice) => {
+    const request = videoDeletionRequest;
+    if (!request) return;
+    setVideoDeletionRequest(null);
+    request.resolve(choice);
+  }, [videoDeletionRequest]);
+
+  const cancelTasksForDeletedPlaceholders = useCallback(async (records: NodeRecord[]) => {
+    const tasks = records
+      .filter((record) => record.content.generationPlaceholder === true)
+      .map((record) => {
+        const clientId = typeof record.content.placeholderClientId === "string"
+          ? record.content.placeholderClientId
+          : "";
+        return persistedComfyTasks.current.find((task) => task.clientId === clientId) ?? null;
+      })
+      .filter((task): task is PersistedComfyTask => Boolean(task));
+    const uniqueTasks = [...new Map(tasks.map((task) => [task.clientId, task])).values()];
+
+    for (const task of uniqueTasks) {
+      cancelledComfyClients.current.add(task.clientId);
       try {
-        changeNode(id, patch);
-        await flushNodePatches([id]);
-        setNotice("文本已保存");
-        return true;
+        await invoke<string | null>("cancel_comfyui_workflow", {
+          serverUrl: COMFYUI_SERVER_URL,
+          clientId: task.clientId,
+        });
+      } catch (error) {
+        cancelledComfyClients.current.delete(task.clientId);
+        throw error;
+      }
+
+      const remainingTaskCount = [...(runningComfyClients.current.get(task.nodeId) ?? [])]
+        .filter((clientId) => clientId !== task.clientId)
+        .length;
+      const sourceNode = nodesSnapshot.current.find((node) => node.id === task.nodeId)?.data.record;
+      if (sourceNode) {
+        changeNode(task.nodeId, {
+          content: {
+            ...sourceNode.content,
+            status: remainingTaskCount ? "running" : "cancelled",
+            executionProgress: null,
+            validationMessage: remainingTaskCount
+              ? `已通过删除占位取消任务，仍有 ${remainingTaskCount} 个任务`
+              : `已通过删除占位取消 ComfyUI ${isSecondaryComfyTask(task) ? "二采" : "生成"}`,
+          },
+        });
+      }
+      if (task.placeholderNodeId) {
+        const placeholderNode = nodesSnapshot.current.find(
+          (node) => node.id === task.placeholderNodeId,
+        )?.data.record;
+        if (placeholderNode?.content.generationPlaceholder === true) {
+          changeNode(task.placeholderNodeId, {
+            content: {
+              ...placeholderNode.content,
+              status: "cancelled",
+              executionProgress: null,
+              validationMessage: "已通过删除占位取消任务",
+            },
+          });
+        }
+        completedGenerationPlaceholders.current.add(task.placeholderNodeId);
+      }
+      if (!ownedComfyClients.current.has(task.clientId)) {
+        forgetComfyTask(task.clientId);
+        unregisterComfyTask(task.nodeId, task.clientId);
+        cancelledComfyClients.current.delete(task.clientId);
+      }
+    }
+    return uniqueTasks.length;
+  }, [changeNode, forgetComfyTask, unregisterComfyTask]);
+
+  const deleteCanvasNodes = useCallback(
+    async (nodesToDelete: CanvasFlowNode[]) => {
+      if (!nodesToDelete.length || nodeDeletionInProgress.current) return;
+      nodeDeletionInProgress.current = true;
+      const records = nodesToDelete.map((node) => node.data.record);
+      try {
+        const choice = await requestVideoDeletionChoice(records);
+        if (choice === "cancel") return;
+
+        const cancelledPlaceholderTaskCount = await cancelTasksForDeletedPlaceholders(records);
+
+        const ids = records.map((record) => record.id);
+        await flushNodePatches(ids);
+        const batch = await invoke<DeletedBatch>("delete_nodes_undoable", {
+          input: { ids },
+        });
+
+        if (choice === "node-and-file") {
+          const filePaths = videoFilePathsForRecords(records);
+          try {
+            await invoke<number>("delete_video_files", { paths: filePaths });
+          } catch (error) {
+            await invoke<DeletedBatch>("restore_deleted_nodes", { batch });
+            throw error;
+          }
+        } else if (!cancelledPlaceholderTaskCount) {
+          rememberDeletedBatch(batch);
+        }
+
+        const deletedIds = new Set(ids);
+        setNodes((current) => current.filter((node) => !deletedIds.has(node.id)));
+        setEdges((current) => current.filter(
+          (edge) => !deletedIds.has(edge.source) && !deletedIds.has(edge.target),
+        ));
+        setNotice(choice === "node-and-file"
+          ? `${ids.length} 个节点及其视频文件已永久删除`
+          : cancelledPlaceholderTaskCount
+            ? `已取消 ${cancelledPlaceholderTaskCount} 个任务并删除对应占位节点`
+            : `${ids.length} 个节点已删除，按 Ctrl+Z 撤销`);
       } catch (error) {
         reportError(error);
-        return false;
+      } finally {
+        nodeDeletionInProgress.current = false;
       }
     },
-    [changeNode, flushNodePatches, reportError],
+    [
+      flushNodePatches,
+      cancelTasksForDeletedPlaceholders,
+      rememberDeletedBatch,
+      reportError,
+      requestVideoDeletionChoice,
+      setEdges,
+      setNodes,
+      videoFilePathsForRecords,
+    ],
   );
 
   const deleteNode = useCallback(
     async (id: string) => {
-      try {
-        await flushNodePatches([id]);
-        const batch = await invoke<DeletedBatch>("delete_nodes_undoable", {
-          input: { ids: [id] },
-        });
-        rememberDeletedBatch(batch);
-        setNodes((current) => current.filter((node) => node.id !== id));
-        setEdges((current) => current.filter((edge) => edge.source !== id && edge.target !== id));
-        setNotice("节点已删除，按 Ctrl+Z 撤销");
-      } catch (error) {
-        reportError(error);
-      }
+      const node = nodesSnapshot.current.find((candidate) => candidate.id === id);
+      if (node) await deleteCanvasNodes([node]);
     },
-    [flushNodePatches, rememberDeletedBatch, reportError, setEdges, setNodes],
+    [deleteCanvasNodes],
   );
 
   const copyText = useCallback(async (text: string) => {
@@ -2841,24 +3371,107 @@ function CanvasWorkspace() {
     }
   }, [reportError]);
 
-  const saveComfyDirectories = useCallback(() => {
+  const saveComfySettings = useCallback(() => {
     const normalizePath = (path: string) => path
       .trim()
       .replace(/^"|"$/g, "")
       .replace(/[\\/]+$/, "");
     const outputRoot = normalizePath(comfyOutputRootDraft);
     const inputRoot = normalizePath(comfyInputRootDraft);
+    const workflowPath = normalizePath(h3WorkflowPathDraft)
+      || DEFAULT_H3_REFERENCE_WORKFLOW_PATH;
     comfyOutputRootRef.current = outputRoot;
     comfyInputRootRef.current = inputRoot;
+    h3WorkflowPathRef.current = workflowPath;
     setComfyOutputRoot(outputRoot);
     setComfyInputRoot(inputRoot);
+    setH3WorkflowPath(workflowPath);
     if (outputRoot) window.localStorage.setItem("infinite-canvas:comfy-output-root", outputRoot);
     else window.localStorage.removeItem("infinite-canvas:comfy-output-root");
     if (inputRoot) window.localStorage.setItem("infinite-canvas:comfy-input-root", inputRoot);
     else window.localStorage.removeItem("infinite-canvas:comfy-input-root");
+    window.localStorage.setItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY, workflowPath);
     setSettingsOpen(false);
-    setNotice("ComfyUI 目录设置已保存");
-  }, [comfyInputRootDraft, comfyOutputRootDraft]);
+    setNotice("ComfyUI 设置已保存");
+  }, [comfyInputRootDraft, comfyOutputRootDraft, h3WorkflowPathDraft]);
+
+  const clearAppLockPasswordFields = useCallback(() => {
+    setAppLockCurrentPassword("");
+    setAppLockNewPassword("");
+    setAppLockConfirmPassword("");
+    setAppLockPasswordVisible(false);
+  }, []);
+
+  const saveAppLockPassword = useCallback(async () => {
+    if (appLockNewPassword.length < 4) {
+      setAppLockMessageKind("error");
+      setAppLockMessage("新密码至少需要 4 个字符");
+      return;
+    }
+    if (appLockNewPassword !== appLockConfirmPassword) {
+      setAppLockMessageKind("error");
+      setAppLockMessage("两次输入的新密码不一致");
+      return;
+    }
+    setAppLockBusy(true);
+    setAppLockMessage("");
+    try {
+      await invoke("set_app_lock_password", {
+        input: {
+          currentPassword: appLockEnabled ? appLockCurrentPassword : null,
+          newPassword: appLockNewPassword,
+        },
+      });
+      setAppLockEnabled(true);
+      clearAppLockPasswordFields();
+      setAppLockMessageKind("success");
+      setAppLockMessage(appLockEnabled ? "应用锁密码已修改" : "应用锁已启用，下次启动时需要输入密码");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAppLockMessageKind("error");
+      setAppLockMessage(message);
+    } finally {
+      setAppLockBusy(false);
+    }
+  }, [appLockConfirmPassword, appLockCurrentPassword, appLockEnabled, appLockNewPassword, clearAppLockPasswordFields]);
+
+  const turnOffAppLock = useCallback(async () => {
+    setAppLockBusy(true);
+    setAppLockMessage("");
+    try {
+      await invoke("disable_app_lock", { password: appLockCurrentPassword });
+      setAppLockEnabled(false);
+      clearAppLockPasswordFields();
+      setAppLockMessageKind("success");
+      setAppLockMessage("应用锁已关闭");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAppLockMessageKind("error");
+      setAppLockMessage(message);
+    } finally {
+      setAppLockBusy(false);
+    }
+  }, [appLockCurrentPassword, clearAppLockPasswordFields]);
+
+  const changeProjectPrivacy = useCallback(async (projectId: string, isPrivate: boolean) => {
+    if (privateProjectBusyId) return;
+    setPrivateProjectBusyId(projectId);
+    try {
+      const updated = await invoke<CanvasRecord>("set_project_private", {
+        input: { id: projectId, isPrivate },
+      });
+      setProjects((current) => current.map((project) =>
+        project.canvas.id === updated.id
+          ? { ...project, canvas: updated }
+          : project,
+      ));
+      setNotice(isPrivate ? `项目“${updated.name}”已设为私密` : `项目“${updated.name}”已取消私密`);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setPrivateProjectBusyId(null);
+    }
+  }, [privateProjectBusyId, reportError]);
 
   const generationSnapshotForGenerator = useCallback((generatorId: string): GenerationSnapshot | null => {
     const generator = nodesSnapshot.current.find(
@@ -2893,7 +3506,10 @@ function CanvasWorkspace() {
       .filter(Boolean);
     return {
       prompt: textInputs.length === 1 ? textFromContent(textInputs[0].content) : "",
+      promptNodeId: textInputs.length === 1 ? textInputs[0].id : "",
+      promptNodeIdSource: textInputs.length === 1 ? "captured" : "",
       durationSeconds: videoDurationFromContent(generator.content),
+      aspectRatio: videoAspectRatioFromContent(generator.content),
       primaryResolutionMegapixels: primaryVideoResolutionFromContent(generator.content),
       secondaryResolutionMegapixels: secondaryVideoResolutionFromContent(generator.content),
       loraName: h3LoraNameFromContent(generator.content),
@@ -2903,6 +3519,169 @@ function CanvasWorkspace() {
       videoPaths: assetPaths("video"),
     };
   }, []);
+
+  const generatedPreviewHeightForAspectRatio = useCallback((aspectRatio: VideoAspectRatio) => {
+    return mediaNodeHeightForAspectRatio(
+      GENERATED_VIDEO_PREVIEW_WIDTH,
+      videoAspectRatioValue(aspectRatio),
+    );
+  }, []);
+
+  const createGenerationPlaceholder = useCallback(async ({
+    source,
+    clientId,
+    snapshot,
+    secondary,
+    sourceGeneratorId,
+  }: {
+    source: NodeRecord;
+    clientId: string;
+    snapshot: GenerationSnapshot;
+    secondary: boolean;
+    sourceGeneratorId: string;
+  }) => {
+    const previewWidth = GENERATED_VIDEO_PREVIEW_WIDTH;
+    const previewHeight = generatedPreviewHeightForAspectRatio(snapshot.aspectRatio);
+    const position = generatedPreviewPosition(
+      source,
+      [
+        ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
+        ...incomingPlacementReservations.current,
+      ],
+      previewWidth,
+      previewHeight,
+    );
+    const reservationId = `generation-placeholder:${clientId}`;
+    const placeholderContent: JsonObject = {
+      generationPlaceholder: true,
+      placeholderClientId: clientId,
+      status: "running",
+      executionProgress: null,
+      validationMessage: secondary
+        ? `正在准备二次采样（${snapshot.secondaryResolutionMegapixels.toFixed(1)} MP）…`
+        : "正在上传素材并提交到远程 ComfyUI…",
+      sourceGeneratorId,
+      ...(secondary ? { sourcePreviewId: source.id } : {}),
+      generationSnapshot: snapshot,
+    };
+    const reservation: NodeRecord = {
+      ...source,
+      id: reservationId,
+      kind: "generated-video",
+      title: secondary ? "二采预览（生成中）" : "视频预览（生成中）",
+      content: placeholderContent,
+      source: "comfyui-placeholder",
+      requestId: reservationId,
+      x: position.x,
+      y: position.y,
+      width: previewWidth,
+      height: previewHeight,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    incomingPlacementReservations.current.push(reservation);
+    let createdNodeId = "";
+    try {
+      const result = await invoke<CreateNodeResult>("create_node", {
+        input: {
+          canvasId: source.canvasId,
+          kind: "generated-video",
+          title: reservation.title,
+          content: placeholderContent,
+          source: reservation.source,
+          requestId: reservation.requestId,
+          x: position.x,
+          y: position.y,
+          width: previewWidth,
+          height: previewHeight,
+        },
+      });
+      createdNodeId = result.node.id;
+      completedGenerationPlaceholders.current.delete(result.node.id);
+      incomingPlacementReservations.current = incomingPlacementReservations.current
+        .map((candidate) => candidate.id === reservationId ? result.node : candidate);
+      const edgeRecord = await invoke<EdgeRecord>("create_edge", {
+        input: {
+          canvasId: source.canvasId,
+          sourceNodeId: source.id,
+          targetNodeId: result.node.id,
+          kind: secondary ? "secondary-output" : "output",
+          metadata: {
+            placeholder: true,
+            clientId,
+            ...(secondary ? {
+              secondaryResolutionMegapixels: snapshot.secondaryResolutionMegapixels,
+            } : {}),
+          },
+        },
+      });
+      const flowNode = makeFlowNodeRef.current?.(result.node);
+      if (flowNode) setNodes((current) => appendUniqueById(current, [flowNode]));
+      setEdges((current) => appendUniqueById(current, [toFlowEdge(edgeRecord)]));
+      return result.node;
+    } catch (error) {
+      if (createdNodeId) {
+        try {
+          await invoke<DeletedBatch>("delete_nodes_undoable", {
+            input: { ids: [createdNodeId] },
+          });
+        } catch {
+          // Preserve the original placeholder creation error.
+        }
+      }
+      throw error;
+    } finally {
+      window.setTimeout(() => {
+        incomingPlacementReservations.current = incomingPlacementReservations.current
+          .filter((candidate) => candidate.id !== reservationId && candidate.id !== createdNodeId);
+      }, 0);
+    }
+  }, [generatedPreviewHeightForAspectRatio, setEdges, setNodes]);
+
+  const updateGenerationPlaceholder = useCallback((
+    placeholderNodeId: string | undefined,
+    patch: JsonObject,
+  ) => {
+    if (!placeholderNodeId || completedGenerationPlaceholders.current.has(placeholderNodeId)) return;
+    const placeholder = nodesSnapshot.current.find(
+      (node) => node.id === placeholderNodeId,
+    )?.data.record;
+    if (!placeholder || placeholder.content.generationPlaceholder !== true) return;
+    changeNode(placeholderNodeId, {
+      content: {
+        ...placeholder.content,
+        ...patch,
+      },
+    });
+  }, [changeNode]);
+
+  const completeGenerationPlaceholder = useCallback(async (
+    placeholderNodeId: string | undefined,
+    title: string,
+    content: JsonObject,
+  ): Promise<NodeRecord | null> => {
+    if (!placeholderNodeId || !nodesSnapshot.current.some(
+      (node) => node.id === placeholderNodeId,
+    )) return null;
+    completedGenerationPlaceholders.current.add(placeholderNodeId);
+    try {
+      await flushNodePatches([placeholderNodeId]);
+      const record = await invoke<NodeRecord>("update_node", {
+        input: {
+          id: placeholderNodeId,
+          title,
+          content,
+        },
+      });
+      setNodes((current) => current.map((node) => node.id === placeholderNodeId
+        ? { ...node, data: { ...node.data, record } }
+        : node));
+      return record;
+    } catch (error) {
+      completedGenerationPlaceholders.current.delete(placeholderNodeId);
+      throw error;
+    }
+  }, [flushNodePatches, setNodes]);
 
   const executeVideoNode = useCallback(async (targetId: string) => {
     const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
@@ -2951,6 +3730,19 @@ function CanvasWorkspace() {
     }
     const clientId = crypto.randomUUID();
     const taskSubmittedAt = Date.now();
+    let placeholder: NodeRecord;
+    try {
+      placeholder = await createGenerationPlaceholder({
+        source: target,
+        clientId,
+        snapshot,
+        secondary: false,
+        sourceGeneratorId: targetId,
+      });
+    } catch (error) {
+      reportError(error);
+      return;
+    }
     ownedComfyClients.current.add(clientId);
     rememberComfyTask({
       clientId,
@@ -2958,6 +3750,8 @@ function CanvasWorkspace() {
       canvasId: target.canvasId,
       snapshot,
       startedAt: taskSubmittedAt,
+      kind: "generation",
+      placeholderNodeId: placeholder.id,
     });
     cancelledComfyClients.current.delete(clientId);
     registerComfyTask(targetId, clientId);
@@ -2995,17 +3789,23 @@ function CanvasWorkspace() {
             validationMessage: `ComfyUI 正在生成：当前步骤 ${update.value}/${update.maximum}`,
           },
         });
+        updateGenerationPlaceholder(placeholder.id, {
+          status: "running",
+          executionProgress: update.progress,
+          validationMessage: `ComfyUI 正在生成：当前步骤 ${update.value}/${update.maximum}`,
+        });
       });
       const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow", {
         input: {
           serverUrl: COMFYUI_SERVER_URL,
-          workflowPath: H3_REFERENCE_WORKFLOW_PATH,
+          workflowPath: h3WorkflowPathRef.current,
           inputRootPath: comfyInputRootRef.current,
           clientId,
           prompt: snapshot.prompt,
           seedMode: seedModeFromContent(target.content),
           seed: fixedSeedFromContent(target.content),
           durationSeconds: snapshot.durationSeconds,
+          aspectRatio: snapshot.aspectRatio,
           primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
           secondaryResolutionMegapixels: snapshot.secondaryResolutionMegapixels,
           secondarySamplingEnabled: false,
@@ -3017,11 +3817,12 @@ function CanvasWorkspace() {
           secondarySource: null,
         },
       });
+      if (!result.outputs.length) throw new Error("ComfyUI 没有返回视频输出");
       if (cancelledComfyClients.current.has(clientId)) return;
       const generationElapsedSeconds = validExecutionElapsedSeconds(result.executionElapsedSeconds);
 
-      const previewWidth = 360;
-      const previewHeight = 288;
+      const previewWidth = GENERATED_VIDEO_PREVIEW_WIDTH;
+      const previewHeight = generatedPreviewHeightForAspectRatio(snapshot.aspectRatio);
       const placementRecords = [
         ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
         ...incomingPlacementReservations.current,
@@ -3031,6 +3832,36 @@ function CanvasWorkspace() {
       const reservationIds = new Set<string>();
       try {
         for (const [index, output] of result.outputs.entries()) {
+          const title = result.outputs.length > 1
+            ? `视频预览 ${index + 1}`
+            : "视频预览";
+          const outputContent: JsonObject = {
+            videoUrl: output.url,
+            originalName: output.filename,
+            filename: output.filename,
+            subfolder: output.subfolder,
+            fileType: output.fileType,
+            seed: result.seed,
+            comfyPromptId: result.promptId,
+            comfyServerUrl: COMFYUI_SERVER_URL,
+            sourceGeneratorId: targetId,
+            outputIndex: index,
+            aspectRatio: videoAspectRatioValue(snapshot.aspectRatio),
+            generationSnapshot: snapshot,
+            hasBeenPlayed: false,
+            ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
+          };
+          if (index === 0) {
+            const completedPlaceholder = await completeGenerationPlaceholder(
+              placeholder.id,
+              title,
+              outputContent,
+            );
+            if (completedPlaceholder) {
+              placementRecords.push(completedPlaceholder);
+              continue;
+            }
+          }
           const position = generatedPreviewPosition(
             target,
             placementRecords,
@@ -3055,23 +3886,8 @@ function CanvasWorkspace() {
             input: {
               canvasId: target.canvasId,
               kind: "generated-video",
-              title: result.outputs.length > 1
-                ? `视频预览 ${index + 1}`
-                : "视频预览",
-              content: {
-                videoUrl: output.url,
-                originalName: output.filename,
-                filename: output.filename,
-                subfolder: output.subfolder,
-                fileType: output.fileType,
-                seed: result.seed,
-                comfyPromptId: result.promptId,
-                comfyServerUrl: COMFYUI_SERVER_URL,
-                sourceGeneratorId: targetId,
-                outputIndex: index,
-                generationSnapshot: snapshot,
-                ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
-              },
+              title,
+              content: outputContent,
               source: "comfyui",
               requestId: comfyPreviewRequestId(target.canvasId, targetId, result.promptId, index),
               x: position.x,
@@ -3167,6 +3983,11 @@ function CanvasWorkspace() {
               : "已取消 ComfyUI 生成",
           },
         });
+        updateGenerationPlaceholder(placeholder.id, {
+          status: "cancelled",
+          executionProgress: null,
+          validationMessage: "已取消 ComfyUI 生成",
+        });
         setNotice(remainingTaskCount
           ? `已取消一个任务，仍有 ${remainingTaskCount} 个任务`
           : "已取消 ComfyUI 生成");
@@ -3184,6 +4005,11 @@ function CanvasWorkspace() {
             : `生成失败：${message}`,
         },
       });
+      updateGenerationPlaceholder(placeholder.id, {
+        status: "invalid",
+        executionProgress: null,
+        validationMessage: `生成失败：${message}`,
+      });
       reportError(error);
     } finally {
       progressSocket?.close();
@@ -3192,7 +4018,7 @@ function CanvasWorkspace() {
       forgetComfyTask(clientId);
       unregisterComfyTask(targetId, clientId);
     }
-  }, [changeNode, forgetComfyTask, generationSnapshotForGenerator, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask]);
+  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder]);
 
   const executeSecondarySample = useCallback(async (previewId: string) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
@@ -3233,6 +4059,31 @@ function CanvasWorkspace() {
         : baseSnapshot.secondaryResolutionMegapixels,
     };
     const clientId = crypto.randomUUID();
+    const taskSubmittedAt = Date.now();
+    let placeholder: NodeRecord;
+    try {
+      placeholder = await createGenerationPlaceholder({
+        source: preview,
+        clientId,
+        snapshot,
+        secondary: true,
+        sourceGeneratorId,
+      });
+    } catch (error) {
+      reportError(error);
+      return;
+    }
+    ownedComfyClients.current.add(clientId);
+    rememberComfyTask({
+      clientId,
+      nodeId: previewId,
+      canvasId: preview.canvasId,
+      snapshot,
+      startedAt: taskSubmittedAt,
+      kind: "secondary",
+      sourceGeneratorId,
+      placeholderNodeId: placeholder.id,
+    });
     cancelledComfyClients.current.delete(clientId);
     registerComfyTask(previewId, clientId);
     changeNode(previewId, {
@@ -3269,6 +4120,11 @@ function CanvasWorkspace() {
                 executionProgress: progress,
                 validationMessage,
               },
+            });
+            updateGenerationPlaceholder(placeholder.id, {
+              status: "running",
+              executionProgress: progress,
+              validationMessage,
             });
           };
           if (message.type === "executing") {
@@ -3307,13 +4163,14 @@ function CanvasWorkspace() {
       const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow", {
         input: {
           serverUrl: COMFYUI_SERVER_URL,
-          workflowPath: H3_REFERENCE_WORKFLOW_PATH,
+          workflowPath: h3WorkflowPathRef.current,
           inputRootPath: comfyInputRootRef.current,
           clientId,
           prompt: snapshot.prompt,
           seedMode: "fixed",
           seed: previewSeed,
           durationSeconds: snapshot.durationSeconds,
+          aspectRatio: snapshot.aspectRatio,
           primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
           secondaryResolutionMegapixels: snapshot.secondaryResolutionMegapixels,
           secondarySamplingEnabled: true,
@@ -3325,15 +4182,45 @@ function CanvasWorkspace() {
           secondarySource,
         },
       });
+      if (!result.outputs.length) throw new Error("ComfyUI 二采没有返回视频输出");
       if (cancelledComfyClients.current.has(clientId)) return;
       const generationElapsedSeconds = validExecutionElapsedSeconds(result.executionElapsedSeconds);
 
-      const previewWidth = 360;
-      const previewHeight = 288;
+      const previewWidth = GENERATED_VIDEO_PREVIEW_WIDTH;
+      const previewHeight = generatedPreviewHeightForAspectRatio(snapshot.aspectRatio);
       const placementRecords = nodesSnapshot.current.map(recordAtCurrentFlowPosition);
       const createdNodes: CanvasFlowNode[] = [];
       const createdEdges: Edge[] = [];
       for (const [index, output] of result.outputs.entries()) {
+        const title = result.outputs.length > 1 ? `二采预览 ${index + 1}` : "二采预览";
+        const outputContent: JsonObject = {
+          videoUrl: output.url,
+          originalName: output.filename,
+          filename: output.filename,
+          subfolder: output.subfolder,
+          fileType: output.fileType,
+          seed: result.seed,
+          comfyPromptId: result.promptId,
+          comfyServerUrl: COMFYUI_SERVER_URL,
+          sourceGeneratorId,
+          sourcePreviewId: previewId,
+          outputIndex: index,
+          aspectRatio: videoAspectRatioValue(snapshot.aspectRatio),
+          generationSnapshot: snapshot,
+          hasBeenPlayed: false,
+          ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
+        };
+        if (index === 0) {
+          const completedPlaceholder = await completeGenerationPlaceholder(
+            placeholder.id,
+            title,
+            outputContent,
+          );
+          if (completedPlaceholder) {
+            placementRecords.push(completedPlaceholder);
+            continue;
+          }
+        }
         const position = generatedPreviewPosition(
           preview,
           placementRecords,
@@ -3344,22 +4231,8 @@ function CanvasWorkspace() {
           input: {
             canvasId: preview.canvasId,
             kind: "generated-video",
-            title: result.outputs.length > 1 ? `二采预览 ${index + 1}` : "二采预览",
-            content: {
-              videoUrl: output.url,
-              originalName: output.filename,
-              filename: output.filename,
-              subfolder: output.subfolder,
-              fileType: output.fileType,
-              seed: result.seed,
-              comfyPromptId: result.promptId,
-              comfyServerUrl: COMFYUI_SERVER_URL,
-              sourceGeneratorId,
-              sourcePreviewId: previewId,
-              outputIndex: index,
-              generationSnapshot: snapshot,
-              ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
-            },
+            title,
+            content: outputContent,
             source: "comfyui",
             requestId: comfyPreviewRequestId(preview.canvasId, previewId, result.promptId, index),
             x: position.x,
@@ -3418,6 +4291,11 @@ function CanvasWorkspace() {
             validationMessage: "已取消 ComfyUI 二采",
           },
         });
+        updateGenerationPlaceholder(placeholder.id, {
+          status: "cancelled",
+          executionProgress: null,
+          validationMessage: "已取消 ComfyUI 二采",
+        });
         setNotice("已取消 ComfyUI 二采");
         return;
       }
@@ -3430,13 +4308,20 @@ function CanvasWorkspace() {
           validationMessage: `二采失败：${message}`,
         },
       });
+      updateGenerationPlaceholder(placeholder.id, {
+        status: "invalid",
+        executionProgress: null,
+        validationMessage: `二采失败：${message}`,
+      });
       reportError(error);
     } finally {
       progressSocket?.close();
       cancelledComfyClients.current.delete(clientId);
+      ownedComfyClients.current.delete(clientId);
+      forgetComfyTask(clientId);
       unregisterComfyTask(previewId, clientId);
     }
-  }, [changeNode, generationSnapshotForGenerator, registerComfyTask, reportError, setEdges, setNodes, unregisterComfyTask]);
+  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder]);
 
   const cancelVideoExecution = useCallback(async (targetId: string) => {
     const clientIds = [...(runningComfyClients.current.get(targetId) ?? [])];
@@ -3448,6 +4333,10 @@ function CanvasWorkspace() {
       setNotice("当前没有可取消的 ComfyUI 任务");
       return;
     }
+    const persistedTask = persistedComfyTasks.current.find(
+      (task) => task.clientId === clientId,
+    );
+    const taskLabel = persistedTask && isSecondaryComfyTask(persistedTask) ? "二采" : "生成";
     cancelledComfyClients.current.add(clientId);
     changeNode(targetId, {
       content: {
@@ -3455,12 +4344,16 @@ function CanvasWorkspace() {
         status: "cancelling",
         validationMessage: clientIds.length > 1
           ? `正在取消最早提交的任务，之后还剩 ${clientIds.length - 1} 个…`
-          : "正在取消 ComfyUI 生成…",
+          : `正在取消 ComfyUI ${taskLabel}…`,
       },
+    });
+    updateGenerationPlaceholder(persistedTask?.placeholderNodeId, {
+      status: "cancelling",
+      validationMessage: `正在取消 ComfyUI ${taskLabel}…`,
     });
     setNotice(clientIds.length > 1
       ? `正在取消最早提交的任务，之后还剩 ${clientIds.length - 1} 个…`
-      : "正在取消 ComfyUI 生成…");
+      : `正在取消 ComfyUI ${taskLabel}…`);
 
     try {
       const cleanupWarning = await invoke<string | null>("cancel_comfyui_workflow", {
@@ -3483,14 +4376,19 @@ function CanvasWorkspace() {
           executionProgress: null,
           validationMessage: remainingTaskCount
             ? `已取消最早提交的任务，仍有 ${remainingTaskCount} 个任务`
-            : "已取消 ComfyUI 生成",
+            : `已取消 ComfyUI ${taskLabel}`,
         },
       });
+      updateGenerationPlaceholder(persistedTask?.placeholderNodeId, {
+        status: "cancelled",
+        executionProgress: null,
+        validationMessage: `已取消 ComfyUI ${taskLabel}`,
+      });
       setNotice(cleanupWarning
-        ? `任务已取消，但输入缓存清理失败：${cleanupWarning}`
+        ? `${taskLabel}已取消，但输入缓存清理失败：${cleanupWarning}`
         : remainingTaskCount
           ? `已取消最早提交的任务，仍有 ${remainingTaskCount} 个任务`
-          : "已取消 ComfyUI 生成");
+          : `已取消 ComfyUI ${taskLabel}`);
     } catch (error) {
       cancelledComfyClients.current.delete(clientId);
       const message = error instanceof Error ? error.message : String(error);
@@ -3500,12 +4398,17 @@ function CanvasWorkspace() {
           ...latest.content,
           status: "running",
           executionProgress: null,
-          validationMessage: `取消失败：${message}`,
+          validationMessage: `取消${taskLabel}失败：${message}`,
         },
+      });
+      updateGenerationPlaceholder(persistedTask?.placeholderNodeId, {
+        status: "running",
+        executionProgress: null,
+        validationMessage: `取消${taskLabel}失败：${message}`,
       });
       reportError(error);
     }
-  }, [changeNode, forgetComfyTask, reportError, unregisterComfyTask]);
+  }, [changeNode, forgetComfyTask, reportError, unregisterComfyTask, updateGenerationPlaceholder]);
 
   const disconnectEdge = useCallback(async (
     edgeId: string,
@@ -3613,14 +4516,15 @@ function CanvasWorkspace() {
       data: {
         record,
         matched,
+        relationHighlighted: false,
         activeTaskCount: activeComfyTaskCounts[record.id] ?? 0,
         inputCount: 0,
         mediaInputs: [],
         textInputCount: 0,
         textInputs: [],
         h3LoraOptions,
+        onH3LoraPreferenceChange: rememberH3LoraPreference,
         onChange: changeNode,
-        onSave: saveNode,
         onExecutionCheck: reportExecutionCheck,
         onExecute: executeVideoNode,
         onSecondarySample: executeSecondarySample,
@@ -3631,7 +4535,7 @@ function CanvasWorkspace() {
         onCopy: copyText,
       },
     }),
-    [activeComfyTaskCounts, cancelVideoExecution, changeNode, copyText, deleteNode, executeSecondarySample, executeVideoNode, h3LoraOptions, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, saveNode],
+    [activeComfyTaskCounts, cancelVideoExecution, changeNode, copyText, deleteNode, executeSecondarySample, executeVideoNode, h3LoraOptions, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -3639,20 +4543,27 @@ function CanvasWorkspace() {
     task: PersistedComfyTask,
     recovered: ComfyClientTaskStatus,
   ) => {
-    const generatorNode = nodesSnapshot.current.find((node) => node.id === task.nodeId);
-    if (!generatorNode || recovered.status !== "success" || !recovered.promptId) return null;
+    const sourceNode = nodesSnapshot.current.find((node) => node.id === task.nodeId);
+    if (!sourceNode || recovered.status !== "success" || !recovered.promptId) return null;
     const alreadyRestored = nodesSnapshot.current.some((node) => (
       node.data.record.kind === "generated-video"
       && node.data.record.content.comfyPromptId === recovered.promptId
     ));
     if (alreadyRestored) return null;
 
-    const generator = recordAtCurrentFlowPosition(generatorNode);
+    const secondaryTask = isSecondaryComfyTask(task);
+    const source = recordAtCurrentFlowPosition(sourceNode);
+    const sourceGeneratorId = secondaryTask
+      ? task.sourceGeneratorId
+        || (typeof source.content.sourceGeneratorId === "string"
+          ? source.content.sourceGeneratorId
+          : "")
+      : task.nodeId;
     const generationElapsedSeconds = validExecutionElapsedSeconds(
       recovered.executionElapsedSeconds,
     );
-    const previewWidth = 360;
-    const previewHeight = 288;
+    const previewWidth = GENERATED_VIDEO_PREVIEW_WIDTH;
+    const previewHeight = generatedPreviewHeightForAspectRatio(task.snapshot.aspectRatio);
     const placementRecords = [
       ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
       ...incomingPlacementReservations.current,
@@ -3662,18 +4573,52 @@ function CanvasWorkspace() {
     const reservationIds = new Set<string>();
     try {
       for (const [index, output] of recovered.outputs.entries()) {
+        const title = secondaryTask
+          ? recovered.outputs.length > 1 ? `二采预览 ${index + 1}` : "二采预览"
+          : recovered.outputs.length > 1 ? `视频预览 ${index + 1}` : "视频预览";
+        const outputContent: JsonObject = {
+          videoUrl: output.url,
+          originalName: output.filename,
+          filename: output.filename,
+          subfolder: output.subfolder,
+          fileType: output.fileType,
+          seed: recovered.seed ?? "",
+          comfyPromptId: recovered.promptId,
+          comfyServerUrl: COMFYUI_SERVER_URL,
+          sourceGeneratorId,
+          ...(secondaryTask ? { sourcePreviewId: task.nodeId } : {}),
+          outputIndex: index,
+          aspectRatio: videoAspectRatioValue(task.snapshot.aspectRatio),
+          generationSnapshot: task.snapshot,
+          hasBeenPlayed: false,
+          ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
+        };
+        if (index === 0) {
+          const completedPlaceholder = await completeGenerationPlaceholder(
+            task.placeholderNodeId,
+            title,
+            outputContent,
+          );
+          if (completedPlaceholder) {
+            placementRecords.push(completedPlaceholder);
+            continue;
+          }
+        }
         const position = generatedPreviewPosition(
-          generator,
+          source,
           placementRecords,
           previewWidth,
           previewHeight,
         );
         const reservationId = `recovered-preview:${task.clientId}:${index}`;
         const reservation: NodeRecord = {
-          ...generator,
+          ...source,
           id: reservationId,
           kind: "generated-video",
-          content: { sourceGeneratorId: task.nodeId },
+          content: {
+            sourceGeneratorId,
+            ...(secondaryTask ? { sourcePreviewId: task.nodeId } : {}),
+          },
           x: position.x,
           y: position.y,
           width: previewWidth,
@@ -3686,21 +4631,8 @@ function CanvasWorkspace() {
           input: {
             canvasId: task.canvasId,
             kind: "generated-video",
-            title: recovered.outputs.length > 1 ? `视频预览 ${index + 1}` : "视频预览",
-            content: {
-              videoUrl: output.url,
-              originalName: output.filename,
-              filename: output.filename,
-              subfolder: output.subfolder,
-              fileType: output.fileType,
-              seed: recovered.seed ?? "",
-              comfyPromptId: recovered.promptId,
-              comfyServerUrl: COMFYUI_SERVER_URL,
-              sourceGeneratorId: task.nodeId,
-              outputIndex: index,
-              generationSnapshot: task.snapshot,
-              ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
-            },
+            title,
+            content: outputContent,
             source: "comfyui-recovery",
             requestId: comfyPreviewRequestId(
               task.canvasId,
@@ -3726,12 +4658,15 @@ function CanvasWorkspace() {
             canvasId: task.canvasId,
             sourceNodeId: task.nodeId,
             targetNodeId: previewResult.node.id,
-            kind: "output",
+            kind: secondaryTask ? "secondary-output" : "output",
             metadata: {
               seed: recovered.seed ?? "",
               promptId: recovered.promptId,
               outputIndex: index,
               recovered: true,
+              ...(secondaryTask ? {
+                secondaryResolutionMegapixels: task.snapshot.secondaryResolutionMegapixels,
+              } : {}),
             },
           },
         });
@@ -3750,7 +4685,18 @@ function CanvasWorkspace() {
     }, 0);
 
     const latest = nodesSnapshot.current.find((node) => node.id === task.nodeId)?.data.record
-      ?? generator;
+      ?? source;
+    if (secondaryTask) {
+      const restoredContent: JsonObject = {
+        ...latest.content,
+        status: "idle",
+        executionProgress: null,
+        validationMessage: "",
+        generationSnapshot: task.snapshot,
+      };
+      changeNode(task.nodeId, { content: restoredContent });
+      return restoredContent;
+    }
     const generatedSeeds = recovered.seed
       ? [...new Set([...generatedSeedsFromContent(latest.content), recovered.seed])]
       : generatedSeedsFromContent(latest.content);
@@ -3764,7 +4710,7 @@ function CanvasWorkspace() {
       executionProgress: remainingTaskCount ? null : 100,
       validationMessage: remainingTaskCount
         ? `已恢复一个完成任务，仍有 ${remainingTaskCount} 个任务正在执行或排队`
-        : `已恢复完成任务并创建 ${createdNodes.length} 个视频预览`,
+        : `已恢复完成任务并创建 ${recovered.outputs.length} 个视频预览`,
       comfyPromptId: recovered.promptId,
       comfyServerUrl: COMFYUI_SERVER_URL,
       lastGenerationSeed: recovered.seed ?? "",
@@ -3775,7 +4721,7 @@ function CanvasWorkspace() {
     };
     changeNode(task.nodeId, { content: restoredContent });
     return restoredContent;
-  }, [changeNode, setEdges, setNodes]);
+  }, [changeNode, completeGenerationPlaceholder, generatedPreviewHeightForAspectRatio, setEdges, setNodes]);
 
   useEffect(() => {
     if (!activeProjectId) return;
@@ -3809,14 +4755,24 @@ function CanvasWorkspace() {
           if (!update) return;
           const node = nodesSnapshot.current.find((candidate) => candidate.id === task.nodeId);
           if (!node) return;
+          const secondaryTask = isSecondaryComfyTask(task);
           recoveredNodeActiveKeys.current.set(task.nodeId, `${task.clientId}:running`);
           changeNode(task.nodeId, {
             content: {
               ...node.data.record.content,
               status: "running",
               executionProgress: update.progress,
-              validationMessage: `ComfyUI 正在生成：当前步骤 ${update.value}/${update.maximum}`,
+              validationMessage: secondaryTask
+                ? `ComfyUI 正在二采：当前步骤 ${update.value}/${update.maximum}`
+                : `ComfyUI 正在生成：当前步骤 ${update.value}/${update.maximum}`,
             },
+          });
+          updateGenerationPlaceholder(task.placeholderNodeId, {
+            status: "running",
+            executionProgress: update.progress,
+            validationMessage: secondaryTask
+              ? `ComfyUI 正在二采：当前步骤 ${update.value}/${update.maximum}`
+              : `ComfyUI 正在生成：当前步骤 ${update.value}/${update.maximum}`,
           });
         });
         socket.addEventListener("close", () => {
@@ -3867,7 +4823,9 @@ function CanvasWorkspace() {
                 if (restoredContent) updatedNodeContents.set(task.nodeId, restoredContent);
                 forgetComfyTask(task.clientId);
                 unregisterComfyTask(task.nodeId, task.clientId);
-                setNotice("已恢复 ComfyUI 完成任务及视频预览");
+                setNotice(isSecondaryComfyTask(task)
+                  ? "已恢复 ComfyUI 完成二采及二采预览"
+                  : "已恢复 ComfyUI 完成任务及视频预览");
               } finally {
                 recoveringComfyClients.current.delete(task.clientId);
               }
@@ -3887,13 +4845,15 @@ function CanvasWorkspace() {
               closeRecoveredProgressSocket(task.clientId);
               const node = nodesSnapshot.current.find((candidate) => candidate.id === task.nodeId);
               if (node) {
+                const secondaryTask = isSecondaryComfyTask(task);
+                const recoveryLabel = secondaryTask ? "二采恢复" : "恢复";
                 const validationMessage = recovered.status === "missing"
-                  ? "恢复失败：任务不在 ComfyUI 队列或最近历史记录中"
+                  ? `${recoveryLabel}失败：任务不在 ComfyUI 队列或最近历史记录中`
                   : recovered.status === "success"
-                    ? "恢复失败：ComfyUI 历史记录中没有视频输出"
+                    ? `${recoveryLabel}失败：ComfyUI 历史记录中没有视频输出`
                     : recovered.status === "cancelled"
-                      ? "已取消恢复的 ComfyUI 任务"
-                      : "恢复的 ComfyUI 任务执行失败";
+                      ? `已取消恢复的 ComfyUI ${secondaryTask ? "二采" : "任务"}`
+                      : `恢复的 ComfyUI ${secondaryTask ? "二采" : "任务"}执行失败`;
                 changeNode(task.nodeId, {
                   content: {
                     ...node.data.record.content,
@@ -3901,6 +4861,11 @@ function CanvasWorkspace() {
                     executionProgress: null,
                     validationMessage,
                   },
+                });
+                updateGenerationPlaceholder(task.placeholderNodeId, {
+                  status: recovered.status === "cancelled" ? "cancelled" : "invalid",
+                  executionProgress: null,
+                  validationMessage,
                 });
               }
               missingRecoveredTaskPolls.current.delete(task.clientId);
@@ -3936,15 +4901,31 @@ function CanvasWorkspace() {
             recoveredNodeActiveKeys.current.set(nodeId, activeKey);
             const node = nodesSnapshot.current.find((candidate) => candidate.id === nodeId);
             if (!node) continue;
+            const secondaryTask = isSecondaryComfyTask(active.task);
             changeNode(nodeId, {
               content: {
                 ...(updatedNodeContents.get(nodeId) ?? node.data.record.content),
                 status: "running",
                 executionProgress: null,
                 validationMessage: active.status === "running"
-                  ? "已恢复 ComfyUI 执行中任务，正在重新接收进度…"
+                  ? secondaryTask
+                    ? "已恢复 ComfyUI 执行中的二采，正在重新接收进度…"
+                    : "已恢复 ComfyUI 执行中任务，正在重新接收进度…"
+                  : secondaryTask
+                    ? "已恢复 ComfyUI 排队中的二采"
                   : "已恢复 ComfyUI 排队任务",
               },
+            });
+            updateGenerationPlaceholder(active.task.placeholderNodeId, {
+              status: "running",
+              executionProgress: null,
+              validationMessage: active.status === "running"
+                ? secondaryTask
+                  ? "已恢复 ComfyUI 执行中的二采，正在重新接收进度…"
+                  : "已恢复 ComfyUI 执行中任务，正在重新接收进度…"
+                : secondaryTask
+                  ? "已恢复 ComfyUI 排队中的二采"
+                  : "已恢复 ComfyUI 排队任务",
             });
           }
         } catch (error) {
@@ -3961,7 +4942,7 @@ function CanvasWorkspace() {
         .filter((task) => task.canvasId === activeProjectId)
         .forEach((task) => closeRecoveredProgressSocket(task.clientId));
     };
-  }, [activeProjectId, changeNode, forgetComfyTask, registerComfyTask, reportError, restoreCompletedComfyTask, unregisterComfyTask]);
+  }, [activeProjectId, changeNode, forgetComfyTask, registerComfyTask, reportError, restoreCompletedComfyTask, unregisterComfyTask, updateGenerationPlaceholder]);
 
   const pasteCopiedNodes = useCallback(async () => {
     const clipboard = nodeClipboard.current;
@@ -4158,6 +5139,7 @@ function CanvasWorkspace() {
         setNodes(snapshot.nodes.map((record) => makeFlowNode(record)));
         setEdges(snapshot.edges.map(toFlowEdge));
         setSearch("");
+        setRelationAnchorId(null);
         setNotice(snapshot.nodes.length ? "所有更改已保存" : "空白画布，创建第一个节点吧");
         window.setTimeout(() => {
           if (snapshot.nodes.length) {
@@ -4179,6 +5161,7 @@ function CanvasWorkspace() {
       deleteUndoStack.current = [];
       activeProjectIdRef.current = null;
       setActiveProjectId(null);
+      setRelationAnchorId(null);
       setCanvasBackground(null);
       setNodes([]);
       setEdges([]);
@@ -4187,6 +5170,32 @@ function CanvasWorkspace() {
       reportError(error);
     }
   }, [flushPendingPatches, reportError, setEdges, setNodes]);
+
+  useEffect(() => {
+    const handlePrivateProjectVisibilityShortcut = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || event.altKey || event.shiftKey || event.repeat) return;
+      if (event.key.toLowerCase() !== "h") return;
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+        || (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      const activeProjectIsPrivate = activeProjectId !== null
+        && projects.some((project) => (
+          project.canvas.id === activeProjectId && project.canvas.isPrivate
+        ));
+      setShowPrivateProjects((show) => !show);
+      if (activeProjectIsPrivate) void returnToProjects();
+    };
+
+    window.addEventListener("keydown", handlePrivateProjectVisibilityShortcut);
+    return () => window.removeEventListener("keydown", handlePrivateProjectVisibilityShortcut);
+  }, [activeProjectId, projects, returnToProjects]);
 
   const createProject = useCallback(async () => {
     const name = newProjectName.trim();
@@ -4251,7 +5260,7 @@ function CanvasWorkspace() {
               const position = incomingNodePosition(
                 record,
                 [
-                  ...nodesSnapshot.current.map((node) => node.data.record),
+                  ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
                   ...incomingPlacementReservations.current,
                 ],
                 viewportCenter,
@@ -4264,9 +5273,6 @@ function CanvasWorkspace() {
                 });
               } catch (error) {
                 reportError(error);
-              } finally {
-                incomingPlacementReservations.current = incomingPlacementReservations.current
-                  .filter((candidate) => candidate.id !== record.id);
               }
             }
             if (!mounted) return;
@@ -4284,6 +5290,10 @@ function CanvasWorkspace() {
               if (current.some((node) => node.id === record.id)) return current;
               return [...current, makeFlowNode(record)];
             });
+            window.setTimeout(() => {
+              incomingPlacementReservations.current = incomingPlacementReservations.current
+                .filter((candidate) => candidate.id !== record.id);
+            }, 0);
             setNotice(`已接收来自 ${record.source} 的新节点`);
           })();
         });
@@ -4372,11 +5382,12 @@ function CanvasWorkspace() {
             status: "idle",
             generationMode: "reference-to-video",
             generationDuration: 15,
+            generationAspectRatio: "16:9",
             generationPrimaryResolution: 0.3,
             generationSecondaryResolution: 0.7,
             secondarySamplingEnabled: false,
-            generationLoraName: DEFAULT_H3_LORA_NAME,
-            generationLoraStrength: 1,
+            generationLoraName: h3LoraPreference.loraName,
+            generationLoraStrength: h3LoraPreference.loraStrength,
             seedMode: "random",
             generationSeed: DEFAULT_GENERATION_SEED,
             manualHeight: VIDEO_NODE_BASE_HEIGHT,
@@ -4399,7 +5410,7 @@ function CanvasWorkspace() {
     } catch (error) {
       reportError(error);
     }
-  }, [activeProjectId, makeFlowNode, reportError, setCenter, setNodes]);
+  }, [activeProjectId, h3LoraPreference, makeFlowNode, reportError, setCenter, setNodes]);
 
   const openCanvasContextMenu = useCallback((event: MouseEvent | ReactMouseEvent) => {
     event.preventDefault();
@@ -4589,31 +5600,45 @@ function CanvasWorkspace() {
     [activeProjectId, connectionValidationError, nodes, reportError, setEdges],
   );
 
-  const deleteElements = useCallback(
-    async ({
-      nodes: deletedNodes,
-      edges: deletedEdges,
-    }: { nodes: CanvasFlowNode[]; edges: Edge[] }) => {
-      try {
-        if (deletedNodes.length) {
-          await flushNodePatches(deletedNodes.map((node) => node.id));
-          const batch = await invoke<DeletedBatch>("delete_nodes_undoable", {
-            input: { ids: deletedNodes.map((node) => node.id) },
-          });
-          rememberDeletedBatch(batch);
-          setNotice(
-            `${deletedNodes.length} 个节点已删除，按 Ctrl+Z 撤销`,
-          );
-          return;
-        }
-        await Promise.all(deletedEdges.map((edge) => invoke("delete_edge", { id: edge.id })));
-        setNotice("连线已删除");
-      } catch (error) {
-        reportError(error);
+  const deleteSelectedElements = useCallback(async () => {
+    const selectedNodes = nodesSnapshot.current.filter((node) => node.selected);
+    if (selectedNodes.length) {
+      await deleteCanvasNodes(selectedNodes);
+      return;
+    }
+    const selectedEdges = edgesSnapshot.current.filter((edge) => edge.selected);
+    if (!selectedEdges.length) return;
+    try {
+      await Promise.all(selectedEdges.map((edge) => invoke("delete_edge", { id: edge.id })));
+      const deletedEdgeIds = new Set(selectedEdges.map((edge) => edge.id));
+      setEdges((current) => current.filter((edge) => !deletedEdgeIds.has(edge.id)));
+      setNotice(`${selectedEdges.length} 条连线已删除`);
+    } catch (error) {
+      reportError(error);
+    }
+  }, [deleteCanvasNodes, reportError, setEdges]);
+
+  useEffect(() => {
+    const handleDeleteShortcut = (event: KeyboardEvent) => {
+      if (event.key !== "Backspace" && event.key !== "Delete") return;
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+        || (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
       }
-    },
-    [flushNodePatches, rememberDeletedBatch, reportError],
-  );
+      const hasSelection = nodesSnapshot.current.some((node) => node.selected)
+        || edgesSnapshot.current.some((edge) => edge.selected);
+      if (!hasSelection) return;
+      event.preventDefault();
+      void deleteSelectedElements();
+    };
+    window.addEventListener("keydown", handleDeleteShortcut);
+    return () => window.removeEventListener("keydown", handleDeleteShortcut);
+  }, [deleteSelectedElements]);
 
   const matchedIds = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -4629,6 +5654,95 @@ function CanvasWorkspace() {
         .map((node) => node.id),
     );
   }, [nodes, search]);
+
+  useEffect(() => {
+    const promptNodeIdsByText = new Map<string, string[]>();
+    nodes.forEach((node) => {
+      const record = node.data.record;
+      if (record.kind !== "text") return;
+      const prompt = textFromContent(record.content);
+      if (!prompt) return;
+      promptNodeIdsByText.set(prompt, [
+        ...(promptNodeIdsByText.get(prompt) ?? []),
+        record.id,
+      ]);
+    });
+
+    const updatedVideoIds: string[] = [];
+    nodes.forEach((node) => {
+      const record = node.data.record;
+      if (record.kind !== "generated-video") return;
+      const snapshotValue = record.content.generationSnapshot;
+      if (!snapshotValue || typeof snapshotValue !== "object" || Array.isArray(snapshotValue)) return;
+      const snapshot = snapshotValue as JsonObject;
+      if (
+        snapshot.promptNodeIdSource === "captured"
+        && typeof snapshot.promptNodeId === "string"
+        && snapshot.promptNodeId
+      ) {
+        return;
+      }
+      const prompt = typeof snapshot.prompt === "string" ? snapshot.prompt : "";
+      const matchingPromptNodeIds = promptNodeIdsByText.get(prompt) ?? [];
+      const promptNodeId = matchingPromptNodeIds.length === 1
+        ? matchingPromptNodeIds[0]
+        : "";
+      const promptNodeIdSource = promptNodeId ? "verified" : "";
+      if (
+        snapshot.promptNodeId === promptNodeId
+        && snapshot.promptNodeIdSource === promptNodeIdSource
+      ) {
+        return;
+      }
+      changeNode(record.id, {
+        content: {
+          ...record.content,
+          generationSnapshot: { ...snapshot, promptNodeId, promptNodeIdSource },
+        },
+      });
+      updatedVideoIds.push(record.id);
+    });
+    if (updatedVideoIds.length) {
+      void flushNodePatches(updatedVideoIds).catch(reportError);
+    }
+  }, [changeNode, flushNodePatches, nodes, reportError]);
+
+  const relationHighlightedIds = useMemo(() => {
+    if (!relationAnchorId) return new Set<string>();
+    const recordsById = new Map(nodes.map((node) => [node.id, node.data.record]));
+    const anchor = recordsById.get(relationAnchorId);
+    if (!anchor || (anchor.kind !== "text" && anchor.kind !== "generated-video")) {
+      return new Set<string>();
+    }
+
+    if (anchor.kind === "text") {
+      const relatedIds = new Set<string>([anchor.id]);
+      nodes.forEach((node) => {
+        const record = node.data.record;
+        if (record.kind !== "generated-video") return;
+        const snapshot = generationSnapshotFromContent(record.content);
+        if (!snapshot) return;
+        if (snapshot.promptNodeId === anchor.id) {
+          relatedIds.add(record.id);
+        }
+      });
+      return relatedIds;
+    }
+
+    const relatedIds = new Set<string>([anchor.id]);
+    const snapshot = generationSnapshotFromContent(anchor.content);
+    if (!snapshot) return relatedIds;
+    if (snapshot.promptNodeId) {
+      const promptNode = recordsById.get(snapshot.promptNodeId);
+      if (promptNode?.kind === "text") relatedIds.add(promptNode.id);
+    }
+    return relatedIds;
+  }, [nodes, relationAnchorId]);
+
+  const handleNodeRelationClick = useCallback((node: CanvasFlowNode) => {
+    const kind = node.data.record.kind;
+    setRelationAnchorId(kind === "text" || kind === "generated-video" ? node.id : null);
+  }, []);
 
   const interactiveEdges = useMemo(
     () => edges.map((edge) => ({
@@ -4652,6 +5766,7 @@ function CanvasWorkspace() {
             data: {
               ...node.data,
               matched: matchedIds.has(node.id),
+              relationHighlighted: relationHighlightedIds.has(node.id),
               activeTaskCount: activeComfyTaskCounts[node.id] ?? 0,
               inputCount: 0,
               mediaInputs: [],
@@ -4687,6 +5802,7 @@ function CanvasWorkspace() {
           data: {
             ...node.data,
             matched: matchedIds.has(node.id),
+            relationHighlighted: relationHighlightedIds.has(node.id),
             activeTaskCount: activeComfyTaskCounts[node.id] ?? 0,
             inputCount: inputRecords.length,
             mediaInputs: orderedMedia,
@@ -4697,7 +5813,7 @@ function CanvasWorkspace() {
         };
       });
     },
-    [activeComfyTaskCounts, edges, h3LoraOptions, matchedIds, nodes],
+    [activeComfyTaskCounts, edges, h3LoraOptions, matchedIds, nodes, relationHighlightedIds],
   );
 
   const focusFirstMatch = () => {
@@ -4776,6 +5892,11 @@ function CanvasWorkspace() {
   const openAppSettings = () => {
     setComfyOutputRootDraft(comfyOutputRoot);
     setComfyInputRootDraft(comfyInputRoot);
+    setH3WorkflowPathDraft(h3WorkflowPath);
+    clearAppLockPasswordFields();
+    setAppLockMessage("");
+    setPrivateProjectSearch("");
+    setActiveSettingsSection("general");
     setSettingsOpen(true);
   };
 
@@ -4790,25 +5911,90 @@ function CanvasWorkspace() {
     </span>
   ) : null;
 
+  const privateProjectCount = projects.filter((project) => project.canvas.isPrivate).length;
+  const normalizedPrivateProjectSearch = privateProjectSearch.trim().toLocaleLowerCase();
+  const filteredPrivateProjects = normalizedPrivateProjectSearch
+    ? projects.filter((project) =>
+      project.canvas.name.toLocaleLowerCase().includes(normalizedPrivateProjectSearch),
+    )
+    : projects;
+  const visibleProjects = showPrivateProjects
+    ? projects
+    : projects.filter((project) => !project.canvas.isPrivate);
+
   const appSettingsDialog = settingsOpen && createPortal(
     <div className="project-dialog-backdrop" onMouseDown={() => setSettingsOpen(false)}>
       <form
         className="project-dialog app-settings-dialog"
         onSubmit={(event) => {
           event.preventDefault();
-          saveComfyDirectories();
+          if (activeSettingsSection === "general") saveComfySettings();
         }}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <div className="project-dialog-icon"><Settings2 size={21} /></div>
-        <div>
-          <h2>应用设置</h2>
-          <p>配置远程 ComfyUI 输入和输出目录在 Windows 中对应的映射路径。</p>
+        <div className="app-settings-header">
+          <div className="project-dialog-icon"><Settings2 size={21} /></div>
+          <div>
+            <h2>应用设置</h2>
+            <p>管理 SuCanvas 的基础连接、私密项目和本机安全。</p>
+          </div>
         </div>
+        <div className="app-settings-body">
+          <nav className="app-settings-nav" aria-label="设置类目">
+            <button
+              type="button"
+              className={activeSettingsSection === "general" ? "is-active" : ""}
+              onClick={() => setActiveSettingsSection("general")}
+            >
+              <Settings2 size={16} />
+              <span><strong>基础设置</strong><small>工作流与目录</small></span>
+            </button>
+            <button
+              type="button"
+              className={activeSettingsSection === "privacy" ? "is-active" : ""}
+              onClick={() => setActiveSettingsSection("privacy")}
+            >
+              <FolderKanban size={16} />
+              <span><strong>私密项目</strong><small>隐藏与显示</small></span>
+            </button>
+            <button
+              type="button"
+              className={activeSettingsSection === "security" ? "is-active" : ""}
+              onClick={() => setActiveSettingsSection("security")}
+            >
+              <LockKeyhole size={16} />
+              <span><strong>应用锁</strong><small>密码与验证</small></span>
+            </button>
+          </nav>
+          <div className="app-settings-content">
+            {activeSettingsSection === "general" && (
+              <section className="settings-pane general-settings-pane" aria-labelledby="general-settings-title">
+                <div className="settings-pane-heading">
+                  <h3 id="general-settings-title">基础设置</h3>
+                  <p>配置 H3 API 工作流，以及远程 ComfyUI 输入和输出目录的 Windows 映射路径。</p>
+                </div>
+        <label>
+          H3 API 工作流文件
+          <input
+            autoFocus
+            value={h3WorkflowPathDraft}
+            onChange={(event) => setH3WorkflowPathDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setSettingsOpen(false);
+              }
+            }}
+            placeholder="例如：D:\\SuCanvas\\workflows\\MiniMax-H3-api.json"
+            spellCheck={false}
+          />
+          <small>
+            请填写本机 H3 API 格式工作流 JSON 的完整路径。移动或重命名文件后，只需在这里更新路径。
+          </small>
+        </label>
         <label>
           ComfyUI 输入映射目录
           <input
-            autoFocus
             value={comfyInputRootDraft}
             onChange={(event) => setComfyInputRootDraft(event.currentTarget.value)}
             onKeyDown={(event) => {
@@ -4844,13 +6030,204 @@ function CanvasWorkspace() {
             请选择或填写远端 ComfyUI 的 output 根目录，不要包含生成任务的子文件夹和文件名。
           </small>
         </label>
+              </section>
+            )}
+            {activeSettingsSection === "privacy" && (
+        <section className="private-project-settings settings-pane" aria-labelledby="private-project-settings-title">
+          <div className="private-project-settings-heading">
+            <span className="private-project-settings-icon"><LockKeyhole size={16} /></span>
+            <div>
+              <strong id="private-project-settings-title">私密项目</strong>
+              <small>被设为私密的项目默认不会出现在项目首页，项目数据不会被删除。</small>
+            </div>
+            <button
+              type="button"
+              className={`private-project-visibility ${showPrivateProjects ? "is-active" : ""}`}
+              role="switch"
+              aria-checked={showPrivateProjects}
+              onClick={() => setShowPrivateProjects((show) => !show)}
+              title="显示或隐藏私密项目（Ctrl+H）"
+            >
+              {showPrivateProjects ? <Eye size={14} /> : <EyeOff size={14} />}
+              {showPrivateProjects ? "正在显示" : "显示私密项目"}
+            </button>
+          </div>
+          <div className="private-project-search">
+            <Search size={14} aria-hidden="true" />
+            <input
+              type="search"
+              value={privateProjectSearch}
+              onChange={(event) => setPrivateProjectSearch(event.currentTarget.value)}
+              placeholder="搜索项目名称"
+              aria-label="搜索私密项目设置中的项目"
+              spellCheck={false}
+            />
+            <span>{filteredPrivateProjects.length} / {projects.length}</span>
+            {privateProjectSearch && (
+              <button
+                type="button"
+                onClick={() => setPrivateProjectSearch("")}
+                title="清空搜索"
+                aria-label="清空项目搜索"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          <div className="private-project-list">
+            {filteredPrivateProjects.map((project) => {
+              const busy = privateProjectBusyId === project.canvas.id;
+              return (
+                <div className="private-project-row" key={project.canvas.id}>
+                  <span className="private-project-row-icon">
+                    {project.canvas.isPrivate ? <LockKeyhole size={14} /> : <FolderKanban size={14} />}
+                  </span>
+                  <span className="private-project-row-name" title={project.canvas.name}>
+                    {project.canvas.name}
+                  </span>
+                  <button
+                    type="button"
+                    className={`private-project-toggle ${project.canvas.isPrivate ? "is-private" : ""}`}
+                    role="switch"
+                    aria-checked={project.canvas.isPrivate}
+                    aria-label={`${project.canvas.name}：${project.canvas.isPrivate ? "取消私密" : "设为私密"}`}
+                    onClick={() => void changeProjectPrivacy(project.canvas.id, !project.canvas.isPrivate)}
+                    disabled={Boolean(privateProjectBusyId)}
+                  >
+                    <span aria-hidden="true" />
+                    {busy ? "保存中" : project.canvas.isPrivate ? "私密" : "普通"}
+                  </button>
+                </div>
+              );
+            })}
+            {filteredPrivateProjects.length === 0 && (
+              <div className="private-project-empty">没有匹配的项目</div>
+            )}
+          </div>
+          <p className="private-project-note">
+            这是界面隐藏功能，不会加密项目文件；需要防止他人打开软件时，请同时启用本机应用锁。显示开关状态会在重启后继续保留。
+          </p>
+        </section>
+            )}
+            {activeSettingsSection === "security" && (
+        <section className="app-lock-settings settings-pane" aria-labelledby="app-lock-settings-title">
+          <div className="app-lock-settings-heading">
+            <span className="app-lock-settings-icon"><LockKeyhole size={16} /></span>
+            <div>
+              <strong id="app-lock-settings-title">本机应用锁</strong>
+              <small>密码经 Argon2 加盐哈希后保存在本机，不会保存明文。</small>
+            </div>
+            <span className={`app-lock-status ${appLockEnabled ? "is-enabled" : ""}`}>
+              {!appLockStatusReady ? "读取中" : appLockEnabled ? "已启用" : "未启用"}
+            </span>
+          </div>
+          {appLockStatusReady && (
+            <div className="app-lock-fields">
+              {appLockEnabled && (
+                <label>
+                  当前密码
+                  <div className="password-input-wrap">
+                    <input
+                      type={appLockPasswordVisible ? "text" : "password"}
+                      value={appLockCurrentPassword}
+                      onChange={(event) => setAppLockCurrentPassword(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void saveAppLockPassword();
+                        }
+                      }}
+                      autoComplete="current-password"
+                      disabled={appLockBusy}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setAppLockPasswordVisible((visible) => !visible)}
+                      title={appLockPasswordVisible ? "隐藏密码" : "显示密码"}
+                      aria-label={appLockPasswordVisible ? "隐藏密码" : "显示密码"}
+                    >
+                      {appLockPasswordVisible ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
+                </label>
+              )}
+              <div className="app-lock-new-passwords">
+                <label>
+                  {appLockEnabled ? "新密码" : "设置密码"}
+                  <input
+                    type={appLockPasswordVisible ? "text" : "password"}
+                    value={appLockNewPassword}
+                    onChange={(event) => setAppLockNewPassword(event.currentTarget.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void saveAppLockPassword();
+                      }
+                    }}
+                    autoComplete="new-password"
+                    placeholder="至少 4 个字符"
+                    maxLength={128}
+                    disabled={appLockBusy}
+                  />
+                </label>
+                <label>
+                  确认新密码
+                  <input
+                    type={appLockPasswordVisible ? "text" : "password"}
+                    value={appLockConfirmPassword}
+                    onChange={(event) => setAppLockConfirmPassword(event.currentTarget.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void saveAppLockPassword();
+                      }
+                    }}
+                    autoComplete="new-password"
+                    maxLength={128}
+                    disabled={appLockBusy}
+                  />
+                </label>
+              </div>
+              {appLockMessage && (
+                <p className={`app-lock-message is-${appLockMessageKind}`} role="status">
+                  {appLockMessage}
+                </p>
+              )}
+              <div className="app-lock-actions">
+                {appLockEnabled && (
+                  <button
+                    type="button"
+                    className="app-lock-disable"
+                    onClick={() => void turnOffAppLock()}
+                    disabled={appLockBusy || !appLockCurrentPassword}
+                  >
+                    关闭应用锁
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="app-lock-save"
+                  onClick={() => void saveAppLockPassword()}
+                  disabled={appLockBusy || !appLockNewPassword || !appLockConfirmPassword || (appLockEnabled && !appLockCurrentPassword)}
+                >
+                  {appLockBusy ? "处理中…" : appLockEnabled ? "修改密码" : "启用应用锁"}
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+            )}
+          </div>
+        </div>
         <div className="project-dialog-actions">
           <button type="button" className="dialog-cancel" onClick={() => setSettingsOpen(false)}>
-            取消
+            关闭
           </button>
-          <button type="submit" className="primary-button">
-            保存设置
-          </button>
+          {activeSettingsSection === "general" && (
+            <button type="submit" className="primary-button">
+              保存基础设置
+            </button>
+          )}
         </div>
       </form>
     </div>,
@@ -4864,7 +6241,7 @@ function CanvasWorkspace() {
           <div className="project-home-brand">
             <div className="project-home-mark"><Sparkles size={22} /></div>
             <div>
-              <strong>InfiniteCanvas</strong>
+              <strong>SuCanvas</strong>
               <span>项目工作区</span>
             </div>
           </div>
@@ -4909,7 +6286,10 @@ function CanvasWorkspace() {
               <h1>选择一个画布项目</h1>
               <p>每个项目拥有独立的节点、图片、连接和生成流程。</p>
             </div>
-            <span className="project-total">{projects.length} 个项目</span>
+            <span className="project-total">
+              {visibleProjects.length} 个项目
+              {!showPrivateProjects && privateProjectCount > 0 ? ` · 已隐藏 ${privateProjectCount} 个` : ""}
+            </span>
           </div>
 
           <div
@@ -4926,7 +6306,7 @@ function CanvasWorkspace() {
               <span>创建一张新的无限画布</span>
             </button>
 
-            {projects.map((project) => (
+            {visibleProjects.map((project) => (
               <article
                 className="project-card"
                 key={project.canvas.id}
@@ -4943,7 +6323,14 @@ function CanvasWorkspace() {
                 <ProjectThumbnail project={project} />
                 <div className="project-card-info">
                   <div>
-                    <strong>{project.canvas.name}</strong>
+                    <strong>
+                      <span className="project-name-text">{project.canvas.name}</span>
+                      {project.canvas.isPrivate && (
+                        <span className="project-private-badge" title="私密项目">
+                          <LockKeyhole size={10} /> 私密
+                        </span>
+                      )}
+                    </strong>
                     <span>
                       更新于 {new Intl.DateTimeFormat("zh-CN", {
                         month: "numeric",
@@ -5072,10 +6459,13 @@ function CanvasWorkspace() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={connectNodes}
-        onPaneClick={() => setCanvasContextMenu(null)}
+        onNodeClick={(_, node) => handleNodeRelationClick(node)}
+        onPaneClick={() => {
+          setCanvasContextMenu(null);
+          setRelationAnchorId(null);
+        }}
         onPaneContextMenu={openCanvasContextMenu}
         isValidConnection={isValidConnection}
-        onDelete={deleteElements}
         onNodeDragStop={(_, node, draggedNodes) => {
           const movedNodes = draggedNodes.length ? draggedNodes : [node];
           movedNodes.forEach((movedNode) => {
@@ -5095,7 +6485,7 @@ function CanvasWorkspace() {
           strokeWidth: 2.5,
           vectorEffect: "non-scaling-stroke",
         }}
-        deleteKeyCode={["Backspace", "Delete"]}
+        deleteKeyCode={null}
         selectionKeyCode="Control"
         multiSelectionKeyCode="Control"
         selectionOnDrag={false}
@@ -5163,7 +6553,7 @@ function CanvasWorkspace() {
                 <Pencil size={12} />
               </button>
             )}
-            <span>InfiniteCanvas · Project</span>
+            <span>SuCanvas · Project</span>
           </div>
         </Panel>
 
@@ -5238,6 +6628,65 @@ function CanvasWorkspace() {
           </div>
         )}
       </ReactFlow>
+      {videoDeletionRequest && createPortal(
+        <div
+          className="project-dialog-backdrop"
+          onMouseDown={() => finishVideoDeletionChoice("cancel")}
+        >
+          <div
+            className="project-dialog project-delete-dialog video-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-video-title"
+            aria-describedby="delete-video-description"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><Trash2 size={22} /></div>
+            <div>
+              <h2 id="delete-video-title">删除视频节点？</h2>
+              <p id="delete-video-description">
+                即将删除 {videoDeletionRequest.videoCount} 个视频节点。
+                {videoDeletionRequest.filePaths.length
+                  ? ` 检测到 ${videoDeletionRequest.filePaths.length} 个本地视频文件，可选择一并永久删除。`
+                  : " 当前没有可定位的本地视频文件，只能删除节点。"}
+              </p>
+              {videoDeletionRequest.filePaths.length > 0 && (
+                <p className="video-delete-warning">
+                  同时删除文件后无法撤销，Ctrl+Z 也不能恢复真实视频文件。
+                </p>
+              )}
+            </div>
+            <div className="project-dialog-actions">
+              <button
+                type="button"
+                className="dialog-cancel"
+                autoFocus
+                onClick={() => finishVideoDeletionChoice("cancel")}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="dialog-cancel video-delete-node-only"
+                onClick={() => finishVideoDeletionChoice("node-only")}
+              >
+                仅删除节点
+              </button>
+              {videoDeletionRequest.filePaths.length > 0 && (
+                <button
+                  type="button"
+                  className="dialog-danger"
+                  onClick={() => finishVideoDeletionChoice("node-and-file")}
+                >
+                  <Trash2 size={14} />
+                  同时删除文件
+                </button>
+              )}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
       {canvasContextMenu && createPortal(
         <div
           className="canvas-context-menu"
@@ -5266,7 +6715,127 @@ function CanvasWorkspace() {
   );
 }
 
+function AppLockScreen({ onUnlock }: { onUnlock: () => void }) {
+  const [password, setPassword] = useState("");
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const unlock = async () => {
+    if (!password || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const accepted = await invoke<boolean>("verify_app_lock_password", { password });
+      if (!accepted) {
+        setPassword("");
+        setError("密码错误，请重新输入");
+        return;
+      }
+      onUnlock();
+    } catch (unlockError) {
+      const message = unlockError instanceof Error ? unlockError.message : String(unlockError);
+      setError(message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="app-lock-screen">
+      <form
+        className="app-lock-card"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void unlock();
+        }}
+      >
+        <div className="app-lock-mark"><LockKeyhole size={25} /></div>
+        <span className="app-lock-eyebrow">SUCANVAS</span>
+        <h1>应用已锁定</h1>
+        <p>输入本机应用锁密码以继续。</p>
+        <label>
+          密码
+          <div className="app-lock-screen-input">
+            <input
+              autoFocus
+              type={passwordVisible ? "text" : "password"}
+              value={password}
+              onChange={(event) => setPassword(event.currentTarget.value)}
+              autoComplete="current-password"
+              disabled={busy}
+            />
+            <button
+              type="button"
+              onClick={() => setPasswordVisible((visible) => !visible)}
+              title={passwordVisible ? "隐藏密码" : "显示密码"}
+              aria-label={passwordVisible ? "隐藏密码" : "显示密码"}
+            >
+              {passwordVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </div>
+        </label>
+        <div className={`app-lock-screen-feedback ${error ? "is-error" : ""}`} aria-live="polite">
+          {error || "密码只在本机验证"}
+        </div>
+        <button className="app-lock-unlock" type="submit" disabled={!password || busy}>
+          {busy ? "正在验证…" : "解锁"}
+        </button>
+      </form>
+    </main>
+  );
+}
+
 export default function App() {
+  const [accessState, setAccessState] = useState<"checking" | "locked" | "unlocked" | "error">("checking");
+  const [statusError, setStatusError] = useState("");
+
+  const checkAppLock = useCallback(async () => {
+    setAccessState("checking");
+    setStatusError("");
+    try {
+      const status = await invoke<AppLockStatus>("get_app_lock_status");
+      setAccessState(status.enabled ? "locked" : "unlocked");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatusError(message);
+      setAccessState("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme =
+      window.localStorage.getItem("infinite-canvas:theme") === "light" ? "light" : "dark";
+    void checkAppLock();
+  }, [checkAppLock]);
+
+  if (accessState === "checking") {
+    return (
+      <main className="app-lock-screen is-loading" aria-label="正在检查应用锁">
+        <div className="app-lock-loading-mark"><LockKeyhole size={23} /></div>
+      </main>
+    );
+  }
+
+  if (accessState === "error") {
+    return (
+      <main className="app-lock-screen">
+        <div className="app-lock-card app-lock-error-card">
+          <div className="app-lock-mark"><LockKeyhole size={25} /></div>
+          <h1>无法读取应用锁</h1>
+          <p>{statusError}</p>
+          <button className="app-lock-unlock" type="button" onClick={() => void checkAppLock()}>
+            重试
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  if (accessState === "locked") {
+    return <AppLockScreen onUnlock={() => setAccessState("unlocked")} />;
+  }
+
   return (
     <ReactFlowProvider>
       <CanvasWorkspace />

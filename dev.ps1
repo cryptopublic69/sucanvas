@@ -57,7 +57,7 @@ try {
     }
 
     Write-Host ''
-    Write-Host 'InfiniteCanvas development preview' -ForegroundColor Cyan
+    Write-Host 'SuCanvas development preview' -ForegroundColor Cyan
     Write-Host "Project: $projectRoot"
     Write-Host "Log:     $logPath"
     Write-Host ''
@@ -81,7 +81,7 @@ try {
     if ($owner) {
         $ownerCommandLine = [string]$owner.CommandLine
         if ($ownerCommandLine.IndexOf($projectRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            Write-Host "InfiniteCanvas dev preview is already running on http://localhost:$vitePort" -ForegroundColor Green
+            Write-Host "SuCanvas dev preview is already running on http://localhost:$vitePort" -ForegroundColor Green
             Write-Host "PID: $($owner.ProcessId)"
             exit 0
         }

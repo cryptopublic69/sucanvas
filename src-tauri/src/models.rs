@@ -12,6 +12,7 @@ fn empty_object() -> Value {
 pub struct CanvasRecord {
     pub id: String,
     pub name: String,
+    pub is_private: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -80,6 +81,13 @@ pub struct CreateProjectInput {
 pub struct UpdateProjectInput {
     pub id: String,
     pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProjectPrivacyInput {
+    pub id: String,
+    pub is_private: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -155,6 +163,20 @@ pub struct RuntimeInfo {
     pub canvas_id: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLockStatus {
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAppLockInput {
+    #[serde(default)]
+    pub current_password: Option<String>,
+    pub new_password: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComfySubmitInput {
@@ -167,6 +189,8 @@ pub struct ComfySubmitInput {
     pub seed_mode: String,
     pub seed: String,
     pub duration_seconds: f64,
+    #[serde(default = "default_video_aspect_ratio")]
+    pub aspect_ratio: String,
     pub primary_resolution_megapixels: f64,
     pub secondary_resolution_megapixels: f64,
     pub secondary_sampling_enabled: bool,
@@ -185,6 +209,10 @@ pub struct ComfySubmitInput {
 
 fn default_lora_strength() -> f64 {
     1.0
+}
+
+fn default_video_aspect_ratio() -> String {
+    "16:9".to_owned()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

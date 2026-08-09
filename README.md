@@ -1,4 +1,4 @@
-# InfiniteCanvas
+# SuCanvas
 
 基于 Tauri 2、React Flow 与 SQLite 的本地无限画布。首版支持文本节点、节点连线、自动保存，以及通过本地 API 接收 Codex/Reasonix 生成的内容。
 
@@ -20,7 +20,7 @@
 .\dev.cmd --check
 ```
 
-启动日志保存在 `%LOCALAPPDATA%\InfiniteCanvas\dev-launcher.log`。
+为兼容已有项目数据，启动日志继续保存在 `%LOCALAPPDATA%\InfiniteCanvas\dev-launcher.log`。
 
 启动后会在 `%LOCALAPPDATA%\InfiniteCanvas\api.json` 写入当前 API 地址与临时访问令牌。应用关闭再启动后端口和令牌会更新。
 
