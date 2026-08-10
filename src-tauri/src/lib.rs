@@ -211,6 +211,10 @@ pub fn run() {
             std::fs::create_dir_all(&assets_dir)?;
             app.asset_protocol_scope()
                 .allow_directory(&assets_dir, true)?;
+            let temp_dir = data_dir.join("temp");
+            std::fs::create_dir_all(&temp_dir)?;
+            app.asset_protocol_scope()
+                .allow_directory(&temp_dir, true)?;
             let workflow_modules_dir = data_dir.join("workflow-modules");
             std::fs::create_dir_all(&workflow_modules_dir)?;
             let workflow_module_exports_dir = data_dir.join("workflow-module-exports");
@@ -220,6 +224,9 @@ pub fn run() {
             let compatibility_config_path = legacy_data_dir(app)?.join("api.json");
             let app_lock_path = data_dir.join("app-lock.json");
             let database = Database::open(&database_path)?;
+            if let Err(error) = commands::cleanup_unreferenced_resize_images(&data_dir, &database) {
+                eprintln!("Failed to clean orphaned Resize images at startup: {error}");
+            }
             let rewritten_nodes = legacy_dirs.iter().try_fold(0usize, |total, legacy_dir| {
                 database
                     .rewrite_asset_paths(&legacy_dir.join("assets"), &assets_dir)
@@ -284,6 +291,8 @@ pub fn run() {
             commands::delete_project,
             commands::create_node,
             commands::import_media,
+            commands::resize_image,
+            commands::cleanup_resize_images,
             commands::update_node,
             commands::delete_node,
             commands::delete_video_files,

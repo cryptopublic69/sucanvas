@@ -62,6 +62,7 @@ import {
   RotateCcw,
   Search,
   Settings2,
+  Scaling,
   SlidersHorizontal,
   Sparkles,
   Square,
@@ -77,6 +78,7 @@ import {
 import {
   ChangeEvent,
   CSSProperties,
+  FormEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   WheelEvent as ReactWheelEvent,
@@ -201,6 +203,11 @@ interface CreateNodeResult {
   created: boolean;
 }
 
+interface ResizeImageResult {
+  node: NodeRecord;
+  edge: EdgeRecord;
+}
+
 interface DeletedBatch {
   nodes: NodeRecord[];
   edges: EdgeRecord[];
@@ -255,6 +262,7 @@ interface ComfyClientTaskStatus {
 
 interface GenerationSnapshot {
   prompt: string;
+  promptInformation: string;
   promptNodeId: string;
   promptNodeTitle: string;
   promptNodeIdSource: "captured" | "verified" | "";
@@ -305,11 +313,26 @@ interface VideoExecutionOptions {
   allowFixedSeedRepeat?: boolean;
 }
 
+interface VideoRegenerationPromptOption {
+  key: string;
+  label: string;
+  prompt: string;
+  information: string;
+  promptNodeId: string;
+  promptNodeTitle: string;
+  promptNodeIdSource: "captured" | "verified" | "";
+  promptVersionId: string;
+  promptVersionLabel: string;
+}
+
 interface VideoRegenerationDraft {
   previewId: string;
   previewTitle: string;
   originalSnapshot: GenerationSnapshot;
+  promptOptions: VideoRegenerationPromptOption[];
+  selectedPromptKey: string;
   seed: string;
+  durationSeconds: number;
   primaryResolutionMegapixels: number;
   loraStrength: number;
   primaryVideoSteps: number;
@@ -321,6 +344,7 @@ interface VideoRegenerationDraft {
 }
 
 type VideoRegenerationNumericField = "primaryResolutionMegapixels"
+  | "durationSeconds"
   | "loraStrength"
   | "primaryVideoSteps"
   | "primaryAudioSteps"
@@ -333,6 +357,7 @@ const VIDEO_REGENERATION_NUMBER_CONFIG: Record<
   { min: number; max: number; step: number }
 > = {
   primaryResolutionMegapixels: { min: 0.2, max: 2, step: 0.1 },
+  durationSeconds: { min: 2, max: 15, step: 1 },
   loraStrength: { min: 0, max: 2, step: 0.05 },
   primaryVideoSteps: { min: 1, max: 1000, step: 1 },
   primaryAudioSteps: { min: 1, max: 1000, step: 1 },
@@ -883,6 +908,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   onRemoveInput: (targetId: string, sourceId: string) => Promise<void>;
   onActivateTextInput: (targetId: string, sourceId: string) => void;
   onDeletePromptVersion: (nodeId: string, versionId: string) => Promise<void>;
+  onResizeImage: (id: string, maxEdge: number) => Promise<void>;
   onDelete: (id: string, deleteSourceFile?: boolean) => void;
   onCopy: (text: string) => void;
 }
@@ -1304,6 +1330,10 @@ const VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS = 10;
 const VIDEO_NODE_TEXT_ROW_HEIGHT = 51;
 const MEDIA_NODE_CHROME_HEIGHT = 73;
 const IMAGE_NODE_CHROME_HEIGHT = 38;
+const IMAGE_RESIZE_DEFAULT_STORAGE_KEY = "infinite-canvas:image-resize-max-edge";
+const DEFAULT_IMAGE_RESIZE_MAX_EDGE = 2048;
+const MIN_IMAGE_RESIZE_MAX_EDGE = 32;
+const MAX_IMAGE_RESIZE_MAX_EDGE = 16_384;
 const GENERATED_VIDEO_FOOTER_HEIGHT = 38;
 const LEGACY_GENERATED_VIDEO_PREVIEW_WIDTH = 360;
 const GENERATED_VIDEO_PREVIEW_WIDTH = 420;
@@ -1328,6 +1358,15 @@ const DEFAULT_H3_MODEL_PARAMETERS: H3ModelParameters = {
   secondaryContrast: 0.9,
   secondarySaturation: 1,
 };
+
+function imageResizeDefaultFromStorage(): number {
+  const saved = Number(window.localStorage.getItem(IMAGE_RESIZE_DEFAULT_STORAGE_KEY));
+  return Number.isInteger(saved)
+    && saved >= MIN_IMAGE_RESIZE_MAX_EDGE
+    && saved <= MAX_IMAGE_RESIZE_MAX_EDGE
+    ? saved
+    : DEFAULT_IMAGE_RESIZE_MAX_EDGE;
+}
 
 function stablePlaceholderUnit(key: string): number {
   let hash = 2166136261;
@@ -1793,6 +1832,9 @@ function persistedComfyTasksFromStorage(): PersistedComfyTask[] {
       ...task,
       snapshot: {
         ...task.snapshot,
+        promptInformation: typeof task.snapshot.promptInformation === "string"
+          ? task.snapshot.promptInformation
+          : "",
         promptNodeId: typeof task.snapshot.promptNodeId === "string"
           ? task.snapshot.promptNodeId
           : "",
@@ -1835,6 +1877,9 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
   if (typeof snapshot.prompt !== "string" || !snapshot.prompt.trim()) return null;
   return {
     prompt: snapshot.prompt,
+    promptInformation: typeof snapshot.promptInformation === "string"
+      ? snapshot.promptInformation
+      : "",
     promptNodeId: typeof snapshot.promptNodeId === "string" ? snapshot.promptNodeId : "",
     promptNodeTitle: typeof snapshot.promptNodeTitle === "string" ? snapshot.promptNodeTitle : "",
     promptNodeIdSource: snapshot.promptNodeIdSource === "captured"
@@ -2534,6 +2579,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onRemoveInput,
     onActivateTextInput,
     onDeletePromptVersion,
+    onResizeImage,
     onDelete,
     onCopy,
   } = data;
@@ -2555,6 +2601,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [promptVersionTitleDraft, setPromptVersionTitleDraft] = useState("");
   const [textInformationOpen, setTextInformationOpen] = useState(false);
   const [generatedInfoOpen, setGeneratedInfoOpen] = useState(false);
+  const [imageResizeDialogOpen, setImageResizeDialogOpen] = useState(false);
+  const [imageResizeDraft, setImageResizeDraft] = useState(() => String(imageResizeDefaultFromStorage()));
+  const [imageResizeError, setImageResizeError] = useState("");
+  const [imageResizing, setImageResizing] = useState(false);
   const [connectedTextEditor, setConnectedTextEditor] = useState<{
     id: string;
     title: string;
@@ -2635,6 +2685,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const isVideoAsset = record.kind === "video";
   const isVideoGeneration = record.kind === "video-generation";
   const isGeneratedVideo = record.kind === "generated-video";
+  const sourceLabel = record.source === "manual"
+    ? "手动创建"
+    : record.source === "image-resize"
+      ? "尺寸调整"
+      : record.source;
   const isSecondaryPreview = isGeneratedVideo
     && typeof record.content.sourcePreviewId === "string";
   const supportsPreviewColor = isText || isNote || (
@@ -2746,6 +2801,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const originalName = typeof record.content.originalName === "string"
     ? record.content.originalName
     : record.title;
+  const naturalWidth = typeof record.content.naturalWidth === "number"
+    && Number.isFinite(record.content.naturalWidth)
+    && record.content.naturalWidth > 0
+    ? Math.round(record.content.naturalWidth)
+    : null;
+  const naturalHeight = typeof record.content.naturalHeight === "number"
+    && Number.isFinite(record.content.naturalHeight)
+    && record.content.naturalHeight > 0
+    ? Math.round(record.content.naturalHeight)
+    : null;
+  const imageDimensionLabel = naturalWidth && naturalHeight
+    ? `${naturalWidth} × ${naturalHeight}`
+    : "读取尺寸…";
   const savedAspectRatio = typeof record.content.aspectRatio === "number"
     ? record.content.aspectRatio
     : null;
@@ -2963,6 +3031,29 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     };
     document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [textInformationOpen]);
+
+  useEffect(() => {
+    if (!textInformationOpen) return;
+    const panel = textInformationRef.current?.querySelector<HTMLElement>(".text-information-panel");
+    const textarea = panel?.querySelector<HTMLTextAreaElement>("textarea");
+    if (!panel || !textarea) return;
+    const containInformationWheel = (event: WheelEvent) => {
+      if (event.ctrlKey) return;
+      const rawDelta = Math.abs(event.deltaY) >= Math.abs(event.deltaX)
+        ? event.deltaY
+        : event.deltaX;
+      const multiplier = event.deltaMode === 1
+        ? 32
+        : event.deltaMode === 2
+          ? textarea.clientHeight
+          : 1;
+      textarea.scrollTop += rawDelta * multiplier;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    panel.addEventListener("wheel", containInformationWheel, { passive: false });
+    return () => panel.removeEventListener("wheel", containInformationWheel);
   }, [textInformationOpen]);
 
   useEffect(() => {
@@ -3615,6 +3706,39 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     void video.requestFullscreen().catch(() => {});
   };
 
+  const runImageResize = async (maxEdge: number, rememberDefault: boolean) => {
+    if (!isImage || imageResizing) return;
+    setImageResizeError("");
+    setImageResizing(true);
+    try {
+      await onResizeImage(id, maxEdge);
+      if (rememberDefault) {
+        window.localStorage.setItem(IMAGE_RESIZE_DEFAULT_STORAGE_KEY, String(maxEdge));
+      }
+      setImageResizeDialogOpen(false);
+    } catch (error) {
+      setImageResizeError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setImageResizing(false);
+    }
+  };
+
+  const submitImageResize = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const maxEdge = Number(imageResizeDraft);
+    if (
+      !Number.isInteger(maxEdge)
+      || maxEdge < MIN_IMAGE_RESIZE_MAX_EDGE
+      || maxEdge > MAX_IMAGE_RESIZE_MAX_EDGE
+    ) {
+      setImageResizeError(
+        `请输入 ${MIN_IMAGE_RESIZE_MAX_EDGE}–${MAX_IMAGE_RESIZE_MAX_EDGE} 之间的整数`,
+      );
+      return;
+    }
+    void runImageResize(maxEdge, true);
+  };
+
   return (
     <article
       className={`canvas-node kind-${record.kind} ${isPromptVersionNode ? "is-prompt-version-node" : ""} ${usesSecondaryGreenTheme ? "is-secondary-preview" : ""} ${usesCustomPreviewTheme ? "has-custom-preview-color" : ""} ${relationHighlighted ? "is-relation-highlighted" : ""} ${matched ? "" : "is-dimmed"}`}
@@ -3834,11 +3958,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </button>
             {textInformationOpen && (
               <aside
-                className="text-information-panel"
+                className="text-information-panel nowheel"
                 aria-label="提示词中文解释"
-                onWheelCapture={(event) => {
-                  if (!event.ctrlKey) event.stopPropagation();
-                }}
               >
                 <header>
                   <div>
@@ -4190,7 +4311,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   if (event.ctrlKey) onConfigureRegenerateVideo(id);
                   else void onRegenerateVideo(id);
                 }}
-                title="点击直接重新生成；Ctrl+点击可调整一采参数"
+                title="点击直接重新生成；Ctrl+点击可选择提示词版本并调整参数"
                 aria-label="重新生成该视频"
               >
                 <RotateCcw size={12} />
@@ -5624,7 +5745,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       {!isGeneratedVideo && (
         <footer className="node-footer">
           <span className={`source-dot ${record.source === "manual" ? "manual" : "external"}`} />
-          <span>{record.source === "manual" ? "手动创建" : record.source}</span>
+          <span>{sourceLabel}</span>
+          {isImage && <span className="image-dimension-label">{imageDimensionLabel}</span>}
           {isPromptVersionNode && relationPromptVersionLabel && (
             <span
               className="prompt-relation-version"
@@ -5634,17 +5756,38 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </span>
           )}
           <span className="node-footer-spacer" />
-          <span className="node-footer-detail">
+          {!isImage && <span className="node-footer-detail">
             {(isText || isNote)
               ? isPromptVersionNode
                 ? `${promptVersions.length} 个版本 · ${textDraft.length.toLocaleString()} 字符`
                 : `${textDraft.length.toLocaleString()} 字符`
-              : (isImage || isAudioAsset || isVideoAsset)
+              : (isAudioAsset || isVideoAsset)
                 ? originalName
                 : mediaInputs.length
                   ? `${mediaInputs.length} 个媒体输入`
                   : "尚未生成"}
-          </span>
+          </span>}
+          {isImage && (
+            <button
+              type="button"
+              className="nodrag node-action media-footer-resize"
+              disabled={imageResizing}
+              onClick={(event) => {
+                if (event.ctrlKey) {
+                  const savedDefault = imageResizeDefaultFromStorage();
+                  setImageResizeDraft(String(savedDefault));
+                  setImageResizeError("");
+                  setImageResizeDialogOpen(true);
+                  return;
+                }
+                void runImageResize(imageResizeDefaultFromStorage(), false);
+              }}
+              title="Resize 图片；Ctrl+单击设置最长边"
+              aria-label="Resize 图片；Ctrl 加单击设置最长边"
+            >
+              <Scaling size={14} />
+            </button>
+          )}
           {(isImage || isAudioAsset) && (
             <button
               type="button"
@@ -5664,6 +5807,63 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           position={Position.Right}
           className={`node-handle source-handle ${outputCount > 0 ? "is-connected" : ""}`}
         />
+      )}
+      {imageResizeDialogOpen && createPortal(
+        <div
+          className="project-dialog-backdrop image-resize-dialog-backdrop"
+          onMouseDown={() => {
+            if (!imageResizing) setImageResizeDialogOpen(false);
+          }}
+        >
+          <form
+            className="project-dialog image-resize-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={`image-resize-title-${id}`}
+            onSubmit={submitImageResize}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><Scaling size={22} /></div>
+            <div>
+              <h2 id={`image-resize-title-${id}`}>Resize 图片</h2>
+              <p>
+                保持原始宽高比，将最长边缩放到指定像素。小于目标尺寸的图片不会被放大。
+              </p>
+            </div>
+            <label>
+              最长边像素
+              <input
+                type="number"
+                min={MIN_IMAGE_RESIZE_MAX_EDGE}
+                max={MAX_IMAGE_RESIZE_MAX_EDGE}
+                step={1}
+                value={imageResizeDraft}
+                disabled={imageResizing}
+                autoFocus
+                onChange={(event) => {
+                  setImageResizeDraft(event.currentTarget.value);
+                  setImageResizeError("");
+                }}
+              />
+            </label>
+            {imageResizeError && <p className="image-resize-error">{imageResizeError}</p>}
+            <div className="project-dialog-actions">
+              <button
+                type="button"
+                className="dialog-cancel"
+                disabled={imageResizing}
+                onClick={() => setImageResizeDialogOpen(false)}
+              >
+                取消
+              </button>
+              <button type="submit" className="primary-button" disabled={imageResizing}>
+                <Scaling size={14} />
+                {imageResizing ? "处理中…" : "执行 Resize"}
+              </button>
+            </div>
+          </form>
+        </div>,
+        document.body,
       )}
       {expanded && createPortal(
         <div className="expanded-editor-backdrop" onMouseDown={() => setExpanded(false)}>
@@ -7961,6 +8161,8 @@ function CanvasWorkspace() {
       : null;
     return {
       prompt: activeTextInput ? textFromContent(activeTextInput.content) : "",
+      promptInformation: activePromptVersion?.information
+        ?? (activeTextInput ? informationFromContent(activeTextInput.content) : ""),
       promptNodeId: activeTextInput?.id ?? "",
       promptNodeTitle: activePromptVersion?.title || activeTextInput?.title || "",
       promptNodeIdSource: activeTextInput ? "captured" : "",
@@ -8893,6 +9095,14 @@ function CanvasWorkspace() {
       setNotice("无法重新生成：该视频缺少历史参数快照或原视频生成节点");
       return;
     }
+    const currentGeneratorSnapshot = generationSnapshotForGenerator(sourceGeneratorId);
+    const snapshotWithCurrentImages = currentGeneratorSnapshot
+      ? {
+          ...snapshot,
+          imagePaths: currentGeneratorSnapshot.imagePaths,
+          imageRoles: currentGeneratorSnapshot.imageRoles,
+        }
+      : snapshot;
 
     let seed = seedOverride;
     if (!seed) {
@@ -8903,8 +9113,12 @@ function CanvasWorkspace() {
       seed = randomFixedSeed();
       while (excludedSeeds.has(seed)) seed = randomFixedSeed();
     }
-    await executeVideoNode(sourceGeneratorId, { sourcePreview, snapshot, seed });
-  }, [executeVideoNode]);
+    await executeVideoNode(sourceGeneratorId, {
+      sourcePreview,
+      snapshot: snapshotWithCurrentImages,
+      seed,
+    });
+  }, [executeVideoNode, generationSnapshotForGenerator]);
 
   const configureGeneratedVideoRegeneration = useCallback((previewId: string) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
@@ -8927,11 +9141,126 @@ function CanvasWorkspace() {
       setNotice("无法设置重新生成参数：该视频没有有效的历史 Seed");
       return;
     }
+    const snapshotPromptOption: VideoRegenerationPromptOption = {
+      key: "snapshot",
+      label: `${snapshot.promptVersionLabel ? `${snapshot.promptVersionLabel} · ` : ""}${snapshot.promptNodeTitle || "生成时提示词"}（历史快照）`,
+      prompt: snapshot.prompt,
+      information: snapshot.promptInformation,
+      promptNodeId: snapshot.promptNodeId,
+      promptNodeTitle: snapshot.promptNodeTitle,
+      promptNodeIdSource: snapshot.promptNodeIdSource,
+      promptVersionId: snapshot.promptVersionId,
+      promptVersionLabel: snapshot.promptVersionLabel,
+    };
+    const allTextNodes = nodesSnapshot.current.filter(
+      (node) => node.data.record.kind === "text",
+    );
+    const sourceGeneratorId = typeof preview.content.sourceGeneratorId === "string"
+      ? preview.content.sourceGeneratorId
+      : "";
+    const connectedPromptNodeIds = new Set(
+      edgesSnapshot.current
+        .filter((edge) => edge.target === sourceGeneratorId)
+        .map((edge) => edge.source),
+    );
+    const connectedTextNodes = allTextNodes.filter((node) => connectedPromptNodeIds.has(node.id));
+    const nodeMatchesSnapshot = (node: CanvasFlowNode) => {
+      const record = node.data.record;
+      const versions = promptVersionsFromContent(record.content);
+      if (snapshot.promptVersionId && versions.some((version) => version.id === snapshot.promptVersionId)) {
+        return true;
+      }
+      return versions.some((version) => version.text === snapshot.prompt)
+        || textFromContent(record.content) === snapshot.prompt;
+    };
+    let promptNode = snapshot.promptNodeId
+      ? allTextNodes.find((node) => node.id === snapshot.promptNodeId)
+      : undefined;
+    if (!promptNode) {
+      const connectedMatches = connectedTextNodes.filter(nodeMatchesSnapshot);
+      promptNode = connectedMatches.length === 1
+        ? connectedMatches[0]
+        : connectedTextNodes.length === 1
+          ? connectedTextNodes[0]
+          : undefined;
+    }
+    if (!promptNode) {
+      const globalMatches = allTextNodes.filter(nodeMatchesSnapshot);
+      if (globalMatches.length === 1) promptNode = globalMatches[0];
+    }
+
+    let promptOptions: VideoRegenerationPromptOption[] = [snapshotPromptOption];
+    let selectedPromptKey = snapshotPromptOption.key;
+    if (promptNode?.data.record.content.promptVersionNode === true) {
+      const promptRecord = promptNode.data.record;
+      const versions = promptVersionsFromContent(promptRecord.content);
+      const usedVersion = versions.find((version) => (
+        Boolean(snapshot.promptVersionId) && version.id === snapshot.promptVersionId
+      )) ?? versions.find((version) => (
+        Boolean(snapshot.promptVersionLabel)
+        && version.label === snapshot.promptVersionLabel
+        && version.text === snapshot.prompt
+      )) ?? versions.find((version) => version.text === snapshot.prompt);
+      promptOptions = [...versions].reverse().map((version) => {
+        const isUsedVersion = version.id === usedVersion?.id;
+        return {
+          key: `version:${version.id}`,
+          label: `${version.label} · ${isUsedVersion
+            ? snapshot.promptNodeTitle || version.title || promptRecord.title
+            : version.title || promptRecord.title}${isUsedVersion ? "（当前视频）" : ""}`,
+          prompt: isUsedVersion ? snapshot.prompt : version.text,
+          information: isUsedVersion ? snapshot.promptInformation : version.information,
+          promptNodeId: promptRecord.id,
+          promptNodeTitle: isUsedVersion
+            ? snapshot.promptNodeTitle || version.title || promptRecord.title
+            : version.title || promptRecord.title,
+          promptNodeIdSource: "captured" as const,
+          promptVersionId: version.id,
+          promptVersionLabel: version.label,
+        };
+      });
+      if (usedVersion) {
+        selectedPromptKey = `version:${usedVersion.id}`;
+      } else {
+        promptOptions.unshift({
+          ...snapshotPromptOption,
+          promptNodeId: promptRecord.id,
+          promptNodeIdSource: "verified",
+        });
+      }
+    } else if (promptNode) {
+      const promptRecord = promptNode.data.record;
+      const currentTextOption: VideoRegenerationPromptOption = {
+        key: `text:${promptRecord.id}`,
+        label: promptRecord.title || "提示词",
+        prompt: textFromContent(promptRecord.content),
+        information: informationFromContent(promptRecord.content),
+        promptNodeId: promptRecord.id,
+        promptNodeTitle: promptRecord.title,
+        promptNodeIdSource: "captured",
+        promptVersionId: "",
+        promptVersionLabel: "",
+      };
+      if (currentTextOption.prompt === snapshot.prompt) {
+        promptOptions = [{
+          ...currentTextOption,
+          prompt: snapshot.prompt,
+          information: snapshot.promptInformation,
+          label: `${currentTextOption.label}（当前视频）`,
+        }];
+        selectedPromptKey = currentTextOption.key;
+      } else {
+        promptOptions.push(currentTextOption);
+      }
+    }
     setVideoRegenerationDraft({
       previewId,
       previewTitle: preview.title || "视频预览",
       originalSnapshot: snapshot,
+      promptOptions,
+      selectedPromptKey,
       seed,
+      durationSeconds: snapshot.durationSeconds,
       primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
       loraStrength: snapshot.loraStrength,
       primaryVideoSteps: snapshot.primaryVideoSteps,
@@ -8989,6 +9318,15 @@ function CanvasWorkspace() {
       setNotice("Seed 必须是 0 到 18446744073709551615 之间的整数");
       return;
     }
+    const selectedPrompt = draft.promptOptions.find((option) => option.key === draft.selectedPromptKey);
+    if (!selectedPrompt || !selectedPrompt.prompt.trim()) {
+      setNotice("请选择包含正文的提示词版本");
+      return;
+    }
+    if (!Number.isInteger(draft.durationSeconds) || draft.durationSeconds < 2 || draft.durationSeconds > 15) {
+      setNotice("时长必须是 2 到 15 秒之间的整数");
+      return;
+    }
     if (
       !Number.isFinite(draft.primaryResolutionMegapixels)
       || draft.primaryResolutionMegapixels < 0.2
@@ -9024,6 +9362,14 @@ function CanvasWorkspace() {
     }
     const snapshot: GenerationSnapshot = {
       ...draft.originalSnapshot,
+      prompt: selectedPrompt.prompt,
+      promptInformation: selectedPrompt.information,
+      promptNodeId: selectedPrompt.promptNodeId,
+      promptNodeTitle: selectedPrompt.promptNodeTitle,
+      promptNodeIdSource: selectedPrompt.promptNodeIdSource,
+      promptVersionId: selectedPrompt.promptVersionId,
+      promptVersionLabel: selectedPrompt.promptVersionLabel,
+      durationSeconds: draft.durationSeconds,
       primaryResolutionMegapixels: Math.round(draft.primaryResolutionMegapixels * 10) / 10,
       loraStrength: Math.round(draft.loraStrength * 100) / 100,
       loraStrengthRecorded: true,
@@ -9900,6 +10246,57 @@ function CanvasWorkspace() {
     );
   }, []);
 
+  const resizeImageNode = useCallback(async (nodeId: string, maxEdge: number) => {
+    const sourceNode = nodesSnapshot.current.find((node) => node.id === nodeId);
+    const source = sourceNode ? recordAtCurrentFlowPosition(sourceNode) : null;
+    if (!source || source.kind !== "image") {
+      throw new Error("找不到需要 Resize 的原图片节点");
+    }
+    const currentProjectId = activeProjectIdRef.current;
+    if (!currentProjectId || source.canvasId !== currentProjectId) {
+      throw new Error("原图片不在当前项目中");
+    }
+    const sourcePath = typeof source.content.assetPath === "string"
+      ? source.content.assetPath.trim()
+      : "";
+    if (!sourcePath) throw new Error("原图片文件路径为空");
+    const originalName = typeof source.content.originalName === "string"
+      ? source.content.originalName
+      : source.title;
+    const position = {
+      x: snapCanvasCoordinate(source.x + source.width + CANVAS_GRID_SIZE * 2),
+      y: snapCanvasCoordinate(source.y),
+    };
+
+    try {
+      const result = await invoke<ResizeImageResult>("resize_image", {
+        sourceNodeId: source.id,
+        sourcePath,
+        originalName,
+        canvasId: currentProjectId,
+        maxEdge,
+        x: position.x,
+        y: position.y,
+        width: source.width,
+        height: source.height,
+      });
+      const resizedNode = makeFlowNodeRef.current?.(result.node);
+      if (!resizedNode) throw new Error("Resize 图片节点尚未初始化");
+      setNodes((current) => [...current, resizedNode]);
+      setEdges((current) => [...current, toFlowEdge(result.edge)]);
+      const resizedWidth = Number(result.node.content.naturalWidth);
+      const resizedHeight = Number(result.node.content.naturalHeight);
+      setNotice(
+        Number.isFinite(resizedWidth) && Number.isFinite(resizedHeight)
+          ? `Resize 完成：${resizedWidth} × ${resizedHeight}`
+          : "Resize 图片已生成并连接到原图",
+      );
+    } catch (error) {
+      reportError(error);
+      throw error;
+    }
+  }, [reportError, setEdges, setNodes]);
+
   const makeFlowNode = useCallback(
     (record: NodeRecord, matched = true): CanvasFlowNode => ({
       id: record.id,
@@ -9938,11 +10335,12 @@ function CanvasWorkspace() {
         onRemoveInput: removeInputFromVideoNode,
         onActivateTextInput: activateTextInput,
         onDeletePromptVersion: deletePromptVersionFromNode,
+        onResizeImage: resizeImageNode,
         onDelete: deleteNode,
         onCopy: copyText,
       },
     }),
-    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3LoraOptions, locateGeneratedVideoPrompt, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, workflowModuleDefaults, workflowModules],
+    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3LoraOptions, locateGeneratedVideoPrompt, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedVideo, workflowModuleDefaults, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -10649,8 +11047,13 @@ function CanvasWorkspace() {
     try {
       await flushPendingPatches();
       const snapshots = await invoke<WorkspaceSnapshot[]>("list_projects");
-      setProjects(snapshots);
       undoStack.current = [];
+      try {
+        await invoke<number>("cleanup_resize_images");
+      } catch (cleanupError) {
+        console.error("Resize 临时文件清理失败", cleanupError);
+      }
+      setProjects(snapshots);
       activeProjectIdRef.current = null;
       setActiveProjectId(null);
       setRelationAnchorId(null);
@@ -11509,16 +11912,26 @@ function CanvasWorkspace() {
   }, [contentNodes, search]);
 
   useEffect(() => {
-    const promptNodeIdsByText = new Map<string, string[]>();
+    const promptNodeIdsByText = new Map<string, Set<string>>();
+    const promptNodeIdsByVersionId = new Map<string, Set<string>>();
     contentNodes.forEach((node) => {
       const record = node.data.record;
       if (record.kind !== "text") return;
-      const prompt = textFromContent(record.content);
-      if (!prompt) return;
-      promptNodeIdsByText.set(prompt, [
-        ...(promptNodeIdsByText.get(prompt) ?? []),
-        record.id,
-      ]);
+      const versions = promptVersionsFromContent(record.content);
+      const prompts = versions.length
+        ? versions.map((version) => version.text)
+        : [textFromContent(record.content)];
+      prompts.forEach((prompt) => {
+        if (!prompt) return;
+        const nodeIds = promptNodeIdsByText.get(prompt) ?? new Set<string>();
+        nodeIds.add(record.id);
+        promptNodeIdsByText.set(prompt, nodeIds);
+      });
+      versions.forEach((version) => {
+        const nodeIds = promptNodeIdsByVersionId.get(version.id) ?? new Set<string>();
+        nodeIds.add(record.id);
+        promptNodeIdsByVersionId.set(version.id, nodeIds);
+      });
     });
 
     const updatedVideoIds: string[] = [];
@@ -11536,10 +11949,18 @@ function CanvasWorkspace() {
         return;
       }
       const prompt = typeof snapshot.prompt === "string" ? snapshot.prompt : "";
-      const matchingPromptNodeIds = promptNodeIdsByText.get(prompt) ?? [];
-      const promptNodeId = matchingPromptNodeIds.length === 1
-        ? matchingPromptNodeIds[0]
+      const promptVersionId = typeof snapshot.promptVersionId === "string"
+        ? snapshot.promptVersionId
         : "";
+      const versionMatches = promptVersionId
+        ? [...(promptNodeIdsByVersionId.get(promptVersionId) ?? [])]
+        : [];
+      const textMatches = [...(promptNodeIdsByText.get(prompt) ?? [])];
+      const promptNodeId = versionMatches.length === 1
+        ? versionMatches[0]
+        : textMatches.length === 1
+          ? textMatches[0]
+          : "";
       const promptNodeIdSource = promptNodeId ? "verified" : "";
       if (
         snapshot.promptNodeId === promptNodeId
@@ -13435,10 +13856,25 @@ function CanvasWorkspace() {
           >
             <div className="project-dialog-icon"><RotateCcw size={21} /></div>
             <div>
-              <h2>调整参数重新生成</h2>
-              <p>默认使用“{videoRegenerationDraft.previewTitle}”保存的一采参数，只覆盖下列项目。</p>
+              <h2>选择提示词并重新生成</h2>
+              <p>默认使用“{videoRegenerationDraft.previewTitle}”生成时保存的提示词版本与参数。</p>
             </div>
             <div className="video-regeneration-fields">
+              <label className="video-regeneration-prompt-field">
+                提示词版本
+                <SettingsSelect
+                  value={videoRegenerationDraft.selectedPromptKey}
+                  options={videoRegenerationDraft.promptOptions.map((option) => ({
+                    value: option.key,
+                    label: option.label,
+                  }))}
+                  onChange={(selectedPromptKey) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    selectedPromptKey,
+                  }))}
+                  ariaLabel="重新生成提示词版本"
+                />
+              </label>
               <label>
                 Seed
                 <div className="video-regeneration-seed">
@@ -13468,6 +13904,20 @@ function CanvasWorkspace() {
                     <Dices size={14} />
                   </button>
                 </div>
+              </label>
+              <label>
+                时长（秒）
+                <ModelParameterNumberInput
+                  regenerationField="durationSeconds"
+                  min={2}
+                  max={15}
+                  step={1}
+                  value={videoRegenerationDraft.durationSeconds}
+                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    durationSeconds: value,
+                  }))}
+                />
               </label>
               <label>
                 一采分辨率（MP）
@@ -13587,7 +14037,7 @@ function CanvasWorkspace() {
               </fieldset>
             </div>
             <p className="video-regeneration-note">
-              提示词、素材、模型、LoRA 文件、时长和画面比例仍使用当前视频的历史快照。Seed 默认保持不变，点击色子才会随机更换。
+              可临时选择关联提示词节点中的其他版本并调整时长；不会切换提示词节点的当前版本。参考图片及首尾帧角色始终读取原视频生成节点当前连接的最新状态；音频、视频、模型、LoRA 文件和画面比例仍使用当前视频的历史快照。Seed 默认保持不变，点击色子才会随机更换。
             </p>
             <div className="project-dialog-actions">
               <button type="button" className="dialog-cancel" onClick={() => setVideoRegenerationDraft(null)}>

@@ -313,6 +313,13 @@ pub struct CreateNodeResult {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ResizeImageResult {
+    pub node: NodeRecord,
+    pub edge: EdgeRecord,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {
     pub base_url: String,
     pub data_path: String,

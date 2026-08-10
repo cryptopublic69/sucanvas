@@ -13,6 +13,7 @@ use argon2::{
     Argon2,
 };
 use chrono::Local;
+use image::{imageops::FilterType, ImageFormat};
 use reqwest::{multipart, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -25,9 +26,9 @@ use crate::{
         AppLockStatus, ComfyClientTaskStatus, ComfyOutputFile, ComfyQueueSummary, ComfySubmitInput,
         ComfySubmitResult, CreateEdgeInput, CreateNodeInput, CreateNodeResult, CreateProjectInput,
         DeleteNodesInput, DeletedBatch, EdgeRecord, NodeRecord, ReplaceNodeAndDeleteInput,
-        ReplaceNodeAndDeleteResult, RestoreNodeReplacementInput, RestoreNodeReplacementResult,
-        RuntimeInfo, SetAppLockInput, SetProjectPrivacyInput, UpdateNodeInput, UpdateProjectInput,
-        WorkspaceSnapshot,
+        ReplaceNodeAndDeleteResult, ResizeImageResult, RestoreNodeReplacementInput,
+        RestoreNodeReplacementResult, RuntimeInfo, SetAppLockInput, SetProjectPrivacyInput,
+        UpdateNodeInput, UpdateProjectInput, WorkspaceSnapshot,
     },
     workflow_modules::{
         self, SaveWorkflowModuleInput, WorkflowBindings, WorkflowInputContract,
@@ -305,6 +306,9 @@ pub fn delete_project(id: String, state: State<'_, ApplicationState>) -> Result<
             .write()
             .map_err(|_| "active project lock is poisoned".to_owned())? = fallback_id;
     }
+    if let Err(error) = cleanup_unreferenced_resize_images(&state.data_dir, &state.database) {
+        eprintln!("Failed to clean orphaned Resize images after project deletion: {error}");
+    }
     Ok(())
 }
 
@@ -539,6 +543,210 @@ fn import_media_blocking(
             Err(error.to_string())
         }
     }
+}
+
+fn resized_image_dimensions(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
+    let longest_edge = width.max(height);
+    if longest_edge <= max_edge {
+        return (width, height);
+    }
+    let scaled = |value: u32| {
+        (((value as u64 * max_edge as u64) + longest_edge as u64 / 2) / longest_edge as u64).max(1)
+            as u32
+    };
+    (scaled(width), scaled(height))
+}
+
+fn resized_image_name(original_name: &str, width: u32, height: u32) -> String {
+    let stem = Path::new(original_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("image");
+    format!("{stem}-{width}x{height}.png")
+}
+
+pub(crate) fn cleanup_unreferenced_resize_images(
+    data_dir: &Path,
+    database: &crate::db::Database,
+) -> Result<usize, String> {
+    let resize_temp_dir = data_dir.join("temp").join("image-resize");
+    if !resize_temp_dir.is_dir() {
+        return Ok(0);
+    }
+    let resize_temp_dir = resize_temp_dir
+        .canonicalize()
+        .map_err(|error| format!("无法读取 Resize 临时目录: {error}"))?;
+    let referenced_paths = database
+        .list_projects()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .flat_map(|project| project.nodes)
+        .filter_map(|node| {
+            node.content
+                .get("assetPath")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+        })
+        .filter_map(|path| path.canonicalize().ok())
+        .filter(|path| path.starts_with(&resize_temp_dir))
+        .collect::<HashSet<_>>();
+
+    let mut removed = 0;
+    for entry in std::fs::read_dir(&resize_temp_dir)
+        .map_err(|error| format!("扫描 Resize 临时目录失败: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("读取 Resize 临时文件失败: {error}"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let is_resize_png = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.starts_with("resize-") && name.ends_with(".png"))
+            .unwrap_or(false);
+        if !is_resize_png {
+            continue;
+        }
+        let resolved = path
+            .canonicalize()
+            .map_err(|error| format!("验证 Resize 临时文件失败: {error}"))?;
+        if referenced_paths.contains(&resolved) {
+            continue;
+        }
+        match std::fs::remove_file(&resolved) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("删除孤立 Resize 临时文件失败: {error}"));
+            }
+        }
+    }
+    Ok(removed)
+}
+
+#[tauri::command]
+pub async fn cleanup_resize_images(state: State<'_, ApplicationState>) -> Result<usize, String> {
+    let data_dir = state.data_dir.clone();
+    let database = state.database.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cleanup_unreferenced_resize_images(&data_dir, &database)
+    })
+    .await
+    .map_err(|error| format!("Resize 临时文件清理任务失败: {error}"))?
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn resize_image(
+    source_node_id: String,
+    source_path: String,
+    original_name: String,
+    canvas_id: String,
+    max_edge: u32,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    state: State<'_, ApplicationState>,
+) -> Result<ResizeImageResult, String> {
+    if !(32..=16_384).contains(&max_edge) {
+        return Err("图片最长边必须介于 32 到 16384 像素之间".to_owned());
+    }
+    if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
+        return Err("Resize 节点位置或尺寸无效".to_owned());
+    }
+
+    let database = state.database.clone();
+    let resize_temp_dir = state.data_dir.join("temp").join("image-resize");
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = PathBuf::from(source_path.trim());
+        let source = source
+            .canonicalize()
+            .map_err(|error| format!("无法读取原图片: {error}"))?;
+        let format =
+            media_format(&source).ok_or_else(|| "原节点不是受支持的图片格式".to_owned())?;
+        if format.kind != "image" {
+            return Err("仅图片节点支持 Resize".to_owned());
+        }
+
+        let image = image::open(&source).map_err(|error| format!("无法解码原图片: {error}"))?;
+        let original_width = image.width();
+        let original_height = image.height();
+        if original_width == 0 || original_height == 0 {
+            return Err("原图片尺寸无效".to_owned());
+        }
+        let (resized_width, resized_height) =
+            resized_image_dimensions(original_width, original_height, max_edge);
+        let resized = if resized_width == original_width && resized_height == original_height {
+            image
+        } else {
+            image.resize_exact(resized_width, resized_height, FilterType::Lanczos3)
+        };
+        std::fs::create_dir_all(&resize_temp_dir)
+            .map_err(|error| format!("创建 Resize 临时目录失败: {error}"))?;
+        let destination = resize_temp_dir.join(format!("resize-{}.png", Uuid::new_v4()));
+        resized
+            .save_with_format(&destination, ImageFormat::Png)
+            .map_err(|error| format!("保存 Resize 图片失败: {error}"))?;
+
+        let resized_name = resized_image_name(&original_name, resized_width, resized_height);
+        let aspect_ratio = resized_width as f64 / resized_height as f64;
+        let created = database.create_node(CreateNodeInput {
+            canvas_id: Some(canvas_id.clone()),
+            kind: Some("image".to_owned()),
+            title: resized_name.clone(),
+            content: json!({
+                "assetPath": destination.to_string_lossy(),
+                "mimeType": "image/png",
+                "originalName": resized_name,
+                "aspectRatio": aspect_ratio,
+                "naturalWidth": resized_width,
+                "naturalHeight": resized_height,
+                "imageLayoutVersion": 1,
+                "resizedFromNodeId": source_node_id,
+                "resizeMaxEdge": max_edge,
+            }),
+            source: Some("image-resize".to_owned()),
+            request_id: None,
+            x: Some(x),
+            y: Some(y),
+            width: Some(width),
+            height: Some(height),
+        });
+        let created = match created {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = std::fs::remove_file(&destination);
+                return Err(error.to_string());
+            }
+        };
+        let edge = database.create_edge(CreateEdgeInput {
+            canvas_id: Some(canvas_id),
+            source_node_id,
+            target_node_id: created.node.id.clone(),
+            kind: Some("image-resize".to_owned()),
+            metadata: json!({
+                "maxEdge": max_edge,
+                "width": resized_width,
+                "height": resized_height,
+            }),
+        });
+        match edge {
+            Ok(edge) => Ok(ResizeImageResult {
+                node: created.node,
+                edge,
+            }),
+            Err(error) => {
+                let _ = database.delete_node(&created.node.id);
+                let _ = std::fs::remove_file(&destination);
+                Err(format!("创建 Resize 连线失败: {error}"))
+            }
+        }
+    })
+    .await
+    .map_err(|error| format!("图片 Resize 任务失败: {error}"))?
 }
 
 #[tauri::command]
@@ -2596,18 +2804,79 @@ pub fn get_runtime_info(state: State<'_, ApplicationState>) -> RuntimeInfo {
 #[cfg(test)]
 mod tests {
     use super::{
-        comfy_execution_elapsed_seconds, comfy_input_task_path, comfy_queue_summary_from_value,
-        configure_h3_diffusion_model, configure_h3_generation, configure_h3_ref_image_size,
-        configure_h3_uploaded_media, configure_secondary_source_video, delete_video_files_blocking,
-        diffusion_models_from_object_info, hash_app_lock_password, loras_from_object_info,
-        media_format, resolve_filename_prefix_date, resolve_generation_seed,
-        validate_new_app_lock_password, validate_workflow_media_counts, verify_app_lock_hash,
-        MediaFormat, WorkflowBindings, WorkflowInputContract, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES,
-        VIDEO_MAX_BYTES,
+        cleanup_unreferenced_resize_images, comfy_execution_elapsed_seconds, comfy_input_task_path,
+        comfy_queue_summary_from_value, configure_h3_diffusion_model, configure_h3_generation,
+        configure_h3_ref_image_size, configure_h3_uploaded_media, configure_secondary_source_video,
+        delete_video_files_blocking, diffusion_models_from_object_info, hash_app_lock_password,
+        loras_from_object_info, media_format, resized_image_dimensions, resized_image_name,
+        resolve_filename_prefix_date, resolve_generation_seed, validate_new_app_lock_password,
+        validate_workflow_media_counts, verify_app_lock_hash, MediaFormat, WorkflowBindings,
+        WorkflowInputContract, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
+    use crate::{db::Database, models::CreateNodeInput};
     use serde_json::json;
     use std::{fs, path::Path};
     use uuid::Uuid;
+
+    #[test]
+    fn resizes_the_longest_image_edge_without_upscaling() {
+        assert_eq!(resized_image_dimensions(4000, 3000, 1920), (1920, 1440));
+        assert_eq!(resized_image_dimensions(3000, 4000, 1920), (1440, 1920));
+        assert_eq!(resized_image_dimensions(800, 600, 1920), (800, 600));
+    }
+
+    #[test]
+    fn names_resized_images_with_their_actual_dimensions() {
+        assert_eq!(
+            resized_image_name("示例照片.jpg", 1920, 1440),
+            "示例照片-1920x1440.png"
+        );
+    }
+
+    #[test]
+    fn keeps_referenced_resize_files_until_their_node_is_deleted() {
+        let root =
+            std::env::temp_dir().join(format!("sucanvas-resize-cleanup-test-{}", Uuid::new_v4()));
+        let data_dir = root.join("data");
+        let resize_dir = data_dir.join("temp").join("image-resize");
+        fs::create_dir_all(&resize_dir).unwrap();
+        let referenced = resize_dir.join("resize-referenced.png");
+        let orphaned = resize_dir.join("resize-orphaned.png");
+        fs::write(&referenced, b"referenced").unwrap();
+        fs::write(&orphaned, b"orphaned").unwrap();
+        let database = Database::open(&data_dir.join("test.sqlite3")).unwrap();
+        let node = database
+            .create_node(CreateNodeInput {
+                canvas_id: None,
+                kind: Some("image".to_owned()),
+                title: "Resize".to_owned(),
+                content: json!({ "assetPath": referenced.to_string_lossy() }),
+                source: Some("image-resize".to_owned()),
+                request_id: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+            })
+            .unwrap()
+            .node;
+
+        assert_eq!(
+            cleanup_unreferenced_resize_images(&data_dir, &database).unwrap(),
+            1
+        );
+        assert!(referenced.exists());
+        assert!(!orphaned.exists());
+
+        database.delete_node(&node.id).unwrap();
+        assert_eq!(
+            cleanup_unreferenced_resize_images(&data_dir, &database).unwrap(),
+            1
+        );
+        assert!(!referenced.exists());
+        drop(database);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn resolves_date_template_before_submitting_save_video() {
