@@ -1013,7 +1013,8 @@ mod tests {
     fn rewrites_legacy_asset_paths_without_touching_other_strings() {
         let database = Database::in_memory().unwrap();
         let legacy_assets = Path::new(r"C:\Users\Raydio\AppData\Local\InfiniteCanvas\assets");
-        let new_assets = Path::new(r"D:\Data\SuCanvasData\data\assets");
+        let new_assets =
+            Path::new(r"C:\Users\Raydio\AppData\Local\SuCanvas\SuCanvasData\data\assets");
         let mut input = text_node("Imported image", "asset-path-migration");
         input.kind = Some("image".to_owned());
         input.content = json!({

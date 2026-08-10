@@ -19,7 +19,7 @@ use models::{ApiConfig, RuntimeInfo, DEFAULT_CANVAS_ID};
 use tauri::Manager;
 use uuid::Uuid;
 
-const DATA_DIR: &str = r"D:\Data\SuCanvasData\data";
+const LEGACY_FIXED_DATA_DIR: &str = r"D:\Data\SuCanvasData\data";
 const DATABASE_FILE: &str = "infinite-canvas.sqlite3";
 
 pub struct RunningComfyTask {
@@ -84,6 +84,22 @@ fn legacy_data_dir(app: &tauri::App) -> Result<PathBuf, Box<dyn std::error::Erro
     Ok(root.join("InfiniteCanvas"))
 }
 
+fn installation_data_dir_from_executable(executable: &Path) -> io::Result<PathBuf> {
+    let installation_dir = executable.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SuCanvas executable path has no parent directory",
+        )
+    })?;
+    Ok(installation_dir.join("SuCanvasData").join("data"))
+}
+
+fn installation_data_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    Ok(installation_data_dir_from_executable(
+        &std::env::current_exe()?,
+    )?)
+}
+
 fn copy_directory(source: &Path, destination: &Path) -> io::Result<()> {
     std::fs::create_dir_all(destination)?;
     for entry in std::fs::read_dir(source)? {
@@ -99,9 +115,14 @@ fn copy_directory(source: &Path, destination: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn prepare_data_dir(app: &tauri::App) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
-    let data_dir = PathBuf::from(DATA_DIR);
-    let legacy_dir = legacy_data_dir(app)?;
+fn prepare_data_dir(
+    app: &tauri::App,
+) -> Result<(PathBuf, Vec<PathBuf>), Box<dyn std::error::Error>> {
+    let data_dir = installation_data_dir()?;
+    let legacy_dirs = [PathBuf::from(LEGACY_FIXED_DATA_DIR), legacy_data_dir(app)?]
+        .into_iter()
+        .filter(|path| path != &data_dir)
+        .collect::<Vec<_>>();
     if let Some(previous_dir) = apply_pending_restore(&data_dir)? {
         eprintln!(
             "Restored SuCanvas backup; previous data was preserved at {}",
@@ -109,12 +130,15 @@ fn prepare_data_dir(app: &tauri::App) -> Result<(PathBuf, PathBuf), Box<dyn std:
         );
     }
     let database_path = data_dir.join(DATABASE_FILE);
-    let legacy_database_path = legacy_dir.join(DATABASE_FILE);
+    let migration_source = legacy_dirs
+        .iter()
+        .find(|path| path.join(DATABASE_FILE).is_file());
 
-    if database_path.is_file() || !legacy_database_path.is_file() {
+    if database_path.is_file() || migration_source.is_none() {
         std::fs::create_dir_all(&data_dir)?;
-        return Ok((data_dir, legacy_dir));
+        return Ok((data_dir, legacy_dirs));
     }
+    let migration_source = migration_source.unwrap();
 
     if data_dir.exists() {
         let mut entries = std::fs::read_dir(&data_dir)?;
@@ -148,7 +172,7 @@ fn prepare_data_dir(app: &tauri::App) -> Result<(PathBuf, PathBuf), Box<dyn std:
         Uuid::new_v4().simple()
     ));
 
-    if let Err(error) = copy_directory(&legacy_dir, &staging_dir) {
+    if let Err(error) = copy_directory(migration_source, &staging_dir) {
         let _ = std::fs::remove_dir_all(&staging_dir);
         return Err(error.into());
     }
@@ -167,10 +191,10 @@ fn prepare_data_dir(app: &tauri::App) -> Result<(PathBuf, PathBuf), Box<dyn std:
 
     eprintln!(
         "Migrated SuCanvas data from {} to {}; the source was preserved",
-        legacy_dir.display(),
+        migration_source.display(),
         data_dir.display()
     );
-    Ok((data_dir, legacy_dir))
+    Ok((data_dir, legacy_dirs))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -182,20 +206,25 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_icon(tauri::include_image!("./icons/128x128.png"))?;
             }
-            let (data_dir, legacy_dir) = prepare_data_dir(app)?;
+            let (data_dir, legacy_dirs) = prepare_data_dir(app)?;
             let assets_dir = data_dir.join("assets");
             std::fs::create_dir_all(&assets_dir)?;
+            app.asset_protocol_scope()
+                .allow_directory(&assets_dir, true)?;
             let workflow_modules_dir = data_dir.join("workflow-modules");
             std::fs::create_dir_all(&workflow_modules_dir)?;
             let workflow_module_exports_dir = data_dir.join("workflow-module-exports");
             std::fs::create_dir_all(&workflow_module_exports_dir)?;
             let database_path = data_dir.join(DATABASE_FILE);
             let config_path = data_dir.join("api.json");
-            let compatibility_config_path = legacy_dir.join("api.json");
+            let compatibility_config_path = legacy_data_dir(app)?.join("api.json");
             let app_lock_path = data_dir.join("app-lock.json");
             let database = Database::open(&database_path)?;
-            let rewritten_nodes =
-                database.rewrite_asset_paths(&legacy_dir.join("assets"), &assets_dir)?;
+            let rewritten_nodes = legacy_dirs.iter().try_fold(0usize, |total, legacy_dir| {
+                database
+                    .rewrite_asset_paths(&legacy_dir.join("assets"), &assets_dir)
+                    .map(|count| total + count)
+            })?;
             if rewritten_nodes > 0 {
                 eprintln!("Updated asset paths in {rewritten_nodes} migrated canvas nodes");
             }
@@ -294,6 +323,16 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn places_data_beside_the_installed_executable() {
+        let executable = Path::new(r"C:\Users\Raydio\AppData\Local\SuCanvas\SuCanvas.exe");
+
+        assert_eq!(
+            installation_data_dir_from_executable(executable).unwrap(),
+            PathBuf::from(r"C:\Users\Raydio\AppData\Local\SuCanvas\SuCanvasData\data")
+        );
+    }
 
     #[test]
     fn applies_pending_restore_and_preserves_previous_data() {

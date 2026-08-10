@@ -28,7 +28,8 @@
 
 - 应用设置新增“数据备份”，可将数据库一致性快照、已导入素材、工作流方案与适配器、方案恢复点、应用锁和 `infinite-canvas:` 软件设置导出为单个 `.sucanvas-backup` 文件。
 - 恢复流程会先校验备份格式、路径、文件数量、解压大小和 SQLite 完整性，再写入待恢复目录；下次启动时原子替换数据目录，并保留恢复前的完整目录用于回退。
-- 软件数据目录统一迁移到 `D:\Data\SuCanvasData\data`；首次启动会从旧 `%LOCALAPPDATA%\InfiniteCanvas` 完整复制数据库、素材和工作流等数据，并递归重写数据库中的旧素材绝对路径，旧目录继续保留。
+- 软件数据目录调整为程序安装目录下的 `SuCanvasData\data`；目标目录尚无数据库时，会优先从旧 `D:\Data\SuCanvasData\data`、其次从更早的 `%LOCALAPPDATA%\InfiniteCanvas` 完整复制数据库、素材和工作流等数据，并递归重写数据库中的旧素材绝对路径，所有源目录继续保留。
+- NSIS 覆盖安装只替换程序文件，不覆盖现有 `SuCanvasData\data`；卸载时同样不删除 `SuCanvasData`，确保重装后仍可继续使用原数据。
 - 备份明确排除实时 `api.json` 和 ComfyUI 外部输出目录；恢复完成后重新生成本机 API 配置，并自动导入备份中的前端设置。
 
 ### 预览节点与画布交互
