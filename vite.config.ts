@@ -29,4 +29,31 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const moduleId = id.replaceAll("\\", "/");
+          if (!moduleId.includes("/node_modules/")) return undefined;
+          if (
+            moduleId.includes("/@xyflow/")
+            || moduleId.includes("/zustand/")
+            || moduleId.includes("/classcat/")
+          ) {
+            return "canvas-vendor";
+          }
+          if (moduleId.includes("/lucide-react/")) return "icons-vendor";
+          if (moduleId.includes("/@tauri-apps/")) return "tauri-vendor";
+          if (
+            moduleId.includes("/react/")
+            || moduleId.includes("/react-dom/")
+            || moduleId.includes("/scheduler/")
+          ) {
+            return "react-vendor";
+          }
+          return "vendor";
+        },
+      },
+    },
+  },
 }));

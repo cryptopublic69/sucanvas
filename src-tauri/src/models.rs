@@ -402,7 +402,7 @@ fn default_lora_strength() -> f64 {
 }
 
 fn default_ref_image_size() -> String {
-    "max".to_owned()
+    "match".to_owned()
 }
 
 fn default_diffusion_model_name() -> String {

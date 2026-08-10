@@ -273,6 +273,54 @@
       "title": "MiniMax H3 Audio Conditioning (T8)"
     }
   },
+  "406": {
+    "inputs": {
+      "prompt": [
+        "312",
+        0
+      ],
+      "width": [
+        "398",
+        0
+      ],
+      "height": [
+        "398",
+        1
+      ],
+      "length": [
+        "324",
+        1
+      ],
+      "task_type": "I2VA",
+      "audio_mode": "native",
+      "audio_denoise_strength": 1,
+      "add_source_as_reference": false,
+      "prompt_primary_audio_ordinal": 0,
+      "strict_prompt_tags": true,
+      "ref_image_size": "max",
+      "reference_video_policy": "official_2_to_15s",
+      "clip": [
+        "316",
+        0
+      ],
+      "video_vae": [
+        "318",
+        0
+      ],
+      "audio_vae": [
+        "319",
+        0
+      ],
+      "first_frame": [
+        "335",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3AudioConditioningT8",
+    "_meta": {
+      "title": "MiniMax H3 Secondary Audio Conditioning (T8)"
+    }
+  },
   "335": {
     "inputs": {
       "image": "809eff29-0ed8-45f7-a81c-b021624bd536.png"
@@ -447,7 +495,7 @@
         0
       ],
       "conditioning": [
-        "333",
+        "406",
         0
       ]
     },

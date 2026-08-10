@@ -79,6 +79,7 @@ import {
   CSSProperties,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
+  WheelEvent as ReactWheelEvent,
   memo,
   useCallback,
   useEffect,
@@ -90,6 +91,22 @@ import suCanvasLogo from "../src-tauri/icons/128x128@2x.png";
 import "./App.css";
 
 type JsonObject = Record<string, unknown>;
+
+function scrollElementWithWheel(event: ReactWheelEvent<HTMLDivElement>) {
+  if (event.ctrlKey) return;
+  const element = event.currentTarget;
+  const rawDelta = Math.abs(event.deltaY) >= Math.abs(event.deltaX)
+    ? event.deltaY
+    : event.deltaX;
+  const multiplier = event.deltaMode === 1
+    ? 32
+    : event.deltaMode === 2
+      ? element.clientHeight
+      : 1;
+  element.scrollTop += rawDelta * multiplier;
+  event.preventDefault();
+  event.stopPropagation();
+}
 
 interface CanvasRecord {
   id: string;
@@ -279,6 +296,13 @@ interface VideoRegenerationRequest {
   sourcePreview: NodeRecord;
   snapshot: GenerationSnapshot;
   seed: string;
+}
+
+interface VideoExecutionOptions {
+  clientId?: string;
+  snapshot?: GenerationSnapshot;
+  placeholderPosition?: { x: number; y: number };
+  allowFixedSeedRepeat?: boolean;
 }
 
 interface VideoRegenerationDraft {
@@ -801,7 +825,12 @@ function SettingsSelect({
         <ChevronDown className="settings-custom-select-arrow" size={13} strokeWidth={1.8} aria-hidden="true" />
       </button>
       {open && (
-        <div className="settings-custom-select-menu" role="listbox" aria-label={ariaLabel}>
+        <div
+          className="settings-custom-select-menu nowheel"
+          role="listbox"
+          aria-label={ariaLabel}
+          onWheelCapture={scrollElementWithWheel}
+        >
           {options.map((option) => (
             <button
               key={option.value}
@@ -828,6 +857,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   record: NodeRecord;
   matched: boolean;
   relationHighlighted: boolean;
+  relationPromptVersionLabel: string;
   activeTaskCount: number;
   inputCount: number;
   outputCount: number;
@@ -842,6 +872,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   onChange: (id: string, patch: NodePatch) => void;
   onExecutionCheck: (message: string, valid: boolean) => void;
   onExecute: (id: string) => Promise<void>;
+  onBatchExecute: (id: string) => Promise<void>;
   onSecondarySample: (id: string) => Promise<void>;
   onConfigureSecondarySample: (id: string) => void;
   onRegenerateVideo: (id: string) => Promise<void>;
@@ -1277,6 +1308,7 @@ const GENERATED_VIDEO_FOOTER_HEIGHT = 38;
 const LEGACY_GENERATED_VIDEO_PREVIEW_WIDTH = 360;
 const GENERATED_VIDEO_PREVIEW_WIDTH = 420;
 const GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH = 300;
+const BATCH_GENERATION_PREVIEW_GAP_OFFSET = 130;
 const GENERATED_VIDEO_PREVIEW_LAYOUT_VERSION = 5;
 const DEFAULT_GENERATED_VIDEO_ASPECT_RATIO = 16 / 9;
 const SHOW_NODE_SEARCH = false;
@@ -1425,6 +1457,11 @@ function generatedVideoPreviewWidthForRatio(aspectRatio: number): number {
   return aspectRatio < 1
     ? GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH
     : GENERATED_VIDEO_PREVIEW_WIDTH;
+}
+
+function batchGenerationPreviewStep(previewWidth: number): number {
+  const gap = previewWidth + BATCH_GENERATION_PREVIEW_GAP_OFFSET;
+  return previewWidth + gap;
 }
 
 function comfyWebSocketUrl(serverUrl: string, clientId: string): string {
@@ -1981,7 +2018,7 @@ function refImageSizeFromContent(content: JsonObject): RefImageSize {
   return typeof value === "string"
     && REF_IMAGE_SIZE_OPTIONS.includes(value as RefImageSize)
     ? value as RefImageSize
-    : "max";
+    : "match";
 }
 
 function validVideoResolution(value: unknown, fallback: number): number {
@@ -2472,6 +2509,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     record,
     matched,
     relationHighlighted,
+    relationPromptVersionLabel,
     activeTaskCount,
     inputCount,
     outputCount,
@@ -2485,6 +2523,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onChange,
     onExecutionCheck,
     onExecute,
+    onBatchExecute,
     onSecondarySample,
     onConfigureSecondarySample,
     onRegenerateVideo,
@@ -2501,6 +2540,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [copied, setCopied] = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
   const [errorCopied, setErrorCopied] = useState(false);
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(record.title);
   const [titleOverflowing, setTitleOverflowing] = useState(false);
@@ -2511,18 +2551,30 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [loraMenuOpen, setLoraMenuOpen] = useState(false);
   const [secondaryLoraMenuOpen, setSecondaryLoraMenuOpen] = useState(false);
   const [promptVersionMenuOpen, setPromptVersionMenuOpen] = useState(false);
+  const [editingPromptVersionTitleId, setEditingPromptVersionTitleId] = useState<string | null>(null);
+  const [promptVersionTitleDraft, setPromptVersionTitleDraft] = useState("");
   const [textInformationOpen, setTextInformationOpen] = useState(false);
   const [generatedInfoOpen, setGeneratedInfoOpen] = useState(false);
   const [connectedTextEditor, setConnectedTextEditor] = useState<{
     id: string;
     title: string;
+    baseTitle: string;
     content: JsonObject;
     text: string;
+    information: string;
   } | null>(null);
   const [draggedMediaId, setDraggedMediaId] = useState<string | null>(null);
   const [dragOverMediaId, setDragOverMediaId] = useState<string | null>(null);
   const [draggedTextId, setDraggedTextId] = useState<string | null>(null);
   const [dragOverTextId, setDragOverTextId] = useState<string | null>(null);
+  const textRowDragRef = useRef<{
+    pointerId: number;
+    inputId: string;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressTextInputClickRef = useRef(false);
   const [removingMediaId, setRemovingMediaId] = useState<string | null>(null);
   const [clearingImages, setClearingImages] = useState(false);
   const [imageIdsPendingClear, setImageIdsPendingClear] = useState<string[] | null>(null);
@@ -2564,6 +2616,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const promptVersions = isPromptVersionNode ? promptVersionsFromContent(record.content) : [];
   const activePromptVersion = isPromptVersionNode
     ? activePromptVersionFromContent(record.content)
+    : null;
+  const connectedPromptVersions = connectedTextEditor?.content.promptVersionNode === true
+    ? promptVersionsFromContent(connectedTextEditor.content)
+    : [];
+  const connectedActivePromptVersion = connectedTextEditor?.content.promptVersionNode === true
+    ? activePromptVersionFromContent(connectedTextEditor.content)
     : null;
   const savedInformation = isPromptVersionNode
     ? activePromptVersion?.information ?? informationFromContent(record.content)
@@ -2726,6 +2784,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     && Number.isFinite(record.content.executionProgress)
     ? Math.max(0, Math.min(100, record.content.executionProgress))
     : null;
+  const generatedVideoFooterStatus = isGenerationPlaceholder
+    ? placeholderActive ? "处理中" : "未完成"
+    : `${formattedGenerationElapsed(record.content)}${generatedVideoSnapshot
+      ? ` / ${generatedVideoSnapshot.durationSeconds}秒`
+      : ""}`;
   const mediaInputGroups = [
     { kind: "image", label: "图片", inputs: mediaInputs.filter((input) => input.kind === "image") },
     { kind: "audio", label: "音频", inputs: mediaInputs.filter((input) => input.kind === "audio") },
@@ -2804,6 +2867,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     const normalizedTitle = normalizedGeneratedVideoTitle(record.title);
     if (normalizedTitle !== record.title) onChange(id, { title: normalizedTitle });
   }, [id, isGeneratedVideo, onChange, record.title]);
+
+  useEffect(() => {
+    if (isPromptVersionNode && record.title === "提示词版本") {
+      onChange(id, { title: "提示词迭代" });
+    }
+  }, [id, isPromptVersionNode, onChange, record.title]);
 
   useEffect(() => {
     if (!isGeneratedVideo || !validationMessage.startsWith("二采完成")) return;
@@ -2940,6 +3009,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
   }, [promptVersionMenuOpen]);
 
+  useEffect(() => {
+    if (promptVersionMenuOpen) return;
+    setEditingPromptVersionTitleId(null);
+    setPromptVersionTitleDraft("");
+  }, [promptVersionMenuOpen]);
+
 
   useEffect(() => {
     if (!expanded && !connectedTextEditor) return;
@@ -3041,6 +3116,29 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     setPromptVersionMenuOpen(false);
   };
 
+  const beginPromptVersionTitleEdit = (version: PromptVersionRecord) => {
+    setEditingPromptVersionTitleId(version.id);
+    setPromptVersionTitleDraft(version.title);
+  };
+
+  const cancelPromptVersionTitleEdit = () => {
+    setEditingPromptVersionTitleId(null);
+    setPromptVersionTitleDraft("");
+  };
+
+  const commitPromptVersionTitleEdit = (versionId: string) => {
+    const nextTitle = promptVersionTitleDraft.trim() || "未命名版本";
+    onChange(id, {
+      content: {
+        ...record.content,
+        promptVersions: promptVersions.map((version) => (
+          version.id === versionId ? { ...version, title: nextTitle } : version
+        )),
+      },
+    });
+    cancelPromptVersionTitleEdit();
+  };
+
   const markActivePromptVersionBest = () => {
     if (!activePromptVersion) return;
     onChange(id, {
@@ -3055,12 +3153,59 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     const inputText = textFromContent(input.content);
     const inputPromptVersion = activePromptVersionFromContent(input.content);
     const versionLabel = inputPromptVersion?.label ?? "";
+    const baseTitle = input.title || "未命名文本";
     setConnectedTextEditor({
       id: input.id,
-      title: `${inputPromptVersion?.title || input.title || "未命名文本"}${versionLabel ? ` · ${versionLabel}` : ""}`,
+      title: `${inputPromptVersion?.title || baseTitle}${versionLabel ? ` · ${versionLabel}` : ""}`,
+      baseTitle,
       content: input.content,
       text: inputText,
+      information: inputPromptVersion?.information ?? informationFromContent(input.content),
     });
+  };
+
+  const selectConnectedPromptVersion = (version: PromptVersionRecord) => {
+    if (!connectedTextEditor) return;
+    const nextContent = {
+      ...connectedTextEditor.content,
+      text: version.text,
+      information: version.information,
+      activePromptVersionId: version.id,
+    };
+    setConnectedTextEditor({
+      ...connectedTextEditor,
+      title: `${version.title || connectedTextEditor.baseTitle} · ${version.label}`,
+      content: nextContent,
+      text: version.text,
+      information: version.information,
+    });
+    onChange(connectedTextEditor.id, { content: nextContent });
+  };
+
+  const changeConnectedPromptField = (
+    field: "text" | "information",
+    value: string,
+  ) => {
+    if (!connectedTextEditor) return;
+    const activeVersion = activePromptVersionFromContent(connectedTextEditor.content);
+    const versions = promptVersionsFromContent(connectedTextEditor.content);
+    const nextContent = {
+      ...connectedTextEditor.content,
+      [field]: value,
+      ...(activeVersion
+        ? {
+            promptVersions: versions.map((version) => (
+              version.id === activeVersion.id ? { ...version, [field]: value } : version
+            )),
+          }
+        : {}),
+    };
+    setConnectedTextEditor({
+      ...connectedTextEditor,
+      content: nextContent,
+      [field]: value,
+    });
+    onChange(connectedTextEditor.id, { content: nextContent });
   };
 
   const copyText = async () => {
@@ -3352,6 +3497,41 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onExecutionCheck(result.message, result.valid);
     if (!result.valid) return;
     await onExecute(id);
+  };
+
+  const checkAndExecuteBatch = async () => {
+    const result = validateVideoExecution(
+      videoGenerationMode,
+      record.content,
+      mediaInputs,
+      textInputs,
+    );
+    const emptyTextIndex = textInputs.findIndex(
+      (input) => !textFromContent(input.content).trim(),
+    );
+    const batchValidation = !result.valid
+      ? result
+      : textInputs.length < 2
+        ? { valid: false, message: "批量提交至少需要接入两个文字提示词" }
+        : emptyTextIndex >= 0
+          ? { valid: false, message: `第 ${emptyTextIndex + 1} 个文字提示词内容为空，请先填写` }
+          : { valid: true, message: `批量提交条件检查通过：共 ${textInputs.length} 个任务` };
+    onChange(id, {
+      content: {
+        ...record.content,
+        status: batchValidation.valid ? "ready" : "invalid",
+        validationMessage: batchValidation.message,
+      },
+    });
+    onExecutionCheck(batchValidation.message, batchValidation.valid);
+    if (!batchValidation.valid) return;
+    if (batchSubmitting) return;
+    setBatchSubmitting(true);
+    try {
+      await onBatchExecute(id);
+    } finally {
+      setBatchSubmitting(false);
+    }
   };
 
   const removeConnectedInput = async (sourceId: string) => {
@@ -3709,7 +3889,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     <strong>历史版本</strong>
                     <span>点击切换生成版本</span>
                   </header>
-                  <div className="prompt-version-menu-list">
+                  <div
+                    className="prompt-version-menu-list nowheel"
+                    onWheelCapture={scrollElementWithWheel}
+                  >
                     {!promptVersions.length && (
                       <div className="prompt-version-empty">尚无版本，点击“新版本”创建 v1</div>
                     )}
@@ -3718,32 +3901,80 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                         key={version.id}
                         className={`prompt-version-menu-item ${version.id === activePromptVersion?.id ? "is-active" : ""}`}
                       >
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="prompt-version-select"
-                          onClick={() => selectPromptVersion(version)}
-                        >
-                          <span className="prompt-version-label">{version.label}</span>
-                          <span className="prompt-version-summary">
-                            <strong>{version.id === activePromptVersion?.id
-                              ? `当前 · ${version.title || "未命名版本"}`
-                              : version.title || "未命名版本"}</strong>
-                            <small>{version.text.trim().replace(/\s+/g, " ") || "空提示词"}</small>
-                          </span>
-                          {version.id === bestPromptVersionId && (
-                            <Star size={12} fill="currentColor" aria-label="最佳版本" />
-                          )}
-                        </button>
-                        <button
-                          type="button"
-                          className="prompt-version-delete"
-                          onClick={() => void deletePromptVersion(version.id)}
-                          title={`删除 ${version.label}`}
-                          aria-label={`删除 ${version.label}`}
-                        >
-                          <Trash2 size={12} />
-                        </button>
+                        {editingPromptVersionTitleId === version.id ? (
+                          <div className="prompt-version-title-editor">
+                            <span className="prompt-version-label">{version.label}</span>
+                            <input
+                              value={promptVersionTitleDraft}
+                              onChange={(event) => setPromptVersionTitleDraft(event.currentTarget.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  commitPromptVersionTitleEdit(version.id);
+                                } else if (event.key === "Escape") {
+                                  event.preventDefault();
+                                  cancelPromptVersionTitleEdit();
+                                }
+                              }}
+                              autoFocus
+                              aria-label={`${version.label} 版本标题`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => commitPromptVersionTitleEdit(version.id)}
+                              title="保存标题"
+                              aria-label={`保存 ${version.label} 标题`}
+                            >
+                              <Check size={12} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={cancelPromptVersionTitleEdit}
+                              title="取消修改"
+                              aria-label={`取消修改 ${version.label} 标题`}
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="prompt-version-select"
+                              onClick={() => selectPromptVersion(version)}
+                            >
+                              <span className="prompt-version-label">{version.label}</span>
+                              <span className="prompt-version-summary">
+                                <strong>{version.id === activePromptVersion?.id
+                                  ? `当前 · ${version.title || "未命名版本"}`
+                                  : version.title || "未命名版本"}</strong>
+                                <small>{version.text.trim().replace(/\s+/g, " ") || "空提示词"}</small>
+                              </span>
+                              {version.id === bestPromptVersionId && (
+                                <Star size={12} fill="currentColor" aria-label="最佳版本" />
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              className="prompt-version-edit"
+                              onClick={() => beginPromptVersionTitleEdit(version)}
+                              title={`修改 ${version.label} 标题`}
+                              aria-label={`修改 ${version.label} 标题`}
+                            >
+                              <Pencil size={12} />
+                            </button>
+                            <button
+                              type="button"
+                              className="prompt-version-delete"
+                              onClick={() => void deletePromptVersion(version.id)}
+                              title={`删除 ${version.label}`}
+                              aria-label={`删除 ${version.label}`}
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -3929,13 +4160,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         <footer className="generated-video-footer">
           <div className="generated-video-footer-status">
             <span className={`source-dot ${isSecondaryPreview ? "is-secondary" : ""}`} />
-            <span>
-              {isGenerationPlaceholder
-                ? placeholderActive ? "处理中" : "未完成"
-                : `${formattedGenerationElapsed(record.content)}${generatedVideoSnapshot
-                  ? ` / ${generatedVideoSnapshot.durationSeconds}秒`
-                  : ""}`}
-            </span>
+            <span title={generatedVideoFooterStatus}>{generatedVideoFooterStatus}</span>
           </div>
           <span className="generated-video-footer-spacer" />
           <div className="generated-video-actions" aria-label="视频预览操作">
@@ -4780,10 +5005,89 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       aria-selected={activeTextInputId === input.id}
                       tabIndex={0}
                       title={activeTextInputId === input.id ? "当前提示词" : "点击设为当前提示词"}
-                      onPointerDown={(event) => event.stopPropagation()}
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        textRowDragRef.current = {
+                          pointerId: event.pointerId,
+                          inputId: input.id,
+                          startX: event.clientX,
+                          startY: event.clientY,
+                          moved: false,
+                        };
+                        suppressTextInputClickRef.current = false;
+                        setDraggedTextId(input.id);
+                        setDragOverTextId(null);
+                      }}
+                      onPointerMove={(event) => {
+                        const drag = textRowDragRef.current;
+                        if (
+                          !drag
+                          || drag.pointerId !== event.pointerId
+                          || drag.inputId !== input.id
+                          || !event.currentTarget.hasPointerCapture(event.pointerId)
+                        ) return;
+                        event.stopPropagation();
+                        if (!drag.moved) {
+                          const distance = Math.hypot(
+                            event.clientX - drag.startX,
+                            event.clientY - drag.startY,
+                          );
+                          if (distance < 4) return;
+                          drag.moved = true;
+                        }
+                        event.preventDefault();
+                        const targetId = textInputIdAtPoint(event.clientX, event.clientY);
+                        setDragOverTextId(targetId && targetId !== input.id ? targetId : null);
+                        if (targetId && targetId !== input.id) moveTextInputTo(input.id, targetId);
+                      }}
+                      onPointerUp={(event) => {
+                        const drag = textRowDragRef.current;
+                        if (
+                          !drag
+                          || drag.pointerId !== event.pointerId
+                          || drag.inputId !== input.id
+                          || !event.currentTarget.hasPointerCapture(event.pointerId)
+                        ) return;
+                        event.stopPropagation();
+                        if (drag.moved) {
+                          event.preventDefault();
+                          moveTextInputTo(
+                            input.id,
+                            textInputIdAtPoint(event.clientX, event.clientY),
+                          );
+                          suppressTextInputClickRef.current = true;
+                          window.setTimeout(() => {
+                            suppressTextInputClickRef.current = false;
+                          }, 0);
+                        }
+                        event.currentTarget.releasePointerCapture(event.pointerId);
+                        textRowDragRef.current = null;
+                        setDraggedTextId(null);
+                        setDragOverTextId(null);
+                      }}
+                      onPointerCancel={(event) => {
+                        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                          event.currentTarget.releasePointerCapture(event.pointerId);
+                        }
+                        textRowDragRef.current = null;
+                        suppressTextInputClickRef.current = false;
+                        setDraggedTextId(null);
+                        setDragOverTextId(null);
+                      }}
+                      onLostPointerCapture={() => {
+                        textRowDragRef.current = null;
+                        setDraggedTextId(null);
+                        setDragOverTextId(null);
+                      }}
                       onClick={(event) => {
                         event.stopPropagation();
                         if ((event.target as HTMLElement).closest("button")) return;
+                        if (suppressTextInputClickRef.current) {
+                          suppressTextInputClickRef.current = false;
+                          return;
+                        }
                         onActivateTextInput(id, input.id);
                       }}
                       onKeyDown={(event) => {
@@ -5258,33 +5562,56 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               )}
             </div>
             <div className="video-execution-actions">
+              {executionRunning || batchSubmitting ? (
+                <button
+                  type="button"
+                  className="video-cancel-button"
+                  disabled={executionCancelling || activeTaskCount === 0}
+                  onClick={() => void onCancelExecution(id)}
+                  title={activeTaskCount === 0
+                    ? "正在提交首个任务，暂时无法取消"
+                    : `取消最早提交的任务；当前共有 ${activeTaskCount} 个任务`}
+                  aria-label={activeTaskCount === 0
+                    ? "正在提交首个任务，暂时无法取消"
+                    : `取消最早提交的任务；当前共有 ${activeTaskCount} 个任务`}
+                >
+                  <X size={13} />
+                  {activeTaskCount || null}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="video-execute-button video-batch-execute-button"
+                  disabled={textInputs.length < 2}
+                  title={textInputs.length < 2
+                    ? "至少接入两个文字提示词后才能批量提交"
+                    : `按当前文本顺序批量提交 ${textInputs.length} 个生成任务`}
+                  aria-label={textInputs.length < 2
+                    ? "至少接入两个文字提示词后才能批量提交"
+                    : `批量提交 ${textInputs.length} 个生成任务`}
+                  onClick={() => void checkAndExecuteBatch()}
+                >
+                  <Clapperboard size={15} />
+                </button>
+              )}
               <button
                 type="button"
                 className="video-execute-button"
-                disabled={executionCancelling || (seedMode === "fixed" && executionRunning)}
-                title={seedMode === "fixed" && executionRunning
+                disabled={batchSubmitting || executionCancelling || (seedMode === "fixed" && executionRunning)}
+                title={batchSubmitting
+                  ? "批量任务正在按顺序提交，请稍后"
+                  : seedMode === "fixed" && executionRunning
                   ? "固定种子已有任务正在执行，不能重复排队"
                   : "提交一个新的生成任务"}
-                aria-label={seedMode === "fixed" && executionRunning
+                aria-label={batchSubmitting
+                  ? "批量任务正在按顺序提交，请稍后"
+                  : seedMode === "fixed" && executionRunning
                   ? "固定种子已有任务正在执行，不能重复排队"
                   : "开始执行"}
                 onClick={() => void checkAndExecute()}
               >
                 <Play size={15} fill="currentColor" />
               </button>
-              {executionRunning && (
-                <button
-                  type="button"
-                  className="video-cancel-button"
-                  disabled={executionCancelling}
-                  onClick={() => void onCancelExecution(id)}
-                  title={`取消最早提交的任务；当前共有 ${activeTaskCount} 个任务`}
-                  aria-label={`取消最早提交的任务；当前共有 ${activeTaskCount} 个任务`}
-                >
-                  <X size={13} />
-                  {activeTaskCount}
-                </button>
-              )}
             </div>
           </div>
           <div className={`input-badge ${inputCount ? "has-input" : ""}`}>
@@ -5298,11 +5625,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         <footer className="node-footer">
           <span className={`source-dot ${record.source === "manual" ? "manual" : "external"}`} />
           <span>{record.source === "manual" ? "手动创建" : record.source}</span>
+          {isPromptVersionNode && relationPromptVersionLabel && (
+            <span
+              className="prompt-relation-version"
+              title={`当前关联视频使用 ${relationPromptVersionLabel} 生成`}
+            >
+              {relationPromptVersionLabel}
+            </span>
+          )}
           <span className="node-footer-spacer" />
           <span className="node-footer-detail">
             {(isText || isNote)
               ? isPromptVersionNode
-                ? `${activePromptVersion?.label ?? "未创建"} · ${promptVersions.length} 个版本 · ${textDraft.length.toLocaleString()} 字符`
+                ? `${promptVersions.length} 个版本 · ${textDraft.length.toLocaleString()} 字符`
                 : `${textDraft.length.toLocaleString()} 字符`
               : (isImage || isAudioAsset || isVideoAsset)
                 ? originalName
@@ -5333,7 +5668,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       {expanded && createPortal(
         <div className="expanded-editor-backdrop" onMouseDown={() => setExpanded(false)}>
           <section
-            className={`expanded-editor-dialog ${isNote ? "is-note" : ""}`}
+            className={`expanded-editor-dialog ${isNote ? "is-note" : ""} ${isPromptVersionNode ? "is-prompt-version" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-label={`${record.title || "未命名节点"} 放大编辑`}
@@ -5347,18 +5682,72 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <strong>{record.title || "未命名节点"}</strong>
                 <span>{textDraft.length.toLocaleString()} 字符 · 自动保存</span>
               </div>
+              {isPromptVersionNode && (
+                <div className="expanded-editor-version-control">
+                  <span>版本</span>
+                  <SettingsSelect
+                    value={activePromptVersion?.id ?? ""}
+                    options={[...promptVersions].reverse().map((version) => ({
+                      value: version.id,
+                      label: `${version.label} · ${version.title || "未命名版本"}`,
+                    }))}
+                    onChange={(versionId) => {
+                      const version = promptVersions.find(
+                        (candidate) => candidate.id === versionId,
+                      );
+                      if (version) selectPromptVersion(version);
+                    }}
+                    disabled={!promptVersions.length}
+                    ariaLabel="切换提示词版本"
+                    placeholder="未创建"
+                  />
+                </div>
+              )}
               <button onClick={() => setExpanded(false)} title="关闭" aria-label="关闭放大编辑器">
                 <X size={17} />
               </button>
             </header>
-            <textarea
-              className="expanded-text-editor"
-              value={textDraft}
-              onChange={changeText}
-              autoFocus
-              spellCheck={false}
-              aria-label="放大文本内容"
-            />
+            {isPromptVersionNode ? (
+              <div className="expanded-prompt-layout">
+                <section className="expanded-prompt-pane is-prompt">
+                  <header>
+                    <strong>提示词</strong>
+                    <span>{textDraft.length.toLocaleString()} 字符</span>
+                  </header>
+                  <textarea
+                    className="expanded-text-editor"
+                    value={textDraft}
+                    onChange={changeText}
+                    autoFocus
+                    spellCheck={false}
+                    aria-label="提示词内容"
+                  />
+                </section>
+                <section className="expanded-prompt-pane is-information">
+                  <header>
+                    <strong>中文提示词说明</strong>
+                    <span>{informationDraft.length.toLocaleString()} 字符</span>
+                  </header>
+                  <textarea
+                    className="expanded-text-editor"
+                    value={informationDraft}
+                    onChange={changeInformation}
+                    spellCheck={false}
+                    placeholder="这里保存提示词的中文解释…"
+                    aria-label="中文提示词说明"
+                  />
+                </section>
+              </div>
+            ) : (
+              <textarea
+                className="expanded-text-editor"
+                value={textDraft}
+                onChange={changeText}
+                autoFocus
+                spellCheck={false}
+                aria-label="放大文本内容"
+              />
+            )}
           </section>
         </div>,
         document.body,
@@ -5369,7 +5758,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           onMouseDown={() => setConnectedTextEditor(null)}
         >
           <section
-            className="expanded-editor-dialog"
+            className={`expanded-editor-dialog ${connectedTextEditor.content.promptVersionNode === true ? "is-prompt-version" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-label={`${connectedTextEditor.title} 放大编辑`}
@@ -5381,6 +5770,27 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <strong>{connectedTextEditor.title}</strong>
                 <span>{connectedTextEditor.text.length.toLocaleString()} 字符 · 自动保存</span>
               </div>
+              {connectedTextEditor.content.promptVersionNode === true && (
+                <div className="expanded-editor-version-control">
+                  <span>版本</span>
+                  <SettingsSelect
+                    value={connectedActivePromptVersion?.id ?? ""}
+                    options={[...connectedPromptVersions].reverse().map((version) => ({
+                      value: version.id,
+                      label: `${version.label} · ${version.title || "未命名版本"}`,
+                    }))}
+                    onChange={(versionId) => {
+                      const version = connectedPromptVersions.find(
+                        (candidate) => candidate.id === versionId,
+                      );
+                      if (version) selectConnectedPromptVersion(version);
+                    }}
+                    disabled={!connectedPromptVersions.length}
+                    ariaLabel="切换已连接提示词版本"
+                    placeholder="未创建"
+                  />
+                </div>
+              )}
               <button
                 onClick={() => setConnectedTextEditor(null)}
                 title="关闭"
@@ -5389,21 +5799,47 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <X size={17} />
               </button>
             </header>
-            <textarea
-              className="expanded-text-editor"
-              value={connectedTextEditor.text}
-              onChange={(event) => {
-                const nextText = event.currentTarget.value;
-                const nextContent = { ...connectedTextEditor.content, text: nextText };
-                setConnectedTextEditor((current) => (
-                  current ? { ...current, content: nextContent, text: nextText } : current
-                ));
-                onChange(connectedTextEditor.id, { content: nextContent });
-              }}
-              autoFocus
-              spellCheck={false}
-              aria-label="放大提示词内容"
-            />
+            {connectedTextEditor.content.promptVersionNode === true ? (
+              <div className="expanded-prompt-layout">
+                <section className="expanded-prompt-pane is-prompt">
+                  <header>
+                    <strong>提示词</strong>
+                    <span>{connectedTextEditor.text.length.toLocaleString()} 字符</span>
+                  </header>
+                  <textarea
+                    className="expanded-text-editor"
+                    value={connectedTextEditor.text}
+                    onChange={(event) => changeConnectedPromptField("text", event.currentTarget.value)}
+                    autoFocus
+                    spellCheck={false}
+                    aria-label="已连接提示词内容"
+                  />
+                </section>
+                <section className="expanded-prompt-pane is-information">
+                  <header>
+                    <strong>中文提示词说明</strong>
+                    <span>{connectedTextEditor.information.length.toLocaleString()} 字符</span>
+                  </header>
+                  <textarea
+                    className="expanded-text-editor"
+                    value={connectedTextEditor.information}
+                    onChange={(event) => changeConnectedPromptField("information", event.currentTarget.value)}
+                    spellCheck={false}
+                    placeholder="这里保存提示词的中文解释…"
+                    aria-label="已连接提示词中文说明"
+                  />
+                </section>
+              </div>
+            ) : (
+              <textarea
+                className="expanded-text-editor"
+                value={connectedTextEditor.text}
+                onChange={(event) => changeConnectedPromptField("text", event.currentTarget.value)}
+                autoFocus
+                spellCheck={false}
+                aria-label="放大提示词内容"
+              />
+            )}
           </section>
         </div>,
         document.body,
@@ -6994,7 +7430,7 @@ function CanvasWorkspace() {
     const flowNode = nodesSnapshot.current.find((node) => node.id === nodeId);
     const record = flowNode?.data.record;
     if (!record || record.content.promptVersionNode !== true) {
-      setNotice("找不到提示词版本节点");
+      setNotice("找不到提示词迭代节点");
       return;
     }
     const versions = promptVersionsFromContent(record.content);
@@ -7453,7 +7889,10 @@ function CanvasWorkspace() {
     }
   }, [privateProjectBusyId, reportError]);
 
-  const generationSnapshotForGenerator = useCallback((generatorId: string): GenerationSnapshot | null => {
+  const generationSnapshotForGenerator = useCallback((
+    generatorId: string,
+    promptNodeId?: string,
+  ): GenerationSnapshot | null => {
     const generator = nodesSnapshot.current.find(
       (node) => node.id === generatorId,
     )?.data.record;
@@ -7509,7 +7948,14 @@ function CanvasWorkspace() {
       loraName: h3LoraNameFromContent(generator.content),
       loraStrength: h3LoraStrengthFromContent(generator.content),
     };
-    const activeTextInput = activeTextInputFromContent(generator.content, textInputs);
+    const orderedTextInputs = orderedNodeRecordsFromContent(
+      generator.content,
+      "textInputOrder",
+      textInputs,
+    );
+    const activeTextInput = promptNodeId
+      ? orderedTextInputs.find((input) => input.id === promptNodeId) ?? null
+      : activeTextInputFromContent(generator.content, orderedTextInputs);
     const activePromptVersion = activeTextInput
       ? activePromptVersionFromContent(activeTextInput.content)
       : null;
@@ -7581,6 +8027,7 @@ function CanvasWorkspace() {
     sourceGeneratorId,
     edgeSourceId = source.id,
     placeBelowSource = false,
+    positionOverride,
   }: {
     source: NodeRecord;
     clientId: string;
@@ -7589,6 +8036,7 @@ function CanvasWorkspace() {
     sourceGeneratorId: string;
     edgeSourceId?: string;
     placeBelowSource?: boolean;
+    positionOverride?: { x: number; y: number };
   }) => {
     const previewWidth = generatedVideoPreviewWidthForRatio(videoAspectRatioValue(snapshot.aspectRatio));
     const previewHeight = generatedPreviewHeightForAspectRatio(snapshot.aspectRatio);
@@ -7596,9 +8044,9 @@ function CanvasWorkspace() {
       ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
       ...incomingPlacementReservations.current,
     ];
-    const position = placeBelowSource
+    const position = positionOverride ?? (placeBelowSource
       ? generatedPreviewPositionBelow(source, placementRecords, previewWidth, previewHeight)
-      : generatedPreviewPosition(source, placementRecords, previewWidth, previewHeight);
+      : generatedPreviewPosition(source, placementRecords, previewWidth, previewHeight));
     const reservationId = `generation-placeholder:${clientId}`;
     const placeholderContent: JsonObject = {
       generationPlaceholder: true,
@@ -7765,9 +8213,42 @@ function CanvasWorkspace() {
     }
   }, [flushNodePatches, setNodes]);
 
+  const removeGenerationPlaceholder = useCallback(async (
+    placeholderNodeId: string | undefined,
+  ): Promise<boolean> => {
+    if (!placeholderNodeId) return false;
+    const placeholder = nodesSnapshot.current.find(
+      (node) => node.id === placeholderNodeId,
+    )?.data.record;
+    if (!placeholder || placeholder.content.generationPlaceholder !== true) return false;
+
+    const wasAlreadyCompleted = completedGenerationPlaceholders.current.has(placeholderNodeId);
+    completedGenerationPlaceholders.current.add(placeholderNodeId);
+    const removeFromCanvas = () => {
+      setNodes((current) => current.filter((node) => node.id !== placeholderNodeId));
+      setEdges((current) => current.filter(
+        (edge) => edge.source !== placeholderNodeId && edge.target !== placeholderNodeId,
+      ));
+    };
+    try {
+      await flushNodePatches([placeholderNodeId]);
+      await invoke("delete_node", { id: placeholderNodeId });
+      removeFromCanvas();
+      return true;
+    } catch (error) {
+      if (String(error).includes("node not found")) {
+        removeFromCanvas();
+        return true;
+      }
+      if (!wasAlreadyCompleted) completedGenerationPlaceholders.current.delete(placeholderNodeId);
+      throw error;
+    }
+  }, [flushNodePatches, setEdges, setNodes]);
+
   const executeVideoNode = useCallback(async (
     targetId: string,
     regeneration?: VideoRegenerationRequest,
+    options?: VideoExecutionOptions,
   ) => {
     const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
     if (!targetNode) {
@@ -7784,6 +8265,7 @@ function CanvasWorkspace() {
     }
     if (
       !regeneration
+      && !options?.allowFixedSeedRepeat
       && requestedSeedMode === "fixed"
       && (generatedSeedsFromContent(target.content).includes(requestedFixedSeed)
         || Boolean(activeClients?.size))
@@ -7797,7 +8279,9 @@ function CanvasWorkspace() {
       setNotice(message);
       return;
     }
-    const snapshot = regeneration?.snapshot ?? generationSnapshotForGenerator(targetId);
+    const snapshot = regeneration?.snapshot
+      ?? options?.snapshot
+      ?? generationSnapshotForGenerator(targetId);
     if (!snapshot?.prompt.trim()) {
       setNotice("无法执行：找不到已保存的提示词与素材参数");
       return;
@@ -7932,7 +8416,7 @@ function CanvasWorkspace() {
       setNotice(`无法执行：${message}`);
       return;
     }
-    const clientId = crypto.randomUUID();
+    const clientId = options?.clientId ?? crypto.randomUUID();
     const taskSubmittedAt = Date.now();
     let placeholder: NodeRecord;
     try {
@@ -7944,6 +8428,7 @@ function CanvasWorkspace() {
         sourceGeneratorId: targetId,
         edgeSourceId: targetId,
         placeBelowSource: Boolean(regeneration),
+        positionOverride: options?.placeholderPosition,
       });
     } catch (error) {
       reportError(error);
@@ -8193,10 +8678,10 @@ function CanvasWorkspace() {
         ? `视频生成完成，但输入缓存清理失败：${result.cleanupWarning}`
         : `视频生成完成：已创建 ${result.outputs.length} 个预览节点`);
     } catch (error) {
-      const remainingTaskCount = Math.max(
-        0,
-        (runningComfyClients.current.get(targetId)?.size ?? 1) - 1,
-      );
+      const registeredClients = runningComfyClients.current.get(targetId);
+      const remainingTaskCount = registeredClients
+        ? Math.max(0, registeredClients.size - (registeredClients.has(clientId) ? 1 : 0))
+        : 0;
       if (cancelledComfyClients.current.has(clientId)) {
         const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
         changeNode(targetId, {
@@ -8255,6 +8740,127 @@ function CanvasWorkspace() {
       unregisterComfyTask(targetId, clientId);
     }
   }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
+
+  const executeVideoNodeBatch = useCallback(async (targetId: string) => {
+    const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
+    if (!targetNode || targetNode.data.record.kind !== "video-generation") {
+      setNotice("无法批量提交：找不到视频生成节点");
+      return;
+    }
+    const target = recordAtCurrentFlowPosition(targetNode);
+    if (target.content.status === "cancelling") {
+      setNotice("当前任务正在取消，请稍后再批量提交");
+      return;
+    }
+    const recordsById = new Map(
+      nodesSnapshot.current.map((node) => [node.id, node.data.record]),
+    );
+    const connectedTextInputs = edgesSnapshot.current
+      .filter((edge) => edge.target === targetId)
+      .map((edge) => recordsById.get(edge.source))
+      .filter((record): record is NodeRecord => record?.kind === "text");
+    const orderedTextInputs = orderedNodeRecordsFromContent(
+      target.content,
+      "textInputOrder",
+      connectedTextInputs,
+    );
+    if (orderedTextInputs.length < 2) {
+      setNotice("批量提交至少需要接入两个文字提示词");
+      return;
+    }
+
+    const snapshots = orderedTextInputs.map(
+      (input) => generationSnapshotForGenerator(targetId, input.id),
+    );
+    const invalidSnapshotIndex = snapshots.findIndex((snapshot) => !snapshot?.prompt.trim());
+    if (invalidSnapshotIndex >= 0) {
+      const message = `第 ${invalidSnapshotIndex + 1} 个文字提示词内容为空，无法批量提交`;
+      changeNode(targetId, {
+        content: { ...target.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(message);
+      return;
+    }
+    const validSnapshots = snapshots.filter(
+      (snapshot): snapshot is GenerationSnapshot => Boolean(snapshot),
+    );
+    const firstSnapshot = validSnapshots[0];
+    if (!firstSnapshot) {
+      setNotice("无法批量提交：没有可用的提示词快照");
+      return;
+    }
+
+    const firstPreviewWidth = generatedVideoPreviewWidthForRatio(
+      videoAspectRatioValue(firstSnapshot.aspectRatio),
+    );
+    const firstPreviewHeight = generatedPreviewHeightForAspectRatio(firstSnapshot.aspectRatio);
+    const placementRecords = [
+      ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
+      ...incomingPlacementReservations.current,
+    ];
+    const firstPosition = generatedPreviewPosition(
+      target,
+      placementRecords,
+      firstPreviewWidth,
+      firstPreviewHeight,
+    );
+    let nextX = firstPosition.x;
+    const batchItems = validSnapshots.map((snapshot) => {
+      const placeholderPosition = { x: nextX, y: firstPosition.y };
+      const previewWidth = generatedVideoPreviewWidthForRatio(
+        videoAspectRatioValue(snapshot.aspectRatio),
+      );
+      nextX += batchGenerationPreviewStep(previewWidth);
+      return { clientId: crypto.randomUUID(), snapshot, placeholderPosition };
+    });
+    changeNode(targetId, {
+      content: {
+        ...target.content,
+        status: "running",
+        executionProgress: null,
+        validationMessage: `正在批量提交 ${batchItems.length} 个生成任务…`,
+      },
+    });
+    setNotice(`正在按文本顺序批量提交 ${batchItems.length} 个生成任务`);
+    const tasks: Promise<void>[] = [];
+    for (const [index, item] of batchItems.entries()) {
+      let taskSettled = false;
+      const task = executeVideoNode(targetId, undefined, {
+        clientId: item.clientId,
+        snapshot: item.snapshot,
+        placeholderPosition: item.placeholderPosition,
+        allowFixedSeedRepeat: true,
+      });
+      tasks.push(task);
+      void task.then(
+        () => { taskSettled = true; },
+        () => { taskSettled = true; },
+      );
+
+      let submissionObserved = false;
+      for (let attempt = 0; attempt < 240 && !taskSettled; attempt += 1) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 500));
+        try {
+          const [status] = await invoke<ComfyClientTaskStatus[]>(
+            "get_comfyui_client_task_statuses",
+            { serverUrl: COMFYUI_SERVER_URL, clientIds: [item.clientId] },
+          );
+          if (status && status.status !== "missing") {
+            submissionObserved = true;
+            break;
+          }
+        } catch {
+          // Keep waiting; falling back to completion preserves queue order if status checks fail.
+        }
+      }
+      if (!submissionObserved && !taskSettled) await task;
+      if (index + 1 < batchItems.length) {
+        setNotice(`已按顺序提交 ${index + 1}/${batchItems.length}，正在准备下一项`);
+      }
+    }
+    setNotice(`已按文本顺序发起 ${batchItems.length} 个生成任务`);
+    void Promise.allSettled(tasks);
+  }, [changeNode, executeVideoNode, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator]);
 
   const regenerateGeneratedVideo = useCallback(async (
     previewId: string,
@@ -9033,10 +9639,10 @@ function CanvasWorkspace() {
         serverUrl: COMFYUI_SERVER_URL,
         clientId,
       });
+      forgetComfyTask(clientId);
+      unregisterComfyTask(targetId, clientId);
       if (!ownedComfyClients.current.has(clientId)) {
-        forgetComfyTask(clientId);
         cancelledComfyClients.current.delete(clientId);
-        unregisterComfyTask(targetId, clientId);
       }
       const remainingTaskCount = [...(runningComfyClients.current.get(targetId) ?? [])]
         .filter((candidate) => candidate !== clientId)
@@ -9052,13 +9658,23 @@ function CanvasWorkspace() {
             : `已取消 ComfyUI ${taskLabel}`,
         },
       });
-      updateGenerationPlaceholder(persistedTask?.placeholderNodeId, {
-        status: "cancelled",
-        executionProgress: null,
-        validationMessage: `已取消 ComfyUI ${taskLabel}`,
-      });
-      setNotice(cleanupWarning
-        ? `${taskLabel}已取消，但输入缓存清理失败：${cleanupWarning}`
+      const cancellationWarnings: string[] = [];
+      if (cleanupWarning) cancellationWarnings.push(`输入缓存清理失败：${cleanupWarning}`);
+      try {
+        await removeGenerationPlaceholder(persistedTask?.placeholderNodeId);
+      } catch (placeholderError) {
+        const placeholderMessage = placeholderError instanceof Error
+          ? placeholderError.message
+          : String(placeholderError);
+        cancellationWarnings.push(`占位框移除失败：${placeholderMessage}`);
+        updateGenerationPlaceholder(persistedTask?.placeholderNodeId, {
+          status: "cancelled",
+          executionProgress: null,
+          validationMessage: `已取消 ComfyUI ${taskLabel}`,
+        });
+      }
+      setNotice(cancellationWarnings.length
+        ? `${taskLabel}已取消，但${cancellationWarnings.join("；")}`
         : remainingTaskCount
           ? `已取消最早提交的任务，仍有 ${remainingTaskCount} 个任务`
           : `已取消 ComfyUI ${taskLabel}`);
@@ -9081,7 +9697,7 @@ function CanvasWorkspace() {
       });
       reportError(error);
     }
-  }, [changeNode, forgetComfyTask, reportError, unregisterComfyTask, updateGenerationPlaceholder]);
+  }, [changeNode, forgetComfyTask, removeGenerationPlaceholder, reportError, unregisterComfyTask, updateGenerationPlaceholder]);
 
   const disconnectEdge = useCallback(async (
     edgeId: string,
@@ -9296,6 +9912,7 @@ function CanvasWorkspace() {
         record,
         matched,
         relationHighlighted: false,
+        relationPromptVersionLabel: "",
         activeTaskCount: activeComfyTaskCounts[record.id] ?? 0,
         inputCount: 0,
         outputCount: 0,
@@ -9310,6 +9927,7 @@ function CanvasWorkspace() {
         onChange: changeNode,
         onExecutionCheck: reportExecutionCheck,
         onExecute: executeVideoNode,
+        onBatchExecute: executeVideoNodeBatch,
         onSecondarySample: executeSecondarySample,
         onConfigureSecondarySample: configureSecondarySample,
         onRegenerateVideo: regenerateGeneratedVideo,
@@ -9324,7 +9942,7 @@ function CanvasWorkspace() {
         onCopy: copyText,
       },
     }),
-    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, h3LoraOptions, locateGeneratedVideoPrompt, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, workflowModuleDefaults, workflowModules],
+    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3LoraOptions, locateGeneratedVideoPrompt, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, workflowModuleDefaults, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -9748,7 +10366,7 @@ function CanvasWorkspace() {
     };
   }, [activeProjectId, changeNode, forgetComfyTask, registerComfyTask, reportError, restoreCompletedComfyTask, unregisterComfyTask, updateGenerationPlaceholder]);
 
-  const pasteCopiedNodes = useCallback(async () => {
+  const pasteCopiedNodes = useCallback(async (allowOverlap = false) => {
     const clipboard = nodeClipboard.current;
     if (!activeProjectId || !clipboard?.nodes.length) return;
 
@@ -9757,15 +10375,18 @@ function CanvasWorkspace() {
     const sourceTop = Math.min(...clipboard.nodes.map((node) => node.y));
     const sourceRight = Math.max(...clipboard.nodes.map((node) => node.x + node.width));
     const sourceBottom = Math.max(...clipboard.nodes.map((node) => node.y + node.height));
-    const placement = reserveNodePlacement(
-      activeProjectId,
-      { x: sourceLeft + pasteOffset, y: sourceTop + pasteOffset },
-      sourceRight - sourceLeft,
-      sourceBottom - sourceTop,
-    );
+    const requestedPosition = { x: sourceLeft + pasteOffset, y: sourceTop + pasteOffset };
+    const placement = allowOverlap
+      ? null
+      : reserveNodePlacement(
+          activeProjectId,
+          requestedPosition,
+          sourceRight - sourceLeft,
+          sourceBottom - sourceTop,
+        );
     const placementDelta = {
-      x: placement.position.x - sourceLeft,
-      y: placement.position.y - sourceTop,
+      x: (placement?.position.x ?? requestedPosition.x) - sourceLeft,
+      y: (placement?.position.y ?? requestedPosition.y) - sourceTop,
     };
     const createdByOriginalId = new Map<string, NodeRecord>();
     const createdNodes: CanvasFlowNode[] = [];
@@ -9817,10 +10438,12 @@ function CanvasWorkspace() {
         }
       }
 
-      finishNodePlacementReservation(
-        placement.reservationId,
-        [...createdByOriginalId.values()],
-      );
+      if (placement) {
+        finishNodePlacementReservation(
+          placement.reservationId,
+          [...createdByOriginalId.values()],
+        );
+      }
       setNodes((current) => [
         ...current.map((node) => ({ ...node, selected: false })),
         ...createdNodes,
@@ -9835,7 +10458,7 @@ function CanvasWorkspace() {
           : `已粘贴 ${createdNodes.length} 个节点${createdEdges.length ? `，恢复 ${createdEdges.length} 条素材连线` : ""}`,
       );
     } catch (error) {
-      finishNodePlacementReservation(placement.reservationId);
+      if (placement) finishNodePlacementReservation(placement.reservationId);
       reportError(error);
     }
   }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setEdges, setNodes]);
@@ -9868,7 +10491,7 @@ function CanvasWorkspace() {
         if (!selectedIds.length) return;
         event.preventDefault();
         copyNodesToClipboard(selectedIds);
-        void pasteCopiedNodes();
+        void pasteCopiedNodes(true);
       } else if (key === "v" && nodeClipboard.current) {
         event.preventDefault();
         void pasteCopiedNodes();
@@ -9950,7 +10573,7 @@ function CanvasWorkspace() {
         ];
       });
       setNotice(entry.kind === "prompt-migration"
-        ? "已撤销接入，恢复文本节点及提示词版本"
+        ? "已撤销接入，恢复文本节点及提示词迭代节点"
         : `已撤销删除，恢复 ${restored.restored.nodes.length} 个节点`);
     } catch (error) {
       undoStack.current.push(entry);
@@ -10264,7 +10887,7 @@ function CanvasWorkspace() {
         input: {
           canvasId: activeProjectId,
           kind: "text",
-          title: "提示词版本",
+          title: "提示词迭代",
           content: {
             text: "",
             information: "",
@@ -10282,7 +10905,7 @@ function CanvasWorkspace() {
       });
       finishNodePlacementReservation(placement.reservationId, [result.node]);
       setNodes((current) => [...current, makeFlowNode(result.node)]);
-      setNotice("提示词版本节点已创建");
+      setNotice("提示词迭代节点已创建");
       if (!position) window.setTimeout(() => {
         void setCenter(
           result.node.x + result.node.width / 2,
@@ -10368,7 +10991,7 @@ function CanvasWorkspace() {
             generationSecondaryLoraName: "",
             generationSecondaryLoraStrength: 1,
             generationSecondaryLoraBypassed: false,
-            generationRefImageSize: "max",
+            generationRefImageSize: "match",
             generationPrimaryVideoSteps: 8,
             generationSecondarySchedulerSteps: 8,
             seedMode: "random",
@@ -10582,7 +11205,7 @@ function CanvasWorkspace() {
         && target.content.promptVersionNode === true;
       if (isPromptVersionMigration) return null;
       if (!(["text", "image", "audio", "video"].includes(source.kind) && target.kind === "video-generation")) {
-        return "只能连接到视频生成节点，或将传统文本接入提示词版本节点";
+        return "只能连接到视频生成节点，或将传统文本接入提示词迭代节点";
       }
       if (edges.some(
         (edge) => edge.source === connection.source && edge.target === connection.target,
@@ -10721,15 +11344,24 @@ function CanvasWorkspace() {
       const selectedTextNodes = sourceNode.selected && sourceNode.data.record.kind === "text"
         ? nodesSnapshot.current
             .filter((node) => node.selected && node.data.record.kind === "text")
-            .sort((left, right) => {
-              const leftTitle = left.data.record.title.trim() || "未命名文本";
-              const rightTitle = right.data.record.title.trim() || "未命名文本";
-              return leftTitle.localeCompare(rightTitle, "zh-CN", {
-                numeric: true,
-                sensitivity: "base",
-              }) || left.id.localeCompare(right.id);
-            })
         : [sourceNode];
+      const batchUsesHorizontalPromptOrder = selectedTextNodes.length > 1
+        && selectedTextNodes.every((node) => node.data.record.content.promptVersionNode === true);
+      if (selectedTextNodes.length > 1) {
+        selectedTextNodes.sort((left, right) => {
+          if (batchUsesHorizontalPromptOrder) {
+            return left.position.x - right.position.x
+              || left.position.y - right.position.y
+              || left.id.localeCompare(right.id);
+          }
+          const leftTitle = left.data.record.title.trim() || "未命名文本";
+          const rightTitle = right.data.record.title.trim() || "未命名文本";
+          return leftTitle.localeCompare(rightTitle, "zh-CN", {
+            numeric: true,
+            sensitivity: "base",
+          }) || left.id.localeCompare(right.id);
+        });
+      }
       const batchSources = selectedTextNodes.length > 1 ? selectedTextNodes : [sourceNode];
       const alreadyConnectedSourceIds = new Set(
         edgesSnapshot.current
@@ -10795,10 +11427,11 @@ function CanvasWorkspace() {
         if (!createdEdges.length) {
           setNotice(`文字节点连接失败：${failures[0] ?? "没有可连接的节点"}`);
         } else if (batchSources.length > 1) {
+          const orderLabel = batchUsesHorizontalPromptOrder ? "画布从左到右" : "标题升序";
           setNotice(
             failures.length
-              ? `已按标题升序连接 ${createdEdges.length} 个文本，${failures.length} 个失败`
-              : `已按标题升序连接 ${createdEdges.length} 个文本`,
+              ? `已按${orderLabel}连接 ${createdEdges.length} 个文本，${failures.length} 个失败`
+              : `已按${orderLabel}连接 ${createdEdges.length} 个文本`,
           );
         } else {
           setNotice("节点已连接");
@@ -10937,12 +11570,21 @@ function CanvasWorkspace() {
 
     if (anchor.kind === "text") {
       const relatedIds = new Set<string>([anchor.id]);
+      const activePromptVersionId = anchor.content.promptVersionNode === true
+        ? activePromptVersionFromContent(anchor.content)?.id ?? ""
+        : null;
       contentNodes.forEach((node) => {
         const record = node.data.record;
         if (record.kind !== "generated-video") return;
         const snapshot = generationSnapshotFromContent(record.content);
         if (!snapshot) return;
-        if (snapshot.promptNodeId === anchor.id) {
+        if (
+          snapshot.promptNodeId === anchor.id
+          && (
+            activePromptVersionId === null
+            || (activePromptVersionId !== "" && snapshot.promptVersionId === activePromptVersionId)
+          )
+        ) {
           relatedIds.add(record.id);
         }
       });
@@ -10957,6 +11599,25 @@ function CanvasWorkspace() {
       if (promptNode?.kind === "text") relatedIds.add(promptNode.id);
     }
     return relatedIds;
+  }, [contentNodes, relationAnchorId]);
+
+  const relationPromptVersionLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    if (!relationAnchorId) return labels;
+    const recordsById = new Map(contentNodes.map((node) => [node.id, node.data.record]));
+    const anchor = recordsById.get(relationAnchorId);
+    if (anchor?.kind !== "generated-video") return labels;
+    const snapshot = generationSnapshotFromContent(anchor.content);
+    if (!snapshot?.promptNodeId) return labels;
+    const promptNode = recordsById.get(snapshot.promptNodeId);
+    if (promptNode?.kind !== "text" || promptNode.content.promptVersionNode !== true) return labels;
+    const versionLabel = snapshot.promptVersionLabel
+      || promptVersionsFromContent(promptNode.content).find(
+        (version) => version.id === snapshot.promptVersionId,
+      )?.label
+      || "";
+    if (versionLabel) labels.set(promptNode.id, versionLabel);
+    return labels;
   }, [contentNodes, relationAnchorId]);
 
   const handleNodeRelationClick = useCallback((node: CanvasFlowNode) => {
@@ -11034,6 +11695,9 @@ function CanvasWorkspace() {
           : orderedText;
         const matched = matchedIds.has(node.id);
         const relationHighlighted = relationHighlightedIds.has(node.id);
+        const relationPromptVersionLabel = relationHighlighted
+          ? relationPromptVersionLabels.get(node.id) ?? ""
+          : "";
         const activeTaskCount = activeComfyTaskCounts[node.id] ?? 0;
         const outputCount = outputCountBySource.get(node.id) ?? 0;
         const generationSnapshot = node.data.record.kind === "generated-video"
@@ -11050,6 +11714,7 @@ function CanvasWorkspace() {
           && previous.source.data === node.data
           && previousData?.matched === matched
           && previousData.relationHighlighted === relationHighlighted
+          && previousData.relationPromptVersionLabel === relationPromptVersionLabel
           && previousData.activeTaskCount === activeTaskCount
           && previousData.inputCount === inputRecords.length
           && previousData.outputCount === outputCount
@@ -11067,6 +11732,7 @@ function CanvasWorkspace() {
               ...node.data,
               matched,
               relationHighlighted,
+              relationPromptVersionLabel,
               activeTaskCount,
               inputCount: inputRecords.length,
               outputCount,
@@ -11087,7 +11753,7 @@ function CanvasWorkspace() {
       visibleNodeCache.current = nextCache;
       return results;
     },
-    [activeComfyTaskCounts, contentNodes, edges, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, workflowModuleDefaults, workflowModules],
+    [activeComfyTaskCounts, contentNodes, edges, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, workflowModuleDefaults, workflowModules],
   );
 
   const updateGuideOverlays = useCallback((nextAlignment: AlignmentGuide[], nextSpacing: SpacingGuide[]) => {
@@ -13145,7 +13811,7 @@ function CanvasWorkspace() {
           </button>
           <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("prompt-version")}>
             <History size={15} />
-            <span><strong>提示词版本节点</strong><small>保留 v1、v2、v3 并选择生成版本</small></span>
+            <span><strong>提示词迭代节点</strong><small>保留 v1、v2、v3 并选择生成版本</small></span>
           </button>
           <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("note")}>
             <StickyNote size={15} />

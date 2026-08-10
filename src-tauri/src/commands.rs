@@ -2039,13 +2039,13 @@ async fn submit_comfyui_workflow_inner(
         .lock()
         .map_err(|_| "ComfyUI 任务状态锁已损坏".to_owned())? = Some(prompt_id.clone());
     if task.cancelled.load(Ordering::SeqCst) {
-        cancel_known_comfy_prompt(&client, &server_url, &prompt_id).await?;
-        wait_until_comfy_prompt_stopped(&client, &server_url, &prompt_id).await?;
-        let cleanup_warning = cleanup_comfy_task_inputs(&task).await;
-        return Err(append_cleanup_warning(
-            "ComfyUI 生成已取消".to_owned(),
-            cleanup_warning,
-        ));
+        cancel_comfy_in_background(
+            client.clone(),
+            server_url.clone(),
+            prompt_id,
+            Some(task.clone()),
+        );
+        return Err("ComfyUI 生成已取消".to_owned());
     }
 
     for _ in 0..5400 {
@@ -2319,6 +2319,30 @@ async fn wait_until_comfy_prompt_stopped(
     Err("ComfyUI 尚未确认任务停止，已保留输入素材避免提前删除".to_owned())
 }
 
+fn cancel_comfy_in_background(
+    client: Client,
+    server_url: String,
+    prompt_id: String,
+    task: Option<Arc<RunningComfyTask>>,
+) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = cancel_known_comfy_prompt(&client, &server_url, &prompt_id).await {
+            eprintln!("ComfyUI 取消请求失败：{error}");
+            return;
+        }
+        if let Err(error) = wait_until_comfy_prompt_stopped(&client, &server_url, &prompt_id).await
+        {
+            eprintln!("ComfyUI 取消确认失败：{error}");
+            return;
+        }
+        if let Some(task) = task {
+            if let Some(warning) = cleanup_comfy_task_inputs(&task).await {
+                eprintln!("ComfyUI 已取消，但输入缓存清理失败：{warning}");
+            }
+        }
+    });
+}
+
 fn comfy_queue_summary_from_value(queue: &Value) -> ComfyQueueSummary {
     let running_count = queue
         .get("queue_running")
@@ -2501,7 +2525,7 @@ pub async fn cancel_comfyui_workflow(
     if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
         return Err("ComfyUI 地址只允许 http 或 https".to_owned());
     }
-    let server_url = server_url.trim().trim_end_matches('/');
+    let server_url = server_url.trim().trim_end_matches('/').to_owned();
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
@@ -2514,29 +2538,39 @@ pub async fn cancel_comfyui_workflow(
         .get(&client_id)
         .cloned();
     let Some(task) = task else {
-        let queue_response = client
-            .get(format!("{server_url}/queue"))
-            .send()
-            .await
-            .map_err(|error| format!("查询 ComfyUI 队列失败：{error}"))?;
-        let queue: Value = queue_response
-            .json()
-            .await
-            .map_err(|error| format!("解析 ComfyUI 队列失败：{error}"))?;
-        let prompt_id = ["queue_running", "queue_pending"].iter().find_map(|key| {
-            queue
-                .get(*key)
-                .and_then(Value::as_array)?
-                .iter()
-                .find(|item| comfy_client_id_from_queue_item(item) == Some(client_id.as_str()))
-                .and_then(comfy_prompt_id_from_queue_item)
-                .map(str::to_owned)
+        tauri::async_runtime::spawn(async move {
+            let result = async {
+                let queue_response = client
+                    .get(format!("{server_url}/queue"))
+                    .send()
+                    .await
+                    .map_err(|error| format!("查询 ComfyUI 队列失败：{error}"))?;
+                let queue: Value = queue_response
+                    .json()
+                    .await
+                    .map_err(|error| format!("解析 ComfyUI 队列失败：{error}"))?;
+                let prompt_id = ["queue_running", "queue_pending"].iter().find_map(|key| {
+                    queue
+                        .get(*key)
+                        .and_then(Value::as_array)?
+                        .iter()
+                        .find(|item| {
+                            comfy_client_id_from_queue_item(item) == Some(client_id.as_str())
+                        })
+                        .and_then(comfy_prompt_id_from_queue_item)
+                        .map(str::to_owned)
+                });
+                let Some(prompt_id) = prompt_id else {
+                    return Ok::<(), String>(());
+                };
+                cancel_known_comfy_prompt(&client, &server_url, &prompt_id).await?;
+                wait_until_comfy_prompt_stopped(&client, &server_url, &prompt_id).await
+            }
+            .await;
+            if let Err(error) = result {
+                eprintln!("恢复任务取消失败：{error}");
+            }
         });
-        let Some(prompt_id) = prompt_id else {
-            return Ok(None);
-        };
-        cancel_known_comfy_prompt(&client, server_url, &prompt_id).await?;
-        wait_until_comfy_prompt_stopped(&client, server_url, &prompt_id).await?;
         return Ok(None);
     };
     task.cancelled.store(true, Ordering::SeqCst);
@@ -2550,9 +2584,8 @@ pub async fn cancel_comfyui_workflow(
         return Ok(None);
     };
 
-    cancel_known_comfy_prompt(&client, server_url, &prompt_id).await?;
-    wait_until_comfy_prompt_stopped(&client, server_url, &prompt_id).await?;
-    Ok(cleanup_comfy_task_inputs(&task).await)
+    cancel_comfy_in_background(client, server_url, prompt_id, Some(task));
+    Ok(None)
 }
 
 #[tauri::command]
