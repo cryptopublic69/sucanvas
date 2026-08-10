@@ -119,8 +119,23 @@ interface NodeRecord {
 interface PromptVersionRecord {
   id: string;
   label: string;
+  title: string;
   text: string;
+  information: string;
   createdAt: string;
+  requestId?: string;
+  source?: string;
+}
+
+interface PromptSceneBindingRecord {
+  promptSetId: string;
+  promptSetTitle: string;
+  canvasId: string;
+  sceneKey: string;
+  sceneTitle: string;
+  nodeId: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface EdgeRecord {
@@ -172,7 +187,24 @@ interface CreateNodeResult {
 interface DeletedBatch {
   nodes: NodeRecord[];
   edges: EdgeRecord[];
+  promptSceneBindings?: PromptSceneBindingRecord[];
 }
+
+interface ReplaceNodeAndDeleteResult {
+  previousNode: NodeRecord;
+  node: NodeRecord;
+  deleted: DeletedBatch;
+}
+
+interface RestoreNodeReplacementResult {
+  node: NodeRecord;
+  restored: DeletedBatch;
+}
+
+type CanvasUndoEntry =
+  | { kind: "node-delete"; batch: DeletedBatch }
+  | { kind: "prompt-migration"; previousNode: NodeRecord; deleted: DeletedBatch }
+  | { kind: "prompt-version-delete"; previousNode: NodeRecord };
 
 interface ComfyOutputFile {
   filename: string;
@@ -819,6 +851,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   onRevealGeneratedVideo: (id: string) => Promise<void>;
   onRemoveInput: (targetId: string, sourceId: string) => Promise<void>;
   onActivateTextInput: (targetId: string, sourceId: string) => void;
+  onDeletePromptVersion: (nodeId: string, versionId: string) => Promise<void>;
   onDelete: (id: string, deleteSourceFile?: boolean) => void;
   onCopy: (text: string) => void;
 }
@@ -2312,6 +2345,10 @@ function textFromContent(content: JsonObject): string {
   return typeof content.text === "string" ? content.text : JSON.stringify(content, null, 2);
 }
 
+function informationFromContent(content: JsonObject): string {
+  return typeof content.information === "string" ? content.information : "";
+}
+
 function promptVersionsFromContent(content: JsonObject): PromptVersionRecord[] {
   if (content.promptVersionNode !== true || !Array.isArray(content.promptVersions)) return [];
   return content.promptVersions.flatMap((value) => {
@@ -2325,8 +2362,12 @@ function promptVersionsFromContent(content: JsonObject): PromptVersionRecord[] {
     return [{
       id: version.id,
       label: version.label,
+      title: typeof version.title === "string" ? version.title : version.label,
       text: version.text,
+      information: typeof version.information === "string" ? version.information : "",
       createdAt: typeof version.createdAt === "string" ? version.createdAt : "",
+      ...(typeof version.requestId === "string" ? { requestId: version.requestId } : {}),
+      ...(typeof version.source === "string" ? { source: version.source } : {}),
     }];
   });
 }
@@ -2341,6 +2382,14 @@ function activePromptVersionFromContent(content: JsonObject): PromptVersionRecor
 
 function activePromptVersionLabelFromContent(content: JsonObject): string {
   return activePromptVersionFromContent(content)?.label ?? "";
+}
+
+function nextPromptVersionLabel(versions: PromptVersionRecord[]): string {
+  const nextIndex = versions.reduce((highest, version) => {
+    const parsed = Number.parseInt(version.label.replace(/^v/i, ""), 10);
+    return Number.isFinite(parsed) ? Math.max(highest, parsed) : highest;
+  }, 0) + 1;
+  return `v${nextIndex}`;
 }
 
 function toFlowEdge(edge: EdgeRecord): Edge {
@@ -2445,6 +2494,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onRevealGeneratedVideo,
     onRemoveInput,
     onActivateTextInput,
+    onDeletePromptVersion,
     onDelete,
     onCopy,
   } = data;
@@ -2461,6 +2511,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [loraMenuOpen, setLoraMenuOpen] = useState(false);
   const [secondaryLoraMenuOpen, setSecondaryLoraMenuOpen] = useState(false);
   const [promptVersionMenuOpen, setPromptVersionMenuOpen] = useState(false);
+  const [textInformationOpen, setTextInformationOpen] = useState(false);
   const [generatedInfoOpen, setGeneratedInfoOpen] = useState(false);
   const [connectedTextEditor, setConnectedTextEditor] = useState<{
     id: string;
@@ -2479,6 +2530,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [textIdsPendingClear, setTextIdsPendingClear] = useState<string[] | null>(null);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
   const [textDraft, setTextDraft] = useState(() => textFromContent(record.content));
+  const [informationDraft, setInformationDraft] = useState(() => informationFromContent(record.content));
   const [textEditorFocused, setTextEditorFocused] = useState(false);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const titleDisplayRef = useRef<HTMLSpanElement>(null);
@@ -2488,6 +2540,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const loraControlRef = useRef<HTMLDivElement>(null);
   const secondaryLoraControlRef = useRef<HTMLDivElement>(null);
   const promptVersionControlRef = useRef<HTMLDivElement>(null);
+  const textInformationRef = useRef<HTMLDivElement>(null);
   const generatedInfoRef = useRef<HTMLDivElement>(null);
   const audioPreviewRefs = useRef(new Map<string, HTMLAudioElement>());
   const generatedVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -2512,6 +2565,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const activePromptVersion = isPromptVersionNode
     ? activePromptVersionFromContent(record.content)
     : null;
+  const savedInformation = isPromptVersionNode
+    ? activePromptVersion?.information ?? informationFromContent(record.content)
+    : informationFromContent(record.content);
   const bestPromptVersionId = typeof record.content.bestPromptVersionId === "string"
     ? record.content.bestPromptVersionId
     : "";
@@ -2765,6 +2821,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     setTextDraft(savedText);
   }, [savedText]);
 
+  useEffect(() => {
+    setInformationDraft(savedInformation);
+  }, [savedInformation]);
+
   useEffect(() => () => {
     if (videoResizeFrameRef.current !== null) {
       window.cancelAnimationFrame(videoResizeFrameRef.current);
@@ -2824,6 +2884,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
   }, [workflowModuleMenuOpen]);
+
+  useEffect(() => {
+    if (!textInformationOpen) return;
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && textInformationRef.current?.contains(target)) return;
+      setTextInformationOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [textInformationOpen]);
 
   useEffect(() => {
     if (!generatedInfoOpen) return;
@@ -2906,22 +2977,43 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     });
   };
 
+  const changeInformation = (event: ChangeEvent<HTMLTextAreaElement>) => {
+    const nextInformation = event.currentTarget.value;
+    setInformationDraft(nextInformation);
+    if (isPromptVersionNode && activePromptVersion) {
+      onChange(id, {
+        content: {
+          ...record.content,
+          information: nextInformation,
+          promptVersions: promptVersions.map((version) => (
+            version.id === activePromptVersion.id
+              ? { ...version, information: nextInformation }
+              : version
+          )),
+        },
+      });
+      return;
+    }
+    onChange(id, {
+      content: { ...record.content, information: nextInformation },
+    });
+  };
+
   const createPromptVersion = () => {
     if (!isPromptVersionNode) return;
-    const nextIndex = promptVersions.reduce((highest, version) => {
-      const parsed = Number.parseInt(version.label.replace(/^v/i, ""), 10);
-      return Number.isFinite(parsed) ? Math.max(highest, parsed) : highest;
-    }, 0) + 1;
     const nextVersion: PromptVersionRecord = {
       id: crypto.randomUUID(),
-      label: `v${nextIndex}`,
+      label: nextPromptVersionLabel(promptVersions),
+      title: activePromptVersion?.title || record.title || "提示词",
       text: textDraft,
+      information: informationDraft,
       createdAt: new Date().toISOString(),
     };
     onChange(id, {
       content: {
         ...record.content,
         text: nextVersion.text,
+        information: nextVersion.information,
         promptVersionNode: true,
         promptVersions: [...promptVersions, nextVersion],
         activePromptVersionId: nextVersion.id,
@@ -2932,13 +3024,20 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
 
   const selectPromptVersion = (version: PromptVersionRecord) => {
     setTextDraft(version.text);
+    setInformationDraft(version.information);
     onChange(id, {
       content: {
         ...record.content,
         text: version.text,
+        information: version.information,
         activePromptVersionId: version.id,
       },
     });
+    setPromptVersionMenuOpen(false);
+  };
+
+  const deletePromptVersion = async (versionId: string) => {
+    await onDeletePromptVersion(id, versionId);
     setPromptVersionMenuOpen(false);
   };
 
@@ -2954,10 +3053,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
 
   const openConnectedTextEditor = (input: NodeRecord) => {
     const inputText = textFromContent(input.content);
-    const versionLabel = activePromptVersionLabelFromContent(input.content);
+    const inputPromptVersion = activePromptVersionFromContent(input.content);
+    const versionLabel = inputPromptVersion?.label ?? "";
     setConnectedTextEditor({
       id: input.id,
-      title: `${input.title || "未命名文本"}${versionLabel ? ` · ${versionLabel}` : ""}`,
+      title: `${inputPromptVersion?.title || input.title || "未命名文本"}${versionLabel ? ` · ${versionLabel}` : ""}`,
       content: input.content,
       text: inputText,
     });
@@ -3386,7 +3486,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           onLostPointerCapture={finishVideoResize}
         />
       ))}
-      {(isVideoGeneration || isGeneratedVideo) && (
+      {(isVideoGeneration || isGeneratedVideo || isPromptVersionNode) && (
         <Handle type="target" position={Position.Left} className="node-handle target-handle" />
       )}
       {!isGeneratedVideo && !isImage && !isAudioAsset && (
@@ -3533,6 +3633,54 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         >
           {isGenerationPlaceholder ? <X size={14} /> : <Trash2 size={14} />}
         </button>
+        {isText && (
+          <div
+            ref={textInformationRef}
+            className="nodrag text-information-control"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className={`node-action text-information-button ${textInformationOpen ? "is-active" : ""}`}
+              onClick={() => {
+                setPreviewColorMenuOpen(false);
+                setTextInformationOpen((open) => !open);
+              }}
+              title="查看和编辑 Information"
+              aria-label="查看和编辑 Information"
+              aria-expanded={textInformationOpen}
+            >
+              <Info size={13} />
+            </button>
+            {textInformationOpen && (
+              <aside
+                className="text-information-panel"
+                aria-label="提示词中文解释"
+                onWheelCapture={(event) => {
+                  if (!event.ctrlKey) event.stopPropagation();
+                }}
+              >
+                <header>
+                  <div>
+                    <strong>Information</strong>
+                    <span>{isPromptVersionNode
+                      ? `${activePromptVersion?.label ?? "未创建版本"} · 中文解释`
+                      : "中文解释"}</span>
+                  </div>
+                </header>
+                <textarea
+                  className="nowheel"
+                  value={informationDraft}
+                  onChange={changeInformation}
+                  placeholder="这里保存提示词的中文解释…"
+                  spellCheck={false}
+                  aria-label="提示词中文解释内容"
+                />
+                <footer>{informationDraft.length.toLocaleString()} 字符 · 自动保存</footer>
+              </aside>
+            )}
+          </div>
+        )}
       </header>
       )}
       {(isText || isNote) && (isPromptVersionNode ? (
@@ -3551,7 +3699,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 aria-label="选择提示词版本"
               >
                 <History size={12} />
-                <strong>{activePromptVersion?.label ?? "v1"}</strong>
+                <strong>{activePromptVersion?.label ?? "未创建"}</strong>
                 <span>{promptVersions.length} 个版本</span>
                 <ChevronDown size={12} />
               </button>
@@ -3562,23 +3710,41 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     <span>点击切换生成版本</span>
                   </header>
                   <div className="prompt-version-menu-list">
+                    {!promptVersions.length && (
+                      <div className="prompt-version-empty">尚无版本，点击“新版本”创建 v1</div>
+                    )}
                     {[...promptVersions].reverse().map((version) => (
-                      <button
+                      <div
                         key={version.id}
-                        type="button"
-                        role="menuitem"
-                        className={version.id === activePromptVersion?.id ? "is-active" : ""}
-                        onClick={() => selectPromptVersion(version)}
+                        className={`prompt-version-menu-item ${version.id === activePromptVersion?.id ? "is-active" : ""}`}
                       >
-                        <span className="prompt-version-label">{version.label}</span>
-                        <span className="prompt-version-summary">
-                          <strong>{version.id === activePromptVersion?.id ? "当前用于生成" : "历史版本"}</strong>
-                          <small>{version.text.trim().replace(/\s+/g, " ") || "空提示词"}</small>
-                        </span>
-                        {version.id === bestPromptVersionId && (
-                          <Star size={12} fill="currentColor" aria-label="最佳版本" />
-                        )}
-                      </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="prompt-version-select"
+                          onClick={() => selectPromptVersion(version)}
+                        >
+                          <span className="prompt-version-label">{version.label}</span>
+                          <span className="prompt-version-summary">
+                            <strong>{version.id === activePromptVersion?.id
+                              ? `当前 · ${version.title || "未命名版本"}`
+                              : version.title || "未命名版本"}</strong>
+                            <small>{version.text.trim().replace(/\s+/g, " ") || "空提示词"}</small>
+                          </span>
+                          {version.id === bestPromptVersionId && (
+                            <Star size={12} fill="currentColor" aria-label="最佳版本" />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          className="prompt-version-delete"
+                          onClick={() => void deletePromptVersion(version.id)}
+                          title={`删除 ${version.label}`}
+                          aria-label={`删除 ${version.label}`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -3588,7 +3754,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               type="button"
               className={`nodrag prompt-version-best ${activePromptVersion?.id === bestPromptVersionId ? "is-active" : ""}`}
               onClick={markActivePromptVersionBest}
-              title={activePromptVersion?.id === bestPromptVersionId ? "当前版本已标记为最佳" : "标记当前版本为最佳"}
+              disabled={!activePromptVersion}
+              title={!activePromptVersion
+                ? "尚未创建版本"
+                : activePromptVersion.id === bestPromptVersionId
+                  ? "当前版本已标记为最佳"
+                  : "标记当前版本为最佳"}
               aria-label="标记当前版本为最佳"
             >
               <Star size={13} fill={activePromptVersion?.id === bestPromptVersionId ? "currentColor" : "none"} />
@@ -5131,7 +5302,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           <span className="node-footer-detail">
             {(isText || isNote)
               ? isPromptVersionNode
-                ? `${activePromptVersion?.label ?? "v1"} · ${promptVersions.length} 个版本 · ${textDraft.length.toLocaleString()} 字符`
+                ? `${activePromptVersion?.label ?? "未创建"} · ${promptVersions.length} 个版本 · ${textDraft.length.toLocaleString()} 字符`
                 : `${textDraft.length.toLocaleString()} 字符`
               : (isImage || isAudioAsset || isVideoAsset)
                 ? originalName
@@ -5566,7 +5737,7 @@ function CanvasWorkspace() {
   const projectNameInputRef = useRef<HTMLInputElement>(null);
   const videoRegenerationDialogRef = useRef<HTMLFormElement>(null);
   const secondarySampleDialogRef = useRef<HTMLFormElement>(null);
-  const deleteUndoStack = useRef<DeletedBatch[]>([]);
+  const undoStack = useRef<CanvasUndoEntry[]>([]);
   const nodeDeletionInProgress = useRef(false);
   const nodeClipboard = useRef<NodeClipboard | null>(null);
   const alignedDragPositions = useRef(new Map<string, { x: number; y: number }>());
@@ -6529,6 +6700,21 @@ function CanvasWorkspace() {
     [persistPatch, setNodes],
   );
 
+  const replaceNodeRecord = useCallback((record: NodeRecord) => {
+    setNodes((current) => current.map((node) => (
+      node.id === record.id
+        ? {
+            ...node,
+            width: record.width,
+            height: record.height,
+            position: { x: record.x, y: record.y },
+            style: { ...node.style, width: record.width, height: record.height },
+            data: { ...node.data, record },
+          }
+        : node
+    )));
+  }, [setNodes]);
+
   const rememberH3LoraPreference = useCallback((patch: H3LoraPreferencePatch) => {
     setH3LoraPreference((current) => {
       const next = { ...current, ...patch };
@@ -6784,8 +6970,13 @@ function CanvasWorkspace() {
   }, [changeNode, contentNodes, edges]);
 
   const rememberDeletedBatch = useCallback((batch: DeletedBatch) => {
-    deleteUndoStack.current.push(batch);
-    if (deleteUndoStack.current.length > 50) deleteUndoStack.current.shift();
+    undoStack.current.push({ kind: "node-delete", batch });
+    if (undoStack.current.length > 50) undoStack.current.shift();
+  }, []);
+
+  const rememberUndoEntry = useCallback((entry: CanvasUndoEntry) => {
+    undoStack.current.push(entry);
+    if (undoStack.current.length > 50) undoStack.current.shift();
   }, []);
 
   const flushNodePatches = useCallback(async (ids: string[]) => {
@@ -6798,6 +6989,54 @@ function CanvasWorkspace() {
       if (patch) await invoke<NodeRecord>("update_node", { input: { id, ...patch } });
     }));
   }, []);
+
+  const deletePromptVersionFromNode = useCallback(async (nodeId: string, versionId: string) => {
+    const flowNode = nodesSnapshot.current.find((node) => node.id === nodeId);
+    const record = flowNode?.data.record;
+    if (!record || record.content.promptVersionNode !== true) {
+      setNotice("找不到提示词版本节点");
+      return;
+    }
+    const versions = promptVersionsFromContent(record.content);
+    const version = versions.find((candidate) => candidate.id === versionId);
+    if (!version) {
+      setNotice("要删除的历史版本不存在");
+      return;
+    }
+    const remaining = versions.filter((candidate) => candidate.id !== versionId);
+    const activeId = typeof record.content.activePromptVersionId === "string"
+      ? record.content.activePromptVersionId
+      : "";
+    const nextActive = remaining.length
+      ? activeId === versionId
+        ? remaining[remaining.length - 1]
+        : remaining.find((candidate) => candidate.id === activeId) ?? remaining[0]
+      : null;
+    const nextContent: JsonObject = {
+      ...record.content,
+      text: nextActive?.text ?? "",
+      information: nextActive?.information ?? "",
+      promptVersions: remaining,
+      activePromptVersionId: nextActive?.id ?? "",
+      bestPromptVersionId: record.content.bestPromptVersionId === versionId
+        ? ""
+        : record.content.bestPromptVersionId,
+    };
+    try {
+      await flushNodePatches([nodeId]);
+      const updated = await invoke<NodeRecord>("update_node", {
+        input: { id: nodeId, content: nextContent },
+      });
+      replaceNodeRecord(updated);
+      rememberUndoEntry({
+        kind: "prompt-version-delete",
+        previousNode: structuredClone(record),
+      });
+      setNotice(`已删除 ${version.label}，按 Ctrl+Z 恢复`);
+    } catch (error) {
+      reportError(error);
+    }
+  }, [flushNodePatches, rememberUndoEntry, replaceNodeRecord, reportError]);
 
   const videoFilePathsForRecords = useCallback((records: NodeRecord[]) => {
     const paths = records.flatMap((record) => {
@@ -7277,7 +7516,7 @@ function CanvasWorkspace() {
     return {
       prompt: activeTextInput ? textFromContent(activeTextInput.content) : "",
       promptNodeId: activeTextInput?.id ?? "",
-      promptNodeTitle: activeTextInput?.title ?? "",
+      promptNodeTitle: activePromptVersion?.title || activeTextInput?.title || "",
       promptNodeIdSource: activeTextInput ? "captured" : "",
       promptVersionId: activePromptVersion?.id ?? "",
       promptVersionLabel: activePromptVersion?.label ?? "",
@@ -9080,11 +9319,12 @@ function CanvasWorkspace() {
         onRevealGeneratedVideo: revealGeneratedVideo,
         onRemoveInput: removeInputFromVideoNode,
         onActivateTextInput: activateTextInput,
+        onDeletePromptVersion: deletePromptVersionFromNode,
         onDelete: deleteNode,
         onCopy: copyText,
       },
     }),
-    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, executeSecondarySample, executeVideoNode, h3LoraOptions, locateGeneratedVideoPrompt, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, workflowModuleDefaults, workflowModules],
+    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, h3LoraOptions, locateGeneratedVideoPrompt, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, workflowModuleDefaults, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -9639,19 +9879,63 @@ function CanvasWorkspace() {
     return () => window.removeEventListener("keydown", handleNodeClipboardShortcut);
   }, [copyNodesToClipboard, pasteCopiedNodes]);
 
-  const undoLastNodeDelete = useCallback(async () => {
-    const batch = deleteUndoStack.current.pop();
-    if (!batch) {
-      setNotice("没有可撤销的节点删除");
+  const undoLastCanvasAction = useCallback(async () => {
+    const entry = undoStack.current.pop();
+    if (!entry) {
+      setNotice("没有可撤销的操作");
       return;
     }
     try {
-      const restored = await invoke<DeletedBatch>("restore_deleted_nodes", { batch });
+      if (entry.kind === "prompt-version-delete") {
+        await flushNodePatches([entry.previousNode.id]);
+        const restoredNode = await invoke<NodeRecord>("update_node", {
+          input: {
+            id: entry.previousNode.id,
+            title: entry.previousNode.title,
+            content: entry.previousNode.content,
+            status: entry.previousNode.status,
+          },
+        });
+        replaceNodeRecord(restoredNode);
+        setNotice("已恢复删除的提示词历史版本");
+        return;
+      }
+
+      const restored = entry.kind === "prompt-migration"
+        ? await invoke<RestoreNodeReplacementResult>("restore_node_replacement", {
+            input: {
+              previousNode: entry.previousNode,
+              deleted: entry.deleted,
+            },
+          })
+        : {
+            node: null,
+            restored: await invoke<DeletedBatch>("restore_deleted_nodes", { batch: entry.batch }),
+          };
       setNodes((current) => {
-        const currentIds = new Set(current.map((node) => node.id));
+        const restoredTarget = restored.node;
+        const withTarget = restoredTarget
+          ? current.map((node) => (
+              node.id === restoredTarget.id
+                ? {
+                    ...node,
+                    width: restoredTarget.width,
+                    height: restoredTarget.height,
+                    position: { x: restoredTarget.x, y: restoredTarget.y },
+                    style: {
+                      ...node.style,
+                      width: restoredTarget.width,
+                      height: restoredTarget.height,
+                    },
+                    data: { ...node.data, record: restoredTarget },
+                  }
+                : node
+            ))
+          : current;
+        const currentIds = new Set(withTarget.map((node) => node.id));
         return [
-          ...current,
-          ...restored.nodes
+          ...withTarget,
+          ...restored.restored.nodes
             .filter((record) => !currentIds.has(record.id))
             .map((record) => makeFlowNode(record)),
         ];
@@ -9660,17 +9944,19 @@ function CanvasWorkspace() {
         const currentIds = new Set(current.map((edge) => edge.id));
         return [
           ...current,
-          ...restored.edges
+          ...restored.restored.edges
             .filter((record) => !currentIds.has(record.id))
             .map(toFlowEdge),
         ];
       });
-      setNotice(`已撤销删除，恢复 ${restored.nodes.length} 个节点`);
+      setNotice(entry.kind === "prompt-migration"
+        ? "已撤销接入，恢复文本节点及提示词版本"
+        : `已撤销删除，恢复 ${restored.restored.nodes.length} 个节点`);
     } catch (error) {
-      deleteUndoStack.current.push(batch);
+      undoStack.current.push(entry);
       reportError(error);
     }
-  }, [makeFlowNode, reportError, setEdges, setNodes]);
+  }, [flushNodePatches, makeFlowNode, replaceNodeRecord, reportError, setEdges, setNodes]);
 
   useEffect(() => {
     const handleUndoShortcut = (event: KeyboardEvent) => {
@@ -9686,11 +9972,11 @@ function CanvasWorkspace() {
         return;
       }
       event.preventDefault();
-      void undoLastNodeDelete();
+      void undoLastCanvasAction();
     };
     window.addEventListener("keydown", handleUndoShortcut);
     return () => window.removeEventListener("keydown", handleUndoShortcut);
-  }, [undoLastNodeDelete]);
+  }, [undoLastCanvasAction]);
 
   const flushPendingPatches = useCallback(async () => {
     for (const timer of saveTimers.current.values()) window.clearTimeout(timer);
@@ -9712,7 +9998,7 @@ function CanvasWorkspace() {
         const savedBackground = validCanvasColor(
           window.localStorage.getItem(`infinite-canvas:canvas-background:${projectId}`),
         );
-        deleteUndoStack.current = [];
+        undoStack.current = [];
         activeProjectIdRef.current = projectId;
         setActiveProjectId(projectId);
         setCanvasBackground(savedBackground);
@@ -9741,7 +10027,7 @@ function CanvasWorkspace() {
       await flushPendingPatches();
       const snapshots = await invoke<WorkspaceSnapshot[]>("list_projects");
       setProjects(snapshots);
-      deleteUndoStack.current = [];
+      undoStack.current = [];
       activeProjectIdRef.current = null;
       setActiveProjectId(null);
       setRelationAnchorId(null);
@@ -9819,7 +10105,8 @@ function CanvasWorkspace() {
 
   useEffect(() => {
     let mounted = true;
-    let unlisten: (() => void) | undefined;
+    let unlistenCreated: (() => void) | undefined;
+    let unlistenUpdated: (() => void) | undefined;
 
     const load = async () => {
       try {
@@ -9832,7 +10119,7 @@ function CanvasWorkspace() {
         setRuntime(runtimeInfo);
         setProjectHomeReady(true);
 
-        unlisten = await listen<NodeRecord>("canvas://node-created", (event) => {
+        unlistenCreated = await listen<NodeRecord>("canvas://node-created", (event) => {
           void (async () => {
             let record = event.payload;
             if (activeProjectIdRef.current === record.canvasId) {
@@ -9880,6 +10167,38 @@ function CanvasWorkspace() {
             setNotice(`已接收来自 ${record.source} 的新节点`);
           })();
         });
+        unlistenUpdated = await listen<NodeRecord>("canvas://node-updated", (event) => {
+          if (!mounted) return;
+          const record = event.payload;
+          setProjects((current) => current.map((project) => {
+            if (project.canvas.id !== record.canvasId) return project;
+            const nodeExists = project.nodes.some((node) => node.id === record.id);
+            return {
+              ...project,
+              canvas: { ...project.canvas, updatedAt: record.updatedAt },
+              nodes: nodeExists
+                ? project.nodes.map((node) => node.id === record.id ? record : node)
+                : [...project.nodes, record],
+            };
+          }));
+          if (activeProjectIdRef.current !== record.canvasId) return;
+          setNodes((current) => {
+            const nodeExists = current.some((node) => node.id === record.id);
+            return nodeExists
+              ? current.map((node) => node.id === record.id
+                ? {
+                    ...node,
+                    width: record.width,
+                    height: record.height,
+                    position: { x: record.x, y: record.y },
+                    style: { ...node.style, width: record.width, height: record.height },
+                    data: { ...node.data, record },
+                  }
+                : node)
+              : [...current, makeFlowNode(record)];
+          });
+          setNotice(`已接收来自 ${record.source} 的提示词新版本`);
+        });
       } catch (error) {
         reportError(error);
       }
@@ -9888,7 +10207,8 @@ function CanvasWorkspace() {
     void load();
     return () => {
       mounted = false;
-      unlisten?.();
+      unlistenCreated?.();
+      unlistenUpdated?.();
       for (const timer of saveTimers.current.values()) window.clearTimeout(timer);
     };
   }, [makeFlowNode, reportError, screenToFlowPosition, setNodes]);
@@ -9907,7 +10227,7 @@ function CanvasWorkspace() {
           canvasId: activeProjectId,
           kind: "text",
           title: "新文本",
-          content: { text: "" },
+          content: { text: "", information: "" },
           source: "manual",
           x: placement.position.x,
           y: placement.position.y,
@@ -9939,12 +10259,6 @@ function CanvasWorkspace() {
       VIDEO_GENERATION_NODE_WIDTH,
       320,
     );
-    const initialVersion: PromptVersionRecord = {
-      id: crypto.randomUUID(),
-      label: "v1",
-      text: "",
-      createdAt: new Date().toISOString(),
-    };
     try {
       const result = await invoke<CreateNodeResult>("create_node", {
         input: {
@@ -9953,9 +10267,10 @@ function CanvasWorkspace() {
           title: "提示词版本",
           content: {
             text: "",
+            information: "",
             promptVersionNode: true,
-            promptVersions: [initialVersion],
-            activePromptVersionId: initialVersion.id,
+            promptVersions: [],
+            activePromptVersionId: "",
             bestPromptVersionId: "",
           },
           source: "manual",
@@ -10261,8 +10576,13 @@ function CanvasWorkspace() {
       const source = contentNodes.find((node) => node.id === connection.source)?.data.record;
       const target = contentNodes.find((node) => node.id === connection.target)?.data.record;
       if (!source || !target) return "找不到要连接的节点";
+      const isPromptVersionMigration = source.kind === "text"
+        && source.content.promptVersionNode !== true
+        && target.kind === "text"
+        && target.content.promptVersionNode === true;
+      if (isPromptVersionMigration) return null;
       if (!(["text", "image", "audio", "video"].includes(source.kind) && target.kind === "video-generation")) {
-        return "只能将文字、图片、音频或视频连接到视频生成节点";
+        return "只能连接到视频生成节点，或将传统文本接入提示词版本节点";
       }
       if (edges.some(
         (edge) => edge.source === connection.source && edge.target === connection.target,
@@ -10336,6 +10656,66 @@ function CanvasWorkspace() {
       const targetNode = nodesSnapshot.current.find((node) => node.id === connection.target);
       if (!sourceNode || !targetNode || !connection.target) {
         setNotice("找不到要连接的节点");
+        return;
+      }
+      const sourceRecord = sourceNode.data.record;
+      const targetRecord = targetNode.data.record;
+      const isPromptVersionMigration = sourceRecord.kind === "text"
+        && sourceRecord.content.promptVersionNode !== true
+        && targetRecord.kind === "text"
+        && targetRecord.content.promptVersionNode === true;
+      if (isPromptVersionMigration) {
+        const promptVersions = promptVersionsFromContent(targetRecord.content);
+        const migratedVersion: PromptVersionRecord = {
+          id: crypto.randomUUID(),
+          label: nextPromptVersionLabel(promptVersions),
+          title: sourceRecord.title.trim() || "未命名文本",
+          text: textFromContent(sourceRecord.content),
+          information: informationFromContent(sourceRecord.content),
+          createdAt: new Date().toISOString(),
+        };
+        const nextContent: JsonObject = {
+          ...targetRecord.content,
+          text: migratedVersion.text,
+          information: migratedVersion.information,
+          promptVersionNode: true,
+          promptVersions: [...promptVersions, migratedVersion],
+          activePromptVersionId: migratedVersion.id,
+        };
+        try {
+          await flushNodePatches([sourceRecord.id, targetRecord.id]);
+          const result = await invoke<ReplaceNodeAndDeleteResult>(
+            "replace_node_and_delete_undoable",
+            {
+              input: {
+                update: { id: targetRecord.id, content: nextContent },
+                deleteIds: [sourceRecord.id],
+              },
+            },
+          );
+          const deletedIds = new Set(result.deleted.nodes.map((node) => node.id));
+          setNodes((current) => current
+            .filter((node) => !deletedIds.has(node.id))
+            .map((node) => (
+              node.id === result.node.id
+                ? {
+                    ...node,
+                    data: { ...node.data, record: result.node },
+                  }
+                : node
+            )));
+          setEdges((current) => current.filter(
+            (edge) => !deletedIds.has(edge.source) && !deletedIds.has(edge.target),
+          ));
+          rememberUndoEntry({
+            kind: "prompt-migration",
+            previousNode: result.previousNode,
+            deleted: result.deleted,
+          });
+          setNotice(`“${migratedVersion.title}”已迁入 ${migratedVersion.label}，按 Ctrl+Z 撤销`);
+        } catch (error) {
+          reportError(error);
+        }
         return;
       }
       const selectedTextNodes = sourceNode.selected && sourceNode.data.record.kind === "text"
@@ -10427,7 +10807,7 @@ function CanvasWorkspace() {
         reportError(error);
       }
     },
-    [activeProjectId, changeNode, connectionValidationError, reportError, setEdges],
+    [activeProjectId, changeNode, connectionValidationError, flushNodePatches, rememberUndoEntry, reportError, setEdges, setNodes],
   );
 
   const deleteSelectedElements = useCallback(async (deleteSourceFiles = false) => {

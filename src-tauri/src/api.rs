@@ -1,11 +1,11 @@
 use std::{
     net::TcpListener as StdTcpListener,
-    path::Path,
+    path::Path as FsPath,
     sync::{Arc, RwLock},
 };
 
 use axum::{
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -16,7 +16,9 @@ use tauri::{AppHandle, Emitter};
 
 use crate::{
     db::{CanvasError, CanvasResult, Database},
-    models::{ApiConfig, CreateNodeInput},
+    models::{
+        ApiConfig, AppendPromptVersionInput, CreateMissingPromptScenesInput, CreateNodeInput,
+    },
 };
 
 #[derive(Clone)]
@@ -42,7 +44,7 @@ struct ApiErrorResponse {
     error: String,
 }
 
-pub fn write_config(path: &Path, config: &ApiConfig) -> CanvasResult<()> {
+pub fn write_config(path: &FsPath, config: &ApiConfig) -> CanvasResult<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -63,6 +65,19 @@ fn router(state: ApiState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/nodes", post(create_node))
+        .route("/v1/prompt-sets", get(list_prompt_sets))
+        .route(
+            "/v1/prompt-sets/{prompt_set_id}/scenes",
+            get(get_prompt_set_scenes),
+        )
+        .route(
+            "/v1/prompt-sets/{prompt_set_id}/scenes:create-missing",
+            post(create_missing_prompt_scenes),
+        )
+        .route(
+            "/v1/prompt-sets/{prompt_set_id}/scenes/{scene_key}/versions:append",
+            post(append_prompt_version),
+        )
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .with_state(state)
 }
@@ -115,6 +130,99 @@ async fn create_node(
     }
 }
 
+async fn list_prompt_sets(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if !authorized(&headers, &state.token) {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
+    }
+    match state.database.list_prompt_sets() {
+        Ok(prompt_sets) => Json(prompt_sets).into_response(),
+        Err(error) => api_error(status_for_error(&error), &error.to_string()),
+    }
+}
+
+async fn get_prompt_set_scenes(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(prompt_set_id): Path<String>,
+) -> Response {
+    if !authorized(&headers, &state.token) {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
+    }
+    match state.database.get_prompt_set_scenes(&prompt_set_id) {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => api_error(status_for_error(&error), &error.to_string()),
+    }
+}
+
+async fn create_missing_prompt_scenes(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(prompt_set_id): Path<String>,
+    Json(input): Json<CreateMissingPromptScenesInput>,
+) -> Response {
+    if !authorized(&headers, &state.token) {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
+    }
+    let active_canvas_id = match state.active_canvas_id.read() {
+        Ok(active_canvas_id) => active_canvas_id.clone(),
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "active project lock is poisoned",
+            );
+        }
+    };
+    match state
+        .database
+        .create_missing_prompt_scenes(&prompt_set_id, &active_canvas_id, input)
+    {
+        Ok(result) => {
+            if let Some(app_handle) = state.app_handle.as_ref() {
+                for scene in result.scenes.iter().filter(|scene| scene.created) {
+                    let _ = app_handle.emit("canvas://node-created", scene.node.clone());
+                }
+            }
+            let status = if result.created_count > 0 {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            };
+            (status, Json(result)).into_response()
+        }
+        Err(error) => api_error(status_for_error(&error), &error.to_string()),
+    }
+}
+
+async fn append_prompt_version(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path((prompt_set_id, scene_key)): Path<(String, String)>,
+    Json(input): Json<AppendPromptVersionInput>,
+) -> Response {
+    if !authorized(&headers, &state.token) {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
+    }
+    match state
+        .database
+        .append_prompt_version(&prompt_set_id, &scene_key, input)
+    {
+        Ok(result) => {
+            if result.created {
+                if let Some(app_handle) = state.app_handle.as_ref() {
+                    let _ = app_handle.emit("canvas://node-updated", result.node.clone());
+                }
+            }
+            let status = if result.created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            };
+            (status, Json(result)).into_response()
+        }
+        Err(error) => api_error(status_for_error(&error), &error.to_string()),
+    }
+}
+
 fn authorized(headers: &HeaderMap, expected_token: &str) -> bool {
     headers
         .get(AUTHORIZATION)
@@ -127,6 +235,8 @@ fn authorized(headers: &HeaderMap, expected_token: &str) -> bool {
 fn status_for_error(error: &CanvasError) -> StatusCode {
     match error {
         CanvasError::Validation(_) => StatusCode::BAD_REQUEST,
+        CanvasError::NotFound(_) => StatusCode::NOT_FOUND,
+        CanvasError::Conflict(_) => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

@@ -289,6 +289,8 @@ pub fn run() {
             commands::delete_video_files,
             commands::delete_nodes_undoable,
             commands::restore_deleted_nodes,
+            commands::replace_node_and_delete_undoable,
+            commands::restore_node_replacement,
             commands::create_edge,
             commands::delete_edge,
             commands::submit_comfyui_workflow,

@@ -53,6 +53,162 @@ pub struct EdgeRecord {
 pub struct DeletedBatch {
     pub nodes: Vec<NodeRecord>,
     pub edges: Vec<EdgeRecord>,
+    #[serde(default)]
+    pub prompt_scene_bindings: Vec<PromptSceneBindingRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptSceneBindingRecord {
+    pub prompt_set_id: String,
+    pub prompt_set_title: String,
+    pub canvas_id: String,
+    pub scene_key: String,
+    pub scene_title: String,
+    pub node_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptVersionRecord {
+    pub id: String,
+    pub label: String,
+    pub title: String,
+    pub text: String,
+    pub information: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptSceneBinding {
+    pub prompt_set_id: String,
+    pub prompt_set_title: String,
+    pub canvas_id: String,
+    pub canvas_name: String,
+    pub scene_key: String,
+    pub scene_title: String,
+    pub node_id: String,
+    pub latest_version: Option<String>,
+    pub version_count: usize,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptSetSummary {
+    pub prompt_set_id: String,
+    pub title: String,
+    pub canvas_id: String,
+    pub canvas_name: String,
+    pub scene_count: usize,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptSetScenesResult {
+    pub prompt_set: PromptSetSummary,
+    pub scenes: Vec<PromptSceneBinding>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePromptSceneInput {
+    pub scene_key: String,
+    pub title: String,
+    pub text: String,
+    #[serde(default)]
+    pub information: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateMissingPromptScenesInput {
+    #[serde(default)]
+    pub canvas_id: Option<String>,
+    pub prompt_set_title: String,
+    pub scenes: Vec<CreatePromptSceneInput>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptSceneMutation {
+    pub binding: PromptSceneBinding,
+    pub node: NodeRecord,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateMissingPromptScenesResult {
+    pub prompt_set: PromptSetSummary,
+    pub scenes: Vec<PromptSceneMutation>,
+    pub created_count: usize,
+    pub existing_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendPromptVersionInput {
+    pub text: String,
+    #[serde(default)]
+    pub information: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    pub request_id: String,
+    #[serde(default)]
+    pub expected_version_count: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendPromptVersionResult {
+    pub binding: PromptSceneBinding,
+    pub node: NodeRecord,
+    pub version: PromptVersionRecord,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceNodeAndDeleteInput {
+    pub update: UpdateNodeInput,
+    pub delete_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceNodeAndDeleteResult {
+    pub previous_node: NodeRecord,
+    pub node: NodeRecord,
+    pub deleted: DeletedBatch,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreNodeReplacementInput {
+    pub previous_node: NodeRecord,
+    pub deleted: DeletedBatch,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreNodeReplacementResult {
+    pub node: NodeRecord,
+    pub restored: DeletedBatch,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

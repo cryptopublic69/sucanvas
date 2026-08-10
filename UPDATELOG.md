@@ -2,6 +2,26 @@
 
 ## 2026-08-10
 
+### v1.0
+
+- SuCanvas 程序版本正式定位为 `1.0.0`；前端包、Rust crate、Tauri 应用配置与锁文件保持一致。
+
+### 提示词版本与 Information
+
+- 提示词版本节点新增左侧输入接入点；将传统文本节点接入后，会把原节点标题、正文和 Information 一并迁入新的提示词版本，并原子删除原文本节点及相关连线，按 `Ctrl+Z` 可完整撤销迁移。
+- 新建提示词版本节点默认为空，不再预建空白 v1；首次点击“新版本”时才创建 v1。历史版本（包括 v1）均可单独删除，删除当前或最佳版本时会自动修正节点状态，并支持 `Ctrl+Z` 恢复。
+- 普通文本节点与提示词版本节点均新增 Information 面板，可查看和自动保存提示词中文解释；提示词版本切换、创建、删除及文本迁移时，英文正文和中文 Information 始终成对处理。
+- Information 图标沿用节点标题栏按钮交互，悬停时白色高亮；面板显示在节点右侧并与节点顶部对齐，避免遮挡当前节点。同步修正两类文本节点上下圆角和提示词版本节点顶部描边不均匀的问题。
+- 视频生成快照会读取当前提示词版本自身的标题、版本 ID、版本名和正文，版本切换后仍能准确记录本次生成所使用的内容。
+
+### 提示词场景 API 与 Skill
+
+- 新增以 `promptSetId + sceneKey` 为稳定身份的提示词场景绑定；绑定持久化在 SQLite 中，不依赖对话上下文、节点顺序或画布坐标，可在重启对话后查询提示词集合及每个场景对应的节点、最新版本和版本数量。
+- 本地 API 新增提示词集合列表、场景绑定查询、仅创建缺失场景和指定场景追加版本接口。继续生成 S06-S10 时只创建不存在的场景；单独重做 S02、S05 时会分别写入目标节点的新版本，不影响其他场景。
+- 创建和追加操作支持稳定请求 ID 的幂等重试；指定场景追加可携带预期版本数，在并发修改或绑定过期时返回冲突，避免重复写入、错写节点或版本次序混乱。
+- 删除提示词节点时会连同场景绑定与请求记录一起生成撤销快照，恢复节点后同步恢复绑定和幂等历史，确保后续查询及追加仍定位到原场景。
+- 仓库内 `send-to-infinite-canvas.zip` 已升级为可随程序同步的完整 Skill 包：保留发送普通文本节点的能力，并加入场景绑定恢复、缺失场景创建、指定场景追加版本脚本及 API 说明；英文完整提示词写入正文，配套中文解释写入同一版本的 Information。
+
 ### 工作流方案管理
 
 - 新增本机工作流方案仓库，每套方案独立保存 `manifest.json`、API 格式 `workflow.json`、`adapter.json`、`ui-schema.json` 和参数默认值；首次使用时会从现有 H3 工作流创建默认的“MiniMax H3 全能参考”方案。
@@ -70,8 +90,10 @@
 ### 验证
 
 - `npm run build`
-- `cargo test --manifest-path src-tauri/Cargo.toml`：50 项测试通过
+- `cargo test --manifest-path src-tauri/Cargo.toml`：55 项测试通过
 - `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features`
+- `send-to-infinite-canvas` Skill 校验：`Skill is valid!`
 - `git diff --check`
 
 ## 2026-08-09

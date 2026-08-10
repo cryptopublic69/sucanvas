@@ -24,8 +24,10 @@ use crate::{
     models::{
         AppLockStatus, ComfyClientTaskStatus, ComfyOutputFile, ComfyQueueSummary, ComfySubmitInput,
         ComfySubmitResult, CreateEdgeInput, CreateNodeInput, CreateNodeResult, CreateProjectInput,
-        DeleteNodesInput, DeletedBatch, EdgeRecord, NodeRecord, RuntimeInfo, SetAppLockInput,
-        SetProjectPrivacyInput, UpdateNodeInput, UpdateProjectInput, WorkspaceSnapshot,
+        DeleteNodesInput, DeletedBatch, EdgeRecord, NodeRecord, ReplaceNodeAndDeleteInput,
+        ReplaceNodeAndDeleteResult, RestoreNodeReplacementInput, RestoreNodeReplacementResult,
+        RuntimeInfo, SetAppLockInput, SetProjectPrivacyInput, UpdateNodeInput, UpdateProjectInput,
+        WorkspaceSnapshot,
     },
     workflow_modules::{
         self, SaveWorkflowModuleInput, WorkflowBindings, WorkflowInputContract,
@@ -624,6 +626,28 @@ pub fn restore_deleted_nodes(
     state
         .database
         .restore_deleted_batch(batch)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn replace_node_and_delete_undoable(
+    input: ReplaceNodeAndDeleteInput,
+    state: State<'_, ApplicationState>,
+) -> Result<ReplaceNodeAndDeleteResult, String> {
+    state
+        .database
+        .replace_node_and_delete_with_snapshot(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn restore_node_replacement(
+    input: RestoreNodeReplacementInput,
+    state: State<'_, ApplicationState>,
+) -> Result<RestoreNodeReplacementResult, String> {
+    state
+        .database
+        .restore_node_replacement(input)
         .map_err(|error| error.to_string())
 }
 
