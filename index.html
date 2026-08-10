@@ -5,6 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#090b11" />
     <title>SuCanvas</title>
+    <style>
+      html,
+      body,
+      #root {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        background: #090b11;
+      }
+
+      html[data-startup-theme="light"],
+      html[data-startup-theme="light"] body,
+      html[data-startup-theme="light"] #root {
+        background: #eef0f5;
+      }
+    </style>
+    <script>
+      try {
+        const startupTheme = localStorage.getItem("infinite-canvas:theme") === "light" ? "light" : "dark";
+        document.documentElement.dataset.startupTheme = startupTheme;
+        document.documentElement.style.colorScheme = startupTheme;
+      } catch {
+        document.documentElement.dataset.startupTheme = "dark";
+        document.documentElement.style.colorScheme = "dark";
+      }
+    </script>
   </head>
 
   <body>

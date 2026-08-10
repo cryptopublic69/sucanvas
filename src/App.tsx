@@ -16,11 +16,13 @@ import {
   MiniMap,
   Node,
   NodeProps,
+  NodeResizeControl,
   NodeResizer,
   Panel,
   Position,
   ReactFlow,
   ReactFlowProvider,
+  ResizeControlVariant,
   SelectionMode,
   ViewportPortal,
   getBezierPath,
@@ -42,10 +44,12 @@ import {
   FolderOpen,
   FolderKanban,
   GripVertical,
+  History,
   Image as ImageIcon,
   Info,
   Link2,
   LockKeyhole,
+  LocateFixed,
   Moon,
   Maximize2,
   Music,
@@ -61,6 +65,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Square,
+  Star,
   StickyNote,
   Sun,
   Trash2,
@@ -81,6 +86,7 @@ import {
   useRef,
   useState,
 } from "react";
+import suCanvasLogo from "../src-tauri/icons/128x128@2x.png";
 import "./App.css";
 
 type JsonObject = Record<string, unknown>;
@@ -108,6 +114,13 @@ interface NodeRecord {
   status: string;
   createdAt: string;
   updatedAt: string;
+}
+
+interface PromptVersionRecord {
+  id: string;
+  label: string;
+  text: string;
+  createdAt: string;
 }
 
 interface EdgeRecord {
@@ -194,7 +207,10 @@ interface ComfyClientTaskStatus {
 interface GenerationSnapshot {
   prompt: string;
   promptNodeId: string;
+  promptNodeTitle: string;
   promptNodeIdSource: "captured" | "verified" | "";
+  promptVersionId: string;
+  promptVersionLabel: string;
   durationSeconds: number;
   aspectRatio: VideoAspectRatio;
   primaryResolutionMegapixels: number;
@@ -217,12 +233,92 @@ interface GenerationSnapshot {
   secondaryLoraStrength: number;
   secondaryLoraStrengthRecorded?: boolean;
   secondaryLoraBypassed: boolean;
+  refImageSize: RefImageSize;
+  refImageSizeRecorded?: boolean;
   imagePaths: string[];
+  imageRoles: FrameRole[];
   audioPaths: string[];
   videoPaths: string[];
   workflowModuleId: string;
   workflowModuleRevision: string;
 }
+
+interface VideoRegenerationRequest {
+  sourcePreview: NodeRecord;
+  snapshot: GenerationSnapshot;
+  seed: string;
+}
+
+interface VideoRegenerationDraft {
+  previewId: string;
+  previewTitle: string;
+  originalSnapshot: GenerationSnapshot;
+  seed: string;
+  primaryResolutionMegapixels: number;
+  loraStrength: number;
+  primaryVideoSteps: number;
+  primaryAudioSteps: number;
+  primaryBrightness: number;
+  primaryContrast: number;
+  primarySaturation: number;
+  refImageSize: RefImageSize;
+}
+
+type VideoRegenerationNumericField = "primaryResolutionMegapixels"
+  | "loraStrength"
+  | "primaryVideoSteps"
+  | "primaryAudioSteps"
+  | "primaryBrightness"
+  | "primaryContrast"
+  | "primarySaturation";
+
+const VIDEO_REGENERATION_NUMBER_CONFIG: Record<
+  VideoRegenerationNumericField,
+  { min: number; max: number; step: number }
+> = {
+  primaryResolutionMegapixels: { min: 0.2, max: 2, step: 0.1 },
+  loraStrength: { min: 0, max: 2, step: 0.05 },
+  primaryVideoSteps: { min: 1, max: 1000, step: 1 },
+  primaryAudioSteps: { min: 1, max: 1000, step: 1 },
+  primaryBrightness: { min: 0, max: 3, step: 0.05 },
+  primaryContrast: { min: 0, max: 3, step: 0.05 },
+  primarySaturation: { min: 0, max: 3, step: 0.05 },
+};
+
+type SecondarySampleOverrides = Pick<
+  GenerationSnapshot,
+  | "secondaryResolutionMegapixels"
+  | "secondarySchedulerSteps"
+  | "secondaryBrightness"
+  | "secondaryContrast"
+  | "secondarySaturation"
+  | "secondaryLoraStrength"
+  | "secondaryLoraBypassed"
+  | "refImageSize"
+>;
+
+interface SecondarySampleDraft extends SecondarySampleOverrides {
+  previewId: string;
+  previewTitle: string;
+  seed: string;
+}
+
+type SecondarySampleNumericField = Exclude<
+  keyof SecondarySampleOverrides,
+  "refImageSize" | "secondaryLoraBypassed"
+>;
+
+const SECONDARY_SAMPLE_NUMBER_CONFIG: Record<
+  SecondarySampleNumericField,
+  { min: number; max: number; step: number }
+> = {
+  secondaryResolutionMegapixels: { min: 0.2, max: 2, step: 0.1 },
+  secondaryLoraStrength: { min: 0, max: 2, step: 0.05 },
+  secondarySchedulerSteps: { min: 1, max: 10000, step: 1 },
+  secondaryBrightness: { min: 0, max: 3, step: 0.05 },
+  secondaryContrast: { min: 0, max: 3, step: 0.05 },
+  secondarySaturation: { min: 0, max: 3, step: 0.05 },
+};
 
 interface PersistedComfyTask {
   clientId: string;
@@ -284,10 +380,12 @@ interface H3ModelParameters {
 }
 
 type WorkflowCapability = "video-generation" | "image-generation";
-type WorkflowVariant = "reference-to-video" | "first-last-frame" | "text-to-video" | "image-generation";
+type WorkflowVariant = "reference-to-video" | "first-last-frame" | "image-to-video" | "last-frame-to-video" | "text-to-video" | "image-generation";
 type UiFontSize = "small" | "medium";
 type WorkflowModuleSlot = "video-generation:reference-to-video"
   | "video-generation:first-last-frame"
+  | "video-generation:image-to-video"
+  | "video-generation:last-frame-to-video"
   | "video-generation:text-to-video"
   | "image-generation";
 
@@ -399,6 +497,9 @@ interface ModelParameterNumberInputProps {
   max: number;
   step: number;
   autoFocus?: boolean;
+  disabled?: boolean;
+  regenerationField?: VideoRegenerationNumericField;
+  secondarySampleField?: SecondarySampleNumericField;
   onChange: (value: number) => void;
 }
 
@@ -408,6 +509,9 @@ function ModelParameterNumberInput({
   max,
   step,
   autoFocus = false,
+  disabled = false,
+  regenerationField,
+  secondarySampleField,
   onChange,
 }: ModelParameterNumberInputProps) {
   const precision = step.toString().split(".")[1]?.length ?? 0;
@@ -420,6 +524,9 @@ function ModelParameterNumberInput({
     <div className="model-parameter-number-input">
       <input
         autoFocus={autoFocus}
+        disabled={disabled}
+        data-regeneration-field={regenerationField}
+        data-secondary-sample-field={secondarySampleField}
         type="number"
         min={min}
         max={max}
@@ -428,10 +535,10 @@ function ModelParameterNumberInput({
         onChange={(event) => onChange(Number(event.currentTarget.value))}
       />
       <span className="model-parameter-stepper">
-        <button type="button" onClick={() => adjust(1)} title="增加" aria-label="增加">
+        <button type="button" disabled={disabled} onClick={() => adjust(1)} title="增加" aria-label="增加">
           <ChevronUp size={12} strokeWidth={2} />
         </button>
-        <button type="button" onClick={() => adjust(-1)} title="减少" aria-label="减少">
+        <button type="button" disabled={disabled} onClick={() => adjust(-1)} title="减少" aria-label="减少">
           <ChevronDown size={12} strokeWidth={2} />
         </button>
       </span>
@@ -695,6 +802,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   mediaInputs: NodeRecord[];
   textInputCount: number;
   textInputs: NodeRecord[];
+  promptNodeTitle: string;
   h3LoraOptions: string[];
   workflowModules: WorkflowModuleRecord[];
   workflowModuleDefaults: Partial<Record<WorkflowModuleSlot, string>>;
@@ -703,9 +811,14 @@ interface CanvasNodeData extends Record<string, unknown> {
   onExecutionCheck: (message: string, valid: boolean) => void;
   onExecute: (id: string) => Promise<void>;
   onSecondarySample: (id: string) => Promise<void>;
+  onConfigureSecondarySample: (id: string) => void;
+  onRegenerateVideo: (id: string) => Promise<void>;
+  onConfigureRegenerateVideo: (id: string) => void;
+  onLocatePrompt: (id: string, target?: "prompt" | "generator") => void;
   onCancelExecution: (id: string) => Promise<void>;
   onRevealGeneratedVideo: (id: string) => Promise<void>;
   onRemoveInput: (targetId: string, sourceId: string) => Promise<void>;
+  onActivateTextInput: (targetId: string, sourceId: string) => void;
   onDelete: (id: string, deleteSourceFile?: boolean) => void;
   onCopy: (text: string) => void;
 }
@@ -1121,7 +1234,10 @@ const CANVAS_GRID_SIZE = 24;
 const ALIGNMENT_SNAP_TOLERANCE_PX = 6;
 const EMPTY_NODE_RECORDS: NodeRecord[] = [];
 const AUDIO_NODE_MIN_HEIGHT = 240;
-const VIDEO_NODE_BASE_HEIGHT = 576;
+const VIDEO_GENERATION_NODE_WIDTH = 360;
+const VIDEO_NODE_BASE_HEIGHT = 600;
+const VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS = 10;
+const VIDEO_NODE_TEXT_ROW_HEIGHT = 51;
 const MEDIA_NODE_CHROME_HEIGHT = 73;
 const IMAGE_NODE_CHROME_HEIGHT = 38;
 const GENERATED_VIDEO_FOOTER_HEIGHT = 38;
@@ -1179,6 +1295,9 @@ function generatedPlaceholderPositionStyle(nodeId: string, blobIndex: number): C
 }
 const H3_MODEL_PARAMETERS_STORAGE_KEY = "infinite-canvas:h3-model-parameters";
 const DEFAULT_H3_REFERENCE_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3全能参考工作流.json";
+const DEFAULT_H3_FIRST_LAST_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3首尾帧工作流.json";
+const DEFAULT_H3_IMAGE_TO_VIDEO_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3图生视频工作流.json";
+const DEFAULT_H3_LAST_FRAME_TO_VIDEO_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3尾帧生视频工作流.json";
 const H3_REFERENCE_WORKFLOW_STORAGE_KEY = "infinite-canvas:h3-reference-workflow-path";
 const WORKFLOW_MODULE_DEFAULTS_STORAGE_KEY = "infinite-canvas:workflow-module-defaults";
 const WORKFLOW_PACKAGE_ENGINE = "workflow-package-v1";
@@ -1189,11 +1308,15 @@ const WORKFLOW_CAPABILITIES: Array<{ value: WorkflowCapability; label: string }>
 const WORKFLOW_VIDEO_VARIANTS: Array<{ value: Exclude<WorkflowVariant, "image-generation">; label: string }> = [
   { value: "reference-to-video", label: "多参生视频" },
   { value: "first-last-frame", label: "首尾帧" },
+  { value: "image-to-video", label: "图生视频" },
+  { value: "last-frame-to-video", label: "尾帧生视频" },
   { value: "text-to-video", label: "文生视频" },
 ];
 const WORKFLOW_MODULE_SLOTS: WorkflowModuleSlot[] = [
   "video-generation:reference-to-video",
   "video-generation:first-last-frame",
+  "video-generation:image-to-video",
+  "video-generation:last-frame-to-video",
   "video-generation:text-to-video",
   "image-generation",
 ];
@@ -1209,6 +1332,8 @@ const VIDEO_RESIZE_CONTROLS = [
 const VIDEO_GENERATION_MODES = [
   { value: "reference-to-video", label: "参考生视频" },
   { value: "first-last-frame", label: "首尾帧" },
+  { value: "image-to-video", label: "图生视频" },
+  { value: "last-frame-to-video", label: "尾帧生视频" },
   { value: "text-to-video", label: "文生视频" },
 ] as const;
 const VIDEO_ASPECT_RATIO_OPTIONS = [
@@ -1220,8 +1345,10 @@ const VIDEO_ASPECT_RATIO_OPTIONS = [
   { value: "2:3", ratio: 2 / 3 },
   { value: "1:1", ratio: 1 },
 ] as const;
+const REF_IMAGE_SIZE_OPTIONS = ["max", "match"] as const;
 const VIDEO_PREVIEW_DEFAULT_COLOR = "#6fb5df";
 const VIDEO_PREVIEW_SECONDARY_COLOR = "#2f6f50";
+const NOTE_DEFAULT_COLOR = "#7a6728";
 const VIDEO_PREVIEW_DEFAULT_HIGHLIGHT_COLOR = "#8b7cf6";
 const VIDEO_PREVIEW_SECONDARY_HIGHLIGHT_COLOR = "#59d58a";
 const VIDEO_PREVIEW_COLOR_PRESETS = [
@@ -1257,6 +1384,7 @@ function loadImageNaturalSize(path: string): Promise<{ width: number; height: nu
 
 type VideoGenerationMode = typeof VIDEO_GENERATION_MODES[number]["value"];
 type VideoAspectRatio = typeof VIDEO_ASPECT_RATIO_OPTIONS[number]["value"];
+type RefImageSize = typeof REF_IMAGE_SIZE_OPTIONS[number];
 type FrameRole = "first" | "last";
 type SeedMode = "random" | "fixed";
 
@@ -1342,6 +1470,34 @@ function snapCanvasCoordinate(value: number): number {
   return Math.round(value / CANVAS_GRID_SIZE) * CANVAS_GRID_SIZE;
 }
 
+function nonOverlappingNodePosition(
+  requestedPosition: { x: number; y: number },
+  width: number,
+  height: number,
+  existingNodes: Array<Pick<NodeRecord, "x" | "y" | "width" | "height">>,
+): { x: number; y: number } {
+  const gap = CANVAS_GRID_SIZE;
+  const x = snapCanvasCoordinate(requestedPosition.x);
+  let y = snapCanvasCoordinate(requestedPosition.y);
+
+  for (let attempt = 0; attempt <= existingNodes.length; attempt += 1) {
+    const blockers = existingNodes.filter((node) => (
+      x < node.x + node.width + gap
+      && x + width + gap > node.x
+      && y < node.y + node.height + gap
+      && y + height + gap > node.y
+    ));
+    if (!blockers.length) break;
+    const nextY = snapCanvasCoordinate(
+      Math.max(...blockers.map((node) => node.y + node.height)) + gap,
+    );
+    if (nextY <= y) break;
+    y = nextY;
+  }
+
+  return { x, y };
+}
+
 function incomingNodePosition(
   node: NodeRecord,
   existingNodes: NodeRecord[],
@@ -1393,12 +1549,15 @@ function videoGenerationAutoHeight(
   const listMediaRows = videoCount + Math.ceil(audioCount / 2);
   const imageColumns = Math.max(1, Math.floor((Math.max(180, nodeWidth - 32) + 6) / 66));
   const imageRows = imageCount ? Math.ceil(imageCount / imageColumns) : 0;
-  const textRows = Math.max(1, textInputCount);
-  const contentHeight = 439
+  const textRows = Math.max(
+    1,
+    Math.min(VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS, textInputCount),
+  );
+  const contentHeight = 463
     + listMediaRows * 51
     + imageRows * 66
     + groupCount * 30
-    + textRows * 51
+    + textRows * VIDEO_NODE_TEXT_ROW_HEIGHT
     + 30;
   return Math.min(
     2400,
@@ -1515,6 +1674,31 @@ function generatedPreviewPosition(
   return { x, y: availableYBelow(x, generator.y) };
 }
 
+function generatedPreviewPositionBelow(
+  source: NodeRecord,
+  existingNodes: NodeRecord[],
+  width: number,
+  height: number,
+): { x: number; y: number } {
+  const gap = CANVAS_GRID_SIZE / 2;
+  const x = source.x;
+  let y = source.y + source.height + gap;
+  for (let attempt = 0; attempt <= existingNodes.length; attempt += 1) {
+    const blockers = existingNodes.filter((node) => (
+      node.id !== source.id
+      && x < node.x + node.width + gap
+      && x + width + gap > node.x
+      && y < node.y + node.height + gap
+      && y + height + gap > node.y
+    ));
+    if (!blockers.length) break;
+    const nextY = Math.max(...blockers.map((node) => node.y + node.height)) + gap;
+    if (nextY <= y) break;
+    y = nextY;
+  }
+  return { x, y };
+}
+
 function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string" && Boolean(item))
@@ -1542,13 +1726,24 @@ function persistedComfyTasksFromStorage(): PersistedComfyTask[] {
         promptNodeId: typeof task.snapshot.promptNodeId === "string"
           ? task.snapshot.promptNodeId
           : "",
+        promptNodeTitle: typeof task.snapshot.promptNodeTitle === "string"
+          ? task.snapshot.promptNodeTitle
+          : "",
         promptNodeIdSource: task.snapshot.promptNodeIdSource === "captured"
           || task.snapshot.promptNodeIdSource === "verified"
           ? task.snapshot.promptNodeIdSource
           : "",
+        promptVersionId: typeof task.snapshot.promptVersionId === "string"
+          ? task.snapshot.promptVersionId
+          : "",
+        promptVersionLabel: typeof task.snapshot.promptVersionLabel === "string"
+          ? task.snapshot.promptVersionLabel
+          : "",
         aspectRatio: videoAspectRatioFromContent({
           generationAspectRatio: task.snapshot.aspectRatio,
         }),
+        refImageSize: refImageSizeFromContent(task.snapshot as unknown as JsonObject),
+        refImageSizeRecorded: typeof task.snapshot.refImageSize === "string",
         ...h3ModelParametersFromContent(task.snapshot as unknown as JsonObject),
         diffusionModelName: h3DiffusionModelNameFromContent(task.snapshot as unknown as JsonObject),
         loraBypassed: h3LoraBypassedFromContent(task.snapshot as unknown as JsonObject),
@@ -1571,9 +1766,14 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
   return {
     prompt: snapshot.prompt,
     promptNodeId: typeof snapshot.promptNodeId === "string" ? snapshot.promptNodeId : "",
+    promptNodeTitle: typeof snapshot.promptNodeTitle === "string" ? snapshot.promptNodeTitle : "",
     promptNodeIdSource: snapshot.promptNodeIdSource === "captured"
       || snapshot.promptNodeIdSource === "verified"
       ? snapshot.promptNodeIdSource
+      : "",
+    promptVersionId: typeof snapshot.promptVersionId === "string" ? snapshot.promptVersionId : "",
+    promptVersionLabel: typeof snapshot.promptVersionLabel === "string"
+      ? snapshot.promptVersionLabel
       : "",
     durationSeconds: typeof snapshot.durationSeconds === "number"
       ? snapshot.durationSeconds
@@ -1601,7 +1801,13 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
     secondaryLoraStrengthRecorded: typeof snapshot.generationSecondaryLoraStrength === "number"
       || typeof snapshot.secondaryLoraStrength === "number",
     secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(snapshot),
+    refImageSize: refImageSizeFromContent(snapshot),
+    refImageSizeRecorded: typeof snapshot.refImageSize === "string"
+      || typeof snapshot.generationRefImageSize === "string",
     imagePaths: stringArray(snapshot.imagePaths),
+    imageRoles: stringArray(snapshot.imageRoles).filter(
+      (role): role is FrameRole => role === "first" || role === "last",
+    ),
     audioPaths: stringArray(snapshot.audioPaths),
     videoPaths: stringArray(snapshot.videoPaths),
     workflowModuleId: typeof snapshot.workflowModuleId === "string" ? snapshot.workflowModuleId : "",
@@ -1735,6 +1941,14 @@ function videoAspectRatioFromContent(content: JsonObject): VideoAspectRatio {
 function videoAspectRatioValue(value: VideoAspectRatio): number {
   return VIDEO_ASPECT_RATIO_OPTIONS.find((option) => option.value === value)?.ratio
     ?? DEFAULT_GENERATED_VIDEO_ASPECT_RATIO;
+}
+
+function refImageSizeFromContent(content: JsonObject): RefImageSize {
+  const value = content.generationRefImageSize ?? content.refImageSize;
+  return typeof value === "string"
+    && REF_IMAGE_SIZE_OPTIONS.includes(value as RefImageSize)
+    ? value as RefImageSize
+    : "max";
 }
 
 function validVideoResolution(value: unknown, fallback: number): number {
@@ -1975,6 +2189,34 @@ function frameRoleFromContent(
   return fallbackIndex === 0 ? "first" : "last";
 }
 
+function activeTextInputFromContent(
+  content: JsonObject,
+  textInputs: NodeRecord[],
+): NodeRecord | null {
+  const orderedInputs = orderedNodeRecordsFromContent(content, "textInputOrder", textInputs);
+  const activeId = typeof content.activeTextInputId === "string"
+    ? content.activeTextInputId
+    : "";
+  return orderedInputs.find((input) => input.id === activeId) ?? orderedInputs[0] ?? null;
+}
+
+function orderedNodeRecordsFromContent(
+  content: JsonObject,
+  orderKey: string,
+  records: NodeRecord[],
+): NodeRecord[] {
+  const savedOrder = Array.isArray(content[orderKey])
+    ? content[orderKey].filter((id): id is string => typeof id === "string")
+    : [];
+  const recordsById = new Map(records.map((record) => [record.id, record]));
+  const ordered = savedOrder
+    .map((id) => recordsById.get(id))
+    .filter((record): record is NodeRecord => Boolean(record));
+  const orderedIds = new Set(ordered.map((record) => record.id));
+  ordered.push(...records.filter((record) => !orderedIds.has(record.id)));
+  return ordered;
+}
+
 function validateVideoExecution(
   mode: VideoGenerationMode,
   content: JsonObject,
@@ -1984,6 +2226,7 @@ function validateVideoExecution(
   const images = mediaInputs.filter((input) => input.kind === "image");
   const audios = mediaInputs.filter((input) => input.kind === "audio");
   const videos = mediaInputs.filter((input) => input.kind === "video");
+  const activeTextInput = activeTextInputFromContent(content, textInputs);
 
   if (mode === "text-to-video") {
     if (mediaInputs.length) {
@@ -1992,8 +2235,8 @@ function validateVideoExecution(
     if (!textInputs.length) {
       return { valid: false, message: "文生视频至少需要连接一个文字节点" };
     }
-    if (!textInputs.some((input) => textFromContent(input.content).trim())) {
-      return { valid: false, message: "已连接的文字节点内容为空，请先填写" };
+    if (!activeTextInput || !textFromContent(activeTextInput.content).trim()) {
+      return { valid: false, message: "当前选中的文字节点内容为空，请先填写" };
     }
     return { valid: true, message: "文生视频条件检查通过" };
   }
@@ -2002,27 +2245,53 @@ function validateVideoExecution(
     if (audios.length || videos.length) {
       return { valid: false, message: "首尾帧模式不能接入音频或视频" };
     }
-    if (!images.length) {
-      return { valid: false, message: "首尾帧模式至少需要一张图片" };
-    }
-    if (images.length > 2) {
-      return { valid: false, message: "首尾帧模式最多只能接入两张图片" };
+    if (images.length !== 2) {
+      return {
+        valid: false,
+        message: `首尾帧模式必须接入两张图片（首帧和尾帧），当前已接入 ${images.length} 张`,
+      };
     }
     const roles = images.map((image, index) => frameRoleFromContent(content, image.id, index));
-    if (roles.length === 2 && roles[0] === roles[1]) {
+    if (roles[0] === roles[1]) {
       return { valid: false, message: "两张图片必须分别指定为首帧和尾帧" };
     }
     return { valid: true, message: "首尾帧条件检查通过" };
   }
 
+  if (mode === "image-to-video") {
+    if (audios.length || videos.length) {
+      return { valid: false, message: "图生视频模式不能接入音频或视频参考" };
+    }
+    if (images.length !== 1) {
+      return {
+        valid: false,
+        message: `图生视频模式必须接入一张首帧图片，当前已接入 ${images.length} 张`,
+      };
+    }
+    return { valid: true, message: "图生视频条件检查通过" };
+  }
+
+  if (mode === "last-frame-to-video") {
+    if (audios.length || videos.length) {
+      return { valid: false, message: "尾帧生视频模式不能接入音频或视频参考" };
+    }
+    if (images.length !== 1) {
+      return {
+        valid: false,
+        message: `尾帧生视频模式必须接入一张尾帧图片，当前已接入 ${images.length} 张`,
+      };
+    }
+    return { valid: true, message: "尾帧生视频条件检查通过" };
+  }
+
   if (!mediaInputs.length) {
     return { valid: false, message: "参考生视频至少需要一个图片或音频素材" };
   }
-  if (textInputs.length !== 1) {
-    return { valid: false, message: "当前参考工作流必须且只能连接一个文字提示词节点" };
+  if (!textInputs.length) {
+    return { valid: false, message: "当前参考工作流至少需要连接一个文字提示词节点" };
   }
-  if (!textFromContent(textInputs[0].content).trim()) {
-    return { valid: false, message: "已连接的文字节点内容为空，请先填写" };
+  if (!activeTextInput || !textFromContent(activeTextInput.content).trim()) {
+    return { valid: false, message: "当前选中的文字节点内容为空，请先填写" };
   }
   if (images.length > 9) {
     return { valid: false, message: "当前参考工作流最多支持9张图片" };
@@ -2041,6 +2310,37 @@ function validateVideoExecution(
 
 function textFromContent(content: JsonObject): string {
   return typeof content.text === "string" ? content.text : JSON.stringify(content, null, 2);
+}
+
+function promptVersionsFromContent(content: JsonObject): PromptVersionRecord[] {
+  if (content.promptVersionNode !== true || !Array.isArray(content.promptVersions)) return [];
+  return content.promptVersions.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const version = value as JsonObject;
+    if (
+      typeof version.id !== "string"
+      || typeof version.label !== "string"
+      || typeof version.text !== "string"
+    ) return [];
+    return [{
+      id: version.id,
+      label: version.label,
+      text: version.text,
+      createdAt: typeof version.createdAt === "string" ? version.createdAt : "",
+    }];
+  });
+}
+
+function activePromptVersionFromContent(content: JsonObject): PromptVersionRecord | null {
+  const versions = promptVersionsFromContent(content);
+  const activeId = typeof content.activePromptVersionId === "string"
+    ? content.activePromptVersionId
+    : "";
+  return versions.find((version) => version.id === activeId) ?? versions[0] ?? null;
+}
+
+function activePromptVersionLabelFromContent(content: JsonObject): string {
+  return activePromptVersionFromContent(content)?.label ?? "";
 }
 
 function toFlowEdge(edge: EdgeRecord): Edge {
@@ -2129,6 +2429,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     mediaInputs,
     textInputCount,
     textInputs,
+    promptNodeTitle,
     h3LoraOptions,
     workflowModules,
     onH3LoraPreferenceChange,
@@ -2136,9 +2437,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onExecutionCheck,
     onExecute,
     onSecondarySample,
+    onConfigureSecondarySample,
+    onRegenerateVideo,
+    onConfigureRegenerateVideo,
+    onLocatePrompt,
     onCancelExecution,
     onRevealGeneratedVideo,
     onRemoveInput,
+    onActivateTextInput,
     onDelete,
     onCopy,
   } = data;
@@ -2154,6 +2460,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [workflowModuleMenuOpen, setWorkflowModuleMenuOpen] = useState(false);
   const [loraMenuOpen, setLoraMenuOpen] = useState(false);
   const [secondaryLoraMenuOpen, setSecondaryLoraMenuOpen] = useState(false);
+  const [promptVersionMenuOpen, setPromptVersionMenuOpen] = useState(false);
   const [generatedInfoOpen, setGeneratedInfoOpen] = useState(false);
   const [connectedTextEditor, setConnectedTextEditor] = useState<{
     id: string;
@@ -2163,9 +2470,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   } | null>(null);
   const [draggedMediaId, setDraggedMediaId] = useState<string | null>(null);
   const [dragOverMediaId, setDragOverMediaId] = useState<string | null>(null);
+  const [draggedTextId, setDraggedTextId] = useState<string | null>(null);
+  const [dragOverTextId, setDragOverTextId] = useState<string | null>(null);
   const [removingMediaId, setRemovingMediaId] = useState<string | null>(null);
   const [clearingImages, setClearingImages] = useState(false);
   const [imageIdsPendingClear, setImageIdsPendingClear] = useState<string[] | null>(null);
+  const [clearingTexts, setClearingTexts] = useState(false);
+  const [textIdsPendingClear, setTextIdsPendingClear] = useState<string[] | null>(null);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
   const [textDraft, setTextDraft] = useState(() => textFromContent(record.content));
   const [textEditorFocused, setTextEditorFocused] = useState(false);
@@ -2176,6 +2487,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const workflowModuleControlRef = useRef<HTMLDivElement>(null);
   const loraControlRef = useRef<HTMLDivElement>(null);
   const secondaryLoraControlRef = useRef<HTMLDivElement>(null);
+  const promptVersionControlRef = useRef<HTMLDivElement>(null);
   const generatedInfoRef = useRef<HTMLDivElement>(null);
   const audioPreviewRefs = useRef(new Map<string, HTMLAudioElement>());
   const generatedVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -2195,6 +2507,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const videoResizeFrameRef = useRef<number | null>(null);
   const savedText = textFromContent(record.content);
   const isText = record.kind === "text";
+  const isPromptVersionNode = isText && record.content.promptVersionNode === true;
+  const promptVersions = isPromptVersionNode ? promptVersionsFromContent(record.content) : [];
+  const activePromptVersion = isPromptVersionNode
+    ? activePromptVersionFromContent(record.content)
+    : null;
+  const bestPromptVersionId = typeof record.content.bestPromptVersionId === "string"
+    ? record.content.bestPromptVersionId
+    : "";
   const isNote = record.kind === "note";
   const isImage = record.kind === "image";
   const isAudioAsset = record.kind === "audio";
@@ -2203,24 +2523,44 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const isGeneratedVideo = record.kind === "generated-video";
   const isSecondaryPreview = isGeneratedVideo
     && typeof record.content.sourcePreviewId === "string";
-  const supportsPreviewColor = isText || (
+  const supportsPreviewColor = isText || isNote || (
     isGeneratedVideo
     && typeof record.content.videoUrl === "string"
     && Boolean(record.content.videoUrl)
   );
-  const previewThemeColor = previewThemeColorFromContent(record.content);
+  const storedPreviewThemeColor = previewThemeColorFromContent(record.content);
+  const previewThemeColor = isNote && storedPreviewThemeColor === VIDEO_PREVIEW_DEFAULT_COLOR
+    ? null
+    : storedPreviewThemeColor;
   const previewDisplayColor = previewThemeColor
-    ?? (isSecondaryPreview ? VIDEO_PREVIEW_SECONDARY_COLOR : VIDEO_PREVIEW_DEFAULT_COLOR);
-  const usesDefaultPreviewTheme = previewDisplayColor === VIDEO_PREVIEW_DEFAULT_COLOR;
+    ?? (isNote
+      ? NOTE_DEFAULT_COLOR
+      : isSecondaryPreview
+        ? VIDEO_PREVIEW_SECONDARY_COLOR
+        : VIDEO_PREVIEW_DEFAULT_COLOR);
+  const usesDefaultPreviewTheme = !isNote
+    && previewDisplayColor === VIDEO_PREVIEW_DEFAULT_COLOR;
   const usesSecondaryGreenTheme = isGeneratedVideo
     && previewDisplayColor === VIDEO_PREVIEW_SECONDARY_COLOR;
   const usesCustomPreviewTheme = supportsPreviewColor
-    && Boolean(previewThemeColor)
+    && (Boolean(previewThemeColor) || isNote)
     && !usesDefaultPreviewTheme
     && !usesSecondaryGreenTheme;
   const previewHighlightColor = VIDEO_PREVIEW_COLOR_PRESETS.find(
     (preset) => preset.value === previewDisplayColor,
   )?.highlight ?? previewDisplayColor;
+  const previewColorPresets = isNote
+    ? [
+        {
+          ...VIDEO_PREVIEW_COLOR_PRESETS.find((preset) => preset.value === NOTE_DEFAULT_COLOR)!,
+          label: "默认颜色",
+        },
+        ...VIDEO_PREVIEW_COLOR_PRESETS.filter((preset) => (
+          preset.value !== VIDEO_PREVIEW_DEFAULT_COLOR
+          && preset.value !== NOTE_DEFAULT_COLOR
+        )),
+      ]
+    : VIDEO_PREVIEW_COLOR_PRESETS;
   const previewThemeStyle = supportsPreviewColor
     ? {
         "--preview-theme-color": previewDisplayColor,
@@ -2240,6 +2580,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   ) ?? null;
   const videoDuration = videoDurationFromContent(record.content);
   const videoAspectRatio = videoAspectRatioFromContent(record.content);
+  const refImageSize = refImageSizeFromContent(record.content);
+  const videoGenerationFullHeight = isVideoGeneration
+    ? videoGenerationAutoHeight(
+        mediaInputs.map((input) => input.kind),
+        textInputs.length,
+        record.width,
+      )
+    : record.height;
+  const activeTextInputId = activeTextInputFromContent(record.content, textInputs)?.id ?? "";
   const primaryVideoResolution = primaryVideoResolutionFromContent(record.content);
   const secondaryVideoResolution = secondaryVideoResolutionFromContent(record.content);
   const primaryVideoSteps = primaryVideoStepsFromContent(
@@ -2306,6 +2655,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ? generationSnapshotFromContent(record.content)
     : null;
   const generatedVideoPrompt = generatedVideoSnapshot?.prompt ?? "";
+  const generatedVideoPromptBaseTitle = promptNodeTitle
+    || generatedVideoSnapshot?.promptNodeTitle
+    || "";
+  const generatedVideoPromptTitle = generatedVideoSnapshot?.promptVersionLabel
+    ? `${generatedVideoPromptBaseTitle || "提示词"} · ${generatedVideoSnapshot.promptVersionLabel}`
+    : generatedVideoPromptBaseTitle;
   const isUnplayedGeneratedVideo = isGeneratedVideo
     && Boolean(generatedVideoUrl)
     && record.content.hasBeenPlayed === false;
@@ -2503,6 +2858,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
   }, [secondaryLoraMenuOpen]);
 
+  useEffect(() => {
+    if (!promptVersionMenuOpen) return;
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && promptVersionControlRef.current?.contains(target)) return;
+      setPromptVersionMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [promptVersionMenuOpen]);
+
 
   useEffect(() => {
     if (!expanded && !connectedTextEditor) return;
@@ -2523,16 +2889,75 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const changeText = (event: ChangeEvent<HTMLTextAreaElement>) => {
     const nextText = event.currentTarget.value;
     setTextDraft(nextText);
+    if (isPromptVersionNode && activePromptVersion) {
+      onChange(id, {
+        content: {
+          ...record.content,
+          text: nextText,
+          promptVersions: promptVersions.map((version) => (
+            version.id === activePromptVersion.id ? { ...version, text: nextText } : version
+          )),
+        },
+      });
+      return;
+    }
     onChange(id, {
       content: { ...record.content, text: nextText },
     });
   };
 
+  const createPromptVersion = () => {
+    if (!isPromptVersionNode) return;
+    const nextIndex = promptVersions.reduce((highest, version) => {
+      const parsed = Number.parseInt(version.label.replace(/^v/i, ""), 10);
+      return Number.isFinite(parsed) ? Math.max(highest, parsed) : highest;
+    }, 0) + 1;
+    const nextVersion: PromptVersionRecord = {
+      id: crypto.randomUUID(),
+      label: `v${nextIndex}`,
+      text: textDraft,
+      createdAt: new Date().toISOString(),
+    };
+    onChange(id, {
+      content: {
+        ...record.content,
+        text: nextVersion.text,
+        promptVersionNode: true,
+        promptVersions: [...promptVersions, nextVersion],
+        activePromptVersionId: nextVersion.id,
+      },
+    });
+    setPromptVersionMenuOpen(false);
+  };
+
+  const selectPromptVersion = (version: PromptVersionRecord) => {
+    setTextDraft(version.text);
+    onChange(id, {
+      content: {
+        ...record.content,
+        text: version.text,
+        activePromptVersionId: version.id,
+      },
+    });
+    setPromptVersionMenuOpen(false);
+  };
+
+  const markActivePromptVersionBest = () => {
+    if (!activePromptVersion) return;
+    onChange(id, {
+      content: {
+        ...record.content,
+        bestPromptVersionId: activePromptVersion.id,
+      },
+    });
+  };
+
   const openConnectedTextEditor = (input: NodeRecord) => {
     const inputText = textFromContent(input.content);
+    const versionLabel = activePromptVersionLabelFromContent(input.content);
     setConnectedTextEditor({
       id: input.id,
-      title: input.title || "未命名文本",
+      title: `${input.title || "未命名文本"}${versionLabel ? ` · ${versionLabel}` : ""}`,
       content: input.content,
       text: inputText,
     });
@@ -2566,7 +2991,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     window.setTimeout(() => setErrorCopied(false), 1200);
   };
 
-  const markGeneratedVideoPlayed = () => {
+  const markGeneratedVideoFullyPlayed = () => {
     if (!isUnplayedGeneratedVideo) return;
     onChange(id, {
       content: {
@@ -2748,6 +3173,32 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     moveMediaInput(sourceId, mediaInputs.indexOf(target));
   };
 
+  const moveTextInput = (sourceId: string, targetIndex: number) => {
+    const orderedIds = textInputs.map((input) => input.id);
+    const sourceIndex = orderedIds.indexOf(sourceId);
+    if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= orderedIds.length) return;
+    const nextOrder = [...orderedIds];
+    const [movedId] = nextOrder.splice(sourceIndex, 1);
+    nextOrder.splice(targetIndex, 0, movedId);
+    if (nextOrder.every((inputId, index) => inputId === orderedIds[index])) return;
+    onChange(id, {
+      content: { ...record.content, textInputOrder: nextOrder },
+    });
+  };
+
+  const textInputIdAtPoint = (clientX: number, clientY: number): string | null => {
+    const target = document
+      .elementFromPoint(clientX, clientY)
+      ?.closest<HTMLElement>("[data-text-input-id]");
+    return target?.dataset.textInputId ?? null;
+  };
+
+  const moveTextInputTo = (sourceId: string, targetId: string | null) => {
+    const targetIndex = textInputs.findIndex((input) => input.id === targetId);
+    if (targetIndex < 0) return;
+    moveTextInput(sourceId, targetIndex);
+  };
+
   const setFrameRole = (sourceId: string, role: FrameRole) => {
     const imageInputs = mediaInputs.filter((input) => input.kind === "image");
     const nextRoles: Record<string, FrameRole> = {};
@@ -2826,6 +3277,25 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     }
   };
 
+  const clearConnectedTexts = async () => {
+    if (!textIdsPendingClear?.length || clearingTexts) return;
+    setClearingTexts(true);
+    try {
+      for (const inputId of textIdsPendingClear) {
+        await onRemoveInput(id, inputId);
+      }
+      if (
+        connectedTextEditor
+        && textIdsPendingClear.includes(connectedTextEditor.id)
+      ) {
+        setConnectedTextEditor(null);
+      }
+      setTextIdsPendingClear(null);
+    } finally {
+      setClearingTexts(false);
+    }
+  };
+
   const toggleAudioPreview = async (inputId: string) => {
     const audio = audioPreviewRefs.current.get(inputId);
     if (!audio) return;
@@ -2867,13 +3337,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
 
   return (
     <article
-      className={`canvas-node kind-${record.kind} ${usesSecondaryGreenTheme ? "is-secondary-preview" : ""} ${usesCustomPreviewTheme ? "has-custom-preview-color" : ""} ${relationHighlighted ? "is-relation-highlighted" : ""} ${matched ? "" : "is-dimmed"}`}
+      className={`canvas-node kind-${record.kind} ${isPromptVersionNode ? "is-prompt-version-node" : ""} ${usesSecondaryGreenTheme ? "is-secondary-preview" : ""} ${usesCustomPreviewTheme ? "has-custom-preview-color" : ""} ${relationHighlighted ? "is-relation-highlighted" : ""} ${matched ? "" : "is-dimmed"}`}
       style={previewThemeStyle}
     >
       <NodeResizer
         minWidth={260}
         minHeight={isAudioAsset ? AUDIO_NODE_MIN_HEIGHT : 180}
-        isVisible={selected && !isImage && !isVideoAsset && !isGeneratedVideo}
+        isVisible={selected && !isImage && !isVideoAsset && !isGeneratedVideo && !isVideoGeneration}
         lineClassName="node-resize-line"
         handleClassName="node-resize-handle"
         onResizeEnd={(_, params) => {
@@ -2886,6 +3356,24 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           });
         }}
       />
+      {selected && isVideoGeneration && videoGenerationFullHeight > VIDEO_NODE_BASE_HEIGHT && (
+        <NodeResizeControl
+          position="bottom"
+          variant={ResizeControlVariant.Line}
+          resizeDirection="vertical"
+          minWidth={record.width}
+          maxWidth={record.width}
+          minHeight={VIDEO_NODE_BASE_HEIGHT}
+          maxHeight={videoGenerationFullHeight}
+          className="video-generation-height-resizer nodrag"
+          onResizeEnd={(_, params) => {
+            onChange(id, {
+              height: params.height,
+              content: { ...record.content, manualHeight: params.height },
+            });
+          }}
+        />
+      )}
       {selected && (isImage || isVideoAsset || isGeneratedVideo) && VIDEO_RESIZE_CONTROLS.map((control) => (
         <div
           key={control.position}
@@ -2914,7 +3402,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               ? <Film size={14} />
               : isVideoGeneration
                 ? <Clapperboard size={14} />
-                : <FileText size={14} />}
+                : isPromptVersionNode
+                  ? <History size={14} />
+                  : <FileText size={14} />}
         </span>
         <div className="node-title-group">
           {editingTitle ? (
@@ -2971,8 +3461,16 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               type="button"
               className="node-preview-color-picker"
               onClick={() => setPreviewColorMenuOpen((open) => !open)}
-              title={isText ? "选择文本节点颜色" : "选择视频预览颜色"}
-              aria-label={isText ? "选择文本节点颜色" : "选择视频预览颜色"}
+              title={isText
+                ? "选择文本节点颜色"
+                : isNote
+                  ? "选择备注节点颜色"
+                  : "选择视频预览颜色"}
+              aria-label={isText
+                ? "选择文本节点颜色"
+                : isNote
+                  ? "选择备注节点颜色"
+                  : "选择视频预览颜色"}
               aria-expanded={previewColorMenuOpen}
             >
               <Palette size={13} />
@@ -2981,9 +3479,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <div
                 className="node-preview-color-presets"
                 role="menu"
-                aria-label={isText ? "文本节点颜色预设" : "视频预览颜色预设"}
+                aria-label={isText
+                  ? "文本节点颜色预设"
+                  : isNote
+                    ? "备注节点颜色预设"
+                    : "视频预览颜色预设"}
               >
-                {VIDEO_PREVIEW_COLOR_PRESETS.map((preset) => (
+                {previewColorPresets.map((preset) => (
                   <button
                     key={preset.value}
                     type="button"
@@ -3003,7 +3505,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     aria-label={preset.label}
                   >
                     <span
-                      className={preset.value === VIDEO_PREVIEW_DEFAULT_COLOR ? "is-default" : ""}
+                      className={!isNote && preset.value === VIDEO_PREVIEW_DEFAULT_COLOR ? "is-default" : ""}
                       aria-hidden="true"
                     />
                     {preset.label}
@@ -3033,7 +3535,87 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         </button>
       </header>
       )}
-      {(isText || isNote) && (
+      {(isText || isNote) && (isPromptVersionNode ? (
+        <div className="prompt-version-shell">
+          <div className="prompt-version-toolbar">
+            <div
+              ref={promptVersionControlRef}
+              className="nodrag prompt-version-control"
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                className="prompt-version-toggle"
+                onClick={() => setPromptVersionMenuOpen((open) => !open)}
+                aria-expanded={promptVersionMenuOpen}
+                aria-label="选择提示词版本"
+              >
+                <History size={12} />
+                <strong>{activePromptVersion?.label ?? "v1"}</strong>
+                <span>{promptVersions.length} 个版本</span>
+                <ChevronDown size={12} />
+              </button>
+              {promptVersionMenuOpen && (
+                <div className="prompt-version-menu" role="menu" aria-label="提示词历史版本">
+                  <header>
+                    <strong>历史版本</strong>
+                    <span>点击切换生成版本</span>
+                  </header>
+                  <div className="prompt-version-menu-list">
+                    {[...promptVersions].reverse().map((version) => (
+                      <button
+                        key={version.id}
+                        type="button"
+                        role="menuitem"
+                        className={version.id === activePromptVersion?.id ? "is-active" : ""}
+                        onClick={() => selectPromptVersion(version)}
+                      >
+                        <span className="prompt-version-label">{version.label}</span>
+                        <span className="prompt-version-summary">
+                          <strong>{version.id === activePromptVersion?.id ? "当前用于生成" : "历史版本"}</strong>
+                          <small>{version.text.trim().replace(/\s+/g, " ") || "空提示词"}</small>
+                        </span>
+                        {version.id === bestPromptVersionId && (
+                          <Star size={12} fill="currentColor" aria-label="最佳版本" />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              className={`nodrag prompt-version-best ${activePromptVersion?.id === bestPromptVersionId ? "is-active" : ""}`}
+              onClick={markActivePromptVersionBest}
+              title={activePromptVersion?.id === bestPromptVersionId ? "当前版本已标记为最佳" : "标记当前版本为最佳"}
+              aria-label="标记当前版本为最佳"
+            >
+              <Star size={13} fill={activePromptVersion?.id === bestPromptVersionId ? "currentColor" : "none"} />
+            </button>
+            <button
+              type="button"
+              className="nodrag prompt-version-create"
+              onClick={createPromptVersion}
+              title="复制当前内容并创建新版本"
+            >
+              <Plus size={13} />
+              新版本
+            </button>
+          </div>
+          <div className="text-editor-shell prompt-version-editor-shell">
+            <textarea
+              className={`nodrag node-editor ${textEditorFocused ? "nowheel" : ""}`}
+              value={textDraft}
+              onChange={changeText}
+              onFocus={() => setTextEditorFocused(true)}
+              onBlur={() => setTextEditorFocused(false)}
+              aria-label={`${activePromptVersion?.label ?? "当前版本"}提示词内容`}
+              spellCheck={false}
+            />
+          </div>
+        </div>
+      ) : (
         <div className="text-editor-shell">
           <textarea
             className={`nodrag node-editor ${textEditorFocused ? "nowheel" : ""}`}
@@ -3045,7 +3627,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             spellCheck={false}
           />
         </div>
-      )}
+      ))}
       {(isImage || isAudioAsset || isVideoAsset || isGeneratedVideo) && (
         <div
           className={isVideoAsset ? "nodrag media-node-body" : "media-node-body"}
@@ -3080,7 +3662,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           ) : generatedVideoUrl && isGeneratedVideo ? (
             <>
               {isUnplayedGeneratedVideo && (
-                <span className="generated-video-new-badge" aria-label="新生成且尚未播放">
+                <span className="generated-video-new-badge" aria-label="新生成且尚未完整播放">
                   NEW
                 </span>
               )}
@@ -3089,7 +3671,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 src={generatedVideoUrl}
                 preload="metadata"
                 playsInline
-                onPlay={markGeneratedVideoPlayed}
+                onEnded={markGeneratedVideoFullyPlayed}
                 onLoadedMetadata={(event) => applyNaturalMediaRatio(
                   event.currentTarget.videoWidth,
                   event.currentTarget.videoHeight,
@@ -3179,7 +3761,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             <span>
               {isGenerationPlaceholder
                 ? placeholderActive ? "处理中" : "未完成"
-                : formattedGenerationElapsed(record.content)}
+                : `${formattedGenerationElapsed(record.content)}${generatedVideoSnapshot
+                  ? ` / ${generatedVideoSnapshot.durationSeconds}秒`
+                  : ""}`}
             </span>
           </div>
           <span className="generated-video-footer-spacer" />
@@ -3189,16 +3773,42 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 type="button"
                 className={`nodrag node-action generated-video-secondary-action ${executionRunning ? "is-cancel" : ""}`}
                 disabled={executionCancelling}
-                onClick={() => {
+                onClick={(event) => {
                   if (executionRunning) void onCancelExecution(id);
+                  else if (event.ctrlKey) onConfigureSecondarySample(id);
                   else void onSecondarySample(id);
                 }}
-                title={executionRunning ? "取消这次二采" : "单独对当前预览视频进行二采"}
+                title={executionRunning ? "取消这次二采" : "点击直接二采；Ctrl+点击可调整二采参数"}
                 aria-label={executionRunning ? "取消二采" : "二采当前视频"}
               >
                 {executionRunning
                   ? <Square size={11} fill="currentColor" />
                   : <Sparkles size={12} />}
+              </button>
+            )}
+            {generatedVideoUrl && !isSecondaryPreview && (
+              <button
+                type="button"
+                className="nodrag node-action generated-video-regenerate-action"
+                onClick={(event) => {
+                  if (event.ctrlKey) onConfigureRegenerateVideo(id);
+                  else void onRegenerateVideo(id);
+                }}
+                title="点击直接重新生成；Ctrl+点击可调整一采参数"
+                aria-label="重新生成该视频"
+              >
+                <RotateCcw size={12} />
+              </button>
+            )}
+            {generatedVideoUrl && generatedVideoSnapshot && (
+              <button
+                type="button"
+                className="nodrag node-action generated-video-locate-prompt-action"
+                onClick={(event) => onLocatePrompt(id, event.ctrlKey ? "generator" : "prompt")}
+                title="点击定位提示词；Ctrl+点击定位关联的视频生成节点"
+                aria-label="定位提示词或视频生成节点"
+              >
+                <LocateFixed size={12} />
               </button>
             )}
             {supportsPreviewColor && (
@@ -3222,7 +3832,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 </button>
                 {previewColorMenuOpen && (
                   <div className="node-preview-color-presets" role="menu" aria-label="视频预览颜色预设">
-                    {VIDEO_PREVIEW_COLOR_PRESETS.map((preset) => (
+                    {previewColorPresets.map((preset) => (
                       <button
                         key={preset.value}
                         type="button"
@@ -3293,7 +3903,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <aside
                   className="generated-video-info-panel"
                   aria-label="视频生成信息"
-                  onWheel={(event) => {
+                  onWheelCapture={(event) => {
                     if (!event.ctrlKey) event.stopPropagation();
                   }}
                 >
@@ -3352,6 +3962,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     <h4>一采</h4>
                     <dl>
                       <dt>分辨率</dt><dd>{generatedVideoSnapshot.primaryResolutionMegapixels.toFixed(1)} MP</dd>
+                      <dt>参考图模式</dt>
+                      <dd>{generatedVideoSnapshot.refImageSizeRecorded === false ? "未记录" : generatedVideoSnapshot.refImageSize}</dd>
                       <dt>视频 / 音频 Steps</dt><dd>{generatedVideoSnapshot.primaryVideoSteps} / {generatedVideoSnapshot.primaryAudioSteps}</dd>
                       <dt>亮度 / 对比度 / 饱和度</dt>
                       <dd>{generatedVideoSnapshot.primaryBrightness.toFixed(2)} / {generatedVideoSnapshot.primaryContrast.toFixed(2)} / {generatedVideoSnapshot.primarySaturation.toFixed(2)}</dd>
@@ -3362,6 +3974,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       <h4>二采</h4>
                       <dl>
                         <dt>分辨率</dt><dd>{generatedVideoSnapshot.secondaryResolutionMegapixels.toFixed(1)} MP</dd>
+                        <dt>参考图模式</dt>
+                        <dd>{generatedVideoSnapshot.refImageSizeRecorded === false ? "未记录" : generatedVideoSnapshot.refImageSize}</dd>
                         <dt>调度 Steps</dt><dd>{generatedVideoSnapshot.secondarySchedulerSteps}</dd>
                         <dt>LoRA</dt>
                         <dd title={generatedVideoSnapshot.secondaryLoraName || "二采 Bypass"}>
@@ -3384,7 +3998,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   )}
                   <section className="generated-video-prompt-info">
                     <div>
-                      <h4>提示词</h4>
+                      <h4 title={generatedVideoPromptTitle || "提示词"}>
+                        提示词{generatedVideoPromptTitle ? ` ${generatedVideoPromptTitle}` : ""}
+                      </h4>
                       <button
                         type="button"
                         disabled={!generatedVideoPrompt}
@@ -3959,23 +4575,119 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             )}
           </div>
           <section className="video-input-group is-text video-text-input-group">
-            <div className="video-input-group-heading">
+            <div className={`video-input-group-heading ${textInputs.length ? "has-text-clear" : ""}`}>
               <FileText size={13} />
               <strong>文本</strong>
               <span>{textInputs.length}</span>
+              {textInputs.length > 0 && (
+                <button
+                  type="button"
+                  className="nodrag video-text-clear-button"
+                  disabled={clearingTexts}
+                  title="清除当前视频节点的全部文本连接"
+                  aria-label={`清除全部 ${textInputs.length} 个文本连接`}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setTextIdsPendingClear(textInputs.map((input) => input.id));
+                  }}
+                >
+                  <Trash2 size={12} aria-hidden="true" />
+                </button>
+              )}
             </div>
-            <ol className="video-input-list" aria-label="文本输入">
+            <ol className="video-input-list" role="listbox" aria-label="文本输入">
               {textInputs.length ? (
                 textInputs.map((input, index) => {
                   const inputText = textFromContent(input.content).trim().replace(/\s+/g, " ");
                   return (
-                    <li key={input.id} className="video-input-item">
-                      <span className="video-input-index">{index + 1}</span>
+                    <li
+                      key={input.id}
+                      data-text-input-id={input.id}
+                      className={`video-input-item is-text-input ${activeTextInputId === input.id ? "is-active-text" : ""} ${draggedTextId === input.id ? "is-dragging" : ""} ${dragOverTextId === input.id ? "is-drop-target" : ""}`}
+                      role="option"
+                      aria-selected={activeTextInputId === input.id}
+                      tabIndex={0}
+                      title={activeTextInputId === input.id ? "当前提示词" : "点击设为当前提示词"}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if ((event.target as HTMLElement).closest("button")) return;
+                        onActivateTextInput(id, input.id);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.target !== event.currentTarget) return;
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        onActivateTextInput(id, input.id);
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className="nodrag video-input-index video-text-order-handle"
+                        aria-label={`调整第 ${index + 1} 个文本的顺序`}
+                        title="按住拖动调整文本顺序"
+                        onPointerDown={(event) => {
+                          if (event.button !== 0) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          event.currentTarget.setPointerCapture(event.pointerId);
+                          setDraggedTextId(input.id);
+                          setDragOverTextId(null);
+                        }}
+                        onPointerMove={(event) => {
+                          if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const targetId = textInputIdAtPoint(event.clientX, event.clientY);
+                          setDragOverTextId(targetId && targetId !== input.id ? targetId : null);
+                          if (targetId && targetId !== input.id) moveTextInputTo(input.id, targetId);
+                        }}
+                        onPointerUp={(event) => {
+                          if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          moveTextInputTo(
+                            input.id,
+                            textInputIdAtPoint(event.clientX, event.clientY),
+                          );
+                          event.currentTarget.releasePointerCapture(event.pointerId);
+                          setDraggedTextId(null);
+                          setDragOverTextId(null);
+                        }}
+                        onPointerCancel={(event) => {
+                          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                            event.currentTarget.releasePointerCapture(event.pointerId);
+                          }
+                          setDraggedTextId(null);
+                          setDragOverTextId(null);
+                        }}
+                        onLostPointerCapture={() => {
+                          setDraggedTextId(null);
+                          setDragOverTextId(null);
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "ArrowUp" && index > 0) {
+                            event.preventDefault();
+                            moveTextInputTo(input.id, textInputs[index - 1].id);
+                          } else if (event.key === "ArrowDown" && index < textInputs.length - 1) {
+                            event.preventDefault();
+                            moveTextInputTo(input.id, textInputs[index + 1].id);
+                          }
+                        }}
+                      >
+                        {index + 1}
+                      </button>
                       <span className="video-input-preview is-text">
                         <FileText size={16} />
                       </span>
                       <span className="video-input-copy">
-                        <strong title={input.title}>{input.title || "未命名文本"}</strong>
+                        <strong title={input.title}>
+                          {input.title || "未命名文本"}
+                          {activePromptVersionLabelFromContent(input.content)
+                            ? ` · ${activePromptVersionLabelFromContent(input.content)}`
+                            : ""}
+                        </strong>
                         <span className="video-text-input-preview" title={inputText}>
                           {inputText || "空文本"}
                         </span>
@@ -4030,13 +4742,36 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <div className={`video-input-groups ${selected ? "nowheel" : ""}`}>
                 {mediaInputGroups.map((group) => (
                   <section key={group.kind} className={`video-input-group is-${group.kind}`}>
-                    <div className="video-input-group-heading">
+                    <div className={`video-input-group-heading ${group.kind === "image" && videoGenerationMode === "reference-to-video" ? "has-ref-image-size" : ""}`}>
                       {group.kind === "image"
                         ? <ImageIcon size={13} />
                         : group.kind === "audio"
                           ? <Music size={13} />
                           : <Film size={13} />}
                       <strong>{group.label}</strong>
+                      {group.kind === "image" && videoGenerationMode === "reference-to-video" && (
+                        <div className="nodrag video-ref-image-size" role="group" aria-label="参考图片尺寸模式">
+                          {REF_IMAGE_SIZE_OPTIONS.map((option) => (
+                            <button
+                              key={option}
+                              type="button"
+                              className={refImageSize === option ? "is-active" : ""}
+                              aria-pressed={refImageSize === option}
+                              onPointerDown={(event) => event.stopPropagation()}
+                              onClick={() => onChange(id, {
+                                content: {
+                                  ...record.content,
+                                  generationRefImageSize: option,
+                                  status: "idle",
+                                  validationMessage: "",
+                                },
+                              })}
+                            >
+                              {option}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                       <span>{group.inputs.length}</span>
                     </div>
                     <ol
@@ -4298,13 +5033,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </>
           ) : (
             <div className="video-node-empty">
-              <div className="video-placeholder"><Clapperboard size={28} /></div>
-              <strong>视频生成节点</strong>
               <span>
                 {videoGenerationMode === "text-to-video"
                   ? (textInputCount ? "文字提示词已连接，可以开始检查" : "从左侧连接文字提示词")
                   : videoGenerationMode === "first-last-frame"
-                    ? "连接一至两张图片，并指定首帧或尾帧"
+                    ? "连接两张图片，并分别指定首帧和尾帧"
+                    : videoGenerationMode === "image-to-video"
+                      ? "连接一张图片作为视频首帧"
+                      : videoGenerationMode === "last-frame-to-video"
+                        ? "连接一张图片作为视频尾帧"
                     : (inputCount
                       ? "已连接文本提示词，可继续连接图片、音频或视频"
                       : "从左侧连接文本提示词、参考图片、音频或视频")}
@@ -4393,7 +5130,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           <span className="node-footer-spacer" />
           <span className="node-footer-detail">
             {(isText || isNote)
-              ? `${textDraft.length.toLocaleString()} 字符`
+              ? isPromptVersionNode
+                ? `${activePromptVersion?.label ?? "v1"} · ${promptVersions.length} 个版本 · ${textDraft.length.toLocaleString()} 字符`
+                : `${textDraft.length.toLocaleString()} 字符`
               : (isImage || isAudioAsset || isVideoAsset)
                 ? originalName
                 : mediaInputs.length
@@ -4539,6 +5278,53 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               >
                 <Trash2 size={14} />
                 {clearingImages ? "正在清空…" : "确认清空"}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+      {textIdsPendingClear && createPortal(
+        <div
+          className="project-dialog-backdrop"
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={() => {
+            if (!clearingTexts) setTextIdsPendingClear(null);
+          }}
+        >
+          <div
+            className="project-dialog project-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby={`clear-texts-title-${id}`}
+            aria-describedby={`clear-texts-description-${id}`}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><Trash2 size={22} /></div>
+            <div>
+              <h2 id={`clear-texts-title-${id}`}>确认清除全部文本连接？</h2>
+              <p id={`clear-texts-description-${id}`}>
+                将从当前视频生成节点断开全部 {textIdsPendingClear.length} 个文本连接。原始文字节点不会被删除，图片、音频和视频连接不受影响。
+              </p>
+            </div>
+            <div className="project-dialog-actions">
+              <button
+                type="button"
+                className="dialog-cancel"
+                autoFocus
+                disabled={clearingTexts}
+                onClick={() => setTextIdsPendingClear(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="dialog-danger"
+                disabled={clearingTexts}
+                onClick={() => void clearConnectedTexts()}
+              >
+                <Trash2 size={14} />
+                {clearingTexts ? "正在清除…" : "确认清除"}
               </button>
             </div>
           </div>
@@ -4751,6 +5537,8 @@ function CanvasWorkspace() {
   const [spacingGuides, setSpacingGuides] = useState<SpacingGuide[]>([]);
   const [canvasContextMenu, setCanvasContextMenu] = useState<CanvasContextMenuState | null>(null);
   const [videoDeletionRequest, setVideoDeletionRequest] = useState<VideoDeletionRequest | null>(null);
+  const [videoRegenerationDraft, setVideoRegenerationDraft] = useState<VideoRegenerationDraft | null>(null);
+  const [secondarySampleDraft, setSecondarySampleDraft] = useState<SecondarySampleDraft | null>(null);
   const saveTimers = useRef(new Map<string, number>());
   const pendingPatches = useRef(new Map<string, NodePatch>());
   const nodesSnapshot = useRef<CanvasFlowNode[]>([]);
@@ -4776,11 +5564,72 @@ function CanvasWorkspace() {
   const makeFlowNodeRef = useRef<((record: NodeRecord, matched?: boolean) => CanvasFlowNode) | null>(null);
   const activeProjectIdRef = useRef<string | null>(null);
   const projectNameInputRef = useRef<HTMLInputElement>(null);
+  const videoRegenerationDialogRef = useRef<HTMLFormElement>(null);
+  const secondarySampleDialogRef = useRef<HTMLFormElement>(null);
   const deleteUndoStack = useRef<DeletedBatch[]>([]);
   const nodeDeletionInProgress = useRef(false);
   const nodeClipboard = useRef<NodeClipboard | null>(null);
   const alignedDragPositions = useRef(new Map<string, { x: number; y: number }>());
   const { setCenter, fitView, screenToFlowPosition, getViewport } = useReactFlow<CanvasFlowNode, Edge>();
+
+  const reserveNodePlacement = useCallback((
+    canvasId: string,
+    requestedPosition: { x: number; y: number } | undefined,
+    width: number,
+    height: number,
+  ) => {
+    const viewportCenter = screenToFlowPosition({
+      x: window.innerWidth / 2,
+      y: window.innerHeight / 2,
+    });
+    const startingPosition = requestedPosition ?? {
+      x: viewportCenter.x - width / 2,
+      y: viewportCenter.y - height / 2,
+    };
+    const position = nonOverlappingNodePosition(
+      startingPosition,
+      width,
+      height,
+      [
+        ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
+        ...incomingPlacementReservations.current,
+      ],
+    );
+    const reservationId = `node-placement:${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    incomingPlacementReservations.current.push({
+      id: reservationId,
+      canvasId,
+      kind: "placement-reservation",
+      title: "",
+      content: {},
+      source: "placement-reservation",
+      requestId: reservationId,
+      ...position,
+      width,
+      height,
+      status: "reserved",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return { reservationId, position };
+  }, [screenToFlowPosition]);
+
+  const finishNodePlacementReservation = useCallback((
+    reservationId: string,
+    createdNodes: NodeRecord[] = [],
+  ) => {
+    incomingPlacementReservations.current = [
+      ...incomingPlacementReservations.current.filter((node) => node.id !== reservationId),
+      ...createdNodes,
+    ];
+    if (!createdNodes.length) return;
+    const createdIds = new Set(createdNodes.map((node) => node.id));
+    window.setTimeout(() => {
+      incomingPlacementReservations.current = incomingPlacementReservations.current
+        .filter((node) => !createdIds.has(node.id));
+    }, 0);
+  }, []);
 
   const savePersistedComfyTasks = useCallback((tasks: PersistedComfyTask[]) => {
     persistedComfyTasks.current = tasks;
@@ -5302,6 +6151,7 @@ function CanvasWorkspace() {
       const validation = await invoke<WorkflowModuleValidation>("validate_workflow_module_source", {
         sourceWorkflowPath: workflowModulePathDraft,
         adapterKind: selectedWorkflowModule?.adapterKind ?? WORKFLOW_PACKAGE_ENGINE,
+        variant: workflowModuleVariantDraft,
         bindings: workflowBindingsFromDraft(workflowModuleBindingsDraft),
       });
       setWorkflowModuleValidation(validation);
@@ -5312,7 +6162,7 @@ function CanvasWorkspace() {
     } finally {
       setWorkflowModulesBusy(false);
     }
-  }, [reportError, selectedWorkflowModule, workflowModuleBindingsDraft, workflowModulePathDraft]);
+  }, [reportError, selectedWorkflowModule, workflowModuleBindingsDraft, workflowModulePathDraft, workflowModuleVariantDraft]);
 
   const saveWorkflowModuleDraft = useCallback(async (overwrite: boolean) => {
     if (overwrite && !selectedWorkflowModule) return;
@@ -5365,7 +6215,7 @@ function CanvasWorkspace() {
 
   const setDefaultWorkflowModule = useCallback((module: WorkflowModuleRecord) => {
     setWorkflowModuleDefaults((current) => ({ ...current, [workflowSlotForModule(module)]: module.id }));
-    if (module.capability === "video-generation" && module.variant === "reference-to-video") {
+    if (module.capability === "video-generation" && module.variant !== "text-to-video") {
       setH3ModelParameters({
         primaryVideoSteps: module.defaults.primaryVideoSteps,
         primaryAudioSteps: module.defaults.primaryAudioSteps,
@@ -5827,6 +6677,7 @@ function CanvasWorkspace() {
     const recordsById = new Map(contentNodes.map((node) => [node.id, node.data.record]));
     const mediaKindsByTarget = new Map<string, string[]>();
     const textInputCountByTarget = new Map<string, number>();
+    const textInputIdsByTarget = new Map<string, string[]>();
 
     for (const edge of edges) {
       const source = recordsById.get(edge.source);
@@ -5836,6 +6687,10 @@ function CanvasWorkspace() {
           edge.target,
           (textInputCountByTarget.get(edge.target) ?? 0) + 1,
         );
+        textInputIdsByTarget.set(edge.target, [
+          ...(textInputIdsByTarget.get(edge.target) ?? []),
+          source.id,
+        ]);
         continue;
       }
       if (!["image", "audio", "video"].includes(source.kind)) continue;
@@ -5856,21 +6711,74 @@ function CanvasWorkspace() {
       const storedManualHeight = typeof record.content.manualHeight === "number"
         ? record.content.manualHeight
         : null;
-      const manualHeight = Math.max(180, storedManualHeight ?? record.height);
-      const desiredHeight = Math.max(
-        manualHeight,
-        videoGenerationAutoHeight(
-          mediaKindsByTarget.get(node.id) ?? [],
-          textInputCountByTarget.get(node.id) ?? 0,
-          record.width,
-        ),
+      const currentTextInputCount = textInputCountByTarget.get(node.id) ?? 0;
+      const storedLayoutTextInputCount = typeof record.content.layoutTextInputCount === "number"
+        && Number.isFinite(record.content.layoutTextInputCount)
+        ? Math.max(0, Math.floor(record.content.layoutTextInputCount))
+        : null;
+      const mediaKinds = mediaKindsByTarget.get(node.id) ?? [];
+      const fullContentHeight = videoGenerationAutoHeight(
+        mediaKinds,
+        currentTextInputCount,
+        record.width,
       );
-      if (Math.abs(record.height - desiredHeight) < 0.5 && storedManualHeight !== null) continue;
+      let desiredHeight = Math.min(
+        fullContentHeight,
+        Math.max(VIDEO_NODE_BASE_HEIGHT, record.height),
+      );
+      if (storedLayoutTextInputCount === null) {
+        const currentTextOnlyHeight = videoGenerationAutoHeight(
+          [],
+          currentTextInputCount,
+          record.width,
+        );
+        desiredHeight = Math.min(
+          fullContentHeight,
+          Math.max(desiredHeight, currentTextOnlyHeight),
+        );
+      } else if (storedLayoutTextInputCount !== currentTextInputCount) {
+        const previousContentHeight = videoGenerationAutoHeight(
+          mediaKinds,
+          storedLayoutTextInputCount,
+          record.width,
+        );
+        desiredHeight = Math.min(
+          fullContentHeight,
+          Math.max(
+            VIDEO_NODE_BASE_HEIGHT,
+            record.height + fullContentHeight - previousContentHeight,
+          ),
+        );
+      }
+      const connectedTextRecords = (textInputIdsByTarget.get(node.id) ?? [])
+        .map((inputId) => recordsById.get(inputId))
+        .filter((input): input is NodeRecord => input?.kind === "text");
+      const connectedTextIds = orderedNodeRecordsFromContent(
+        record.content,
+        "textInputOrder",
+        connectedTextRecords,
+      ).map((input) => input.id);
+      const storedActiveTextId = typeof record.content.activeTextInputId === "string"
+        ? record.content.activeTextInputId
+        : "";
+      const activeTextInputId = connectedTextIds.includes(storedActiveTextId)
+        ? storedActiveTextId
+        : connectedTextIds[0] ?? "";
+      if (
+        Math.abs(record.height - desiredHeight) < 0.5
+        && storedManualHeight !== null
+        && Math.abs(storedManualHeight - desiredHeight) < 0.5
+        && storedActiveTextId === activeTextInputId
+        && storedLayoutTextInputCount === currentTextInputCount
+      ) continue;
       changeNode(node.id, {
         height: desiredHeight,
-        ...(storedManualHeight === null
-          ? { content: { ...record.content, manualHeight } }
-          : {}),
+        content: {
+          ...record.content,
+          manualHeight: desiredHeight,
+          activeTextInputId,
+          layoutTextInputCount: currentTextInputCount,
+        },
       });
     }
   }, [changeNode, contentNodes, edges]);
@@ -6179,7 +7087,7 @@ function CanvasWorkspace() {
       return;
     }
     const module = selectedWorkflowModule?.capability === "video-generation"
-      && selectedWorkflowModule.variant === "reference-to-video"
+      && selectedWorkflowModule.variant !== "text-to-video"
       && !selectedWorkflowModule.deletedAt
       ? selectedWorkflowModule
       : workflowModules.find((candidate) => (
@@ -6187,7 +7095,7 @@ function CanvasWorkspace() {
         && candidate.id === workflowModuleDefaults["video-generation:reference-to-video"]
       ));
     if (!module) {
-      setNotice("没有可保存模型参数的多参生视频方案");
+      setNotice("没有可保存模型参数的视频生成方案");
       return;
     }
     setWorkflowModulesBusy(true);
@@ -6333,11 +7241,18 @@ function CanvasWorkspace() {
       .filter((record): record is NodeRecord => Boolean(record));
     const orderedIds = new Set(orderedMedia.map((record) => record.id));
     orderedMedia.push(...mediaInputs.filter((record) => !orderedIds.has(record.id)));
+    const mode = videoGenerationModeFromContent(generator.content);
     const assetPaths = (kind: string) => orderedMedia
       .filter((record) => record.kind === kind)
       .map((record) => typeof record.content.assetPath === "string" ? record.content.assetPath : "")
       .filter(Boolean);
-    const mode = videoGenerationModeFromContent(generator.content);
+    const imageAssets = orderedMedia
+      .filter((record) => record.kind === "image")
+      .map((record, index) => ({
+        path: typeof record.content.assetPath === "string" ? record.content.assetPath : "",
+        role: frameRoleFromContent(generator.content, record.id, index),
+      }))
+      .filter((asset) => Boolean(asset.path));
     const capability = workflowCapabilityForVideoMode(mode);
     const slot = workflowSlotForVideoMode(mode);
     const configuredModuleId = typeof generator.content.workflowModuleId === "string"
@@ -6355,10 +7270,17 @@ function CanvasWorkspace() {
       loraName: h3LoraNameFromContent(generator.content),
       loraStrength: h3LoraStrengthFromContent(generator.content),
     };
+    const activeTextInput = activeTextInputFromContent(generator.content, textInputs);
+    const activePromptVersion = activeTextInput
+      ? activePromptVersionFromContent(activeTextInput.content)
+      : null;
     return {
-      prompt: textInputs.length === 1 ? textFromContent(textInputs[0].content) : "",
-      promptNodeId: textInputs.length === 1 ? textInputs[0].id : "",
-      promptNodeIdSource: textInputs.length === 1 ? "captured" : "",
+      prompt: activeTextInput ? textFromContent(activeTextInput.content) : "",
+      promptNodeId: activeTextInput?.id ?? "",
+      promptNodeTitle: activeTextInput?.title ?? "",
+      promptNodeIdSource: activeTextInput ? "captured" : "",
+      promptVersionId: activePromptVersion?.id ?? "",
+      promptVersionLabel: activePromptVersion?.label ?? "",
       durationSeconds: videoDurationFromContent(generator.content),
       aspectRatio: videoAspectRatioFromContent(generator.content),
       primaryResolutionMegapixels: primaryVideoResolutionFromContent(generator.content),
@@ -6387,7 +7309,12 @@ function CanvasWorkspace() {
       secondaryLoraStrength: h3SecondaryLoraStrengthFromContent(generator.content),
       secondaryLoraStrengthRecorded: true,
       secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(generator.content),
-      imagePaths: assetPaths("image"),
+      refImageSize: refImageSizeFromContent(generator.content),
+      refImageSizeRecorded: true,
+      imagePaths: imageAssets.map((asset) => asset.path),
+      imageRoles: mode === "first-last-frame"
+        ? imageAssets.map((asset) => asset.role)
+        : [],
       audioPaths: assetPaths("audio"),
       videoPaths: assetPaths("video"),
       workflowModuleId: workflowModule?.id ?? "",
@@ -6413,24 +7340,26 @@ function CanvasWorkspace() {
     snapshot,
     secondary,
     sourceGeneratorId,
+    edgeSourceId = source.id,
+    placeBelowSource = false,
   }: {
     source: NodeRecord;
     clientId: string;
     snapshot: GenerationSnapshot;
     secondary: boolean;
     sourceGeneratorId: string;
+    edgeSourceId?: string;
+    placeBelowSource?: boolean;
   }) => {
     const previewWidth = generatedVideoPreviewWidthForRatio(videoAspectRatioValue(snapshot.aspectRatio));
     const previewHeight = generatedPreviewHeightForAspectRatio(snapshot.aspectRatio);
-    const position = generatedPreviewPosition(
-      source,
-      [
-        ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
-        ...incomingPlacementReservations.current,
-      ],
-      previewWidth,
-      previewHeight,
-    );
+    const placementRecords = [
+      ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
+      ...incomingPlacementReservations.current,
+    ];
+    const position = placeBelowSource
+      ? generatedPreviewPositionBelow(source, placementRecords, previewWidth, previewHeight)
+      : generatedPreviewPosition(source, placementRecords, previewWidth, previewHeight);
     const reservationId = `generation-placeholder:${clientId}`;
     const placeholderContent: JsonObject = {
       generationPlaceholder: true,
@@ -6483,7 +7412,7 @@ function CanvasWorkspace() {
       const edgeRecord = await invoke<EdgeRecord>("create_edge", {
         input: {
           canvasId: source.canvasId,
-          sourceNodeId: source.id,
+          sourceNodeId: edgeSourceId,
           targetNodeId: result.node.id,
           kind: secondary ? "secondary-output" : "output",
           metadata: {
@@ -6597,22 +7526,26 @@ function CanvasWorkspace() {
     }
   }, [flushNodePatches, setNodes]);
 
-  const executeVideoNode = useCallback(async (targetId: string) => {
+  const executeVideoNode = useCallback(async (
+    targetId: string,
+    regeneration?: VideoRegenerationRequest,
+  ) => {
     const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
     if (!targetNode) {
       setNotice("无法执行：找不到视频生成节点");
       return;
     }
     const target = recordAtCurrentFlowPosition(targetNode);
-    const requestedSeedMode = seedModeFromContent(target.content);
-    const requestedFixedSeed = fixedSeedFromContent(target.content);
+    const requestedSeedMode = regeneration ? "fixed" : seedModeFromContent(target.content);
+    const requestedFixedSeed = regeneration?.seed ?? fixedSeedFromContent(target.content);
     const activeClients = runningComfyClients.current.get(targetId);
     if (target.content.status === "cancelling") {
       setNotice("当前任务正在取消，请稍后再提交");
       return;
     }
     if (
-      requestedSeedMode === "fixed"
+      !regeneration
+      && requestedSeedMode === "fixed"
       && (generatedSeedsFromContent(target.content).includes(requestedFixedSeed)
         || Boolean(activeClients?.size))
     ) {
@@ -6625,17 +7558,26 @@ function CanvasWorkspace() {
       setNotice(message);
       return;
     }
+    const snapshot = regeneration?.snapshot ?? generationSnapshotForGenerator(targetId);
+    if (!snapshot?.prompt.trim()) {
+      setNotice("无法执行：找不到已保存的提示词与素材参数");
+      return;
+    }
     const mode = videoGenerationModeFromContent(target.content);
     const capability = workflowCapabilityForVideoMode(mode);
     const slot = workflowSlotForVideoMode(mode);
-    const configuredModuleId = typeof target.content.workflowModuleId === "string"
-      ? target.content.workflowModuleId
-      : workflowModuleDefaults[slot] ?? "";
+    const configuredModuleId = regeneration
+      ? snapshot.workflowModuleId
+      : typeof target.content.workflowModuleId === "string"
+        ? target.content.workflowModuleId
+        : workflowModuleDefaults[slot] ?? "";
     const configuredModule = workflowModules.find((module) => (
       !module.deletedAt
-      && module.capability === capability
-      && module.variant === mode
       && module.id === configuredModuleId
+      && (regeneration || (
+        module.capability === capability
+        && module.variant === mode
+      ))
     ));
     if (!configuredModule) {
       const label = WORKFLOW_VIDEO_VARIANTS.find((item) => item.value === mode)?.label ?? mode;
@@ -6649,11 +7591,49 @@ function CanvasWorkspace() {
       return;
     }
 
-    const snapshot = generationSnapshotForGenerator(targetId);
-    if (!snapshot?.prompt.trim()) {
-      setNotice("无法执行：找不到已保存的提示词与素材参数");
-      return;
+    if (configuredModule.variant === "first-last-frame") {
+      const mediaError = snapshot.audioPaths.length || snapshot.videoPaths.length
+        ? "首尾帧模式不能包含音频或视频参考"
+        : snapshot.imagePaths.length !== 2
+          ? `首尾帧模式必须提供两张有效图片（首帧和尾帧），当前为 ${snapshot.imagePaths.length} 张`
+          : null;
+      if (mediaError) {
+        changeNode(targetId, {
+          content: { ...target.content, status: "invalid", validationMessage: mediaError },
+        });
+        setNotice(`无法执行：${mediaError}`);
+        return;
+      }
     }
+    if (configuredModule.variant === "image-to-video") {
+      const mediaError = snapshot.audioPaths.length || snapshot.videoPaths.length
+        ? "图生视频模式不能包含音频或视频参考"
+        : snapshot.imagePaths.length !== 1
+          ? `图生视频模式必须提供一张有效的首帧图片，当前为 ${snapshot.imagePaths.length} 张`
+          : null;
+      if (mediaError) {
+        changeNode(targetId, {
+          content: { ...target.content, status: "invalid", validationMessage: mediaError },
+        });
+        setNotice(`无法执行：${mediaError}`);
+        return;
+      }
+    }
+    if (configuredModule.variant === "last-frame-to-video") {
+      const mediaError = snapshot.audioPaths.length || snapshot.videoPaths.length
+        ? "尾帧生视频模式不能包含音频或视频参考"
+        : snapshot.imagePaths.length !== 1
+          ? `尾帧生视频模式必须提供一张有效的尾帧图片，当前为 ${snapshot.imagePaths.length} 张`
+          : null;
+      if (mediaError) {
+        changeNode(targetId, {
+          content: { ...target.content, status: "invalid", validationMessage: mediaError },
+        });
+        setNotice(`无法执行：${mediaError}`);
+        return;
+      }
+    }
+
     if (!snapshot.loraBypassed && !snapshot.loraName) {
       const message = "请先选择一采 LoRA";
       changeNode(targetId, {
@@ -6718,11 +7698,13 @@ function CanvasWorkspace() {
     let placeholder: NodeRecord;
     try {
       placeholder = await createGenerationPlaceholder({
-        source: target,
+        source: regeneration?.sourcePreview ?? target,
         clientId,
         snapshot,
         secondary: false,
         sourceGeneratorId: targetId,
+        edgeSourceId: targetId,
+        placeBelowSource: Boolean(regeneration),
       });
     } catch (error) {
       reportError(error);
@@ -6789,8 +7771,8 @@ function CanvasWorkspace() {
           inputRootPath: comfyInputRootRef.current,
           clientId,
           prompt: snapshot.prompt,
-          seedMode: seedModeFromContent(target.content),
-          seed: fixedSeedFromContent(target.content),
+          seedMode: requestedSeedMode,
+          seed: requestedFixedSeed,
           durationSeconds: snapshot.durationSeconds,
           aspectRatio: snapshot.aspectRatio,
           primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
@@ -6812,7 +7794,9 @@ function CanvasWorkspace() {
           secondaryLoraName: snapshot.secondaryLoraName,
           secondaryLoraStrength: snapshot.secondaryLoraStrength,
           secondaryLoraBypassed: snapshot.secondaryLoraBypassed,
+          refImageSize: snapshot.refImageSize,
           imagePaths: snapshot.imagePaths,
+          imageRoles: snapshot.imageRoles,
           audioPaths: snapshot.audioPaths,
           videoPaths: snapshot.videoPaths,
           secondarySource: null,
@@ -6863,12 +7847,14 @@ function CanvasWorkspace() {
               continue;
             }
           }
-          const position = generatedPreviewPosition(
-            target,
-            placementRecords,
-            previewWidth,
-            previewHeight,
-          );
+          const position = regeneration
+            ? generatedPreviewPositionBelow(
+              regeneration.sourcePreview,
+              placementRecords,
+              previewWidth,
+              previewHeight,
+            )
+            : generatedPreviewPosition(target, placementRecords, previewWidth, previewHeight);
           const reservationId = `generated-preview:${clientId}:${index}`;
           const reservedRecord: NodeRecord = {
             ...target,
@@ -7031,7 +8017,289 @@ function CanvasWorkspace() {
     }
   }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
 
-  const executeSecondarySample = useCallback(async (previewId: string) => {
+  const regenerateGeneratedVideo = useCallback(async (
+    previewId: string,
+    snapshotOverride?: GenerationSnapshot,
+    seedOverride?: string,
+  ) => {
+    const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
+    if (!previewNode || previewNode.data.record.kind !== "generated-video") {
+      setNotice("无法重新生成：找不到视频预览节点");
+      return;
+    }
+    const sourcePreview = recordAtCurrentFlowPosition(previewNode);
+    if (typeof sourcePreview.content.sourcePreviewId === "string") {
+      setNotice("二采视频不支持重新生成");
+      return;
+    }
+    if (sourcePreview.content.generationPlaceholder === true) {
+      setNotice("当前视频仍在生成中");
+      return;
+    }
+    const storedSnapshot = generationSnapshotFromContent(sourcePreview.content);
+    const snapshot = snapshotOverride ?? storedSnapshot;
+    const sourceGeneratorId = typeof sourcePreview.content.sourceGeneratorId === "string"
+      ? sourcePreview.content.sourceGeneratorId
+      : "";
+    const sourceGenerator = nodesSnapshot.current.find(
+      (node) => node.id === sourceGeneratorId && node.data.record.kind === "video-generation",
+    )?.data.record;
+    if (!snapshot || !sourceGenerator) {
+      setNotice("无法重新生成：该视频缺少历史参数快照或原视频生成节点");
+      return;
+    }
+
+    let seed = seedOverride;
+    if (!seed) {
+      const excludedSeeds = new Set([
+        ...generatedSeedsFromContent(sourceGenerator.content),
+        typeof sourcePreview.content.seed === "string" ? sourcePreview.content.seed : "",
+      ]);
+      seed = randomFixedSeed();
+      while (excludedSeeds.has(seed)) seed = randomFixedSeed();
+    }
+    await executeVideoNode(sourceGeneratorId, { sourcePreview, snapshot, seed });
+  }, [executeVideoNode]);
+
+  const configureGeneratedVideoRegeneration = useCallback((previewId: string) => {
+    const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
+    if (!previewNode || previewNode.data.record.kind !== "generated-video") {
+      setNotice("无法设置重新生成参数：找不到视频预览节点");
+      return;
+    }
+    const preview = previewNode.data.record;
+    if (typeof preview.content.sourcePreviewId === "string") {
+      setNotice("二采视频不支持重新生成");
+      return;
+    }
+    const snapshot = generationSnapshotFromContent(preview.content);
+    if (!snapshot) {
+      setNotice("无法设置重新生成参数：该视频没有完整的历史参数快照");
+      return;
+    }
+    const seed = typeof preview.content.seed === "string" ? preview.content.seed.trim() : "";
+    if (!/^\d+$/.test(seed)) {
+      setNotice("无法设置重新生成参数：该视频没有有效的历史 Seed");
+      return;
+    }
+    setVideoRegenerationDraft({
+      previewId,
+      previewTitle: preview.title || "视频预览",
+      originalSnapshot: snapshot,
+      seed,
+      primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
+      loraStrength: snapshot.loraStrength,
+      primaryVideoSteps: snapshot.primaryVideoSteps,
+      primaryAudioSteps: snapshot.primaryAudioSteps,
+      primaryBrightness: snapshot.primaryBrightness,
+      primaryContrast: snapshot.primaryContrast,
+      primarySaturation: snapshot.primarySaturation,
+      refImageSize: snapshot.refImageSize,
+    });
+  }, []);
+
+  const adjustVideoRegenerationNumber = useCallback((
+    field: VideoRegenerationNumericField,
+    deltaY: number,
+    min: number,
+    max: number,
+    step: number,
+  ) => {
+    if (!deltaY) return;
+    setVideoRegenerationDraft((current) => {
+      if (!current) return current;
+      const direction = deltaY < 0 ? 1 : -1;
+      const next = Math.min(max, Math.max(min, current[field] + direction * step));
+      const precision = step.toString().split(".")[1]?.length ?? 0;
+      return { ...current, [field]: Number(next.toFixed(precision)) };
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!videoRegenerationDraft) return;
+    const handleRegenerationDialogWheel = (event: WheelEvent) => {
+      const dialog = videoRegenerationDialogRef.current;
+      const target = event.target;
+      if (!dialog || !(target instanceof HTMLElement) || !dialog.contains(target)) return;
+      event.stopImmediatePropagation();
+      const input = target.closest<HTMLInputElement>("input[data-regeneration-field]");
+      if (!input) return;
+      event.preventDefault();
+      const field = input.dataset.regenerationField as VideoRegenerationNumericField | undefined;
+      if (!field || !(field in VIDEO_REGENERATION_NUMBER_CONFIG)) return;
+      const { min, max, step } = VIDEO_REGENERATION_NUMBER_CONFIG[field];
+      adjustVideoRegenerationNumber(field, event.deltaY, min, max, step);
+    };
+    window.addEventListener("wheel", handleRegenerationDialogWheel, {
+      capture: true,
+      passive: false,
+    });
+    return () => window.removeEventListener("wheel", handleRegenerationDialogWheel, true);
+  }, [adjustVideoRegenerationNumber, videoRegenerationDraft]);
+
+  const submitConfiguredVideoRegeneration = useCallback(async () => {
+    const draft = videoRegenerationDraft;
+    if (!draft) return;
+    if (!/^\d+$/.test(draft.seed) || BigInt(draft.seed) > 18446744073709551615n) {
+      setNotice("Seed 必须是 0 到 18446744073709551615 之间的整数");
+      return;
+    }
+    if (
+      !Number.isFinite(draft.primaryResolutionMegapixels)
+      || draft.primaryResolutionMegapixels < 0.2
+      || draft.primaryResolutionMegapixels > 2
+    ) {
+      setNotice("一采分辨率必须在 0.2 到 2.0 MP 之间");
+      return;
+    }
+    if (!Number.isFinite(draft.loraStrength) || draft.loraStrength < 0 || draft.loraStrength > 2) {
+      setNotice("一采 LoRA 强度必须在 0.00 到 2.00 之间");
+      return;
+    }
+    if (!Number.isInteger(draft.primaryVideoSteps) || draft.primaryVideoSteps < 1 || draft.primaryVideoSteps > 1000) {
+      setNotice("一采 Video Steps 必须是 1 到 1000 的整数");
+      return;
+    }
+    if (
+      !Number.isInteger(draft.primaryAudioSteps)
+      || draft.primaryAudioSteps < draft.primaryVideoSteps
+      || draft.primaryAudioSteps > 1000
+    ) {
+      setNotice("一采 Audio Steps 必须是整数，且不能小于 Video Steps");
+      return;
+    }
+    const invalidColorValue = [
+      draft.primaryBrightness,
+      draft.primaryContrast,
+      draft.primarySaturation,
+    ].some((value) => !Number.isFinite(value) || value < 0 || value > 3);
+    if (invalidColorValue) {
+      setNotice("亮度、对比度和饱和度必须在 0.00 到 3.00 之间");
+      return;
+    }
+    const snapshot: GenerationSnapshot = {
+      ...draft.originalSnapshot,
+      primaryResolutionMegapixels: Math.round(draft.primaryResolutionMegapixels * 10) / 10,
+      loraStrength: Math.round(draft.loraStrength * 100) / 100,
+      loraStrengthRecorded: true,
+      primaryVideoSteps: draft.primaryVideoSteps,
+      primaryAudioSteps: draft.primaryAudioSteps,
+      primaryBrightness: Math.round(draft.primaryBrightness * 100) / 100,
+      primaryContrast: Math.round(draft.primaryContrast * 100) / 100,
+      primarySaturation: Math.round(draft.primarySaturation * 100) / 100,
+      refImageSize: draft.refImageSize,
+      refImageSizeRecorded: true,
+    };
+    setVideoRegenerationDraft(null);
+    await regenerateGeneratedVideo(draft.previewId, snapshot, draft.seed);
+  }, [regenerateGeneratedVideo, videoRegenerationDraft]);
+
+  const configureSecondarySample = useCallback((previewId: string) => {
+    const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
+    if (!previewNode || previewNode.data.record.kind !== "generated-video") {
+      setNotice("无法设置二采参数：找不到视频预览节点");
+      return;
+    }
+    const preview = previewNode.data.record;
+    if (preview.content.generationPlaceholder === true) {
+      setNotice("当前视频仍在生成中");
+      return;
+    }
+    const sourceGeneratorId = typeof preview.content.sourceGeneratorId === "string"
+      ? preview.content.sourceGeneratorId
+      : "";
+    const sourceGenerator = nodesSnapshot.current.find(
+      (node) => node.id === sourceGeneratorId,
+    )?.data.record;
+    const storedSnapshot = generationSnapshotFromContent(preview.content);
+    const fallbackSnapshot = sourceGeneratorId
+      ? generationSnapshotForGenerator(sourceGeneratorId)
+      : null;
+    const baseSnapshot = storedSnapshot ?? fallbackSnapshot;
+    if (!baseSnapshot?.prompt.trim()) {
+      setNotice("无法设置二采参数：该视频没有完整的历史参数快照");
+      return;
+    }
+    const workflowModule = workflowModules.find((module) => (
+      !module.deletedAt && module.id === baseSnapshot.workflowModuleId
+    ));
+    if (!workflowModule) {
+      setNotice("无法设置二采参数：该视频使用的工作流方案已缺失");
+      return;
+    }
+    const seed = typeof preview.content.seed === "string" ? preview.content.seed.trim() : "";
+    if (!/^\d+$/.test(seed)) {
+      setNotice("无法设置二采参数：该视频没有有效的历史 Seed");
+      return;
+    }
+    setSecondarySampleDraft({
+      previewId,
+      previewTitle: preview.title || "视频预览",
+      seed,
+      secondaryResolutionMegapixels: sourceGenerator?.kind === "video-generation"
+        ? secondaryVideoResolutionFromContent(sourceGenerator.content)
+        : baseSnapshot.secondaryResolutionMegapixels,
+      secondarySchedulerSteps: sourceGenerator?.kind === "video-generation"
+        ? secondarySchedulerStepsFromContent(
+          sourceGenerator.content,
+          workflowModule.defaults.secondarySchedulerSteps,
+        )
+        : baseSnapshot.secondarySchedulerSteps,
+      secondaryLoraStrength: sourceGenerator?.kind === "video-generation"
+        ? h3SecondaryLoraStrengthFromContent(sourceGenerator.content)
+        : baseSnapshot.secondaryLoraStrength,
+      secondaryLoraBypassed: true,
+      secondaryBrightness: workflowModule.defaults.secondaryBrightness,
+      secondaryContrast: workflowModule.defaults.secondaryContrast,
+      secondarySaturation: workflowModule.defaults.secondarySaturation,
+      refImageSize: baseSnapshot.refImageSize,
+    });
+  }, [generationSnapshotForGenerator, workflowModules]);
+
+  const adjustSecondarySampleNumber = useCallback((
+    field: SecondarySampleNumericField,
+    deltaY: number,
+    min: number,
+    max: number,
+    step: number,
+  ) => {
+    if (!deltaY) return;
+    setSecondarySampleDraft((current) => {
+      if (!current) return current;
+      const direction = deltaY < 0 ? 1 : -1;
+      const next = Math.min(max, Math.max(min, current[field] + direction * step));
+      const precision = step.toString().split(".")[1]?.length ?? 0;
+      return { ...current, [field]: Number(next.toFixed(precision)) };
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!secondarySampleDraft) return;
+    const handleSecondarySampleDialogWheel = (event: WheelEvent) => {
+      const dialog = secondarySampleDialogRef.current;
+      const target = event.target;
+      if (!dialog || !(target instanceof HTMLElement) || !dialog.contains(target)) return;
+      event.stopImmediatePropagation();
+      const input = target.closest<HTMLInputElement>("input[data-secondary-sample-field]");
+      if (!input) return;
+      event.preventDefault();
+      const field = input.dataset.secondarySampleField as SecondarySampleNumericField | undefined;
+      if (!field || !(field in SECONDARY_SAMPLE_NUMBER_CONFIG)) return;
+      const { min, max, step } = SECONDARY_SAMPLE_NUMBER_CONFIG[field];
+      adjustSecondarySampleNumber(field, event.deltaY, min, max, step);
+    };
+    window.addEventListener("wheel", handleSecondarySampleDialogWheel, {
+      capture: true,
+      passive: false,
+    });
+    return () => window.removeEventListener("wheel", handleSecondarySampleDialogWheel, true);
+  }, [adjustSecondarySampleNumber, secondarySampleDraft]);
+
+  const executeSecondarySample = useCallback(async (
+    previewId: string,
+    overrides?: SecondarySampleOverrides,
+    seedOverride?: string,
+  ) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
     if (!previewNode || previewNode.data.record.kind !== "generated-video") {
       setNotice("无法二采：找不到视频预览节点");
@@ -7051,6 +8319,7 @@ function CanvasWorkspace() {
       : null;
     const baseSnapshot = storedSnapshot ?? fallbackSnapshot;
     const previewSeed = typeof preview.content.seed === "string" ? preview.content.seed : "";
+    const requestedSeed = seedOverride ?? previewSeed;
     if (!secondarySource) {
       setNotice("无法二采：当前预览缺少远程视频文件信息");
       return;
@@ -7059,7 +8328,7 @@ function CanvasWorkspace() {
       setNotice("无法二采：找不到该视频生成时使用的提示词与参考素材参数");
       return;
     }
-    if (!previewSeed) {
+    if (!requestedSeed) {
       setNotice("无法二采：当前预览缺少生成 seed");
       return;
     }
@@ -7101,6 +8370,8 @@ function CanvasWorkspace() {
       secondaryLoraBypassed: sourceGenerator?.kind === "video-generation"
         ? h3SecondaryLoraBypassedFromContent(sourceGenerator.content)
         : baseSnapshot.secondaryLoraBypassed,
+      ...overrides,
+      ...(overrides ? { refImageSizeRecorded: true } : {}),
     };
     if (!snapshot.secondaryLoraBypassed && !snapshot.secondaryLoraName) {
       const message = "请先选择二采 LoRA";
@@ -7251,7 +8522,7 @@ function CanvasWorkspace() {
           clientId,
           prompt: snapshot.prompt,
           seedMode: "fixed",
-          seed: previewSeed,
+          seed: requestedSeed,
           durationSeconds: snapshot.durationSeconds,
           aspectRatio: snapshot.aspectRatio,
           primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
@@ -7273,7 +8544,9 @@ function CanvasWorkspace() {
           secondaryLoraName: snapshot.secondaryLoraName,
           secondaryLoraStrength: snapshot.secondaryLoraStrength,
           secondaryLoraBypassed: snapshot.secondaryLoraBypassed,
+          refImageSize: snapshot.refImageSize,
           imagePaths: snapshot.imagePaths,
+          imageRoles: snapshot.imageRoles,
           audioPaths: snapshot.audioPaths,
           videoPaths: snapshot.videoPaths,
           secondarySource,
@@ -7430,6 +8703,60 @@ function CanvasWorkspace() {
     }
   }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModules]);
 
+  const submitConfiguredSecondarySample = useCallback(async () => {
+    const draft = secondarySampleDraft;
+    if (!draft) return;
+    if (!/^\d+$/.test(draft.seed) || BigInt(draft.seed) > 18446744073709551615n) {
+      setNotice("Seed 必须是 0 到 18446744073709551615 之间的整数");
+      return;
+    }
+    if (
+      !Number.isFinite(draft.secondaryResolutionMegapixels)
+      || draft.secondaryResolutionMegapixels < 0.2
+      || draft.secondaryResolutionMegapixels > 2
+    ) {
+      setNotice("二采分辨率必须在 0.2 到 2.0 MP 之间");
+      return;
+    }
+    if (
+      !Number.isFinite(draft.secondaryLoraStrength)
+      || draft.secondaryLoraStrength < 0
+      || draft.secondaryLoraStrength > 2
+    ) {
+      setNotice("二采 LoRA 强度必须在 0.00 到 2.00 之间");
+      return;
+    }
+    if (
+      !Number.isInteger(draft.secondarySchedulerSteps)
+      || draft.secondarySchedulerSteps < 1
+      || draft.secondarySchedulerSteps > 10000
+    ) {
+      setNotice("二采 Scheduler Steps 必须是 1 到 10000 的整数");
+      return;
+    }
+    const invalidColorValue = [
+      draft.secondaryBrightness,
+      draft.secondaryContrast,
+      draft.secondarySaturation,
+    ].some((value) => !Number.isFinite(value) || value < 0 || value > 3);
+    if (invalidColorValue) {
+      setNotice("二采亮度、对比度和饱和度必须在 0.00 到 3.00 之间");
+      return;
+    }
+    const overrides: SecondarySampleOverrides = {
+      secondaryResolutionMegapixels: Math.round(draft.secondaryResolutionMegapixels * 10) / 10,
+      secondaryLoraStrength: Math.round(draft.secondaryLoraStrength * 100) / 100,
+      secondarySchedulerSteps: draft.secondarySchedulerSteps,
+      secondaryBrightness: Math.round(draft.secondaryBrightness * 100) / 100,
+      secondaryContrast: Math.round(draft.secondaryContrast * 100) / 100,
+      secondarySaturation: Math.round(draft.secondarySaturation * 100) / 100,
+      secondaryLoraBypassed: draft.secondaryLoraBypassed,
+      refImageSize: draft.refImageSize,
+    };
+    setSecondarySampleDraft(null);
+    await executeSecondarySample(draft.previewId, overrides, draft.seed);
+  }, [executeSecondarySample, secondarySampleDraft]);
+
   const cancelVideoExecution = useCallback(async (targetId: string) => {
     const clientIds = [...(runningComfyClients.current.get(targetId) ?? [])];
     const clientId = clientIds.find(
@@ -7538,6 +8865,9 @@ function CanvasWorkspace() {
         const mediaInputOrder = Array.isArray(target.content.mediaInputOrder)
           ? target.content.mediaInputOrder.filter((inputId) => inputId !== inputEdge.source)
           : [];
+        const textInputOrder = Array.isArray(target.content.textInputOrder)
+          ? target.content.textInputOrder.filter((inputId) => inputId !== inputEdge.source)
+          : [];
         const frameRoles = target.content.frameRoles
           && typeof target.content.frameRoles === "object"
           && !Array.isArray(target.content.frameRoles)
@@ -7548,6 +8878,7 @@ function CanvasWorkspace() {
           content: {
             ...target.content,
             mediaInputOrder,
+            textInputOrder,
             frameRoles,
             status: "idle",
             validationMessage: "",
@@ -7570,6 +8901,108 @@ function CanvasWorkspace() {
     }
     await disconnectEdge(inputEdge.id, "输入已从视频节点移除");
   }, [disconnectEdge]);
+
+  const activateTextInput = useCallback((targetId: string, sourceId: string) => {
+    const target = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record;
+    const source = nodesSnapshot.current.find((node) => node.id === sourceId)?.data.record;
+    const isConnected = edgesSnapshot.current.some(
+      (edge) => edge.source === sourceId && edge.target === targetId,
+    );
+    if (target?.kind !== "video-generation" || source?.kind !== "text" || !isConnected) return;
+    setRelationAnchorId(sourceId);
+    if (target.content.activeTextInputId === sourceId) return;
+    changeNode(targetId, {
+      content: {
+        ...target.content,
+        activeTextInputId: sourceId,
+        status: "idle",
+        validationMessage: "",
+      },
+    });
+    setNotice(`已切换当前文本：${source.title || "未命名文本"}`);
+  }, [changeNode]);
+
+  const locateGeneratedVideoPrompt = useCallback((
+    previewId: string,
+    target: "prompt" | "generator" = "prompt",
+  ) => {
+    const previewNode = nodesSnapshot.current.find(
+      (node) => node.id === previewId && node.data.record.kind === "generated-video",
+    );
+    const preview = previewNode?.data.record;
+    if (!preview) {
+      setNotice("无法定位：找不到当前视频预览节点");
+      return;
+    }
+    if (target === "generator") {
+      const sourceGeneratorId = typeof preview.content.sourceGeneratorId === "string"
+        ? preview.content.sourceGeneratorId
+        : "";
+      const generatorNode = sourceGeneratorId
+        ? nodesSnapshot.current.find((node) => (
+          node.id === sourceGeneratorId && node.data.record.kind === "video-generation"
+        ))
+        : undefined;
+      if (!generatorNode) {
+        setNotice(sourceGeneratorId
+          ? "无法定位：关联的视频生成节点已被删除"
+          : "无法定位：该视频没有记录关联的视频生成节点");
+        return;
+      }
+      const width = generatorNode.width ?? generatorNode.data.record.width ?? 360;
+      const height = generatorNode.height ?? generatorNode.data.record.height ?? VIDEO_NODE_BASE_HEIGHT;
+      setRelationAnchorId(null);
+      setNodes((current) => current.map((node) => ({
+        ...node,
+        selected: node.id === generatorNode.id,
+      })));
+      void setCenter(
+        generatorNode.position.x + width / 2,
+        generatorNode.position.y + height / 2,
+        { zoom: 1, duration: 350 },
+      );
+      setNotice(`已定位视频生成节点：${generatorNode.data.record.title || "视频生成"}`);
+      return;
+    }
+    const snapshot = preview ? generationSnapshotFromContent(preview.content) : null;
+    if (!snapshot) {
+      setNotice("无法定位：该视频没有保存生成提示词信息");
+      return;
+    }
+
+    let promptNode = snapshot.promptNodeId
+      ? nodesSnapshot.current.find((node) => (
+        node.id === snapshot.promptNodeId && node.data.record.kind === "text"
+      ))
+      : undefined;
+    if (!promptNode && !snapshot.promptNodeId) {
+      const exactMatches = nodesSnapshot.current.filter((node) => (
+        node.data.record.kind === "text"
+        && textFromContent(node.data.record.content) === snapshot.prompt
+      ));
+      if (exactMatches.length === 1) promptNode = exactMatches[0];
+    }
+    if (!promptNode) {
+      setNotice(snapshot.promptNodeId
+        ? "无法定位：该视频使用的提示词文本框已被删除"
+        : "无法定位：没有找到唯一匹配的提示词文本框");
+      return;
+    }
+
+    const width = promptNode.width ?? promptNode.data.record.width ?? 320;
+    const height = promptNode.height ?? promptNode.data.record.height ?? 240;
+    setRelationAnchorId(promptNode.id);
+    setNodes((current) => current.map((node) => ({
+      ...node,
+      selected: node.id === promptNode.id,
+    })));
+    void setCenter(
+      promptNode.position.x + width / 2,
+      promptNode.position.y + height / 2,
+      { zoom: 1, duration: 350 },
+    );
+    setNotice(`已定位提示词：${promptNode.data.record.title || "未命名文本"}`);
+  }, [setCenter, setNodes]);
 
   const copyNodesToClipboard = useCallback((nodeIds: string[]) => {
     const copiedIds = new Set(nodeIds);
@@ -7630,6 +9063,7 @@ function CanvasWorkspace() {
         mediaInputs: [],
         textInputCount: 0,
         textInputs: [],
+        promptNodeTitle: "",
         h3LoraOptions,
         workflowModules,
         workflowModuleDefaults,
@@ -7638,14 +9072,19 @@ function CanvasWorkspace() {
         onExecutionCheck: reportExecutionCheck,
         onExecute: executeVideoNode,
         onSecondarySample: executeSecondarySample,
+        onConfigureSecondarySample: configureSecondarySample,
+        onRegenerateVideo: regenerateGeneratedVideo,
+        onConfigureRegenerateVideo: configureGeneratedVideoRegeneration,
+        onLocatePrompt: locateGeneratedVideoPrompt,
         onCancelExecution: cancelVideoExecution,
         onRevealGeneratedVideo: revealGeneratedVideo,
         onRemoveInput: removeInputFromVideoNode,
+        onActivateTextInput: activateTextInput,
         onDelete: deleteNode,
         onCopy: copyText,
       },
     }),
-    [activeComfyTaskCounts, cancelVideoExecution, changeNode, copyText, deleteNode, executeSecondarySample, executeVideoNode, h3LoraOptions, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, workflowModuleDefaults, workflowModules],
+    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, executeSecondarySample, executeVideoNode, h3LoraOptions, locateGeneratedVideoPrompt, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, revealGeneratedVideo, workflowModuleDefaults, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -8074,6 +9513,20 @@ function CanvasWorkspace() {
     if (!activeProjectId || !clipboard?.nodes.length) return;
 
     const pasteOffset = CANVAS_GRID_SIZE * 2 * (clipboard.pasteCount + 1);
+    const sourceLeft = Math.min(...clipboard.nodes.map((node) => node.x));
+    const sourceTop = Math.min(...clipboard.nodes.map((node) => node.y));
+    const sourceRight = Math.max(...clipboard.nodes.map((node) => node.x + node.width));
+    const sourceBottom = Math.max(...clipboard.nodes.map((node) => node.y + node.height));
+    const placement = reserveNodePlacement(
+      activeProjectId,
+      { x: sourceLeft + pasteOffset, y: sourceTop + pasteOffset },
+      sourceRight - sourceLeft,
+      sourceBottom - sourceTop,
+    );
+    const placementDelta = {
+      x: placement.position.x - sourceLeft,
+      y: placement.position.y - sourceTop,
+    };
     const createdByOriginalId = new Map<string, NodeRecord>();
     const createdNodes: CanvasFlowNode[] = [];
     try {
@@ -8087,8 +9540,8 @@ function CanvasWorkspace() {
               ? copiedVideoGenerationContent(sourceNode.content)
               : structuredClone(sourceNode.content),
             source: "clipboard",
-            x: snapCanvasCoordinate(sourceNode.x + pasteOffset),
-            y: snapCanvasCoordinate(sourceNode.y + pasteOffset),
+            x: snapCanvasCoordinate(sourceNode.x + placementDelta.x),
+            y: snapCanvasCoordinate(sourceNode.y + placementDelta.y),
             width: sourceNode.width,
             height: sourceNode.height,
           },
@@ -8124,6 +9577,10 @@ function CanvasWorkspace() {
         }
       }
 
+      finishNodePlacementReservation(
+        placement.reservationId,
+        [...createdByOriginalId.values()],
+      );
       setNodes((current) => [
         ...current.map((node) => ({ ...node, selected: false })),
         ...createdNodes,
@@ -8138,9 +9595,10 @@ function CanvasWorkspace() {
           : `已粘贴 ${createdNodes.length} 个节点${createdEdges.length ? `，恢复 ${createdEdges.length} 条素材连线` : ""}`,
       );
     } catch (error) {
+      finishNodePlacementReservation(placement.reservationId);
       reportError(error);
     }
-  }, [activeProjectId, makeFlowNode, reportError, setEdges, setNodes]);
+  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setEdges, setNodes]);
 
   useEffect(() => {
     const handleNodeClipboardShortcut = (event: KeyboardEvent) => {
@@ -8437,6 +9895,12 @@ function CanvasWorkspace() {
 
   const addTextNode = useCallback(async (position?: { x: number; y: number }) => {
     if (!activeProjectId) return;
+    const placement = reserveNodePlacement(
+      activeProjectId,
+      position,
+      VIDEO_GENERATION_NODE_WIDTH,
+      240,
+    );
     try {
       const result = await invoke<CreateNodeResult>("create_node", {
         input: {
@@ -8445,11 +9909,13 @@ function CanvasWorkspace() {
           title: "新文本",
           content: { text: "" },
           source: "manual",
-          ...(position ? { x: position.x, y: position.y } : {}),
-          width: 320,
+          x: placement.position.x,
+          y: placement.position.y,
+          width: VIDEO_GENERATION_NODE_WIDTH,
           height: 240,
         },
       });
+      finishNodePlacementReservation(placement.reservationId, [result.node]);
       setNodes((current) => [...current, makeFlowNode(result.node)]);
       setNotice("新文本节点已创建");
       if (!position) window.setTimeout(() => {
@@ -8460,12 +9926,64 @@ function CanvasWorkspace() {
         );
       }, 60);
     } catch (error) {
+      finishNodePlacementReservation(placement.reservationId);
       reportError(error);
     }
-  }, [activeProjectId, makeFlowNode, reportError, setCenter, setNodes]);
+  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes]);
+
+  const addPromptVersionNode = useCallback(async (position?: { x: number; y: number }) => {
+    if (!activeProjectId) return;
+    const placement = reserveNodePlacement(
+      activeProjectId,
+      position,
+      VIDEO_GENERATION_NODE_WIDTH,
+      320,
+    );
+    const initialVersion: PromptVersionRecord = {
+      id: crypto.randomUUID(),
+      label: "v1",
+      text: "",
+      createdAt: new Date().toISOString(),
+    };
+    try {
+      const result = await invoke<CreateNodeResult>("create_node", {
+        input: {
+          canvasId: activeProjectId,
+          kind: "text",
+          title: "提示词版本",
+          content: {
+            text: "",
+            promptVersionNode: true,
+            promptVersions: [initialVersion],
+            activePromptVersionId: initialVersion.id,
+            bestPromptVersionId: "",
+          },
+          source: "manual",
+          x: placement.position.x,
+          y: placement.position.y,
+          width: VIDEO_GENERATION_NODE_WIDTH,
+          height: 320,
+        },
+      });
+      finishNodePlacementReservation(placement.reservationId, [result.node]);
+      setNodes((current) => [...current, makeFlowNode(result.node)]);
+      setNotice("提示词版本节点已创建");
+      if (!position) window.setTimeout(() => {
+        void setCenter(
+          result.node.x + result.node.width / 2,
+          result.node.y + result.node.height / 2,
+          { zoom: 1, duration: 350 },
+        );
+      }, 60);
+    } catch (error) {
+      finishNodePlacementReservation(placement.reservationId);
+      reportError(error);
+    }
+  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes]);
 
   const addNoteNode = useCallback(async (position?: { x: number; y: number }) => {
     if (!activeProjectId) return;
+    const placement = reserveNodePlacement(activeProjectId, position, 300, 200);
     try {
       const result = await invoke<CreateNodeResult>("create_node", {
         input: {
@@ -8474,11 +9992,13 @@ function CanvasWorkspace() {
           title: "备注",
           content: { text: "" },
           source: "manual",
-          ...(position ? { x: position.x, y: position.y } : {}),
+          x: placement.position.x,
+          y: placement.position.y,
           width: 300,
           height: 200,
         },
       });
+      finishNodePlacementReservation(placement.reservationId, [result.node]);
       setNodes((current) => [...current, makeFlowNode(result.node)]);
       setNotice("备注节点已创建");
       if (!position) window.setTimeout(() => {
@@ -8489,12 +10009,19 @@ function CanvasWorkspace() {
         );
       }, 60);
     } catch (error) {
+      finishNodePlacementReservation(placement.reservationId);
       reportError(error);
     }
-  }, [activeProjectId, makeFlowNode, reportError, setCenter, setNodes]);
+  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes]);
 
   const addVideoNode = useCallback(async (position?: { x: number; y: number }) => {
     if (!activeProjectId) return;
+    const placement = reserveNodePlacement(
+      activeProjectId,
+      position,
+      VIDEO_GENERATION_NODE_WIDTH,
+      VIDEO_NODE_BASE_HEIGHT,
+    );
     const defaultWorkflowModule = workflowModules.find((module) => (
       !module.deletedAt
       && module.capability === "video-generation"
@@ -8526,18 +10053,22 @@ function CanvasWorkspace() {
             generationSecondaryLoraName: "",
             generationSecondaryLoraStrength: 1,
             generationSecondaryLoraBypassed: false,
+            generationRefImageSize: "max",
             generationPrimaryVideoSteps: 8,
             generationSecondarySchedulerSteps: 8,
             seedMode: "random",
             generationSeed: DEFAULT_GENERATION_SEED,
             manualHeight: VIDEO_NODE_BASE_HEIGHT,
+            layoutTextInputCount: 0,
           },
           source: "manual",
-          ...(position ? { x: position.x, y: position.y } : {}),
-          width: 360,
+          x: placement.position.x,
+          y: placement.position.y,
+          width: VIDEO_GENERATION_NODE_WIDTH,
           height: VIDEO_NODE_BASE_HEIGHT,
         },
       });
+      finishNodePlacementReservation(placement.reservationId, [result.node]);
       setNodes((current) => [...current, makeFlowNode(result.node)]);
       setNotice("视频生成节点已创建");
       if (!position) window.setTimeout(() => {
@@ -8548,15 +10079,16 @@ function CanvasWorkspace() {
         );
       }, 60);
     } catch (error) {
+      finishNodePlacementReservation(placement.reservationId);
       reportError(error);
     }
-  }, [activeProjectId, h3DiffusionModelName, makeFlowNode, reportError, setCenter, setNodes, workflowModuleDefaults, workflowModules]);
+  }, [activeProjectId, finishNodePlacementReservation, h3DiffusionModelName, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes, workflowModuleDefaults, workflowModules]);
 
   const openCanvasContextMenu = useCallback((event: MouseEvent | ReactMouseEvent) => {
     event.preventDefault();
     const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
     const menuWidth = uiFontSize === "medium" ? 220 : 190;
-    const menuHeight = uiFontSize === "medium" ? 206 : 180;
+    const menuHeight = uiFontSize === "medium" ? 264 : 228;
     setCanvasContextMenu({
       screenX: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
       screenY: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -8565,14 +10097,15 @@ function CanvasWorkspace() {
     });
   }, [screenToFlowPosition, uiFontSize]);
 
-  const createNodeFromContextMenu = useCallback((kind: "text" | "note" | "video-generation") => {
+  const createNodeFromContextMenu = useCallback((kind: "text" | "prompt-version" | "note" | "video-generation") => {
     if (!canvasContextMenu) return;
     const position = { x: canvasContextMenu.flowX, y: canvasContextMenu.flowY };
     setCanvasContextMenu(null);
     if (kind === "text") void addTextNode(position);
+    else if (kind === "prompt-version") void addPromptVersionNode(position);
     else if (kind === "note") void addNoteNode(position);
     else void addVideoNode(position);
-  }, [addNoteNode, addTextNode, addVideoNode, canvasContextMenu]);
+  }, [addNoteNode, addPromptVersionNode, addTextNode, addVideoNode, canvasContextMenu]);
 
   useEffect(() => {
     if (!canvasContextMenu) return;
@@ -8648,6 +10181,28 @@ function CanvasWorkspace() {
               }
             }
           }
+          const placement = reserveNodePlacement(
+            activeProjectId,
+            {
+              x: basePosition.x + index * CANVAS_GRID_SIZE,
+              y: basePosition.y + index * CANVAS_GRID_SIZE,
+            },
+            importedNode.width,
+            importedNode.height,
+          );
+          try {
+            importedNode = await invoke<NodeRecord>("update_node", {
+              input: {
+                id: importedNode.id,
+                x: placement.position.x,
+                y: placement.position.y,
+              },
+            });
+            finishNodePlacementReservation(placement.reservationId, [importedNode]);
+          } catch (error) {
+            finishNodePlacementReservation(placement.reservationId);
+            throw error;
+          }
           setNodes((current) => [...current, makeFlowNode(importedNode)]);
           imported += 1;
         } catch (error) {
@@ -8663,7 +10218,7 @@ function CanvasWorkspace() {
         setNotice(`媒体导入失败：${failures[0] ?? "没有可用文件"}`);
       }
     },
-    [activeProjectId, makeFlowNode, screenToFlowPosition, setNodes],
+    [activeProjectId, finishNodePlacementReservation, makeFlowNode, reserveNodePlacement, screenToFlowPosition, setNodes],
   );
 
   useEffect(() => {
@@ -8732,6 +10287,32 @@ function CanvasWorkspace() {
           if (imageCount >= 2) return "首尾帧模式最多只能连接两张图片";
         }
       }
+      if (mode === "image-to-video") {
+        if (source.kind === "audio" || source.kind === "video") {
+          return "图生视频模式不能连接音频或视频参考";
+        }
+        if (source.kind === "image") {
+          const imageCount = edges
+            .filter((edge) => edge.target === target.id)
+            .map((edge) => contentNodes.find((node) => node.id === edge.source)?.data.record)
+            .filter((record) => record?.kind === "image")
+            .length;
+          if (imageCount >= 1) return "图生视频模式只能连接一张首帧图片";
+        }
+      }
+      if (mode === "last-frame-to-video") {
+        if (source.kind === "audio" || source.kind === "video") {
+          return "尾帧生视频模式不能连接音频或视频参考";
+        }
+        if (source.kind === "image") {
+          const imageCount = edges
+            .filter((edge) => edge.target === target.id)
+            .map((edge) => contentNodes.find((node) => node.id === edge.source)?.data.record)
+            .filter((record) => record?.kind === "image")
+            .length;
+          if (imageCount >= 1) return "尾帧生视频模式只能连接一张尾帧图片";
+        }
+      }
 
       return null;
     },
@@ -8751,28 +10332,102 @@ function CanvasWorkspace() {
         setNotice(validationError);
         return;
       }
-      const sourceKind = nodes.find((node) => node.id === connection.source)?.data.record.kind;
+      const sourceNode = nodesSnapshot.current.find((node) => node.id === connection.source);
+      const targetNode = nodesSnapshot.current.find((node) => node.id === connection.target);
+      if (!sourceNode || !targetNode || !connection.target) {
+        setNotice("找不到要连接的节点");
+        return;
+      }
+      const selectedTextNodes = sourceNode.selected && sourceNode.data.record.kind === "text"
+        ? nodesSnapshot.current
+            .filter((node) => node.selected && node.data.record.kind === "text")
+            .sort((left, right) => {
+              const leftTitle = left.data.record.title.trim() || "未命名文本";
+              const rightTitle = right.data.record.title.trim() || "未命名文本";
+              return leftTitle.localeCompare(rightTitle, "zh-CN", {
+                numeric: true,
+                sensitivity: "base",
+              }) || left.id.localeCompare(right.id);
+            })
+        : [sourceNode];
+      const batchSources = selectedTextNodes.length > 1 ? selectedTextNodes : [sourceNode];
+      const alreadyConnectedSourceIds = new Set(
+        edgesSnapshot.current
+          .filter((edge) => edge.target === connection.target)
+          .map((edge) => edge.source),
+      );
+      const sourcesToConnect = batchSources.filter(
+        (node) => !alreadyConnectedSourceIds.has(node.id),
+      );
+      if (!sourcesToConnect.length) {
+        setNotice("选中的文字节点已经全部连接");
+        return;
+      }
       try {
-        const record = await invoke<EdgeRecord>("create_edge", {
-          input: {
-            canvasId: activeProjectId,
-            sourceNodeId: connection.source,
-            targetNodeId: connection.target,
-            kind: "input",
-            metadata: { sourceKind },
-          },
-        });
-        setEdges((current) =>
-          current.some((edge) => edge.id === record.id)
-            ? current
-            : [...current, toFlowEdge(record)],
-        );
-        setNotice("节点已连接");
+        const createdEdges: Edge[] = [];
+        const createdSourceIds: string[] = [];
+        const failures: string[] = [];
+        for (const source of sourcesToConnect) {
+          try {
+            const record = await invoke<EdgeRecord>("create_edge", {
+              input: {
+                canvasId: activeProjectId,
+                sourceNodeId: source.id,
+                targetNodeId: connection.target,
+                kind: "input",
+                metadata: { sourceKind: source.data.record.kind },
+              },
+            });
+            createdEdges.push(toFlowEdge(record));
+            createdSourceIds.push(source.id);
+          } catch (error) {
+            failures.push(error instanceof Error ? error.message : String(error));
+          }
+        }
+        if (createdEdges.length) {
+          setEdges((current) => {
+            const currentIds = new Set(current.map((edge) => edge.id));
+            return [
+              ...current,
+              ...createdEdges.filter((edge) => !currentIds.has(edge.id)),
+            ];
+          });
+        }
+
+        if (createdSourceIds.length && targetNode.data.record.kind === "video-generation") {
+          const existingTextRecords = edgesSnapshot.current
+            .filter((edge) => edge.target === targetNode.id)
+            .map((edge) => nodesSnapshot.current.find((node) => node.id === edge.source)?.data.record)
+            .filter((record): record is NodeRecord => record?.kind === "text");
+          const existingTextOrder = orderedNodeRecordsFromContent(
+            targetNode.data.record.content,
+            "textInputOrder",
+            existingTextRecords,
+          ).map((record) => record.id);
+          changeNode(targetNode.id, {
+            content: {
+              ...targetNode.data.record.content,
+              textInputOrder: [...existingTextOrder, ...createdSourceIds],
+            },
+          });
+        }
+
+        if (!createdEdges.length) {
+          setNotice(`文字节点连接失败：${failures[0] ?? "没有可连接的节点"}`);
+        } else if (batchSources.length > 1) {
+          setNotice(
+            failures.length
+              ? `已按标题升序连接 ${createdEdges.length} 个文本，${failures.length} 个失败`
+              : `已按标题升序连接 ${createdEdges.length} 个文本`,
+          );
+        } else {
+          setNotice("节点已连接");
+        }
       } catch (error) {
         reportError(error);
       }
     },
-    [activeProjectId, connectionValidationError, nodes, reportError, setEdges],
+    [activeProjectId, changeNode, connectionValidationError, reportError, setEdges],
   );
 
   const deleteSelectedElements = useCallback(async (deleteSourceFiles = false) => {
@@ -8926,8 +10581,16 @@ function CanvasWorkspace() {
 
   const handleNodeRelationClick = useCallback((node: CanvasFlowNode) => {
     const kind = node.data.record.kind;
+    if (kind === "text") {
+      const targetIds = new Set(
+        edgesSnapshot.current
+          .filter((edge) => edge.source === node.id)
+          .map((edge) => edge.target),
+      );
+      targetIds.forEach((targetId) => activateTextInput(targetId, node.id));
+    }
     setRelationAnchorId(kind === "text" || kind === "generated-video" ? node.id : null);
-  }, []);
+  }, [activateTextInput]);
 
   const interactiveEdges = useMemo(
     () => edges.map((edge) => ({
@@ -8965,6 +10628,11 @@ function CanvasWorkspace() {
           (record) => record.kind === "image" || record.kind === "audio" || record.kind === "video",
         );
         const connectedText = inputRecords.filter((record) => record.kind === "text");
+        const orderedText = orderedNodeRecordsFromContent(
+          node.data.record.content,
+          "textInputOrder",
+          connectedText,
+        );
         const connectedMediaById = new Map(connectedMedia.map((record) => [record.id, record]));
         const savedOrder = Array.isArray(node.data.record.content.mediaInputOrder)
           ? node.data.record.content.mediaInputOrder.filter(
@@ -8981,13 +10649,22 @@ function CanvasWorkspace() {
         const mediaInputs = previousData && nodeRecordArraysEqual(previousData.mediaInputs, orderedMedia)
           ? previousData.mediaInputs
           : orderedMedia;
-        const textInputs = previousData && nodeRecordArraysEqual(previousData.textInputs, connectedText)
+        const textInputs = previousData && nodeRecordArraysEqual(previousData.textInputs, orderedText)
           ? previousData.textInputs
-          : connectedText;
+          : orderedText;
         const matched = matchedIds.has(node.id);
         const relationHighlighted = relationHighlightedIds.has(node.id);
         const activeTaskCount = activeComfyTaskCounts[node.id] ?? 0;
         const outputCount = outputCountBySource.get(node.id) ?? 0;
+        const generationSnapshot = node.data.record.kind === "generated-video"
+          ? generationSnapshotFromContent(node.data.record.content)
+          : null;
+        const linkedPromptNode = generationSnapshot?.promptNodeId
+          ? recordsById.get(generationSnapshot.promptNodeId)
+          : null;
+        const promptNodeTitle = linkedPromptNode?.kind === "text"
+          ? linkedPromptNode.title
+          : generationSnapshot?.promptNodeTitle ?? "";
         const presentationUnchanged = Boolean(
           previous
           && previous.source.data === node.data
@@ -8999,6 +10676,7 @@ function CanvasWorkspace() {
           && previousData.mediaInputs === mediaInputs
           && previousData.textInputCount === connectedText.length
           && previousData.textInputs === textInputs
+          && previousData.promptNodeTitle === promptNodeTitle
           && previousData.h3LoraOptions === h3LoraOptions
           && previousData.workflowModules === workflowModules
           && previousData.workflowModuleDefaults === workflowModuleDefaults,
@@ -9015,6 +10693,7 @@ function CanvasWorkspace() {
               mediaInputs,
               textInputCount: connectedText.length,
               textInputs,
+              promptNodeTitle,
               h3LoraOptions,
               workflowModules,
               workflowModuleDefaults,
@@ -9557,13 +11236,29 @@ function CanvasWorkspace() {
                           <span>视频生成子类型</span>
                           <SettingsSelect
                             value={workflowModuleVariantDraft}
-                            onChange={(value) => setWorkflowModuleVariantDraft(value as WorkflowVariant)}
+                            onChange={(value) => {
+                              const variant = value as WorkflowVariant;
+                              setWorkflowModuleVariantDraft(variant);
+                              setWorkflowModuleValidation(null);
+                              if (!selectedWorkflowModule) {
+                                setWorkflowModuleBindingsDraft("");
+                                setWorkflowModulePathDraft(
+                                  variant === "first-last-frame"
+                                    ? DEFAULT_H3_FIRST_LAST_WORKFLOW_PATH
+                                    : variant === "image-to-video"
+                                      ? DEFAULT_H3_IMAGE_TO_VIDEO_WORKFLOW_PATH
+                                      : variant === "last-frame-to-video"
+                                        ? DEFAULT_H3_LAST_FRAME_TO_VIDEO_WORKFLOW_PATH
+                                      : h3WorkflowPathDraft || DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
+                                );
+                              }
+                            }}
                             disabled={Boolean(selectedWorkflowModule?.deletedAt)}
                             ariaLabel="视频生成子类型"
                             options={WORKFLOW_VIDEO_VARIANTS.map((variant) => ({
                               value: variant.value,
-                              label: `${variant.label}${variant.value === "reference-to-video" ? "" : "（等待对应适配器）"}`,
-                              disabled: variant.value !== "reference-to-video",
+                              label: `${variant.label}${variant.value === "text-to-video" ? "（等待对应适配器）" : ""}`,
+                              disabled: variant.value === "text-to-video",
                             }))}
                           />
                         </div>
@@ -9688,7 +11383,7 @@ function CanvasWorkspace() {
                 <div className="model-workflow-module-select">
                   <span>编辑方案</span>
                   <SettingsSelect
-                    value={selectedWorkflowModule?.capability === "video-generation" && selectedWorkflowModule.variant === "reference-to-video" ? selectedWorkflowModule.id : ""}
+                    value={selectedWorkflowModule?.capability === "video-generation" ? selectedWorkflowModule.id : ""}
                     onChange={(value) => {
                       const module = workflowModules.find((candidate) => candidate.id === value);
                       if (!module) return;
@@ -9713,7 +11408,11 @@ function CanvasWorkspace() {
                     }}
                     ariaLabel="模型参数编辑方案"
                     placeholder="没有可用方案"
-                    options={workflowModules.filter((module) => !module.deletedAt && module.capability === "video-generation" && module.variant === "reference-to-video").map((module) => ({
+                    options={workflowModules.filter((module) => (
+                      !module.deletedAt
+                      && module.capability === "video-generation"
+                      && module.variant !== "text-to-video"
+                    )).map((module) => ({
                       value: module.id,
                       label: `${module.name} · ${module.revision}`,
                     }))}
@@ -10184,7 +11883,9 @@ function CanvasWorkspace() {
       <main className="project-home">
         <header className="project-home-header">
           <div className="project-home-brand">
-            <div className="project-home-mark"><Sparkles size={22} /></div>
+            <div className="project-home-mark">
+              <img src={suCanvasLogo} alt="" />
+            </div>
             <div>
               <strong>SuCanvas</strong>
               <span>项目工作区</span>
@@ -10437,6 +12138,7 @@ function CanvasWorkspace() {
         panActivationKeyCode="Space"
         panOnDrag={[1]}
         panOnScroll
+        proOptions={{ hideAttribution: true }}
         fitView
       >
         <Background
@@ -10671,6 +12373,379 @@ function CanvasWorkspace() {
         </div>,
         document.body,
       )}
+      {videoRegenerationDraft && createPortal(
+        <div
+          className="project-dialog-backdrop"
+          onMouseDown={() => setVideoRegenerationDraft(null)}
+        >
+          <form
+            ref={videoRegenerationDialogRef}
+            className="project-dialog video-regeneration-dialog"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitConfiguredVideoRegeneration();
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><RotateCcw size={21} /></div>
+            <div>
+              <h2>调整参数重新生成</h2>
+              <p>默认使用“{videoRegenerationDraft.previewTitle}”保存的一采参数，只覆盖下列项目。</p>
+            </div>
+            <div className="video-regeneration-fields">
+              <label>
+                Seed
+                <div className="video-regeneration-seed">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={20}
+                    value={videoRegenerationDraft.seed}
+                    onChange={(event) => setVideoRegenerationDraft((current) => current && ({
+                      ...current,
+                      seed: event.currentTarget.value.replace(/\D/g, ""),
+                    }))}
+                    aria-label="重新生成 Seed"
+                    spellCheck={false}
+                  />
+                  <button
+                    type="button"
+                    title="随机生成新 Seed"
+                    aria-label="随机生成新 Seed"
+                    onClick={() => setVideoRegenerationDraft((current) => {
+                      if (!current) return current;
+                      let seed = randomFixedSeed();
+                      while (seed === current.seed) seed = randomFixedSeed();
+                      return { ...current, seed };
+                    })}
+                  >
+                    <Dices size={14} />
+                  </button>
+                </div>
+              </label>
+              <label>
+                一采分辨率（MP）
+                <ModelParameterNumberInput
+                  regenerationField="primaryResolutionMegapixels"
+                  min={0.2}
+                  max={2}
+                  step={0.1}
+                  value={videoRegenerationDraft.primaryResolutionMegapixels}
+                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    primaryResolutionMegapixels: value,
+                  }))}
+                />
+              </label>
+              <label>
+                一采 LoRA 强度
+                <ModelParameterNumberInput
+                  regenerationField="loraStrength"
+                  min={0}
+                  max={2}
+                  step={0.05}
+                  value={videoRegenerationDraft.loraStrength}
+                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    loraStrength: value,
+                  }))}
+                />
+              </label>
+              <label>
+                Video Steps
+                <ModelParameterNumberInput
+                  regenerationField="primaryVideoSteps"
+                  min={1}
+                  max={1000}
+                  step={1}
+                  value={videoRegenerationDraft.primaryVideoSteps}
+                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    primaryVideoSteps: value,
+                  }))}
+                />
+              </label>
+              <label>
+                Audio Steps
+                <ModelParameterNumberInput
+                  regenerationField="primaryAudioSteps"
+                  min={1}
+                  max={1000}
+                  step={1}
+                  value={videoRegenerationDraft.primaryAudioSteps}
+                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    primaryAudioSteps: value,
+                  }))}
+                />
+              </label>
+              <label>
+                亮度
+                <ModelParameterNumberInput
+                  regenerationField="primaryBrightness"
+                  min={0}
+                  max={3}
+                  step={0.05}
+                  value={videoRegenerationDraft.primaryBrightness}
+                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    primaryBrightness: value,
+                  }))}
+                />
+              </label>
+              <label>
+                对比度
+                <ModelParameterNumberInput
+                  regenerationField="primaryContrast"
+                  min={0}
+                  max={3}
+                  step={0.05}
+                  value={videoRegenerationDraft.primaryContrast}
+                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    primaryContrast: value,
+                  }))}
+                />
+              </label>
+              <label>
+                饱和度
+                <ModelParameterNumberInput
+                  regenerationField="primarySaturation"
+                  min={0}
+                  max={3}
+                  step={0.05}
+                  value={videoRegenerationDraft.primarySaturation}
+                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    primarySaturation: value,
+                  }))}
+                />
+              </label>
+              <fieldset className="video-regeneration-ref-mode">
+                <legend>参考图模式</legend>
+                <div>
+                  {REF_IMAGE_SIZE_OPTIONS.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={videoRegenerationDraft.refImageSize === option ? "is-active" : ""}
+                      onClick={() => setVideoRegenerationDraft((current) => current && ({
+                        ...current,
+                        refImageSize: option,
+                      }))}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+            </div>
+            <p className="video-regeneration-note">
+              提示词、素材、模型、LoRA 文件、时长和画面比例仍使用当前视频的历史快照。Seed 默认保持不变，点击色子才会随机更换。
+            </p>
+            <div className="project-dialog-actions">
+              <button type="button" className="dialog-cancel" onClick={() => setVideoRegenerationDraft(null)}>
+                取消
+              </button>
+              <button type="submit" className="primary-button">
+                <RotateCcw size={13} />
+                生成
+              </button>
+            </div>
+          </form>
+        </div>,
+        document.body,
+      )}
+      {secondarySampleDraft && createPortal(
+        <div
+          className="project-dialog-backdrop"
+          onMouseDown={() => setSecondarySampleDraft(null)}
+        >
+          <form
+            ref={secondarySampleDialogRef}
+            className="project-dialog video-regeneration-dialog secondary-sample-dialog"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitConfiguredSecondarySample();
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><Sparkles size={21} /></div>
+            <div>
+              <h2>调整二采参数</h2>
+              <p>默认使用“{secondarySampleDraft.previewTitle}”当前可用的二采设置，只覆盖下列项目。</p>
+            </div>
+            <div className="video-regeneration-fields">
+              <label>
+                Seed
+                <div className="video-regeneration-seed">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={20}
+                    value={secondarySampleDraft.seed}
+                    onChange={(event) => setSecondarySampleDraft((current) => current && ({
+                      ...current,
+                      seed: event.currentTarget.value.replace(/\D/g, ""),
+                    }))}
+                    aria-label="二采 Seed"
+                    spellCheck={false}
+                  />
+                  <button
+                    type="button"
+                    title="点击色子随机生成新 Seed"
+                    aria-label="随机生成新 Seed"
+                    onClick={() => setSecondarySampleDraft((current) => {
+                      if (!current) return current;
+                      let seed = randomFixedSeed();
+                      while (seed === current.seed) seed = randomFixedSeed();
+                      return { ...current, seed };
+                    })}
+                  >
+                    <Dices size={14} />
+                  </button>
+                </div>
+              </label>
+              <label>
+                二采分辨率（MP）
+                <ModelParameterNumberInput
+                  secondarySampleField="secondaryResolutionMegapixels"
+                  min={0.2}
+                  max={2}
+                  step={0.1}
+                  value={secondarySampleDraft.secondaryResolutionMegapixels}
+                  onChange={(value) => setSecondarySampleDraft((current) => current && ({
+                    ...current,
+                    secondaryResolutionMegapixels: value,
+                  }))}
+                />
+              </label>
+              <label>
+                二采 LoRA 强度
+                <div className={`secondary-sample-lora-control ${secondarySampleDraft.secondaryLoraBypassed ? "is-bypassed" : "is-enabled"}`}>
+                  <ModelParameterNumberInput
+                    secondarySampleField="secondaryLoraStrength"
+                    min={0}
+                    max={2}
+                    step={0.05}
+                    disabled={secondarySampleDraft.secondaryLoraBypassed}
+                    value={secondarySampleDraft.secondaryLoraStrength}
+                    onChange={(value) => setSecondarySampleDraft((current) => current && ({
+                      ...current,
+                      secondaryLoraStrength: value,
+                    }))}
+                  />
+                  <div className="secondary-sample-lora-inline-switch">
+                    <button
+                      type="button"
+                      className="video-lora-bypass-switch"
+                      role="switch"
+                      aria-checked={!secondarySampleDraft.secondaryLoraBypassed}
+                      aria-label="启用二采 LoRA"
+                      title={secondarySampleDraft.secondaryLoraBypassed
+                        ? "二采 LoRA 已关闭，点击启用"
+                        : "二采 LoRA 已启用，点击关闭"}
+                      onClick={() => setSecondarySampleDraft((current) => current && ({
+                        ...current,
+                        secondaryLoraBypassed: !current.secondaryLoraBypassed,
+                      }))}
+                    >
+                      <span aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
+              </label>
+              <label>
+                Scheduler Steps
+                <ModelParameterNumberInput
+                  secondarySampleField="secondarySchedulerSteps"
+                  min={1}
+                  max={10000}
+                  step={1}
+                  value={secondarySampleDraft.secondarySchedulerSteps}
+                  onChange={(value) => setSecondarySampleDraft((current) => current && ({
+                    ...current,
+                    secondarySchedulerSteps: value,
+                  }))}
+                />
+              </label>
+              <label>
+                亮度
+                <ModelParameterNumberInput
+                  secondarySampleField="secondaryBrightness"
+                  min={0}
+                  max={3}
+                  step={0.05}
+                  value={secondarySampleDraft.secondaryBrightness}
+                  onChange={(value) => setSecondarySampleDraft((current) => current && ({
+                    ...current,
+                    secondaryBrightness: value,
+                  }))}
+                />
+              </label>
+              <label>
+                对比度
+                <ModelParameterNumberInput
+                  secondarySampleField="secondaryContrast"
+                  min={0}
+                  max={3}
+                  step={0.05}
+                  value={secondarySampleDraft.secondaryContrast}
+                  onChange={(value) => setSecondarySampleDraft((current) => current && ({
+                    ...current,
+                    secondaryContrast: value,
+                  }))}
+                />
+              </label>
+              <label>
+                饱和度
+                <ModelParameterNumberInput
+                  secondarySampleField="secondarySaturation"
+                  min={0}
+                  max={3}
+                  step={0.05}
+                  value={secondarySampleDraft.secondarySaturation}
+                  onChange={(value) => setSecondarySampleDraft((current) => current && ({
+                    ...current,
+                    secondarySaturation: value,
+                  }))}
+                />
+              </label>
+              <fieldset className="video-regeneration-ref-mode">
+                <legend>参考图模式</legend>
+                <div>
+                  {REF_IMAGE_SIZE_OPTIONS.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={secondarySampleDraft.refImageSize === option ? "is-active" : ""}
+                      onClick={() => setSecondarySampleDraft((current) => current && ({
+                        ...current,
+                        refImageSize: option,
+                      }))}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+            </div>
+            <p className="video-regeneration-note">
+              Seed 默认保持原视频数值，点击色子才会随机更换。二采 LoRA 默认关闭，其余提示词、素材、模型及 LoRA 文件保持原二采逻辑。
+            </p>
+            <div className="project-dialog-actions">
+              <button type="button" className="dialog-cancel" onClick={() => setSecondarySampleDraft(null)}>
+                取消
+              </button>
+              <button type="submit" className="primary-button">
+                <Sparkles size={13} />
+                开始二采
+              </button>
+            </div>
+          </form>
+        </div>,
+        document.body,
+      )}
       {canvasContextMenu && createPortal(
         <div
           className="canvas-context-menu"
@@ -10687,6 +12762,10 @@ function CanvasWorkspace() {
           <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("text")}>
             <FileText size={15} />
             <span><strong>文本节点</strong><small>输入提示词或普通文本</small></span>
+          </button>
+          <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("prompt-version")}>
+            <History size={15} />
+            <span><strong>提示词版本节点</strong><small>保留 v1、v2、v3 并选择生成版本</small></span>
           </button>
           <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("note")}>
             <StickyNote size={15} />
@@ -10734,7 +12813,9 @@ function AppLockScreen({ onUnlock }: { onUnlock: () => void }) {
           void unlock();
         }}
       >
-        <div className="app-lock-mark"><LockKeyhole size={25} /></div>
+        <div className="app-lock-mark">
+          <img src={suCanvasLogo} alt="" />
+        </div>
         <span className="app-lock-eyebrow">SUCANVAS</span>
         <h1>应用已锁定</h1>
         <p>输入本机应用锁密码以继续。</p>
@@ -10798,7 +12879,9 @@ export default function App() {
   if (accessState === "checking") {
     return (
       <main className="app-lock-screen is-loading" aria-label="正在检查应用锁">
-        <div className="app-lock-loading-mark"><LockKeyhole size={23} /></div>
+        <div className="app-lock-loading-mark">
+          <img src={suCanvasLogo} alt="" />
+        </div>
       </main>
     );
   }
@@ -10807,7 +12890,9 @@ export default function App() {
     return (
       <main className="app-lock-screen">
         <div className="app-lock-card app-lock-error-card">
-          <div className="app-lock-mark"><LockKeyhole size={25} /></div>
+          <div className="app-lock-mark">
+            <img src={suCanvasLogo} alt="" />
+          </div>
           <h1>无法读取应用锁</h1>
           <p>{statusError}</p>
           <button className="app-lock-unlock" type="button" onClick={() => void checkAppLock()}>

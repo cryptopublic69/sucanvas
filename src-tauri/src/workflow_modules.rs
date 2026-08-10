@@ -19,6 +19,9 @@ pub const WORKFLOW_PACKAGE_ENGINE: &str = "workflow-package-v1";
 pub const WORKFLOW_PACKAGE_SCHEMA_VERSION: u32 = 1;
 pub const WORKFLOW_ENGINE_API_VERSION: &str = "1.0";
 pub const H3_MULTI_REFERENCE_ADAPTER: &str = "minimax-h3-multi-reference-v1";
+pub const H3_FIRST_LAST_FRAME_ADAPTER: &str = "minimax-h3-first-last-frame-v1";
+pub const H3_IMAGE_TO_VIDEO_ADAPTER: &str = "minimax-h3-image-to-video-v1";
+pub const H3_LAST_FRAME_TO_VIDEO_ADAPTER: &str = "minimax-h3-last-frame-to-video-v1";
 const MAX_PACKAGE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
 fn default_diffusion_model_node_id() -> String {
@@ -124,6 +127,65 @@ impl Default for WorkflowBindings {
     }
 }
 
+impl WorkflowBindings {
+    pub fn first_last_frame() -> Self {
+        Self {
+            prompt_node_id: "312".to_owned(),
+            seed_node_id: "321".to_owned(),
+            duration_node_id: "323".to_owned(),
+            primary_resolution_node_id: "313".to_owned(),
+            secondary_resolution_node_id: "398".to_owned(),
+            primary_lora_node_id: "327".to_owned(),
+            secondary_lora_node_id: "401".to_owned(),
+            primary_sampler_node_id: "331".to_owned(),
+            secondary_scheduler_node_id: "391".to_owned(),
+            secondary_guider_node_id: "393".to_owned(),
+            primary_output_node_id: "328".to_owned(),
+            secondary_output_node_id: "397".to_owned(),
+            primary_color_node_id: "405".to_owned(),
+            secondary_color_node_id: "403".to_owned(),
+            clean_video_node_id: "9000".to_owned(),
+            clean_save_node_id: "9001".to_owned(),
+            secondary_video_input_node_id: "9002".to_owned(),
+            conditioning_node_id: "333".to_owned(),
+            audio_node_ids: Vec::new(),
+            image_node_ids: vec!["335".to_owned(), "417".to_owned()],
+            primary_audio_output_node_id: "330".to_owned(),
+            primary_audio_output_index: 1,
+            secondary_audio_output_node_id: "382".to_owned(),
+            secondary_audio_output_index: 0,
+            secondary_resize_node_id: "383".to_owned(),
+            secondary_audio_encode_node_id: "388".to_owned(),
+            diffusion_model_node_id: "332".to_owned(),
+            diffusion_model_class_type: default_diffusion_model_class_type(),
+            diffusion_model_directory: default_diffusion_model_directory(),
+            lora_class_type: "LoraLoaderModelOnly".to_owned(),
+            lora_directory: "MinimaxH3".to_owned(),
+        }
+    }
+
+    pub fn image_to_video() -> Self {
+        let mut bindings = Self::first_last_frame();
+        bindings.image_node_ids = vec!["335".to_owned()];
+        bindings
+    }
+
+    pub fn last_frame_to_video() -> Self {
+        let mut bindings = Self::first_last_frame();
+        bindings.image_node_ids = vec!["417".to_owned()];
+        bindings
+    }
+
+    pub fn for_variant(variant: &str) -> Self {
+        match variant {
+            "first-last-frame" => Self::first_last_frame(),
+            "image-to-video" => Self::image_to_video(),
+            "last-frame-to-video" => Self::last_frame_to_video(),
+            _ => Self::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowInputContract {
@@ -173,6 +235,75 @@ impl WorkflowAdapter {
             variant: "reference-to-video".to_owned(),
             input_contract: WorkflowInputContract::default(),
             bindings,
+        }
+    }
+
+    pub fn first_last_frame(bindings: WorkflowBindings) -> Self {
+        Self {
+            schema_version: WORKFLOW_PACKAGE_SCHEMA_VERSION,
+            engine_api_version: WORKFLOW_ENGINE_API_VERSION.to_owned(),
+            adapter_id: H3_FIRST_LAST_FRAME_ADAPTER.to_owned(),
+            capability: "video-generation".to_owned(),
+            variant: "first-last-frame".to_owned(),
+            input_contract: WorkflowInputContract {
+                prompt_required: true,
+                image_min: 2,
+                image_max: 2,
+                audio_min: 0,
+                audio_max: 0,
+                video_min: 0,
+                video_max: 0,
+            },
+            bindings,
+        }
+    }
+
+    pub fn image_to_video(bindings: WorkflowBindings) -> Self {
+        Self {
+            schema_version: WORKFLOW_PACKAGE_SCHEMA_VERSION,
+            engine_api_version: WORKFLOW_ENGINE_API_VERSION.to_owned(),
+            adapter_id: H3_IMAGE_TO_VIDEO_ADAPTER.to_owned(),
+            capability: "video-generation".to_owned(),
+            variant: "image-to-video".to_owned(),
+            input_contract: WorkflowInputContract {
+                prompt_required: true,
+                image_min: 1,
+                image_max: 1,
+                audio_min: 0,
+                audio_max: 0,
+                video_min: 0,
+                video_max: 0,
+            },
+            bindings,
+        }
+    }
+
+    pub fn last_frame_to_video(bindings: WorkflowBindings) -> Self {
+        Self {
+            schema_version: WORKFLOW_PACKAGE_SCHEMA_VERSION,
+            engine_api_version: WORKFLOW_ENGINE_API_VERSION.to_owned(),
+            adapter_id: H3_LAST_FRAME_TO_VIDEO_ADAPTER.to_owned(),
+            capability: "video-generation".to_owned(),
+            variant: "last-frame-to-video".to_owned(),
+            input_contract: WorkflowInputContract {
+                prompt_required: true,
+                image_min: 1,
+                image_max: 1,
+                audio_min: 0,
+                audio_max: 0,
+                video_min: 0,
+                video_max: 0,
+            },
+            bindings,
+        }
+    }
+
+    fn for_variant(variant: &str, bindings: WorkflowBindings) -> Self {
+        match variant {
+            "first-last-frame" => Self::first_last_frame(bindings),
+            "image-to-video" => Self::image_to_video(bindings),
+            "last-frame-to-video" => Self::last_frame_to_video(bindings),
+            _ => Self::current_h3(bindings),
         }
     }
 }
@@ -499,8 +630,15 @@ fn validate_adapter_contract(
     if adapter.adapter_id.trim().is_empty() {
         return Err("方案适配器 adapterId 不能为空".to_owned());
     }
-    if capability != "video-generation" || variant != "reference-to-video" {
-        return Err("当前 v1 通用引擎只实现了多参生视频接口".to_owned());
+    if capability != "video-generation"
+        || !matches!(
+            variant,
+            "reference-to-video" | "first-last-frame" | "image-to-video" | "last-frame-to-video"
+        )
+    {
+        return Err(
+            "当前 v1 通用引擎只实现了多参生视频、首尾帧、图生视频和尾帧生视频接口".to_owned(),
+        );
     }
     if adapter.input_contract.image_max > adapter.bindings.image_node_ids.len() {
         return Err("适配器声明的最大图片数量超过图片输入节点数量".to_owned());
@@ -516,6 +654,30 @@ fn validate_adapter_contract(
         || adapter.input_contract.video_min > adapter.input_contract.video_max
     {
         return Err("适配器素材数量范围无效".to_owned());
+    }
+    if variant == "first-last-frame"
+        && (adapter.input_contract.image_min != 2
+            || adapter.input_contract.image_max != 2
+            || adapter.input_contract.audio_max != 0
+            || adapter.input_contract.video_max != 0)
+    {
+        return Err("首尾帧适配器必须要求恰好2张图片，并禁止音频和视频输入".to_owned());
+    }
+    if variant == "image-to-video"
+        && (adapter.input_contract.image_min != 1
+            || adapter.input_contract.image_max != 1
+            || adapter.input_contract.audio_max != 0
+            || adapter.input_contract.video_max != 0)
+    {
+        return Err("图生视频适配器必须要求恰好1张图片，并禁止音频和视频输入".to_owned());
+    }
+    if variant == "last-frame-to-video"
+        && (adapter.input_contract.image_min != 1
+            || adapter.input_contract.image_max != 1
+            || adapter.input_contract.audio_max != 0
+            || adapter.input_contract.video_max != 0)
+    {
+        return Err("尾帧生视频适配器必须要求恰好1张图片，并禁止音频和视频输入".to_owned());
     }
     Ok(())
 }
@@ -576,14 +738,17 @@ fn read_or_migrate_package(
 ) -> Result<WorkflowModuleRecord, String> {
     let adapter_file = adapter_path(root, &manifest.id);
     let ui_schema_file = ui_schema_path(root, &manifest.id);
-    let legacy_bindings = manifest.legacy_bindings.clone().unwrap_or_default();
+    let legacy_bindings = manifest
+        .legacy_bindings
+        .clone()
+        .unwrap_or_else(|| WorkflowBindings::for_variant(&manifest.variant));
     let adapter = if adapter_file.is_file() {
         let bytes =
             fs::read(&adapter_file).map_err(|error| format!("读取方案适配器失败：{error}"))?;
         serde_json::from_slice::<WorkflowAdapter>(&bytes)
             .map_err(|error| format!("解析方案适配器失败：{error}"))?
     } else {
-        let adapter = WorkflowAdapter::current_h3(legacy_bindings);
+        let adapter = WorkflowAdapter::for_variant(&manifest.variant, legacy_bindings);
         write_json_file(&adapter_file, &adapter, "方案适配器")?;
         adapter
     };
@@ -676,18 +841,28 @@ fn normalize_classification(capability: &str, variant: &str) -> Result<(String, 
         "first-last-frame-video" => {
             Ok(("video-generation".to_owned(), "first-last-frame".to_owned()))
         }
+        "image-to-video" => Ok(("video-generation".to_owned(), "image-to-video".to_owned())),
+        "last-frame-to-video" => Ok((
+            "video-generation".to_owned(),
+            "last-frame-to-video".to_owned(),
+        )),
         "text-to-video" => Ok(("video-generation".to_owned(), "text-to-video".to_owned())),
         "video-generation"
             if matches!(
                 variant,
-                "reference-to-video" | "first-last-frame" | "text-to-video"
+                "reference-to-video"
+                    | "first-last-frame"
+                    | "image-to-video"
+                    | "last-frame-to-video"
+                    | "text-to-video"
             ) =>
         {
             Ok((capability.to_owned(), variant.to_owned()))
         }
-        "video-generation" => {
-            Err("视频生成方案必须选择多参生视频、首尾帧或文生视频子类型".to_owned())
-        }
+        "video-generation" => Err(
+            "视频生成方案必须选择多参生视频、首尾帧、图生视频、尾帧生视频或文生视频子类型"
+                .to_owned(),
+        ),
         "image-generation" => Ok((capability.to_owned(), "image-generation".to_owned())),
         _ => Err(format!("不支持的工作流方案类型：{capability}")),
     }
@@ -741,11 +916,48 @@ fn require_input(workflow: &Value, node_id: &str, input_name: &str, issues: &mut
     }
 }
 
+fn validate_input_connections(
+    workflow: &serde_json::Map<String, Value>,
+    node_id: &str,
+    input_name: &str,
+    value: &Value,
+    issues: &mut Vec<String>,
+) {
+    if let Some(connection) = value.as_array() {
+        if connection.len() == 2 && connection[1].as_u64().is_some() {
+            if let Some(linked_node_id) = connection[0].as_str() {
+                if !workflow.contains_key(linked_node_id) {
+                    issues.push(format!(
+                        "节点 {node_id} 的 inputs.{input_name} 引用了不存在的节点 {linked_node_id}"
+                    ));
+                }
+                return;
+            }
+            if connection[0].is_number() {
+                issues.push(format!(
+                    "节点 {node_id} 的 inputs.{input_name} 连接 ID 必须是字符串，不能是数字 {}",
+                    connection[0]
+                ));
+                return;
+            }
+        }
+        for nested in connection {
+            validate_input_connections(workflow, node_id, input_name, nested, issues);
+        }
+        return;
+    }
+    if let Some(nested) = value.as_object() {
+        for nested_value in nested.values() {
+            validate_input_connections(workflow, node_id, input_name, nested_value, issues);
+        }
+    }
+}
+
 pub fn validate_workflow_bytes(
     bytes: &[u8],
-    _adapter_kind: &str,
-    bindings: &WorkflowBindings,
+    adapter: &WorkflowAdapter,
 ) -> WorkflowModuleValidation {
+    let bindings = &adapter.bindings;
     let mut issues = Vec::new();
     let workflow: Value = match serde_json::from_slice(bytes) {
         Ok(workflow) => workflow,
@@ -764,6 +976,13 @@ pub fn validate_workflow_bytes(
     };
     if object.contains_key("nodes") || object.contains_key("links") {
         issues.push("这是普通 UI 工作流，不是 API 格式工作流".to_owned());
+    }
+    for (node_id, node) in object {
+        if let Some(inputs) = node.get("inputs").and_then(Value::as_object) {
+            for (input_name, value) in inputs {
+                validate_input_connections(object, node_id, input_name, value, &mut issues);
+            }
+        }
     }
     for (node_id, input_name) in [
         (&bindings.prompt_node_id, "value"),
@@ -837,6 +1056,72 @@ pub fn validate_workflow_bytes(
             issues.push(format!("缺少素材输入节点 {node_id}"));
         }
     }
+    if adapter.variant == "first-last-frame" {
+        require_input(
+            &workflow,
+            &bindings.conditioning_node_id,
+            "first_frame",
+            &mut issues,
+        );
+        require_input(
+            &workflow,
+            &bindings.conditioning_node_id,
+            "last_frame",
+            &mut issues,
+        );
+        let task_type = workflow
+            .get(&bindings.conditioning_node_id)
+            .and_then(|node| node.get("inputs"))
+            .and_then(|inputs| inputs.get("task_type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if task_type != "FL2VA" {
+            issues.push(format!(
+                "节点 {} 的 inputs.task_type 必须是 FL2VA",
+                bindings.conditioning_node_id
+            ));
+        }
+    }
+    if adapter.variant == "image-to-video" {
+        require_input(
+            &workflow,
+            &bindings.conditioning_node_id,
+            "first_frame",
+            &mut issues,
+        );
+        let task_type = workflow
+            .get(&bindings.conditioning_node_id)
+            .and_then(|node| node.get("inputs"))
+            .and_then(|inputs| inputs.get("task_type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if task_type != "I2VA" {
+            issues.push(format!(
+                "节点 {} 的 inputs.task_type 必须是 I2VA",
+                bindings.conditioning_node_id
+            ));
+        }
+    }
+    if adapter.variant == "last-frame-to-video" {
+        require_input(
+            &workflow,
+            &bindings.conditioning_node_id,
+            "last_frame",
+            &mut issues,
+        );
+        let task_type = workflow
+            .get(&bindings.conditioning_node_id)
+            .and_then(|node| node.get("inputs"))
+            .and_then(|inputs| inputs.get("task_type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if task_type != "L2VA" {
+            issues.push(format!(
+                "节点 {} 的 inputs.task_type 必须是 L2VA",
+                bindings.conditioning_node_id
+            ));
+        }
+    }
     for node_id in [
         &bindings.primary_output_node_id,
         &bindings.secondary_output_node_id,
@@ -853,12 +1138,13 @@ pub fn validate_workflow_bytes(
 
 pub fn validate_source(
     source_path: &Path,
-    adapter_kind: &str,
+    variant: &str,
     bindings: &WorkflowBindings,
 ) -> Result<WorkflowModuleValidation, String> {
     let bytes = fs::read(source_path)
         .map_err(|error| format!("读取工作流文件失败（{}）：{error}", source_path.display()))?;
-    Ok(validate_workflow_bytes(&bytes, adapter_kind, bindings))
+    let adapter = WorkflowAdapter::for_variant(variant, bindings.clone());
+    Ok(validate_workflow_bytes(&bytes, &adapter))
 }
 
 pub fn save(root: &Path, input: SaveWorkflowModuleInput) -> Result<WorkflowModuleRecord, String> {
@@ -872,14 +1158,20 @@ pub fn save(root: &Path, input: SaveWorkflowModuleInput) -> Result<WorkflowModul
         validate_label(&input.revision, "修订名称")?
     };
     let requested_engine = validate_label(&input.adapter_kind, "方案引擎类型")?;
-    if requested_engine != WORKFLOW_PACKAGE_ENGINE && requested_engine != H3_MULTI_REFERENCE_ADAPTER
+    if requested_engine != WORKFLOW_PACKAGE_ENGINE
+        && requested_engine != H3_MULTI_REFERENCE_ADAPTER
+        && requested_engine != H3_FIRST_LAST_FRAME_ADAPTER
+        && requested_engine != H3_IMAGE_TO_VIDEO_ADAPTER
+        && requested_engine != H3_LAST_FRAME_TO_VIDEO_ADAPTER
     {
         return Err(format!("当前程序尚不支持方案引擎 {requested_engine}"));
     }
-    let bindings = input.bindings.unwrap_or_default();
+    let bindings = input
+        .bindings
+        .unwrap_or_else(|| WorkflowBindings::for_variant(&variant));
     let adapter = input
         .adapter
-        .unwrap_or_else(|| WorkflowAdapter::current_h3(bindings));
+        .unwrap_or_else(|| WorkflowAdapter::for_variant(&variant, bindings));
     validate_adapter_contract(&adapter, &capability, &variant)?;
     let ui_schema = input.ui_schema.unwrap_or_default();
     validate_ui_schema(&ui_schema)?;
@@ -890,8 +1182,7 @@ pub fn save(root: &Path, input: SaveWorkflowModuleInput) -> Result<WorkflowModul
     }
     let workflow_bytes = fs::read(&source)
         .map_err(|error| format!("读取工作流文件失败（{}）：{error}", source.display()))?;
-    let validation =
-        validate_workflow_bytes(&workflow_bytes, &adapter.adapter_id, &adapter.bindings);
+    let validation = validate_workflow_bytes(&workflow_bytes, &adapter);
     if !validation.compatible {
         return Err(format!(
             "工作流与方案不兼容：{}",
@@ -1201,7 +1492,13 @@ fn import_package_bytes(
         serde_json::from_slice::<WorkflowAdapter>(bytes)
             .map_err(|error| format!("解析方案备份适配器失败：{error}"))?
     } else {
-        WorkflowAdapter::current_h3(source_manifest.legacy_bindings.clone().unwrap_or_default())
+        WorkflowAdapter::for_variant(
+            &source_manifest.variant,
+            source_manifest
+                .legacy_bindings
+                .clone()
+                .unwrap_or_else(|| WorkflowBindings::for_variant(&source_manifest.variant)),
+        )
     };
     let ui_schema = if let Some(bytes) = ui_schema_bytes {
         serde_json::from_slice::<WorkflowUiSchema>(bytes)
@@ -1239,9 +1536,10 @@ fn import_package_bytes(
 mod tests {
     use super::{
         export, import_bundle, list, restore_bundle, restore_from_trash, restore_latest_backup,
-        save, trash, validate_source, SaveWorkflowModuleInput, WorkflowBindings,
-        WorkflowModuleDefaults, ADAPTER_FILE, H3_MULTI_REFERENCE_ADAPTER, UI_SCHEMA_FILE,
-        WORKFLOW_FILE, WORKFLOW_PACKAGE_ENGINE,
+        save, trash, validate_source, validate_workflow_bytes, SaveWorkflowModuleInput,
+        WorkflowAdapter, WorkflowBindings, WorkflowModuleDefaults, ADAPTER_FILE,
+        H3_FIRST_LAST_FRAME_ADAPTER, H3_IMAGE_TO_VIDEO_ADAPTER, H3_LAST_FRAME_TO_VIDEO_ADAPTER,
+        H3_MULTI_REFERENCE_ADAPTER, UI_SCHEMA_FILE, WORKFLOW_FILE, WORKFLOW_PACKAGE_ENGINE,
     };
     use serde_json::json;
     use std::{fs, path::PathBuf};
@@ -1262,6 +1560,7 @@ mod tests {
             "340": { "inputs": { "aspect_ratio": "16:9", "megapixels": 0.4 } },
             "398": { "inputs": { "aspect_ratio": "16:9", "megapixels": 0.5 } },
             "358": { "class_type": "UNETLoader", "inputs": { "unet_name": "MinimaxH3\\model.safetensors" } },
+            "353": { "inputs": { "model": ["358", 0] } },
             "354": { "class_type": "LoraLoaderModelOnly", "inputs": { "model": ["353", 0], "lora_name": "MinimaxH3\\a.safetensors", "strength_model": 1.0 } },
             "401": { "class_type": "LoraLoaderModelOnly", "inputs": { "model": ["353", 0], "lora_name": "MinimaxH3\\a.safetensors", "strength_model": 1.0 } },
             "357": { "inputs": { "video_steps": 6, "audio_steps": 8, "model": ["354", 0] } },
@@ -1403,12 +1702,136 @@ mod tests {
             .unwrap()
             .join("workflows")
             .join("MiniMax+H3全能参考工作流.json");
+        let validation =
+            validate_source(&path, "reference-to-video", &WorkflowBindings::default()).unwrap();
+        assert!(validation.compatible, "{}", validation.issues.join("; "));
+    }
+
+    #[test]
+    fn current_h3_first_last_workflow_matches_the_builtin_adapter() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows")
+            .join("MiniMax+H3首尾帧工作流.json");
         let validation = validate_source(
             &path,
-            H3_MULTI_REFERENCE_ADAPTER,
-            &WorkflowBindings::default(),
+            "first-last-frame",
+            &WorkflowBindings::first_last_frame(),
         )
         .unwrap();
         assert!(validation.compatible, "{}", validation.issues.join("; "));
+    }
+
+    #[test]
+    fn current_h3_image_to_video_workflow_matches_the_builtin_adapter() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows")
+            .join("MiniMax+H3图生视频工作流.json");
+        let validation =
+            validate_source(&path, "image-to-video", &WorkflowBindings::image_to_video()).unwrap();
+        assert!(validation.compatible, "{}", validation.issues.join("; "));
+    }
+
+    #[test]
+    fn current_h3_last_frame_to_video_workflow_matches_the_builtin_adapter() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows")
+            .join("MiniMax+H3尾帧生视频工作流.json");
+        let validation = validate_source(
+            &path,
+            "last-frame-to-video",
+            &WorkflowBindings::last_frame_to_video(),
+        )
+        .unwrap();
+        assert!(validation.compatible, "{}", validation.issues.join("; "));
+    }
+
+    #[test]
+    fn rejects_numeric_connection_node_ids_before_comfyui_submission() {
+        let mut workflow = test_workflow();
+        workflow["405"]["inputs"]["image"] = json!([330, 0]);
+        let adapter =
+            WorkflowAdapter::for_variant("reference-to-video", WorkflowBindings::default());
+        let validation = validate_workflow_bytes(&serde_json::to_vec(&workflow).unwrap(), &adapter);
+        assert!(!validation.compatible);
+        assert!(validation.issues.iter().any(|issue| {
+            issue.contains("节点 405")
+                && issue.contains("inputs.image")
+                && issue.contains("必须是字符串")
+        }));
+    }
+
+    #[test]
+    fn saves_first_last_workflow_with_its_own_adapter() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows")
+            .join("MiniMax+H3首尾帧工作流.json");
+        let mut input = save_input(&path);
+        input.name = "H3 first and last frame".to_owned();
+        input.capability = "video-generation".to_owned();
+        input.variant = "first-last-frame".to_owned();
+        input.bindings = None;
+        input.adapter = None;
+        let saved = save(&root, input).unwrap();
+        assert_eq!(saved.adapter.adapter_id, H3_FIRST_LAST_FRAME_ADAPTER);
+        assert_eq!(saved.adapter.input_contract.image_min, 2);
+        assert_eq!(saved.adapter.input_contract.image_max, 2);
+        assert_eq!(saved.bindings.image_node_ids, ["335", "417"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saves_image_to_video_workflow_with_its_own_adapter() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows")
+            .join("MiniMax+H3图生视频工作流.json");
+        let mut input = save_input(&path);
+        input.name = "H3 image to video".to_owned();
+        input.capability = "video-generation".to_owned();
+        input.variant = "image-to-video".to_owned();
+        input.bindings = None;
+        input.adapter = None;
+        let saved = save(&root, input).unwrap();
+        assert_eq!(saved.adapter.adapter_id, H3_IMAGE_TO_VIDEO_ADAPTER);
+        assert_eq!(saved.adapter.input_contract.image_min, 1);
+        assert_eq!(saved.adapter.input_contract.image_max, 1);
+        assert_eq!(saved.bindings.image_node_ids, ["335"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saves_last_frame_to_video_workflow_with_its_own_adapter() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows")
+            .join("MiniMax+H3尾帧生视频工作流.json");
+        let mut input = save_input(&path);
+        input.name = "H3 last frame to video".to_owned();
+        input.capability = "video-generation".to_owned();
+        input.variant = "last-frame-to-video".to_owned();
+        input.bindings = None;
+        input.adapter = None;
+        let saved = save(&root, input).unwrap();
+        assert_eq!(saved.adapter.adapter_id, H3_LAST_FRAME_TO_VIDEO_ADAPTER);
+        assert_eq!(saved.adapter.input_contract.image_min, 1);
+        assert_eq!(saved.adapter.input_contract.image_max, 1);
+        assert_eq!(saved.bindings.image_node_ids, ["417"]);
+        fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -28,8 +28,8 @@ use crate::{
         SetProjectPrivacyInput, UpdateNodeInput, UpdateProjectInput, WorkspaceSnapshot,
     },
     workflow_modules::{
-        self, SaveWorkflowModuleInput, WorkflowBindings, WorkflowModuleRecord,
-        WorkflowModuleValidation,
+        self, SaveWorkflowModuleInput, WorkflowBindings, WorkflowInputContract,
+        WorkflowModuleRecord, WorkflowModuleValidation,
     },
     ApplicationState, RunningComfyTask,
 };
@@ -668,15 +668,15 @@ pub fn save_workflow_module(
 #[tauri::command]
 pub fn validate_workflow_module_source(
     source_workflow_path: String,
-    adapter_kind: Option<String>,
+    _adapter_kind: Option<String>,
+    variant: Option<String>,
     bindings: Option<WorkflowBindings>,
 ) -> Result<WorkflowModuleValidation, String> {
+    let variant = variant.as_deref().unwrap_or("reference-to-video");
     workflow_modules::validate_source(
         Path::new(source_workflow_path.trim().trim_matches('"')),
-        adapter_kind
-            .as_deref()
-            .unwrap_or(workflow_modules::WORKFLOW_PACKAGE_ENGINE),
-        &bindings.unwrap_or_default(),
+        variant,
+        &bindings.unwrap_or_else(|| WorkflowBindings::for_variant(variant)),
     )
 }
 
@@ -1162,6 +1162,135 @@ fn resolve_filename_prefix_date(filename_prefix: &str, current_date: &str) -> St
     filename_prefix.replace("%date:yyyy-MM-dd%", current_date)
 }
 
+fn configure_h3_ref_image_size(
+    workflow: &mut Value,
+    ref_image_size: &str,
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    set_workflow_input(
+        workflow,
+        &bindings.conditioning_node_id,
+        "ref_image_size",
+        Value::String(ref_image_size.to_owned()),
+    )
+}
+
+fn configure_h3_uploaded_media(
+    workflow: &mut Value,
+    variant: &str,
+    uploaded_images: &[String],
+    image_roles: &[String],
+    uploaded_audios: &[String],
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    if variant == "image-to-video" {
+        let image_node_id = bindings
+            .image_node_ids
+            .first()
+            .ok_or_else(|| "图生视频适配器必须配置首帧图片输入节点".to_owned())?;
+        let uploaded_name = uploaded_images
+            .first()
+            .ok_or_else(|| "图生视频必须提供一张首帧图片".to_owned())?;
+        set_workflow_input(
+            workflow,
+            image_node_id,
+            "image",
+            Value::String(uploaded_name.clone()),
+        )?;
+        return Ok(());
+    }
+    if variant == "last-frame-to-video" {
+        let image_node_id = bindings
+            .image_node_ids
+            .first()
+            .ok_or_else(|| "尾帧生视频适配器必须配置尾帧图片输入节点".to_owned())?;
+        let uploaded_name = uploaded_images
+            .first()
+            .ok_or_else(|| "尾帧生视频必须提供一张尾帧图片".to_owned())?;
+        set_workflow_input(
+            workflow,
+            image_node_id,
+            "image",
+            Value::String(uploaded_name.clone()),
+        )?;
+        return Ok(());
+    }
+    if variant == "first-last-frame" {
+        let frame_nodes = bindings
+            .image_node_ids
+            .get(0..2)
+            .ok_or_else(|| "首尾帧适配器必须配置首帧和尾帧两个图片输入节点".to_owned())?;
+        for (role, node_id) in [("first", &frame_nodes[0]), ("last", &frame_nodes[1])] {
+            let input_name = if role == "first" {
+                "first_frame"
+            } else {
+                "last_frame"
+            };
+            let uploaded_name = uploaded_images
+                .iter()
+                .enumerate()
+                .find_map(|(index, name)| {
+                    let assigned_role = image_roles
+                        .get(index)
+                        .map(String::as_str)
+                        .unwrap_or_else(|| if index == 0 { "first" } else { "last" });
+                    (assigned_role == role).then_some(name)
+                });
+            if let Some(uploaded_name) = uploaded_name {
+                set_workflow_input(
+                    workflow,
+                    node_id,
+                    "image",
+                    Value::String(uploaded_name.clone()),
+                )?;
+            } else {
+                workflow
+                    .as_object_mut()
+                    .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?
+                    .remove(node_id);
+                remove_workflow_input(workflow, &bindings.conditioning_node_id, input_name)?;
+            }
+        }
+        return Ok(());
+    }
+
+    for (index, node_id) in bindings.image_node_ids.iter().enumerate() {
+        let input_name = format!("ref_images.ref_image_{index}");
+        if let Some(uploaded_name) = uploaded_images.get(index) {
+            set_workflow_input(
+                workflow,
+                node_id,
+                "image",
+                Value::String(uploaded_name.clone()),
+            )?;
+        } else {
+            workflow
+                .as_object_mut()
+                .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?
+                .remove(node_id);
+            remove_workflow_input(workflow, &bindings.conditioning_node_id, &input_name)?;
+        }
+    }
+    for (index, node_id) in bindings.audio_node_ids.iter().enumerate() {
+        let input_name = format!("ref_audios.ref_audio_{index}");
+        if let Some(uploaded_name) = uploaded_audios.get(index) {
+            set_workflow_input(
+                workflow,
+                node_id,
+                "audio",
+                Value::String(uploaded_name.clone()),
+            )?;
+        } else {
+            workflow
+                .as_object_mut()
+                .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?
+                .remove(node_id);
+            remove_workflow_input(workflow, &bindings.conditioning_node_id, &input_name)?;
+        }
+    }
+    Ok(())
+}
+
 fn configure_h3_generation(
     workflow: &mut Value,
     prompt: &str,
@@ -1577,6 +1706,64 @@ fn ensure_comfy_task_active(cancelled: &AtomicBool) -> Result<(), String> {
     }
 }
 
+fn validate_workflow_media_counts(
+    variant: &str,
+    contract: &WorkflowInputContract,
+    image_count: usize,
+    audio_count: usize,
+    video_count: usize,
+) -> Result<(), String> {
+    if variant == "first-last-frame" {
+        if image_count != 2 {
+            return Err(format!(
+                "首尾帧模式必须提供两张图片（首帧和尾帧），当前为 {image_count} 张"
+            ));
+        }
+        if audio_count > 0 || video_count > 0 {
+            return Err("首尾帧模式不能包含音频或视频参考".to_owned());
+        }
+    }
+    if variant == "image-to-video" {
+        if image_count != 1 {
+            return Err(format!(
+                "图生视频模式必须提供一张首帧图片，当前为 {image_count} 张"
+            ));
+        }
+        if audio_count > 0 || video_count > 0 {
+            return Err("图生视频模式不能包含音频或视频参考".to_owned());
+        }
+    }
+    if variant == "last-frame-to-video" {
+        if image_count != 1 {
+            return Err(format!(
+                "尾帧生视频模式必须提供一张尾帧图片，当前为 {image_count} 张"
+            ));
+        }
+        if audio_count > 0 || video_count > 0 {
+            return Err("尾帧生视频模式不能包含音频或视频参考".to_owned());
+        }
+    }
+    if image_count < contract.image_min || image_count > contract.image_max {
+        return Err(format!(
+            "当前方案要求参考图片数量为 {}–{} 张",
+            contract.image_min, contract.image_max
+        ));
+    }
+    if audio_count < contract.audio_min || audio_count > contract.audio_max {
+        return Err(format!(
+            "当前方案要求参考音频数量为 {}–{} 个",
+            contract.audio_min, contract.audio_max
+        ));
+    }
+    if video_count < contract.video_min || video_count > contract.video_max {
+        return Err(format!(
+            "当前方案要求参考视频数量为 {}–{} 个",
+            contract.video_min, contract.video_max
+        ));
+    }
+    Ok(())
+}
+
 async fn submit_comfyui_workflow_inner(
     input: ComfySubmitInput,
     task: Arc<RunningComfyTask>,
@@ -1604,29 +1791,30 @@ async fn submit_comfyui_workflow_inner(
             workflow_modules::WorkflowAdapter::current_h3(WorkflowBindings::default()),
         )
     };
+    let adapter_variant = adapter.variant.clone();
     let contract = &adapter.input_contract;
     let bindings = &adapter.bindings;
     let generation_seed = resolve_generation_seed(&input.seed_mode, &input.seed)?;
-    if input.image_paths.len() < contract.image_min || input.image_paths.len() > contract.image_max
-    {
-        return Err(format!(
-            "当前方案要求参考图片数量为 {}–{} 张",
-            contract.image_min, contract.image_max
-        ));
-    }
-    if input.audio_paths.len() < contract.audio_min || input.audio_paths.len() > contract.audio_max
-    {
-        return Err(format!(
-            "当前方案要求参考音频数量为 {}–{} 个",
-            contract.audio_min, contract.audio_max
-        ));
-    }
-    if input.video_paths.len() < contract.video_min || input.video_paths.len() > contract.video_max
-    {
-        return Err(format!(
-            "当前方案要求参考视频数量为 {}–{} 个",
-            contract.video_min, contract.video_max
-        ));
+    validate_workflow_media_counts(
+        &adapter_variant,
+        contract,
+        input.image_paths.len(),
+        input.audio_paths.len(),
+        input.video_paths.len(),
+    )?;
+    if adapter_variant == "first-last-frame" && !input.image_roles.is_empty() {
+        if input.image_roles.len() != input.image_paths.len() {
+            return Err("首尾帧图片角色数量与图片数量不一致".to_owned());
+        }
+        let mut seen_roles = HashSet::new();
+        for role in &input.image_roles {
+            if !matches!(role.as_str(), "first" | "last") {
+                return Err("首尾帧图片角色必须是 first 或 last".to_owned());
+            }
+            if !seen_roles.insert(role.as_str()) {
+                return Err("首帧和尾帧不能重复指定".to_owned());
+            }
+        }
     }
     if !input.duration_seconds.is_finite()
         || input.duration_seconds < 2.0
@@ -1656,6 +1844,10 @@ async fn submit_comfyui_workflow_inner(
     }
     if !(1..=10000).contains(&input.secondary_scheduler_steps) {
         return Err("二采基本调度器 Steps 必须在1到10000之间".to_owned());
+    }
+    let ref_image_size = input.ref_image_size.trim();
+    if !matches!(ref_image_size, "max" | "match") {
+        return Err("参考图片尺寸模式必须是 max 或 match".to_owned());
     }
     for (label, value) in [
         ("一采亮度", input.primary_brightness),
@@ -1780,40 +1972,15 @@ async fn submit_comfyui_workflow_inner(
         secondary_lora_bypassed,
         &bindings,
     )?;
-    for (index, node_id) in bindings.image_node_ids.iter().enumerate() {
-        let input_name = format!("ref_images.ref_image_{index}");
-        if let Some(uploaded_name) = uploaded_images.get(index) {
-            set_workflow_input(
-                &mut workflow,
-                node_id,
-                "image",
-                Value::String(uploaded_name.clone()),
-            )?;
-        } else {
-            workflow
-                .as_object_mut()
-                .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?
-                .remove(node_id);
-            remove_workflow_input(&mut workflow, &bindings.conditioning_node_id, &input_name)?;
-        }
-    }
-    for (index, node_id) in bindings.audio_node_ids.iter().enumerate() {
-        let input_name = format!("ref_audios.ref_audio_{index}");
-        if let Some(uploaded_name) = uploaded_audios.get(index) {
-            set_workflow_input(
-                &mut workflow,
-                node_id,
-                "audio",
-                Value::String(uploaded_name.clone()),
-            )?;
-        } else {
-            workflow
-                .as_object_mut()
-                .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?
-                .remove(node_id);
-            remove_workflow_input(&mut workflow, &bindings.conditioning_node_id, &input_name)?;
-        }
-    }
+    configure_h3_ref_image_size(&mut workflow, ref_image_size, bindings)?;
+    configure_h3_uploaded_media(
+        &mut workflow,
+        &adapter_variant,
+        &uploaded_images,
+        &input.image_roles,
+        &uploaded_audios,
+        bindings,
+    )?;
     if let Some(uploaded_video) = uploaded_secondary_source.as_deref() {
         configure_secondary_source_video(&mut workflow, uploaded_video, &bindings)?;
     }
@@ -2373,11 +2540,13 @@ pub fn get_runtime_info(state: State<'_, ApplicationState>) -> RuntimeInfo {
 mod tests {
     use super::{
         comfy_execution_elapsed_seconds, comfy_input_task_path, comfy_queue_summary_from_value,
-        configure_h3_diffusion_model, configure_h3_generation, configure_secondary_source_video,
-        delete_video_files_blocking, diffusion_models_from_object_info, hash_app_lock_password,
-        loras_from_object_info, media_format, resolve_filename_prefix_date,
-        resolve_generation_seed, validate_new_app_lock_password, verify_app_lock_hash, MediaFormat,
-        WorkflowBindings, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
+        configure_h3_diffusion_model, configure_h3_generation, configure_h3_ref_image_size,
+        configure_h3_uploaded_media, configure_secondary_source_video, delete_video_files_blocking,
+        diffusion_models_from_object_info, hash_app_lock_password, loras_from_object_info,
+        media_format, resolve_filename_prefix_date, resolve_generation_seed,
+        validate_new_app_lock_password, validate_workflow_media_counts, verify_app_lock_hash,
+        MediaFormat, WorkflowBindings, WorkflowInputContract, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES,
+        VIDEO_MAX_BYTES,
     };
     use serde_json::json;
     use std::{fs, path::Path};
@@ -2388,6 +2557,183 @@ mod tests {
         assert_eq!(
             resolve_filename_prefix_date("%date:yyyy-MM-dd%/Minimax_H3", "2026-08-10"),
             "2026-08-10/Minimax_H3"
+        );
+    }
+
+    #[test]
+    fn configures_reference_image_size_mode() {
+        let mut workflow = json!({
+            "363": { "inputs": { "ref_image_size": "max" } }
+        });
+        configure_h3_ref_image_size(&mut workflow, "match", &WorkflowBindings::default()).unwrap();
+        assert_eq!(workflow["363"]["inputs"]["ref_image_size"], "match");
+    }
+
+    #[test]
+    fn maps_first_and_last_frames_by_their_explicit_roles() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows")
+            .join("MiniMax+H3首尾帧工作流.json");
+        let mut workflow: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        configure_h3_uploaded_media(
+            &mut workflow,
+            "first-last-frame",
+            &["tail.png".to_owned(), "head.png".to_owned()],
+            &["last".to_owned(), "first".to_owned()],
+            &[],
+            &WorkflowBindings::first_last_frame(),
+        )
+        .unwrap();
+        assert_eq!(workflow["335"]["inputs"]["image"], "head.png");
+        assert_eq!(workflow["417"]["inputs"]["image"], "tail.png");
+    }
+
+    #[test]
+    fn maps_image_to_video_image_to_the_first_frame_loader() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows")
+            .join("MiniMax+H3图生视频工作流.json");
+        let mut workflow: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        configure_h3_uploaded_media(
+            &mut workflow,
+            "image-to-video",
+            &["first.png".to_owned()],
+            &[],
+            &[],
+            &WorkflowBindings::image_to_video(),
+        )
+        .unwrap();
+        assert_eq!(workflow["335"]["inputs"]["image"], "first.png");
+        assert_eq!(workflow["333"]["inputs"]["first_frame"], json!(["335", 0]));
+    }
+
+    #[test]
+    fn maps_last_frame_to_video_image_to_the_last_frame_loader() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows")
+            .join("MiniMax+H3尾帧生视频工作流.json");
+        let mut workflow: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        configure_h3_uploaded_media(
+            &mut workflow,
+            "last-frame-to-video",
+            &["last.png".to_owned()],
+            &[],
+            &[],
+            &WorkflowBindings::last_frame_to_video(),
+        )
+        .unwrap();
+        assert_eq!(workflow["417"]["inputs"]["image"], "last.png");
+        assert_eq!(workflow["333"]["inputs"]["last_frame"], json!(["417", 0]));
+    }
+
+    #[test]
+    fn first_last_frame_requires_exactly_two_images_and_no_audio_or_video() {
+        let contract = WorkflowInputContract {
+            prompt_required: true,
+            image_min: 2,
+            image_max: 2,
+            audio_min: 0,
+            audio_max: 0,
+            video_min: 0,
+            video_max: 0,
+        };
+        assert!(validate_workflow_media_counts("first-last-frame", &contract, 2, 0, 0).is_ok());
+        assert!(
+            validate_workflow_media_counts("first-last-frame", &contract, 1, 0, 0)
+                .unwrap_err()
+                .contains("必须提供两张图片")
+        );
+        assert!(
+            validate_workflow_media_counts("first-last-frame", &contract, 3, 0, 0)
+                .unwrap_err()
+                .contains("必须提供两张图片")
+        );
+        assert!(
+            validate_workflow_media_counts("first-last-frame", &contract, 2, 1, 0)
+                .unwrap_err()
+                .contains("不能包含音频或视频参考")
+        );
+        assert!(
+            validate_workflow_media_counts("first-last-frame", &contract, 2, 0, 1)
+                .unwrap_err()
+                .contains("不能包含音频或视频参考")
+        );
+    }
+
+    #[test]
+    fn image_to_video_requires_one_image_and_no_audio_or_video() {
+        let contract = WorkflowInputContract {
+            prompt_required: true,
+            image_min: 1,
+            image_max: 1,
+            audio_min: 0,
+            audio_max: 0,
+            video_min: 0,
+            video_max: 0,
+        };
+        assert!(validate_workflow_media_counts("image-to-video", &contract, 1, 0, 0).is_ok());
+        assert!(
+            validate_workflow_media_counts("image-to-video", &contract, 0, 0, 0)
+                .unwrap_err()
+                .contains("必须提供一张首帧图片")
+        );
+        assert!(
+            validate_workflow_media_counts("image-to-video", &contract, 2, 0, 0)
+                .unwrap_err()
+                .contains("必须提供一张首帧图片")
+        );
+        assert!(
+            validate_workflow_media_counts("image-to-video", &contract, 1, 1, 0)
+                .unwrap_err()
+                .contains("不能包含音频或视频参考")
+        );
+        assert!(
+            validate_workflow_media_counts("image-to-video", &contract, 1, 0, 1)
+                .unwrap_err()
+                .contains("不能包含音频或视频参考")
+        );
+    }
+
+    #[test]
+    fn last_frame_to_video_requires_one_image_and_no_audio_or_video() {
+        let contract = WorkflowInputContract {
+            prompt_required: true,
+            image_min: 1,
+            image_max: 1,
+            audio_min: 0,
+            audio_max: 0,
+            video_min: 0,
+            video_max: 0,
+        };
+        assert!(validate_workflow_media_counts("last-frame-to-video", &contract, 1, 0, 0).is_ok());
+        assert!(
+            validate_workflow_media_counts("last-frame-to-video", &contract, 0, 0, 0)
+                .unwrap_err()
+                .contains("必须提供一张尾帧图片")
+        );
+        assert!(
+            validate_workflow_media_counts("last-frame-to-video", &contract, 2, 0, 0)
+                .unwrap_err()
+                .contains("必须提供一张尾帧图片")
+        );
+        assert!(
+            validate_workflow_media_counts("last-frame-to-video", &contract, 1, 1, 0)
+                .unwrap_err()
+                .contains("不能包含音频或视频参考")
+        );
+        assert!(
+            validate_workflow_media_counts("last-frame-to-video", &contract, 1, 0, 1)
+                .unwrap_err()
+                .contains("不能包含音频或视频参考")
         );
     }
 

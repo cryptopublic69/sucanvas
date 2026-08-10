@@ -227,8 +227,12 @@ pub struct ComfySubmitInput {
     pub secondary_lora_strength: Option<f64>,
     #[serde(default)]
     pub secondary_lora_bypassed: Option<bool>,
+    #[serde(default = "default_ref_image_size")]
+    pub ref_image_size: String,
     #[serde(default)]
     pub image_paths: Vec<String>,
+    #[serde(default)]
+    pub image_roles: Vec<String>,
     #[serde(default)]
     pub audio_paths: Vec<String>,
     #[serde(default)]
@@ -239,6 +243,10 @@ pub struct ComfySubmitInput {
 
 fn default_lora_strength() -> f64 {
     1.0
+}
+
+fn default_ref_image_size() -> String {
+    "max".to_owned()
 }
 
 fn default_diffusion_model_name() -> String {

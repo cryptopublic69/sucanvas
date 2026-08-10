@@ -179,6 +179,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_icon(tauri::include_image!("./icons/128x128.png"))?;
+            }
             let (data_dir, legacy_dir) = prepare_data_dir(app)?;
             let assets_dir = data_dir.join("assets");
             std::fs::create_dir_all(&assets_dir)?;
