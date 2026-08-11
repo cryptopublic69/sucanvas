@@ -11,14 +11,23 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::models::{
-    AppendPromptVersionInput, AppendPromptVersionResult, CanvasRecord, CreateEdgeInput,
+    AppendPromptVersionInput, AppendPromptVersionResult, CancelFolderResult,
+    CancelFolderUndoRecord, CanvasFolderLinkRecord, CanvasRecord, CreateEdgeInput,
     CreateMissingPromptScenesInput, CreateMissingPromptScenesResult, CreateNodeInput,
-    CreateNodeResult, DeletedBatch, EdgeRecord, NodeRecord, PromptSceneBinding,
+    CreateNodeResult, DeleteFolderResult, DeletedBatch, EdgeRecord, FolderActionInput,
+    FolderGroupingUndoRecord, FolderInputDuplicateRecord, FolderMergeDeduplicatedInputRecord,
+    FolderMergeSourceSnapshot, FolderMergeUndoRecord, FolderTreeUndoRecord,
+    GroupNodesIntoFolderInput, GroupNodesIntoFolderResult, GroupRelatedNodesIntoFolderInput,
+    MergeFoldersInput, MergeFoldersResult, NodeRecord, PromptSceneBinding,
     PromptSceneBindingRecord, PromptSceneMutation, PromptSetScenesResult, PromptSetSummary,
     PromptVersionRecord, ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult,
-    RestoreNodeReplacementInput, RestoreNodeReplacementResult, UpdateNodeInput, WorkspaceSnapshot,
-    DEFAULT_CANVAS_ID,
+    RestoreNodeReplacementInput, RestoreNodeReplacementResult, UndoCancelFolderInput,
+    UndoDeleteFolderInput, UndoFolderGroupingInput, UndoFolderMergeInput, UpdateNodeInput,
+    WorkspaceSnapshot, DEFAULT_CANVAS_ID,
 };
+
+const FOLDER_NODE_WIDTH: f64 = 420.0;
+const FOLDER_NODE_HEIGHT: f64 = 274.25;
 
 #[derive(Debug, Error)]
 pub enum CanvasError {
@@ -121,6 +130,15 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_edges_canvas
                 ON edges(canvas_id);
 
+            CREATE TABLE IF NOT EXISTS canvas_folders (
+                folder_node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+                child_canvas_id TEXT NOT NULL UNIQUE REFERENCES canvases(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_canvas_folders_child
+                ON canvas_folders(child_canvas_id);
+
             CREATE TABLE IF NOT EXISTS prompt_scene_bindings (
                 prompt_set_id TEXT NOT NULL,
                 prompt_set_title TEXT NOT NULL,
@@ -154,6 +172,11 @@ impl Database {
                 [],
             )?;
         }
+
+        connection.execute(
+            "UPDATE nodes SET width = ?1, height = ?2 WHERE kind = 'folder'",
+            params![FOLDER_NODE_WIDTH, FOLDER_NODE_HEIGHT],
+        )?;
 
         let now = now();
         connection.execute(
@@ -234,6 +257,23 @@ impl Database {
 
     pub fn list_projects(&self) -> CanvasResult<Vec<WorkspaceSnapshot>> {
         let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT canvases.id
+                 FROM canvases
+                 LEFT JOIN canvas_folders ON canvas_folders.child_canvas_id = canvases.id
+                 WHERE canvas_folders.child_canvas_id IS NULL
+                 ORDER BY canvases.updated_at DESC, canvases.created_at DESC",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| load_workspace_from_connection(&connection, &id))
+            .collect()
+    }
+
+    pub fn list_all_projects(&self) -> CanvasResult<Vec<WorkspaceSnapshot>> {
+        let connection = self.lock()?;
         let mut statement = connection
             .prepare("SELECT id FROM canvases ORDER BY updated_at DESC, created_at DESC")?;
         let ids = statement
@@ -257,30 +297,52 @@ impl Database {
     }
 
     pub fn rename_project(&self, id: &str, name: &str) -> CanvasResult<CanvasRecord> {
-        let name = validate_project_name(name)?;
-        let connection = self.lock()?;
-        let changed = connection.execute(
+        let mut name = validate_project_name(name)?.to_owned();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let folder_parent = transaction
+            .query_row(
+                "SELECT nodes.id, nodes.canvas_id
+                 FROM canvas_folders
+                 JOIN nodes ON nodes.id = canvas_folders.folder_node_id
+                 WHERE canvas_folders.child_canvas_id = ?1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((folder_node_id, parent_canvas_id)) = folder_parent.as_ref() {
+            name =
+                unique_folder_title(&transaction, parent_canvas_id, &name, Some(folder_node_id))?;
+        }
+        let timestamp = now();
+        let changed = transaction.execute(
             "UPDATE canvases SET name = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, name, now()],
+            params![id, name, timestamp],
         )?;
         if changed == 0 {
             return Err(CanvasError::Validation(format!("project not found: {id}")));
         }
-        connection
-            .query_row(
-                "SELECT id, name, is_private, created_at, updated_at FROM canvases WHERE id = ?1",
-                [id],
-                |row| {
-                    Ok(CanvasRecord {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        is_private: row.get::<_, i64>(2)? != 0,
-                        created_at: row.get(3)?,
-                        updated_at: row.get(4)?,
-                    })
-                },
-            )
-            .map_err(CanvasError::Database)
+        transaction.execute(
+            "UPDATE nodes
+             SET title = ?2, updated_at = ?3
+             WHERE id = (SELECT folder_node_id FROM canvas_folders WHERE child_canvas_id = ?1)",
+            params![id, name, timestamp],
+        )?;
+        let record = transaction.query_row(
+            "SELECT id, name, is_private, created_at, updated_at FROM canvases WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(CanvasRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    is_private: row.get::<_, i64>(2)? != 0,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            },
+        )?;
+        transaction.commit()?;
+        Ok(record)
     }
 
     pub fn set_project_private(&self, id: &str, is_private: bool) -> CanvasResult<CanvasRecord> {
@@ -322,12 +384,1327 @@ impl Database {
         }
         let mut connection = self.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = transaction.execute("DELETE FROM canvases WHERE id = ?1", [id])?;
-        if changed == 0 {
+        let exists = transaction
+            .query_row("SELECT 1 FROM canvases WHERE id = ?1", [id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !exists {
             return Err(CanvasError::Validation(format!("project not found: {id}")));
         }
+        delete_canvas_tree(&transaction, id)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn group_nodes_into_folder(
+        &self,
+        input: GroupNodesIntoFolderInput,
+    ) -> CanvasResult<GroupNodesIntoFolderResult> {
+        self.group_nodes_into_folder_with_plan(&input.canvas_id, input.node_ids, None)
+    }
+
+    pub fn group_related_nodes_into_folder(
+        &self,
+        input: GroupRelatedNodesIntoFolderInput,
+    ) -> CanvasResult<GroupNodesIntoFolderResult> {
+        let root_node_id = input.root_node_id.trim().to_owned();
+        self.group_nodes_into_folder_with_plan(
+            &input.canvas_id,
+            vec![root_node_id.clone()],
+            Some(root_node_id),
+        )
+    }
+
+    fn group_nodes_into_folder_with_plan(
+        &self,
+        requested_canvas_id: &str,
+        requested_node_ids: Vec<String>,
+        related_root_node_id: Option<String>,
+    ) -> CanvasResult<GroupNodesIntoFolderResult> {
+        let canvas_id = requested_canvas_id.trim();
+        if canvas_id.is_empty() {
+            return Err(CanvasError::Validation(
+                "canvas id cannot be empty".to_owned(),
+            ));
+        }
+        let mut node_ids = requested_node_ids
+            .into_iter()
+            .filter(|id| !id.trim().is_empty())
+            .collect::<BTreeSet<_>>();
+        if node_ids.is_empty() {
+            return Err(CanvasError::Validation(
+                "at least one node is required".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let workspace = load_workspace_from_connection(&transaction, canvas_id)?;
+        let node_kinds = workspace
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.kind.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let canvas_edges = workspace.edges;
+        let mut duplicated_source_ids = BTreeSet::new();
+
+        if let Some(root_node_id) = related_root_node_id.as_deref() {
+            if node_kinds.get(root_node_id).map(String::as_str) != Some("video-generation") {
+                return Err(CanvasError::Validation(
+                    "the related-node root must be a video-generation node on the active canvas"
+                        .to_owned(),
+                ));
+            }
+
+            let mut adjacency = BTreeMap::<String, Vec<String>>::new();
+            for edge in &canvas_edges {
+                adjacency
+                    .entry(edge.source_node_id.clone())
+                    .or_default()
+                    .push(edge.target_node_id.clone());
+            }
+            node_ids.clear();
+            let mut pending = vec![root_node_id.to_owned()];
+            while let Some(node_id) = pending.pop() {
+                if !node_ids.insert(node_id.clone()) {
+                    continue;
+                }
+                if let Some(targets) = adjacency.get(&node_id) {
+                    pending.extend(targets.iter().cloned());
+                }
+            }
+
+            let generation_chain_node_ids = node_ids.clone();
+            let input_source_ids = canvas_edges
+                .iter()
+                .filter(|edge| {
+                    edge.kind == "input"
+                        && generation_chain_node_ids.contains(&edge.target_node_id)
+                        && node_kinds.get(&edge.target_node_id).map(String::as_str)
+                            == Some("video-generation")
+                        && matches!(
+                            node_kinds.get(&edge.source_node_id).map(String::as_str),
+                            Some("text" | "image" | "audio" | "video")
+                        )
+                        && !generation_chain_node_ids.contains(&edge.source_node_id)
+                })
+                .map(|edge| edge.source_node_id.clone())
+                .collect::<BTreeSet<_>>();
+
+            for source_node_id in input_source_ids {
+                let shared_with_outside_generator = canvas_edges.iter().any(|edge| {
+                    edge.kind == "input"
+                        && edge.source_node_id == source_node_id
+                        && !generation_chain_node_ids.contains(&edge.target_node_id)
+                        && node_kinds.get(&edge.target_node_id).map(String::as_str)
+                            == Some("video-generation")
+                });
+                if shared_with_outside_generator {
+                    duplicated_source_ids.insert(source_node_id);
+                } else {
+                    node_ids.insert(source_node_id);
+                }
+            }
+        }
+
+        let mut moved_nodes = Vec::with_capacity(node_ids.len());
+        for node_id in &node_ids {
+            let node = get_node_by_id(&transaction, node_id)?
+                .ok_or_else(|| CanvasError::Validation(format!("node not found: {node_id}")))?;
+            if node.canvas_id != canvas_id {
+                return Err(CanvasError::Validation(
+                    "all grouped nodes must belong to the active canvas".to_owned(),
+                ));
+            }
+            moved_nodes.push(node);
+        }
+        let mut duplicated_source_nodes = Vec::with_capacity(duplicated_source_ids.len());
+        for source_node_id in &duplicated_source_ids {
+            let source = get_node_by_id(&transaction, source_node_id)?.ok_or_else(|| {
+                CanvasError::Validation(format!("input node not found: {source_node_id}"))
+            })?;
+            if source.canvas_id != canvas_id
+                || !matches!(source.kind.as_str(), "text" | "image" | "audio" | "video")
+            {
+                return Err(CanvasError::Validation(
+                    "all copied inputs must be supported nodes on the active canvas".to_owned(),
+                ));
+            }
+            duplicated_source_nodes.push(source);
+        }
+        let original_nodes = moved_nodes.clone();
+        let mut original_prompt_scene_bindings = Vec::new();
+        for node in &original_nodes {
+            if let Some(binding) = get_prompt_scene_binding_by_node_id(&transaction, &node.id)? {
+                original_prompt_scene_bindings.push(binding);
+            }
+        }
+
+        let folder_title = next_folder_title(&transaction, canvas_id)?;
+        let timestamp = now();
+        let child_canvas_id = format!("canvas:{}", Uuid::new_v4());
+        let folder_node_id = format!("node:{}", Uuid::new_v4());
+        let min_x = moved_nodes
+            .iter()
+            .chain(duplicated_source_nodes.iter())
+            .map(|node| node.x)
+            .fold(f64::INFINITY, f64::min);
+        let min_y = moved_nodes
+            .iter()
+            .chain(duplicated_source_nodes.iter())
+            .map(|node| node.y)
+            .fold(f64::INFINITY, f64::min);
+        let (folder_x, folder_y) = related_root_node_id
+            .as_deref()
+            .and_then(|root_node_id| {
+                original_nodes
+                    .iter()
+                    .find(|node| node.id == root_node_id)
+                    .map(|node| (node.x, node.y))
+            })
+            .unwrap_or((min_x, min_y));
+        let folder_content = json!({
+            "childCanvasId": child_canvas_id,
+            "nodeCount": moved_nodes.len() + duplicated_source_nodes.len(),
+        });
+
+        transaction.execute(
+            "INSERT INTO canvases (id, name, is_private, created_at, updated_at)
+             SELECT ?1, ?2, is_private, ?3, ?3 FROM canvases WHERE id = ?4",
+            params![child_canvas_id, folder_title, timestamp, canvas_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO nodes (
+                id, canvas_id, kind, title, content_json, source, request_id,
+                x, y, width, height, status, created_at, updated_at
+             ) VALUES (?1, ?2, 'folder', ?3, ?4, 'manual', NULL,
+                       ?5, ?6, ?7, ?8, 'ready', ?9, ?9)",
+            params![
+                folder_node_id,
+                canvas_id,
+                folder_title,
+                serde_json::to_string(&folder_content)?,
+                folder_x,
+                folder_y,
+                FOLDER_NODE_WIDTH,
+                FOLDER_NODE_HEIGHT,
+                timestamp,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO canvas_folders (folder_node_id, child_canvas_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![folder_node_id, child_canvas_id, timestamp],
+        )?;
+
+        let mut duplicate_node_id_map = BTreeMap::new();
+        let mut duplicated_input_nodes = Vec::with_capacity(duplicated_source_nodes.len());
+        let mut duplicated_nodes = Vec::with_capacity(duplicated_source_nodes.len());
+        for source in &duplicated_source_nodes {
+            let duplicate_node_id = format!("node:{}", Uuid::new_v4());
+            duplicate_node_id_map.insert(source.id.clone(), duplicate_node_id.clone());
+            duplicated_input_nodes.push(FolderInputDuplicateRecord {
+                source_node_id: source.id.clone(),
+                duplicate_node_id: duplicate_node_id.clone(),
+            });
+            let mut content = source.content.clone();
+            if let Some(object) = content.as_object_mut() {
+                object.insert(
+                    "folderInputCopySourceId".to_owned(),
+                    Value::String(source.id.clone()),
+                );
+            }
+            duplicated_nodes.push(NodeRecord {
+                id: duplicate_node_id,
+                canvas_id: child_canvas_id.clone(),
+                kind: source.kind.clone(),
+                title: source.title.clone(),
+                content,
+                source: "folder-copy".to_owned(),
+                request_id: None,
+                x: source.x - min_x + 80.0,
+                y: source.y - min_y + 80.0,
+                width: source.width,
+                height: source.height,
+                status: source.status.clone(),
+                created_at: timestamp.clone(),
+                updated_at: timestamp.clone(),
+            });
+        }
+
+        for node in &moved_nodes {
+            let remapped_content =
+                remap_folder_input_references(&node.content, &duplicate_node_id_map);
+            transaction.execute(
+                "UPDATE nodes
+                 SET canvas_id = ?2, content_json = ?3, x = ?4, y = ?5, updated_at = ?6
+                 WHERE id = ?1",
+                params![
+                    node.id,
+                    child_canvas_id,
+                    serde_json::to_string(&remapped_content)?,
+                    node.x - min_x + 80.0,
+                    node.y - min_y + 80.0,
+                    timestamp,
+                ],
+            )?;
+            transaction.execute(
+                "UPDATE prompt_scene_bindings SET canvas_id = ?2, updated_at = ?3 WHERE node_id = ?1",
+                params![node.id, child_canvas_id, timestamp],
+            )?;
+        }
+        for duplicate in &duplicated_nodes {
+            insert_node(&transaction, duplicate)?;
+        }
+
+        let original_edges = canvas_edges
+            .iter()
+            .filter(|edge| {
+                node_ids.contains(&edge.source_node_id) || node_ids.contains(&edge.target_node_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut removed_crossing_edge_count = 0usize;
+        for edge in canvas_edges {
+            let source_moved = node_ids.contains(&edge.source_node_id);
+            let target_moved = node_ids.contains(&edge.target_node_id);
+            if source_moved && target_moved {
+                transaction.execute(
+                    "UPDATE edges SET canvas_id = ?2 WHERE id = ?1",
+                    params![edge.id, child_canvas_id],
+                )?;
+            } else if target_moved {
+                if let Some(duplicate_node_id) = duplicate_node_id_map.get(&edge.source_node_id) {
+                    insert_edge(
+                        &transaction,
+                        &EdgeRecord {
+                            id: format!("edge:{}", Uuid::new_v4()),
+                            canvas_id: child_canvas_id.clone(),
+                            source_node_id: duplicate_node_id.clone(),
+                            target_node_id: edge.target_node_id.clone(),
+                            kind: edge.kind.clone(),
+                            metadata: edge.metadata.clone(),
+                            created_at: timestamp.clone(),
+                        },
+                    )?;
+                    transaction.execute("DELETE FROM edges WHERE id = ?1", [edge.id])?;
+                    continue;
+                }
+                if is_protected_generation_edge(&transaction, &edge)? {
+                    return Err(CanvasError::Conflict(
+                        "generated video ownership links cannot cross folder boundaries".to_owned(),
+                    ));
+                }
+                transaction.execute("DELETE FROM edges WHERE id = ?1", [edge.id])?;
+                removed_crossing_edge_count += 1;
+            } else if source_moved || target_moved {
+                if is_protected_generation_edge(&transaction, &edge)? {
+                    return Err(CanvasError::Conflict(
+                        "generated video ownership links cannot cross folder boundaries".to_owned(),
+                    ));
+                }
+                transaction.execute("DELETE FROM edges WHERE id = ?1", [edge.id])?;
+                removed_crossing_edge_count += 1;
+            }
+        }
+
+        touch_canvas(&transaction, canvas_id)?;
+        touch_canvas(&transaction, &child_canvas_id)?;
+        let parent = load_workspace_from_connection(&transaction, canvas_id)?;
+        let child = load_workspace_from_connection(&transaction, &child_canvas_id)?;
+        transaction.commit()?;
+
+        Ok(GroupNodesIntoFolderResult {
+            parent,
+            child,
+            folder_node_id: folder_node_id.clone(),
+            removed_crossing_edge_count,
+            moved_node_count: original_nodes.len(),
+            copied_input_node_count: duplicated_input_nodes.len(),
+            undo: FolderGroupingUndoRecord {
+                parent_canvas_id: canvas_id.to_owned(),
+                child_canvas_id,
+                folder_node_id,
+                nodes: original_nodes,
+                edges: original_edges,
+                prompt_scene_bindings: original_prompt_scene_bindings,
+                duplicated_input_nodes,
+            },
+        })
+    }
+
+    pub fn undo_folder_grouping(
+        &self,
+        input: UndoFolderGroupingInput,
+    ) -> CanvasResult<WorkspaceSnapshot> {
+        let grouping = input.grouping;
+        if grouping.nodes.is_empty() {
+            return Err(CanvasError::Validation(
+                "folder grouping contains no nodes".to_owned(),
+            ));
+        }
+        let mut expected_node_ids = grouping
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<BTreeSet<_>>();
+        for duplicate in &grouping.duplicated_input_nodes {
+            if !expected_node_ids.insert(duplicate.duplicate_node_id.clone()) {
+                return Err(CanvasError::Validation(
+                    "folder grouping snapshot contains duplicate node ids".to_owned(),
+                ));
+            }
+        }
+        if grouping
+            .nodes
+            .iter()
+            .any(|node| node.canvas_id != grouping.parent_canvas_id)
+        {
+            return Err(CanvasError::Validation(
+                "folder grouping snapshot has inconsistent parent canvas ids".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let linked_child_canvas_id = transaction
+            .query_row(
+                "SELECT child_canvas_id FROM canvas_folders WHERE folder_node_id = ?1",
+                [&grouping.folder_node_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| CanvasError::Conflict("folder grouping no longer exists".to_owned()))?;
+        if linked_child_canvas_id != grouping.child_canvas_id {
+            return Err(CanvasError::Conflict(
+                "folder now points to a different child canvas".to_owned(),
+            ));
+        }
+
+        let mut child_node_statement =
+            transaction.prepare("SELECT id FROM nodes WHERE canvas_id = ?1")?;
+        let current_child_node_ids = child_node_statement
+            .query_map([&grouping.child_canvas_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        drop(child_node_statement);
+        if current_child_node_ids != expected_node_ids {
+            return Err(CanvasError::Conflict(
+                "child canvas changed after grouping; undo would discard newer nodes".to_owned(),
+            ));
+        }
+
+        for duplicate in &grouping.duplicated_input_nodes {
+            let source =
+                get_node_by_id(&transaction, &duplicate.source_node_id)?.ok_or_else(|| {
+                    CanvasError::Conflict(
+                        "the original shared input was deleted after grouping".to_owned(),
+                    )
+                })?;
+            let copied =
+                get_node_by_id(&transaction, &duplicate.duplicate_node_id)?.ok_or_else(|| {
+                    CanvasError::Conflict(
+                        "the shared input copy was deleted after grouping".to_owned(),
+                    )
+                })?;
+            let copied_source_id = copied
+                .content
+                .get("folderInputCopySourceId")
+                .and_then(Value::as_str);
+            if source.canvas_id != grouping.parent_canvas_id
+                || copied.canvas_id != grouping.child_canvas_id
+                || copied_source_id != Some(duplicate.source_node_id.as_str())
+            {
+                return Err(CanvasError::Conflict(
+                    "a shared input copy no longer matches its original node".to_owned(),
+                ));
+            }
+        }
+
+        for duplicate in &grouping.duplicated_input_nodes {
+            transaction.execute(
+                "DELETE FROM nodes WHERE id = ?1 AND canvas_id = ?2",
+                params![duplicate.duplicate_node_id, grouping.child_canvas_id],
+            )?;
+        }
+
+        for node in &grouping.nodes {
+            transaction.execute(
+                "DELETE FROM edges WHERE source_node_id = ?1 OR target_node_id = ?1",
+                [&node.id],
+            )?;
+        }
+        for node in &grouping.nodes {
+            transaction.execute(
+                "UPDATE nodes SET canvas_id = ?2 WHERE id = ?1",
+                params![node.id, grouping.parent_canvas_id],
+            )?;
+            write_node_update(&transaction, node)?;
+        }
+        for binding in &grouping.prompt_scene_bindings {
+            update_prompt_scene_binding(&transaction, binding)?;
+        }
+        for edge in &grouping.edges {
+            let metadata_json = serde_json::to_string(&edge.metadata)?;
+            transaction.execute(
+                "INSERT INTO edges (
+                    id, canvas_id, source_node_id, target_node_id, kind,
+                    metadata_json, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    edge.id,
+                    edge.canvas_id,
+                    edge.source_node_id,
+                    edge.target_node_id,
+                    edge.kind,
+                    metadata_json,
+                    edge.created_at,
+                ],
+            )?;
+        }
+
+        transaction.execute(
+            "DELETE FROM canvases WHERE id = ?1",
+            [&grouping.child_canvas_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM nodes WHERE id = ?1 AND kind = 'folder'",
+            [&grouping.folder_node_id],
+        )?;
+        touch_canvas(&transaction, &grouping.parent_canvas_id)?;
+        let parent = load_workspace_from_connection(&transaction, &grouping.parent_canvas_id)?;
+        transaction.commit()?;
+        Ok(parent)
+    }
+
+    pub fn merge_folders(&self, input: MergeFoldersInput) -> CanvasResult<MergeFoldersResult> {
+        let canvas_id = input.canvas_id.trim();
+        if canvas_id.is_empty() {
+            return Err(CanvasError::Validation(
+                "canvas id cannot be empty".to_owned(),
+            ));
+        }
+        let folder_node_ids = input
+            .folder_node_ids
+            .into_iter()
+            .filter(|id| !id.trim().is_empty())
+            .collect::<BTreeSet<_>>();
+        if folder_node_ids.len() < 2 {
+            return Err(CanvasError::Validation(
+                "at least two folders are required".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut sources = Vec::with_capacity(folder_node_ids.len());
+        for folder_node_id in &folder_node_ids {
+            let folder_node = get_node_by_id(&transaction, folder_node_id)?.ok_or_else(|| {
+                CanvasError::Validation(format!("node not found: {folder_node_id}"))
+            })?;
+            if folder_node.canvas_id != canvas_id || folder_node.kind != "folder" {
+                return Err(CanvasError::Validation(
+                    "all merged nodes must be folders on the active canvas".to_owned(),
+                ));
+            }
+            let (child_canvas_id, folder_link_created_at) = transaction
+                .query_row(
+                    "SELECT child_canvas_id, created_at FROM canvas_folders WHERE folder_node_id = ?1",
+                    [folder_node_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| CanvasError::Validation(format!(
+                    "folder has no child canvas: {folder_node_id}"
+                )))?;
+            let child = load_workspace_from_connection(&transaction, &child_canvas_id)?;
+            let mut prompt_scene_bindings = Vec::new();
+            for node in &child.nodes {
+                if let Some(binding) = get_prompt_scene_binding_by_node_id(&transaction, &node.id)?
+                {
+                    prompt_scene_bindings.push(binding);
+                }
+            }
+            sources.push(FolderMergeSourceSnapshot {
+                folder_node,
+                child_canvas: child.canvas,
+                folder_link_created_at,
+                nodes: child.nodes,
+                edges: child.edges,
+                prompt_scene_bindings,
+            });
+        }
+
+        sources.sort_by(|left, right| {
+            left.folder_node
+                .x
+                .total_cmp(&right.folder_node.x)
+                .then_with(|| left.folder_node.y.total_cmp(&right.folder_node.y))
+                .then_with(|| left.folder_node.id.cmp(&right.folder_node.id))
+        });
+        let mut input_candidates = BTreeMap::<(String, String), BTreeMap<String, usize>>::new();
+        for (source_index, source) in sources.iter().enumerate() {
+            let nodes_by_id = source
+                .nodes
+                .iter()
+                .map(|node| (node.id.as_str(), node))
+                .collect::<BTreeMap<_, _>>();
+            for edge in &source.edges {
+                if edge.kind != "input" {
+                    continue;
+                }
+                let Some(input_node) = nodes_by_id.get(edge.source_node_id.as_str()) else {
+                    continue;
+                };
+                let Some(target_node) = nodes_by_id.get(edge.target_node_id.as_str()) else {
+                    continue;
+                };
+                if target_node.kind != "video-generation"
+                    || !matches!(
+                        input_node.kind.as_str(),
+                        "text" | "image" | "audio" | "video"
+                    )
+                {
+                    continue;
+                }
+                let original_source_node_id =
+                    folder_input_original_source_id(&transaction, input_node)?;
+                input_candidates
+                    .entry((input_node.kind.clone(), original_source_node_id))
+                    .or_default()
+                    .insert(input_node.id.clone(), source_index);
+            }
+        }
+
+        let mut input_node_replacements = BTreeMap::<String, String>::new();
+        let mut deduplicated_input_nodes = Vec::new();
+        for ((_, original_source_node_id), candidates) in input_candidates {
+            let source_indexes = candidates.values().copied().collect::<BTreeSet<_>>();
+            if source_indexes.len() < 2 || candidates.len() < 2 {
+                continue;
+            }
+            let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+            candidates.sort_by(|(left_id, left_source), (right_id, right_source)| {
+                left_source
+                    .cmp(right_source)
+                    .then_with(|| left_id.cmp(right_id))
+            });
+            let kept_node_id = candidates
+                .iter()
+                .find(|(node_id, _)| node_id == &original_source_node_id)
+                .or_else(|| candidates.first())
+                .map(|(node_id, _)| node_id.clone())
+                .expect("duplicate input candidates are non-empty");
+            let removed_node_ids = candidates
+                .into_iter()
+                .map(|(node_id, _)| node_id)
+                .filter(|node_id| node_id != &kept_node_id)
+                .collect::<Vec<_>>();
+            for removed_node_id in &removed_node_ids {
+                input_node_replacements.insert(removed_node_id.clone(), kept_node_id.clone());
+            }
+            deduplicated_input_nodes.push(FolderMergeDeduplicatedInputRecord {
+                original_source_node_id,
+                kept_node_id,
+                removed_node_ids,
+            });
+        }
+        let removed_input_node_ids = input_node_replacements
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut parent_edge_statement = transaction.prepare(
+            "SELECT id, canvas_id, source_node_id, target_node_id, kind,
+                    metadata_json, created_at
+             FROM edges WHERE canvas_id = ?1",
+        )?;
+        let parent_edges = parent_edge_statement
+            .query_map([canvas_id], edge_from_row)?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|edge| {
+                folder_node_ids.contains(&edge.source_node_id)
+                    || folder_node_ids.contains(&edge.target_node_id)
+            })
+            .collect::<Vec<_>>();
+        drop(parent_edge_statement);
+
+        let folder_title = next_folder_title(&transaction, canvas_id)?;
+        let timestamp = now();
+        let merged_child_canvas_id = format!("canvas:{}", Uuid::new_v4());
+        let merged_folder_node_id = format!("node:{}", Uuid::new_v4());
+        let folder_x = sources
+            .iter()
+            .map(|source| source.folder_node.x)
+            .fold(f64::INFINITY, f64::min);
+        let folder_y = sources
+            .iter()
+            .map(|source| source.folder_node.y)
+            .fold(f64::INFINITY, f64::min);
+        let merged_node_count = sources
+            .iter()
+            .map(|source| source.nodes.len())
+            .sum::<usize>()
+            .saturating_sub(removed_input_node_ids.len());
+        let folder_content = json!({
+            "childCanvasId": merged_child_canvas_id,
+            "nodeCount": merged_node_count,
+        });
+
+        transaction.execute(
+            "INSERT INTO canvases (id, name, is_private, created_at, updated_at)
+             SELECT ?1, ?2, is_private, ?3, ?3 FROM canvases WHERE id = ?4",
+            params![merged_child_canvas_id, folder_title, timestamp, canvas_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO nodes (
+                id, canvas_id, kind, title, content_json, source, request_id,
+                x, y, width, height, status, created_at, updated_at
+             ) VALUES (?1, ?2, 'folder', ?3, ?4, 'manual', NULL,
+                       ?5, ?6, ?7, ?8, 'ready', ?9, ?9)",
+            params![
+                merged_folder_node_id,
+                canvas_id,
+                folder_title,
+                serde_json::to_string(&folder_content)?,
+                folder_x,
+                folder_y,
+                FOLDER_NODE_WIDTH,
+                FOLDER_NODE_HEIGHT,
+                timestamp,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO canvas_folders (folder_node_id, child_canvas_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![merged_folder_node_id, merged_child_canvas_id, timestamp],
+        )?;
+
+        let mut next_group_x = 80.0;
+        for source in &sources {
+            let (min_x, min_y, group_width) = if source.nodes.is_empty() {
+                (0.0, 0.0, FOLDER_NODE_WIDTH)
+            } else {
+                let min_x = source
+                    .nodes
+                    .iter()
+                    .map(|node| node.x)
+                    .fold(f64::INFINITY, f64::min);
+                let min_y = source
+                    .nodes
+                    .iter()
+                    .map(|node| node.y)
+                    .fold(f64::INFINITY, f64::min);
+                let max_right = source
+                    .nodes
+                    .iter()
+                    .map(|node| node.x + node.width)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                (min_x, min_y, (max_right - min_x).max(FOLDER_NODE_WIDTH))
+            };
+            for node in &source.nodes {
+                if removed_input_node_ids.contains(&node.id) {
+                    continue;
+                }
+                let remapped_content =
+                    remap_folder_input_references(&node.content, &input_node_replacements);
+                transaction.execute(
+                    "UPDATE nodes
+                     SET canvas_id = ?2, content_json = ?3, x = ?4, y = ?5, updated_at = ?6
+                     WHERE id = ?1",
+                    params![
+                        node.id,
+                        merged_child_canvas_id,
+                        serde_json::to_string(&remapped_content)?,
+                        node.x - min_x + next_group_x,
+                        node.y - min_y + 80.0,
+                        timestamp,
+                    ],
+                )?;
+                transaction.execute(
+                    "UPDATE prompt_scene_bindings SET canvas_id = ?2, updated_at = ?3 WHERE node_id = ?1",
+                    params![node.id, merged_child_canvas_id, timestamp],
+                )?;
+            }
+            for edge in &source.edges {
+                let source_node_id = input_node_replacements
+                    .get(&edge.source_node_id)
+                    .unwrap_or(&edge.source_node_id);
+                let target_node_id = input_node_replacements
+                    .get(&edge.target_node_id)
+                    .unwrap_or(&edge.target_node_id);
+                transaction.execute("DELETE FROM edges WHERE id = ?1", [&edge.id])?;
+                transaction.execute(
+                    "INSERT INTO edges (
+                        id, canvas_id, source_node_id, target_node_id, kind,
+                        metadata_json, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(canvas_id, source_node_id, target_node_id, kind) DO NOTHING",
+                    params![
+                        edge.id,
+                        merged_child_canvas_id,
+                        source_node_id,
+                        target_node_id,
+                        edge.kind,
+                        serde_json::to_string(&edge.metadata)?,
+                        edge.created_at,
+                    ],
+                )?;
+            }
+            next_group_x += group_width + 160.0;
+        }
+
+        for source in &sources {
+            transaction.execute(
+                "DELETE FROM canvases WHERE id = ?1",
+                [&source.child_canvas.id],
+            )?;
+            transaction.execute(
+                "DELETE FROM nodes WHERE id = ?1 AND canvas_id = ?2 AND kind = 'folder'",
+                params![source.folder_node.id, canvas_id],
+            )?;
+        }
+
+        touch_canvas(&transaction, canvas_id)?;
+        touch_canvas(&transaction, &merged_child_canvas_id)?;
+        let parent = load_workspace_from_connection(&transaction, canvas_id)?;
+        let child = load_workspace_from_connection(&transaction, &merged_child_canvas_id)?;
+        transaction.commit()?;
+
+        Ok(MergeFoldersResult {
+            parent,
+            child,
+            folder_node_id: merged_folder_node_id.clone(),
+            merged_node_count,
+            source_folder_count: sources.len(),
+            deduplicated_input_node_count: removed_input_node_ids.len(),
+            undo: FolderMergeUndoRecord {
+                parent_canvas_id: canvas_id.to_owned(),
+                merged_child_canvas_id,
+                merged_folder_node_id,
+                sources,
+                parent_edges,
+                deduplicated_input_nodes,
+            },
+        })
+    }
+
+    pub fn undo_folder_merge(
+        &self,
+        input: UndoFolderMergeInput,
+    ) -> CanvasResult<WorkspaceSnapshot> {
+        let merge = input.merge;
+        if merge.sources.len() < 2 {
+            return Err(CanvasError::Validation(
+                "folder merge contains fewer than two source folders".to_owned(),
+            ));
+        }
+        let all_source_node_ids = merge
+            .sources
+            .iter()
+            .flat_map(|source| source.nodes.iter().map(|node| node.id.clone()))
+            .collect::<BTreeSet<_>>();
+        let mut removed_input_node_ids = BTreeSet::new();
+        for deduplicated in &merge.deduplicated_input_nodes {
+            if !all_source_node_ids.contains(&deduplicated.kept_node_id)
+                || deduplicated.removed_node_ids.is_empty()
+                || deduplicated.removed_node_ids.iter().any(|node_id| {
+                    node_id == &deduplicated.kept_node_id
+                        || !all_source_node_ids.contains(node_id)
+                        || !removed_input_node_ids.insert(node_id.clone())
+                })
+            {
+                return Err(CanvasError::Validation(
+                    "folder merge deduplication snapshot is inconsistent".to_owned(),
+                ));
+            }
+        }
+        let expected_node_ids = all_source_node_ids
+            .difference(&removed_input_node_ids)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if merge.sources.iter().any(|source| {
+            source.folder_node.canvas_id != merge.parent_canvas_id
+                || source.folder_node.kind != "folder"
+                || source
+                    .nodes
+                    .iter()
+                    .any(|node| node.canvas_id != source.child_canvas.id)
+        }) {
+            return Err(CanvasError::Validation(
+                "folder merge snapshot is inconsistent".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let linked_child_canvas_id = transaction
+            .query_row(
+                "SELECT child_canvas_id FROM canvas_folders WHERE folder_node_id = ?1",
+                [&merge.merged_folder_node_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| CanvasError::Conflict("merged folder no longer exists".to_owned()))?;
+        if linked_child_canvas_id != merge.merged_child_canvas_id {
+            return Err(CanvasError::Conflict(
+                "merged folder now points to a different child canvas".to_owned(),
+            ));
+        }
+        let mut merged_node_statement =
+            transaction.prepare("SELECT id FROM nodes WHERE canvas_id = ?1")?;
+        let current_node_ids = merged_node_statement
+            .query_map([&merge.merged_child_canvas_id], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        drop(merged_node_statement);
+        if current_node_ids != expected_node_ids {
+            return Err(CanvasError::Conflict(
+                "merged folder changed after merging; undo would discard newer nodes".to_owned(),
+            ));
+        }
+
+        transaction.execute(
+            "DELETE FROM edges WHERE canvas_id = ?1",
+            [&merge.merged_child_canvas_id],
+        )?;
+        for source in &merge.sources {
+            let exists = transaction
+                .query_row(
+                    "SELECT 1 FROM canvases WHERE id = ?1",
+                    [&source.child_canvas.id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if exists {
+                return Err(CanvasError::Conflict(
+                    "a source folder canvas already exists".to_owned(),
+                ));
+            }
+            transaction.execute(
+                "INSERT INTO canvases (id, name, is_private, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    source.child_canvas.id,
+                    source.child_canvas.name,
+                    i64::from(source.child_canvas.is_private),
+                    source.child_canvas.created_at,
+                    source.child_canvas.updated_at,
+                ],
+            )?;
+        }
+
+        for source in &merge.sources {
+            for node in &source.nodes {
+                if removed_input_node_ids.contains(&node.id) {
+                    insert_node(&transaction, node)?;
+                } else {
+                    transaction.execute(
+                        "UPDATE nodes SET canvas_id = ?2 WHERE id = ?1",
+                        params![node.id, source.child_canvas.id],
+                    )?;
+                    write_node_update(&transaction, node)?;
+                }
+            }
+            for binding in &source.prompt_scene_bindings {
+                if removed_input_node_ids.contains(&binding.node_id) {
+                    insert_prompt_scene_binding(&transaction, binding)?;
+                } else {
+                    update_prompt_scene_binding(&transaction, binding)?;
+                }
+            }
+            for edge in &source.edges {
+                let metadata_json = serde_json::to_string(&edge.metadata)?;
+                transaction.execute(
+                    "INSERT INTO edges (
+                        id, canvas_id, source_node_id, target_node_id, kind,
+                        metadata_json, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        edge.id,
+                        edge.canvas_id,
+                        edge.source_node_id,
+                        edge.target_node_id,
+                        edge.kind,
+                        metadata_json,
+                        edge.created_at,
+                    ],
+                )?;
+            }
+        }
+
+        transaction.execute(
+            "DELETE FROM canvases WHERE id = ?1",
+            [&merge.merged_child_canvas_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM nodes WHERE id = ?1 AND kind = 'folder'",
+            [&merge.merged_folder_node_id],
+        )?;
+        for source in &merge.sources {
+            insert_node(&transaction, &source.folder_node)?;
+            transaction.execute(
+                "INSERT INTO canvas_folders (folder_node_id, child_canvas_id, created_at)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    source.folder_node.id,
+                    source.child_canvas.id,
+                    source.folder_link_created_at,
+                ],
+            )?;
+        }
+        for edge in &merge.parent_edges {
+            let metadata_json = serde_json::to_string(&edge.metadata)?;
+            transaction.execute(
+                "INSERT INTO edges (
+                    id, canvas_id, source_node_id, target_node_id, kind,
+                    metadata_json, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    edge.id,
+                    edge.canvas_id,
+                    edge.source_node_id,
+                    edge.target_node_id,
+                    edge.kind,
+                    metadata_json,
+                    edge.created_at,
+                ],
+            )?;
+        }
+
+        touch_canvas(&transaction, &merge.parent_canvas_id)?;
+        let parent = load_workspace_from_connection(&transaction, &merge.parent_canvas_id)?;
+        transaction.commit()?;
+        Ok(parent)
+    }
+
+    pub fn cancel_folder(&self, input: FolderActionInput) -> CanvasResult<CancelFolderResult> {
+        let canvas_id = input.canvas_id.trim();
+        let folder_node_id = input.folder_node_id.trim();
+        if canvas_id.is_empty() || folder_node_id.is_empty() {
+            return Err(CanvasError::Validation(
+                "canvas id and folder node id are required".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let source = folder_source_snapshot(&transaction, canvas_id, folder_node_id)?;
+        let folder_ids = BTreeSet::from([source.folder_node.id.clone()]);
+        let parent_edges = incident_edges_for_nodes(&transaction, canvas_id, &folder_ids)?;
+        let timestamp = now();
+
+        for node in &source.nodes {
+            transaction.execute(
+                "UPDATE nodes
+                 SET canvas_id = ?2, x = ?3, y = ?4, updated_at = ?5
+                 WHERE id = ?1",
+                params![
+                    node.id,
+                    canvas_id,
+                    source.folder_node.x + node.x - 80.0,
+                    source.folder_node.y + node.y - 80.0,
+                    timestamp,
+                ],
+            )?;
+            transaction.execute(
+                "UPDATE prompt_scene_bindings SET canvas_id = ?2, updated_at = ?3 WHERE node_id = ?1",
+                params![node.id, canvas_id, timestamp],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE edges SET canvas_id = ?2 WHERE canvas_id = ?1",
+            params![source.child_canvas.id, canvas_id],
+        )?;
+        let restored_source_edges =
+            restore_generated_video_source_edges(&transaction, canvas_id, &source.nodes)?;
+        transaction.execute(
+            "DELETE FROM canvases WHERE id = ?1",
+            [&source.child_canvas.id],
+        )?;
+        transaction.execute(
+            "DELETE FROM nodes WHERE id = ?1 AND canvas_id = ?2 AND kind = 'folder'",
+            params![source.folder_node.id, canvas_id],
+        )?;
+
+        touch_canvas(&transaction, canvas_id)?;
+        let parent = load_workspace_from_connection(&transaction, canvas_id)?;
+        transaction.commit()?;
+        Ok(CancelFolderResult {
+            moved_node_count: source.nodes.len(),
+            parent,
+            undo: CancelFolderUndoRecord {
+                parent_canvas_id: canvas_id.to_owned(),
+                source,
+                parent_edges,
+                restored_source_edges,
+            },
+        })
+    }
+
+    pub fn undo_cancel_folder(
+        &self,
+        input: UndoCancelFolderInput,
+    ) -> CanvasResult<WorkspaceSnapshot> {
+        let cancellation = input.cancellation;
+        let source = &cancellation.source;
+        if source.folder_node.canvas_id != cancellation.parent_canvas_id
+            || source.folder_node.kind != "folder"
+            || source
+                .nodes
+                .iter()
+                .any(|node| node.canvas_id != source.child_canvas.id)
+        {
+            return Err(CanvasError::Validation(
+                "folder cancellation snapshot is inconsistent".to_owned(),
+            ));
+        }
+        let moved_node_ids = source
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if get_node_by_id(&transaction, &source.folder_node.id)?.is_some()
+            || transaction
+                .query_row(
+                    "SELECT 1 FROM canvases WHERE id = ?1",
+                    [&source.child_canvas.id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+        {
+            return Err(CanvasError::Conflict(
+                "the cancelled folder has already been recreated".to_owned(),
+            ));
+        }
+        for node_id in &moved_node_ids {
+            let node = get_node_by_id(&transaction, node_id)?.ok_or_else(|| {
+                CanvasError::Conflict("a moved folder node was deleted".to_owned())
+            })?;
+            if node.canvas_id != cancellation.parent_canvas_id {
+                return Err(CanvasError::Conflict(
+                    "a moved folder node is no longer on the parent canvas".to_owned(),
+                ));
+            }
+        }
+        let current_incident_edges = incident_edges_for_nodes(
+            &transaction,
+            &cancellation.parent_canvas_id,
+            &moved_node_ids,
+        )?;
+        let current_edge_ids = current_incident_edges
+            .iter()
+            .map(|edge| edge.id.clone())
+            .collect::<BTreeSet<_>>();
+        let expected_edge_ids = source
+            .edges
+            .iter()
+            .chain(cancellation.restored_source_edges.iter())
+            .map(|edge| edge.id.clone())
+            .collect::<BTreeSet<_>>();
+        if current_edge_ids != expected_edge_ids {
+            return Err(CanvasError::Conflict(
+                "moved folder contents changed after cancellation".to_owned(),
+            ));
+        }
+
+        for edge in current_incident_edges {
+            transaction.execute("DELETE FROM edges WHERE id = ?1", [edge.id])?;
+        }
+        transaction.execute(
+            "INSERT INTO canvases (id, name, is_private, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                source.child_canvas.id,
+                source.child_canvas.name,
+                if source.child_canvas.is_private { 1 } else { 0 },
+                source.child_canvas.created_at,
+                source.child_canvas.updated_at,
+            ],
+        )?;
+        for node in &source.nodes {
+            transaction.execute(
+                "UPDATE nodes SET canvas_id = ?2 WHERE id = ?1",
+                params![node.id, source.child_canvas.id],
+            )?;
+            write_node_update(&transaction, node)?;
+        }
+        for binding in &source.prompt_scene_bindings {
+            update_prompt_scene_binding(&transaction, binding)?;
+        }
+        for edge in &source.edges {
+            insert_edge(&transaction, edge)?;
+        }
+        insert_node(&transaction, &source.folder_node)?;
+        transaction.execute(
+            "INSERT INTO canvas_folders (folder_node_id, child_canvas_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![
+                source.folder_node.id,
+                source.child_canvas.id,
+                source.folder_link_created_at,
+            ],
+        )?;
+        for edge in &cancellation.parent_edges {
+            insert_edge(&transaction, edge)?;
+        }
+
+        touch_canvas(&transaction, &cancellation.parent_canvas_id)?;
+        let parent = load_workspace_from_connection(&transaction, &cancellation.parent_canvas_id)?;
+        transaction.commit()?;
+        Ok(parent)
+    }
+
+    pub fn delete_folder_tree(&self, input: FolderActionInput) -> CanvasResult<DeleteFolderResult> {
+        let canvas_id = input.canvas_id.trim();
+        let folder_node_id = input.folder_node_id.trim();
+        if canvas_id.is_empty() || folder_node_id.is_empty() {
+            return Err(CanvasError::Validation(
+                "canvas id and folder node id are required".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let root_folder = get_node_by_id(&transaction, folder_node_id)?
+            .ok_or_else(|| CanvasError::Validation(format!("node not found: {folder_node_id}")))?;
+        if root_folder.canvas_id != canvas_id || root_folder.kind != "folder" {
+            return Err(CanvasError::Validation(
+                "the selected node is not a folder on the active canvas".to_owned(),
+            ));
+        }
+        let root_link = get_folder_link(&transaction, folder_node_id)?
+            .ok_or_else(|| CanvasError::Validation("folder has no child canvas".to_owned()))?;
+        let mut canvases = Vec::new();
+        let mut nodes = vec![root_folder];
+        let mut edges = incident_edges_for_nodes(
+            &transaction,
+            canvas_id,
+            &BTreeSet::from([folder_node_id.to_owned()]),
+        )?;
+        let mut folder_links = vec![root_link.clone()];
+        let mut prompt_scene_bindings = Vec::new();
+        let mut visited_canvas_ids = BTreeSet::new();
+        collect_canvas_tree_snapshot(
+            &transaction,
+            &root_link.child_canvas_id,
+            &mut visited_canvas_ids,
+            &mut canvases,
+            &mut nodes,
+            &mut edges,
+            &mut folder_links,
+            &mut prompt_scene_bindings,
+        )?;
+        let deleted_content_node_count = nodes.len().saturating_sub(1);
+        let undo = FolderTreeUndoRecord {
+            parent_canvas_id: canvas_id.to_owned(),
+            root_folder_node_id: folder_node_id.to_owned(),
+            canvases,
+            nodes,
+            edges,
+            folder_links,
+            prompt_scene_bindings,
+        };
+
+        delete_canvas_tree(&transaction, &root_link.child_canvas_id)?;
+        transaction.execute(
+            "DELETE FROM nodes WHERE id = ?1 AND canvas_id = ?2 AND kind = 'folder'",
+            params![folder_node_id, canvas_id],
+        )?;
+        touch_canvas(&transaction, canvas_id)?;
+        let parent = load_workspace_from_connection(&transaction, canvas_id)?;
+        transaction.commit()?;
+        Ok(DeleteFolderResult {
+            parent,
+            deleted_content_node_count,
+            undo,
+        })
+    }
+
+    pub fn undo_delete_folder_tree(
+        &self,
+        input: UndoDeleteFolderInput,
+    ) -> CanvasResult<WorkspaceSnapshot> {
+        let deletion = input.deletion;
+        if deletion.canvases.is_empty()
+            || deletion.nodes.is_empty()
+            || deletion.folder_links.is_empty()
+            || deletion
+                .nodes
+                .iter()
+                .find(|node| node.id == deletion.root_folder_node_id)
+                .is_none_or(|node| {
+                    node.canvas_id != deletion.parent_canvas_id || node.kind != "folder"
+                })
+        {
+            return Err(CanvasError::Validation(
+                "folder deletion snapshot is inconsistent".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for canvas in &deletion.canvases {
+            if transaction
+                .query_row("SELECT 1 FROM canvases WHERE id = ?1", [&canvas.id], |_| {
+                    Ok(())
+                })
+                .optional()?
+                .is_some()
+            {
+                return Err(CanvasError::Conflict(
+                    "a deleted folder canvas already exists".to_owned(),
+                ));
+            }
+        }
+        for node in &deletion.nodes {
+            if get_node_by_id(&transaction, &node.id)?.is_some() {
+                return Err(CanvasError::Conflict(
+                    "a deleted folder node already exists".to_owned(),
+                ));
+            }
+        }
+
+        for canvas in &deletion.canvases {
+            transaction.execute(
+                "INSERT INTO canvases (id, name, is_private, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    canvas.id,
+                    canvas.name,
+                    if canvas.is_private { 1 } else { 0 },
+                    canvas.created_at,
+                    canvas.updated_at,
+                ],
+            )?;
+        }
+        for node in &deletion.nodes {
+            insert_node(&transaction, node)?;
+            restore_prompt_version_requests_from_node(&transaction, node)?;
+        }
+        for link in &deletion.folder_links {
+            transaction.execute(
+                "INSERT INTO canvas_folders (folder_node_id, child_canvas_id, created_at)
+                 VALUES (?1, ?2, ?3)",
+                params![link.folder_node_id, link.child_canvas_id, link.created_at],
+            )?;
+        }
+        for binding in &deletion.prompt_scene_bindings {
+            insert_prompt_scene_binding(&transaction, binding)?;
+        }
+        for edge in &deletion.edges {
+            insert_edge(&transaction, edge)?;
+        }
+
+        touch_canvas(&transaction, &deletion.parent_canvas_id)?;
+        let parent = load_workspace_from_connection(&transaction, &deletion.parent_canvas_id)?;
+        transaction.commit()?;
+        Ok(parent)
     }
 
     pub fn load_project(&self, canvas_id: &str) -> CanvasResult<WorkspaceSnapshot> {
@@ -339,6 +1716,19 @@ impl Database {
         let connection = self.lock()?;
         let bindings = list_prompt_scene_binding_records(&connection, None)?;
         prompt_set_summaries(&connection, &bindings)
+    }
+
+    pub fn list_prompt_sets_for_canvas(
+        &self,
+        canvas_id: &str,
+    ) -> CanvasResult<Vec<PromptSetSummary>> {
+        let connection = self.lock()?;
+        let bindings = list_prompt_scene_binding_records(&connection, None)?;
+        let active_bindings = bindings
+            .into_iter()
+            .filter(|binding| binding.canvas_id == canvas_id)
+            .collect::<Vec<_>>();
+        prompt_set_summaries(&connection, &active_bindings)
     }
 
     pub fn get_prompt_set_scenes(
@@ -812,14 +2202,28 @@ impl Database {
     }
 
     pub fn update_node(&self, input: UpdateNodeInput) -> CanvasResult<NodeRecord> {
-        let connection = self.lock()?;
-        let mut node = get_node_by_id(&connection, &input.id)?
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut node = get_node_by_id(&transaction, &input.id)?
             .ok_or_else(|| CanvasError::Validation(format!("node not found: {}", input.id)))?;
         apply_node_update(&mut node, input);
+        if node.kind == "folder" {
+            node.title =
+                unique_folder_title(&transaction, &node.canvas_id, &node.title, Some(&node.id))?;
+        }
         validate_node(&node)?;
         node.updated_at = now();
-        write_node_update(&connection, &node)?;
-        touch_canvas(&connection, &node.canvas_id)?;
+        write_node_update(&transaction, &node)?;
+        if node.kind == "folder" {
+            transaction.execute(
+                "UPDATE canvases
+                 SET name = ?2, updated_at = ?3
+                 WHERE id = (SELECT child_canvas_id FROM canvas_folders WHERE folder_node_id = ?1)",
+                params![node.id, node.title, node.updated_at],
+            )?;
+        }
+        touch_canvas(&transaction, &node.canvas_id)?;
+        transaction.commit()?;
         Ok(node)
     }
 
@@ -994,9 +2398,14 @@ impl Database {
 
     pub fn delete_node(&self, id: &str) -> CanvasResult<()> {
         let connection = self.lock()?;
-        let canvas_id = get_node_by_id(&connection, id)?
-            .map(|node| node.canvas_id)
+        let node = get_node_by_id(&connection, id)?
             .ok_or_else(|| CanvasError::Validation(format!("node not found: {id}")))?;
+        if node.kind == "folder" {
+            return Err(CanvasError::Validation(
+                "folder nodes cannot be deleted with ordinary node deletion".to_owned(),
+            ));
+        }
+        let canvas_id = node.canvas_id;
         let changed = connection.execute("DELETE FROM nodes WHERE id = ?1", [id])?;
         if changed == 0 {
             return Err(CanvasError::Validation(format!("node not found: {id}")));
@@ -1027,6 +2436,11 @@ impl Database {
         for id in &unique_ids {
             let node = get_node_by_id(&transaction, id)?
                 .ok_or_else(|| CanvasError::Validation(format!("node not found: {id}")))?;
+            if node.kind == "folder" {
+                return Err(CanvasError::Validation(
+                    "folder nodes cannot be deleted with ordinary node deletion".to_owned(),
+                ));
+            }
             canvas_ids.insert(node.canvas_id.clone());
             nodes.push(node);
 
@@ -1202,17 +2616,35 @@ impl Database {
 
     pub fn delete_edge(&self, id: &str) -> CanvasResult<()> {
         let connection = self.lock()?;
-        let canvas_id = connection
-            .query_row("SELECT canvas_id FROM edges WHERE id = ?1", [id], |row| {
-                row.get::<_, String>(0)
-            })
+        let edge = connection
+            .query_row(
+                "SELECT canvas_id, source_node_id, target_node_id, kind
+                 FROM edges WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(EdgeRecord {
+                        id: id.to_owned(),
+                        canvas_id: row.get(0)?,
+                        source_node_id: row.get(1)?,
+                        target_node_id: row.get(2)?,
+                        kind: row.get(3)?,
+                        metadata: Value::Null,
+                        created_at: String::new(),
+                    })
+                },
+            )
             .optional()?
             .ok_or_else(|| CanvasError::Validation(format!("edge not found: {id}")))?;
+        if is_protected_generation_edge(&connection, &edge)? {
+            return Err(CanvasError::Conflict(
+                "generated video ownership links cannot be disconnected".to_owned(),
+            ));
+        }
         let changed = connection.execute("DELETE FROM edges WHERE id = ?1", [id])?;
         if changed == 0 {
             return Err(CanvasError::Validation(format!("edge not found: {id}")));
         }
-        touch_canvas(&connection, &canvas_id)?;
+        touch_canvas(&connection, &edge.canvas_id)?;
         Ok(())
     }
 }
@@ -1674,6 +3106,376 @@ fn validate_optional_request_id(request_id: Option<&str>) -> CanvasResult<()> {
     Ok(())
 }
 
+fn next_folder_title(connection: &Connection, canvas_id: &str) -> CanvasResult<String> {
+    unique_folder_title(connection, canvas_id, "新建目录", None)
+}
+
+fn get_folder_link(
+    connection: &Connection,
+    folder_node_id: &str,
+) -> CanvasResult<Option<CanvasFolderLinkRecord>> {
+    connection
+        .query_row(
+            "SELECT folder_node_id, child_canvas_id, created_at
+             FROM canvas_folders WHERE folder_node_id = ?1",
+            [folder_node_id],
+            |row| {
+                Ok(CanvasFolderLinkRecord {
+                    folder_node_id: row.get(0)?,
+                    child_canvas_id: row.get(1)?,
+                    created_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(CanvasError::Database)
+}
+
+fn incident_edges_for_nodes(
+    connection: &Connection,
+    canvas_id: &str,
+    node_ids: &BTreeSet<String>,
+) -> CanvasResult<Vec<EdgeRecord>> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection.prepare(
+        "SELECT id, canvas_id, source_node_id, target_node_id, kind,
+                metadata_json, created_at
+         FROM edges WHERE canvas_id = ?1",
+    )?;
+    let edges = statement
+        .query_map([canvas_id], edge_from_row)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|edge| {
+            node_ids.contains(&edge.source_node_id) || node_ids.contains(&edge.target_node_id)
+        })
+        .collect();
+    Ok(edges)
+}
+
+fn folder_source_snapshot(
+    connection: &Connection,
+    parent_canvas_id: &str,
+    folder_node_id: &str,
+) -> CanvasResult<FolderMergeSourceSnapshot> {
+    let folder_node = get_node_by_id(connection, folder_node_id)?
+        .ok_or_else(|| CanvasError::Validation(format!("node not found: {folder_node_id}")))?;
+    if folder_node.canvas_id != parent_canvas_id || folder_node.kind != "folder" {
+        return Err(CanvasError::Validation(
+            "the selected node is not a folder on the active canvas".to_owned(),
+        ));
+    }
+    let link = get_folder_link(connection, folder_node_id)?
+        .ok_or_else(|| CanvasError::Validation("folder has no child canvas".to_owned()))?;
+    let child = load_workspace_from_connection(connection, &link.child_canvas_id)?;
+    let mut prompt_scene_bindings = Vec::new();
+    for node in &child.nodes {
+        if let Some(binding) = get_prompt_scene_binding_by_node_id(connection, &node.id)? {
+            prompt_scene_bindings.push(binding);
+        }
+    }
+    Ok(FolderMergeSourceSnapshot {
+        folder_node,
+        child_canvas: child.canvas,
+        folder_link_created_at: link.created_at,
+        nodes: child.nodes,
+        edges: child.edges,
+        prompt_scene_bindings,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_canvas_tree_snapshot(
+    connection: &Connection,
+    canvas_id: &str,
+    visited_canvas_ids: &mut BTreeSet<String>,
+    canvases: &mut Vec<CanvasRecord>,
+    nodes: &mut Vec<NodeRecord>,
+    edges: &mut Vec<EdgeRecord>,
+    folder_links: &mut Vec<CanvasFolderLinkRecord>,
+    prompt_scene_bindings: &mut Vec<PromptSceneBindingRecord>,
+) -> CanvasResult<()> {
+    if !visited_canvas_ids.insert(canvas_id.to_owned()) {
+        return Err(CanvasError::Conflict(
+            "folder canvas hierarchy contains a cycle".to_owned(),
+        ));
+    }
+    let workspace = load_workspace_from_connection(connection, canvas_id)?;
+    canvases.push(workspace.canvas.clone());
+    edges.extend(workspace.edges.iter().cloned());
+    for node in &workspace.nodes {
+        if let Some(binding) = get_prompt_scene_binding_by_node_id(connection, &node.id)? {
+            prompt_scene_bindings.push(binding);
+        }
+        if node.kind == "folder" {
+            let link = get_folder_link(connection, &node.id)?.ok_or_else(|| {
+                CanvasError::Conflict(format!("nested folder has no child canvas: {}", node.id))
+            })?;
+            folder_links.push(link.clone());
+            collect_canvas_tree_snapshot(
+                connection,
+                &link.child_canvas_id,
+                visited_canvas_ids,
+                canvases,
+                nodes,
+                edges,
+                folder_links,
+                prompt_scene_bindings,
+            )?;
+        }
+    }
+    nodes.extend(workspace.nodes);
+    Ok(())
+}
+
+fn insert_edge(connection: &Connection, edge: &EdgeRecord) -> CanvasResult<()> {
+    let metadata_json = serde_json::to_string(&edge.metadata)?;
+    connection.execute(
+        "INSERT INTO edges (
+            id, canvas_id, source_node_id, target_node_id, kind,
+            metadata_json, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            edge.id,
+            edge.canvas_id,
+            edge.source_node_id,
+            edge.target_node_id,
+            edge.kind,
+            metadata_json,
+            edge.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn folder_input_original_source_id(
+    connection: &Connection,
+    node: &NodeRecord,
+) -> CanvasResult<String> {
+    let mut resolved_source_id = node.id.clone();
+    let mut next_source_id = node
+        .content
+        .get("folderInputCopySourceId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|source_node_id| !source_node_id.is_empty())
+        .map(str::to_owned);
+    let mut visited = BTreeSet::from([node.id.clone()]);
+
+    while let Some(source_node_id) = next_source_id {
+        if !visited.insert(source_node_id.clone()) {
+            return Err(CanvasError::Conflict(
+                "folder input copy provenance contains a cycle".to_owned(),
+            ));
+        }
+        resolved_source_id = source_node_id.clone();
+        next_source_id = get_node_by_id(connection, &source_node_id)?.and_then(|source| {
+            source
+                .content
+                .get("folderInputCopySourceId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|source_node_id| !source_node_id.is_empty())
+                .map(str::to_owned)
+        });
+    }
+
+    Ok(resolved_source_id)
+}
+
+fn remap_folder_input_references(
+    content: &Value,
+    duplicate_node_id_map: &BTreeMap<String, String>,
+) -> Value {
+    if duplicate_node_id_map.is_empty() {
+        return content.clone();
+    }
+    let mut remapped = content.clone();
+    let Some(object) = remapped.as_object_mut() else {
+        return remapped;
+    };
+
+    for key in ["mediaInputOrder", "textInputOrder"] {
+        let Some(values) = object.get_mut(key).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for value in values {
+            let Some(node_id) = value.as_str() else {
+                continue;
+            };
+            if let Some(duplicate_node_id) = duplicate_node_id_map.get(node_id) {
+                *value = Value::String(duplicate_node_id.clone());
+            }
+        }
+    }
+
+    if let Some(active_text_input_id) = object
+        .get_mut("activeTextInputId")
+        .and_then(|value| value.as_str())
+        .and_then(|node_id| duplicate_node_id_map.get(node_id))
+        .cloned()
+    {
+        object.insert(
+            "activeTextInputId".to_owned(),
+            Value::String(active_text_input_id),
+        );
+    }
+
+    if let Some(frame_roles) = object.get_mut("frameRoles").and_then(Value::as_object_mut) {
+        for (source_node_id, duplicate_node_id) in duplicate_node_id_map {
+            if let Some(role) = frame_roles.remove(source_node_id) {
+                frame_roles.insert(duplicate_node_id.clone(), role);
+            }
+        }
+    }
+
+    if let Some(snapshot) = object
+        .get_mut("generationSnapshot")
+        .and_then(Value::as_object_mut)
+    {
+        if let Some(prompt_node_id) = snapshot
+            .get("promptNodeId")
+            .and_then(Value::as_str)
+            .and_then(|node_id| duplicate_node_id_map.get(node_id))
+            .cloned()
+        {
+            snapshot.insert("promptNodeId".to_owned(), Value::String(prompt_node_id));
+        }
+    }
+
+    remapped
+}
+
+fn restore_generated_video_source_edges(
+    connection: &Connection,
+    canvas_id: &str,
+    moved_nodes: &[NodeRecord],
+) -> CanvasResult<Vec<EdgeRecord>> {
+    let mut restored = Vec::new();
+    for node in moved_nodes
+        .iter()
+        .filter(|node| node.kind == "generated-video")
+    {
+        let source_preview_id = node
+            .content
+            .get("sourcePreviewId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty());
+        let source_generator_id = node
+            .content
+            .get("sourceGeneratorId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty());
+        let candidates = [
+            source_preview_id.map(|id| (id, "generated-video", "secondary-output")),
+            source_generator_id.map(|id| (id, "video-generation", "output")),
+        ];
+        let mut selected_source = None;
+        for candidate in candidates.into_iter().flatten() {
+            if candidate.0 == node.id {
+                continue;
+            }
+            let Some(source) = get_node_by_id(connection, candidate.0)? else {
+                continue;
+            };
+            if source.canvas_id == canvas_id && source.kind == candidate.1 {
+                selected_source = Some((source.id, candidate.2));
+                break;
+            }
+        }
+        let Some((source_node_id, kind)) = selected_source else {
+            continue;
+        };
+        let existing = connection
+            .query_row(
+                "SELECT id, canvas_id, source_node_id, target_node_id, kind,
+                        metadata_json, created_at
+                 FROM edges
+                 WHERE canvas_id = ?1 AND source_node_id = ?2
+                   AND target_node_id = ?3 AND kind = ?4",
+                params![canvas_id, source_node_id, node.id, kind],
+                edge_from_row,
+            )
+            .optional()?;
+        if existing.is_some() {
+            continue;
+        }
+        let metadata = json!({
+            "seed": node.content.get("seed").cloned().unwrap_or(Value::Null),
+            "promptId": node.content.get("comfyPromptId").cloned().unwrap_or(Value::Null),
+            "outputIndex": node.content.get("outputIndex").cloned().unwrap_or(Value::Null),
+            "restoredFromFolder": true,
+        });
+        let edge = EdgeRecord {
+            id: format!("edge:{}", Uuid::new_v4()),
+            canvas_id: canvas_id.to_owned(),
+            source_node_id,
+            target_node_id: node.id.clone(),
+            kind: kind.to_owned(),
+            metadata,
+            created_at: now(),
+        };
+        insert_edge(connection, &edge)?;
+        restored.push(edge);
+    }
+    Ok(restored)
+}
+
+fn unique_folder_title(
+    connection: &Connection,
+    canvas_id: &str,
+    requested_title: &str,
+    excluding_node_id: Option<&str>,
+) -> CanvasResult<String> {
+    let mut statement = connection
+        .prepare("SELECT id, title FROM nodes WHERE canvas_id = ?1 AND kind = 'folder'")?;
+    let existing = statement
+        .query_map([canvas_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|(node_id, _)| excluding_node_id != Some(node_id.as_str()))
+        .map(|(_, title)| title)
+        .collect::<BTreeSet<_>>();
+    let base_title = requested_title.trim();
+    let base_title = if base_title.is_empty() {
+        "新建目录"
+    } else {
+        base_title
+    };
+    if !existing.contains(base_title) {
+        return Ok(base_title.to_owned());
+    }
+    for suffix in 2usize.. {
+        let candidate = format!("{base_title} {suffix}");
+        if !existing.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("folder suffix search is unbounded")
+}
+
+fn delete_canvas_tree(connection: &Connection, canvas_id: &str) -> CanvasResult<()> {
+    let mut statement = connection.prepare(
+        "SELECT canvas_folders.child_canvas_id
+         FROM canvas_folders
+         JOIN nodes ON nodes.id = canvas_folders.folder_node_id
+         WHERE nodes.canvas_id = ?1",
+    )?;
+    let child_ids = statement
+        .query_map([canvas_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for child_id in child_ids {
+        delete_canvas_tree(connection, &child_id)?;
+    }
+    connection.execute("DELETE FROM canvases WHERE id = ?1", [canvas_id])?;
+    Ok(())
+}
+
 fn load_workspace_from_connection(
     connection: &Connection,
     canvas_id: &str,
@@ -1697,9 +3499,29 @@ fn load_workspace_from_connection(
                 x, y, width, height, status, created_at, updated_at
          FROM nodes WHERE canvas_id = ?1 ORDER BY created_at ASC",
     )?;
-    let nodes = node_statement
+    let mut nodes = node_statement
         .query_map([canvas_id], node_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
+    for node in nodes.iter_mut().filter(|node| node.kind == "folder") {
+        let folder_summary = connection
+            .query_row(
+                "SELECT canvas_folders.child_canvas_id, COUNT(child_nodes.id)
+                 FROM canvas_folders
+                 LEFT JOIN nodes AS child_nodes
+                   ON child_nodes.canvas_id = canvas_folders.child_canvas_id
+                 WHERE canvas_folders.folder_node_id = ?1
+                 GROUP BY canvas_folders.child_canvas_id",
+                [&node.id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        if let Some((child_canvas_id, node_count)) = folder_summary {
+            if let Value::Object(content) = &mut node.content {
+                content.insert("childCanvasId".to_owned(), json!(child_canvas_id));
+                content.insert("nodeCount".to_owned(), json!(node_count.max(0) as usize));
+            }
+        }
+    }
 
     let mut edge_statement = connection.prepare(
         "SELECT id, canvas_id, source_node_id, target_node_id, kind,
@@ -1969,6 +3791,27 @@ fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<EdgeRecord> {
     })
 }
 
+fn is_protected_generation_edge(connection: &Connection, edge: &EdgeRecord) -> CanvasResult<bool> {
+    if edge.kind != "output" {
+        return Ok(false);
+    }
+    let kinds = connection
+        .query_row(
+            "SELECT source.kind, target.kind
+             FROM nodes source
+             JOIN nodes target ON target.id = ?2
+             WHERE source.id = ?1",
+            params![edge.source_node_id, edge.target_node_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    Ok(matches!(
+        kinds,
+        Some((source_kind, target_kind))
+            if source_kind == "video-generation" && target_kind == "generated-video"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -1988,6 +3831,12 @@ mod tests {
             width: None,
             height: None,
         }
+    }
+
+    fn node_with_kind(kind: &str, title: &str, request_id: &str) -> CreateNodeInput {
+        let mut input = text_node(title, request_id);
+        input.kind = Some(kind.to_owned());
+        input
     }
 
     fn prompt_scene(scene_key: &str) -> crate::models::CreatePromptSceneInput {
@@ -2198,6 +4047,1188 @@ mod tests {
     }
 
     #[test]
+    fn groups_nodes_and_internal_edges_into_an_auto_named_child_canvas() {
+        let database = Database::in_memory().unwrap();
+        let source = database
+            .create_node(text_node("Generator", "folder-source"))
+            .unwrap()
+            .node;
+        let target = database
+            .create_node(text_node("Preview", "folder-target"))
+            .unwrap()
+            .node;
+        let outside = database
+            .create_node(text_node("Outside", "folder-outside"))
+            .unwrap()
+            .node;
+        database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: source.id.clone(),
+                target_node_id: target.id.clone(),
+                kind: Some("output".to_owned()),
+                metadata: json!({}),
+            })
+            .unwrap();
+        database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: target.id.clone(),
+                target_node_id: outside.id.clone(),
+                kind: Some("flow".to_owned()),
+                metadata: json!({}),
+            })
+            .unwrap();
+
+        let result = database
+            .group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                node_ids: vec![source.id.clone(), target.id.clone()],
+            })
+            .unwrap();
+
+        assert_eq!(result.removed_crossing_edge_count, 1);
+        assert_eq!(result.parent.nodes.len(), 2);
+        let folder_node = result
+            .parent
+            .nodes
+            .iter()
+            .find(|node| node.kind == "folder")
+            .unwrap();
+        assert_eq!(folder_node.width, FOLDER_NODE_WIDTH);
+        assert_eq!(folder_node.height, FOLDER_NODE_HEIGHT);
+        assert!(result.parent.nodes.iter().any(|node| node.id == outside.id));
+        assert_eq!(result.child.canvas.name, "新建目录");
+        assert_eq!(result.child.nodes.len(), 2);
+        assert_eq!(result.child.edges.len(), 1);
+        assert_eq!(result.child.edges[0].canvas_id, result.child.canvas.id);
+        assert_eq!(database.list_projects().unwrap().len(), 1);
+        assert_eq!(database.list_all_projects().unwrap().len(), 2);
+
+        let child_canvas_id = result.child.canvas.id.clone();
+        let restored = database
+            .undo_folder_grouping(UndoFolderGroupingInput {
+                grouping: result.undo,
+            })
+            .unwrap();
+
+        assert_eq!(restored.nodes.len(), 3);
+        assert!(restored.nodes.iter().all(|node| node.kind != "folder"));
+        assert!(restored.nodes.iter().any(|node| node.id == source.id));
+        assert!(restored.nodes.iter().any(|node| node.id == target.id));
+        assert!(restored.nodes.iter().any(|node| node.id == outside.id));
+        assert_eq!(restored.edges.len(), 2);
+        assert!(restored
+            .edges
+            .iter()
+            .any(|edge| edge.source_node_id == source.id && edge.target_node_id == target.id));
+        assert!(restored
+            .edges
+            .iter()
+            .any(|edge| edge.source_node_id == target.id && edge.target_node_id == outside.id));
+        assert!(database.load_project(&child_canvas_id).is_err());
+        assert_eq!(database.list_all_projects().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn groups_generation_inputs_and_discards_shared_input_copies_on_undo() {
+        let database = Database::in_memory().unwrap();
+        let shared_prompt = database
+            .create_node(text_node("Shared prompt", "folder-related-shared-prompt"))
+            .unwrap()
+            .node;
+        let shared_image = database
+            .create_node(node_with_kind(
+                "image",
+                "Shared image",
+                "folder-related-shared-image",
+            ))
+            .unwrap()
+            .node;
+        let audio = database
+            .create_node(node_with_kind(
+                "audio",
+                "Exclusive audio",
+                "folder-related-audio",
+            ))
+            .unwrap()
+            .node;
+
+        let mut generator_input =
+            node_with_kind("video-generation", "Generator", "folder-related-generator");
+        generator_input.x = Some(720.0);
+        generator_input.y = Some(480.0);
+        generator_input.content = json!({
+            "mediaInputOrder": [shared_image.id.clone(), audio.id.clone()],
+            "textInputOrder": [shared_prompt.id.clone()],
+            "activeTextInputId": shared_prompt.id.clone(),
+            "frameRoles": { shared_image.id.clone(): "reference" },
+        });
+        let generator = database.create_node(generator_input).unwrap().node;
+        let outside_generator = database
+            .create_node(node_with_kind(
+                "video-generation",
+                "Outside generator",
+                "folder-related-outside-generator",
+            ))
+            .unwrap()
+            .node;
+        let preview = database
+            .create_node(node_with_kind(
+                "generated-video",
+                "Preview",
+                "folder-related-preview",
+            ))
+            .unwrap()
+            .node;
+
+        for (source_node_id, target_node_id, kind) in [
+            (shared_prompt.id.clone(), generator.id.clone(), "input"),
+            (
+                shared_prompt.id.clone(),
+                outside_generator.id.clone(),
+                "input",
+            ),
+            (shared_image.id.clone(), generator.id.clone(), "input"),
+            (
+                shared_image.id.clone(),
+                outside_generator.id.clone(),
+                "input",
+            ),
+            (audio.id.clone(), generator.id.clone(), "input"),
+            (generator.id.clone(), preview.id.clone(), "output"),
+        ] {
+            database
+                .create_edge(CreateEdgeInput {
+                    canvas_id: None,
+                    source_node_id,
+                    target_node_id,
+                    kind: Some(kind.to_owned()),
+                    metadata: json!({}),
+                })
+                .unwrap();
+        }
+
+        let grouped = database
+            .group_related_nodes_into_folder(GroupRelatedNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                root_node_id: generator.id.clone(),
+            })
+            .unwrap();
+
+        assert_eq!(grouped.moved_node_count, 3);
+        assert_eq!(grouped.copied_input_node_count, 2);
+        assert_eq!(grouped.removed_crossing_edge_count, 0);
+        assert_eq!(grouped.parent.nodes.len(), 4);
+        assert_eq!(grouped.parent.edges.len(), 2);
+        assert_eq!(grouped.child.nodes.len(), 5);
+        assert_eq!(grouped.child.edges.len(), 4);
+        let folder_node = grouped
+            .parent
+            .nodes
+            .iter()
+            .find(|node| node.id == grouped.folder_node_id)
+            .unwrap();
+        assert_eq!((folder_node.x, folder_node.y), (generator.x, generator.y));
+
+        let prompt_copy = grouped
+            .child
+            .nodes
+            .iter()
+            .find(|node| {
+                node.content
+                    .get("folderInputCopySourceId")
+                    .and_then(Value::as_str)
+                    == Some(shared_prompt.id.as_str())
+            })
+            .unwrap();
+        let image_copy = grouped
+            .child
+            .nodes
+            .iter()
+            .find(|node| {
+                node.content
+                    .get("folderInputCopySourceId")
+                    .and_then(Value::as_str)
+                    == Some(shared_image.id.as_str())
+            })
+            .unwrap();
+        let moved_generator = grouped
+            .child
+            .nodes
+            .iter()
+            .find(|node| node.id == generator.id)
+            .unwrap();
+        assert_eq!(
+            moved_generator.content["textInputOrder"],
+            json!([prompt_copy.id.clone()])
+        );
+        assert_eq!(
+            moved_generator.content["mediaInputOrder"],
+            json!([image_copy.id.clone(), audio.id.clone()])
+        );
+        assert_eq!(
+            moved_generator.content["activeTextInputId"],
+            json!(prompt_copy.id.clone())
+        );
+        assert_eq!(
+            moved_generator.content["frameRoles"][&image_copy.id],
+            json!("reference")
+        );
+        assert!(grouped.child.edges.iter().any(|edge| {
+            edge.source_node_id == prompt_copy.id && edge.target_node_id == generator.id
+        }));
+        assert!(grouped.child.edges.iter().any(|edge| {
+            edge.source_node_id == image_copy.id && edge.target_node_id == generator.id
+        }));
+
+        let restored = database
+            .undo_folder_grouping(UndoFolderGroupingInput {
+                grouping: grouped.undo,
+            })
+            .unwrap();
+
+        assert_eq!(restored.nodes.len(), 6);
+        assert_eq!(restored.edges.len(), 6);
+        assert!(restored
+            .nodes
+            .iter()
+            .all(|node| { node.content.get("folderInputCopySourceId").is_none() }));
+        let restored_generator = restored
+            .nodes
+            .iter()
+            .find(|node| node.id == generator.id)
+            .unwrap();
+        assert_eq!(
+            restored_generator.content["textInputOrder"],
+            json!([shared_prompt.id])
+        );
+        assert_eq!(
+            restored_generator.content["mediaInputOrder"],
+            json!([shared_image.id, audio.id])
+        );
+    }
+
+    #[test]
+    fn deduplicates_persisted_shared_inputs_when_separately_grouped_folders_are_merged() {
+        let path = std::env::temp_dir().join(format!(
+            "infinite-canvas-folder-merge-dedup-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        let database = Database::open(&path).unwrap();
+        let shared_prompt = database
+            .create_node(text_node("Shared prompt", "merge-dedup-prompt"))
+            .unwrap()
+            .node;
+        let shared_image = database
+            .create_node(node_with_kind("image", "Shared image", "merge-dedup-image"))
+            .unwrap()
+            .node;
+        let shared_audio = database
+            .create_node(node_with_kind("audio", "Shared audio", "merge-dedup-audio"))
+            .unwrap()
+            .node;
+        let shared_video = database
+            .create_node(node_with_kind("video", "Shared video", "merge-dedup-video"))
+            .unwrap()
+            .node;
+        let exclusive_image = database
+            .create_node(node_with_kind(
+                "image",
+                "Generator B image",
+                "merge-dedup-exclusive-image",
+            ))
+            .unwrap()
+            .node;
+
+        let mut generator_a_input =
+            node_with_kind("video-generation", "Generator A", "merge-dedup-generator-a");
+        generator_a_input.content = json!({
+            "mediaInputOrder": [
+                shared_image.id.clone(),
+                shared_audio.id.clone(),
+                shared_video.id.clone()
+            ],
+            "textInputOrder": [shared_prompt.id.clone()],
+            "activeTextInputId": shared_prompt.id.clone(),
+            "frameRoles": { shared_image.id.clone(): "reference" },
+        });
+        let generator_a = database.create_node(generator_a_input).unwrap().node;
+        let mut generator_b_input =
+            node_with_kind("video-generation", "Generator B", "merge-dedup-generator-b");
+        generator_b_input.content = json!({
+            "mediaInputOrder": [
+                shared_image.id.clone(),
+                exclusive_image.id.clone(),
+                shared_audio.id.clone(),
+                shared_video.id.clone()
+            ],
+            "textInputOrder": [shared_prompt.id.clone()],
+            "activeTextInputId": shared_prompt.id.clone(),
+            "frameRoles": {
+                shared_image.id.clone(): "reference",
+                exclusive_image.id.clone(): "first-frame"
+            },
+        });
+        let generator_b = database.create_node(generator_b_input).unwrap().node;
+        let preview_a = database
+            .create_node(node_with_kind(
+                "generated-video",
+                "Preview A",
+                "merge-dedup-preview-a",
+            ))
+            .unwrap()
+            .node;
+        let preview_b = database
+            .create_node(node_with_kind(
+                "generated-video",
+                "Preview B",
+                "merge-dedup-preview-b",
+            ))
+            .unwrap()
+            .node;
+
+        for source in [&shared_prompt, &shared_image, &shared_audio, &shared_video] {
+            for target in [&generator_a, &generator_b] {
+                database
+                    .create_edge(CreateEdgeInput {
+                        canvas_id: None,
+                        source_node_id: source.id.clone(),
+                        target_node_id: target.id.clone(),
+                        kind: Some("input".to_owned()),
+                        metadata: json!({ "sourceKind": source.kind.clone() }),
+                    })
+                    .unwrap();
+            }
+        }
+        database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: exclusive_image.id.clone(),
+                target_node_id: generator_b.id.clone(),
+                kind: Some("input".to_owned()),
+                metadata: json!({ "sourceKind": "image" }),
+            })
+            .unwrap();
+        for (generator, preview) in [(&generator_a, &preview_a), (&generator_b, &preview_b)] {
+            database
+                .create_edge(CreateEdgeInput {
+                    canvas_id: None,
+                    source_node_id: generator.id.clone(),
+                    target_node_id: preview.id.clone(),
+                    kind: Some("output".to_owned()),
+                    metadata: json!({}),
+                })
+                .unwrap();
+        }
+
+        let folder_a = database
+            .group_related_nodes_into_folder(GroupRelatedNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                root_node_id: generator_a.id.clone(),
+            })
+            .unwrap();
+        let folder_b = database
+            .group_related_nodes_into_folder(GroupRelatedNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                root_node_id: generator_b.id.clone(),
+            })
+            .unwrap();
+        let folder_ids = vec![
+            folder_a.folder_node_id.clone(),
+            folder_b.folder_node_id.clone(),
+        ];
+        let child_a_id = folder_a.child.canvas.id.clone();
+        let child_b_id = folder_b.child.canvas.id.clone();
+        drop(database);
+
+        let database = Database::open(&path).unwrap();
+        let merged = database
+            .merge_folders(MergeFoldersInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                folder_node_ids: folder_ids,
+            })
+            .unwrap();
+
+        assert_eq!(merged.deduplicated_input_node_count, 4);
+        assert_eq!(merged.merged_node_count, 9);
+        assert_eq!(merged.child.nodes.len(), 9);
+        assert_eq!(merged.child.edges.len(), 11);
+        for shared in [&shared_prompt, &shared_image, &shared_audio, &shared_video] {
+            let targets = merged
+                .child
+                .edges
+                .iter()
+                .filter(|edge| edge.source_node_id == shared.id && edge.kind == "input")
+                .map(|edge| edge.target_node_id.as_str())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                targets,
+                BTreeSet::from([generator_a.id.as_str(), generator_b.id.as_str()])
+            );
+        }
+        let exclusive_targets = merged
+            .child
+            .edges
+            .iter()
+            .filter(|edge| edge.source_node_id == exclusive_image.id && edge.kind == "input")
+            .map(|edge| edge.target_node_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(exclusive_targets, vec![generator_b.id.as_str()]);
+
+        let merged_generator_a = merged
+            .child
+            .nodes
+            .iter()
+            .find(|node| node.id == generator_a.id)
+            .unwrap();
+        let merged_generator_b = merged
+            .child
+            .nodes
+            .iter()
+            .find(|node| node.id == generator_b.id)
+            .unwrap();
+        assert_eq!(
+            merged_generator_a.content["mediaInputOrder"],
+            json!([
+                shared_image.id.clone(),
+                shared_audio.id.clone(),
+                shared_video.id.clone()
+            ])
+        );
+        assert_eq!(
+            merged_generator_a.content["textInputOrder"],
+            json!([shared_prompt.id.clone()])
+        );
+        assert_eq!(
+            merged_generator_b.content["mediaInputOrder"],
+            json!([
+                shared_image.id.clone(),
+                exclusive_image.id.clone(),
+                shared_audio.id.clone(),
+                shared_video.id.clone()
+            ])
+        );
+        assert_eq!(
+            merged_generator_b.content["frameRoles"][&exclusive_image.id],
+            json!("first-frame")
+        );
+
+        let restored_parent = database
+            .undo_folder_merge(UndoFolderMergeInput { merge: merged.undo })
+            .unwrap();
+        assert_eq!(
+            restored_parent
+                .nodes
+                .iter()
+                .filter(|node| node.kind == "folder")
+                .count(),
+            2
+        );
+        let restored_a = database.load_project(&child_a_id).unwrap();
+        let restored_b = database.load_project(&child_b_id).unwrap();
+        assert_eq!(restored_a.nodes.len(), 6);
+        assert_eq!(restored_a.edges.len(), 5);
+        assert_eq!(restored_b.nodes.len(), 7);
+        assert_eq!(restored_b.edges.len(), 6);
+        let restored_generator_a = restored_a
+            .nodes
+            .iter()
+            .find(|node| node.id == generator_a.id)
+            .unwrap();
+        let restored_prompt_copy_id = restored_generator_a.content["textInputOrder"][0]
+            .as_str()
+            .unwrap();
+        assert_ne!(restored_prompt_copy_id, shared_prompt.id);
+        assert!(restored_a.nodes.iter().any(|node| {
+            node.id == restored_prompt_copy_id
+                && node
+                    .content
+                    .get("folderInputCopySourceId")
+                    .and_then(Value::as_str)
+                    == Some(shared_prompt.id.as_str())
+        }));
+        let restored_generator_b = restored_b
+            .nodes
+            .iter()
+            .find(|node| node.id == generator_b.id)
+            .unwrap();
+        assert_eq!(
+            restored_generator_b.content["textInputOrder"],
+            json!([shared_prompt.id.clone()])
+        );
+        assert_eq!(
+            restored_generator_b.content["mediaInputOrder"],
+            json!([
+                shared_image.id.clone(),
+                exclusive_image.id.clone(),
+                shared_audio.id.clone(),
+                shared_video.id.clone()
+            ])
+        );
+        drop(database);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn keeps_all_shared_images_and_audio_connected_when_folders_are_merged() {
+        let database = Database::in_memory().unwrap();
+        let shared_images = (0..4)
+            .map(|index| {
+                database
+                    .create_node(node_with_kind(
+                        "image",
+                        &format!("Shared image {}", index + 1),
+                        &format!("merge-five-input-image-{index}"),
+                    ))
+                    .unwrap()
+                    .node
+            })
+            .collect::<Vec<_>>();
+        let shared_audio = database
+            .create_node(node_with_kind(
+                "audio",
+                "Shared audio",
+                "merge-five-input-audio",
+            ))
+            .unwrap()
+            .node;
+        let shared_input_ids = shared_images
+            .iter()
+            .map(|node| node.id.clone())
+            .chain(std::iter::once(shared_audio.id.clone()))
+            .collect::<Vec<_>>();
+
+        let create_generator = |title: &str, request_id: &str| {
+            let mut input = node_with_kind("video-generation", title, request_id);
+            input.content = json!({ "mediaInputOrder": shared_input_ids.clone() });
+            database.create_node(input).unwrap().node
+        };
+        let generator_a = create_generator("Generator A", "merge-five-input-generator-a");
+        let generator_b = create_generator("Generator B", "merge-five-input-generator-b");
+        for source in shared_images.iter().chain(std::iter::once(&shared_audio)) {
+            for target in [&generator_a, &generator_b] {
+                database
+                    .create_edge(CreateEdgeInput {
+                        canvas_id: None,
+                        source_node_id: source.id.clone(),
+                        target_node_id: target.id.clone(),
+                        kind: Some("input".to_owned()),
+                        metadata: json!({ "sourceKind": source.kind.clone() }),
+                    })
+                    .unwrap();
+            }
+        }
+
+        let folder_a = database
+            .group_related_nodes_into_folder(GroupRelatedNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                root_node_id: generator_a.id.clone(),
+            })
+            .unwrap();
+        let folder_b = database
+            .group_related_nodes_into_folder(GroupRelatedNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                root_node_id: generator_b.id.clone(),
+            })
+            .unwrap();
+        let merged = database
+            .merge_folders(MergeFoldersInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                folder_node_ids: vec![folder_a.folder_node_id, folder_b.folder_node_id],
+            })
+            .unwrap();
+
+        assert_eq!(merged.deduplicated_input_node_count, 5);
+        assert_eq!(merged.child.nodes.len(), 7);
+        assert_eq!(merged.child.edges.len(), 10);
+        for generator in [&generator_a, &generator_b] {
+            let connected_input_ids = merged
+                .child
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == "input" && edge.target_node_id == generator.id)
+                .map(|edge| edge.source_node_id.as_str())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(connected_input_ids.len(), 5);
+            assert_eq!(
+                connected_input_ids,
+                shared_input_ids.iter().map(String::as_str).collect()
+            );
+            let merged_generator = merged
+                .child
+                .nodes
+                .iter()
+                .find(|node| node.id == generator.id)
+                .unwrap();
+            assert_eq!(
+                merged_generator.content["mediaInputOrder"],
+                json!(shared_input_ids)
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_nested_folder_copy_sources_before_deduplicating_inputs() {
+        let database = Database::in_memory().unwrap();
+        let kinds = ["image", "image", "image", "image", "audio"];
+        let mut first_inputs = Vec::new();
+        let mut second_inputs = Vec::new();
+        for (index, kind) in kinds.into_iter().enumerate() {
+            let mut first_input = node_with_kind(
+                kind,
+                &format!("First {kind} {index}"),
+                &format!("nested-copy-first-{index}"),
+            );
+            first_input.content = json!({
+                "folderInputCopySourceId": format!("missing-original-{index}")
+            });
+            let first = database.create_node(first_input).unwrap().node;
+            let mut second_input = node_with_kind(
+                kind,
+                &format!("Second {kind} {index}"),
+                &format!("nested-copy-second-{index}"),
+            );
+            second_input.content = json!({
+                "folderInputCopySourceId": first.id.clone()
+            });
+            let second = database.create_node(second_input).unwrap().node;
+            first_inputs.push(first);
+            second_inputs.push(second);
+        }
+
+        let mut generator_a_input =
+            node_with_kind("video-generation", "Generator A", "nested-copy-generator-a");
+        generator_a_input.content = json!({
+            "mediaInputOrder": first_inputs.iter().map(|node| node.id.clone()).collect::<Vec<_>>()
+        });
+        let generator_a = database.create_node(generator_a_input).unwrap().node;
+        let mut generator_b_input =
+            node_with_kind("video-generation", "Generator B", "nested-copy-generator-b");
+        generator_b_input.content = json!({
+            "mediaInputOrder": second_inputs.iter().map(|node| node.id.clone()).collect::<Vec<_>>()
+        });
+        let generator_b = database.create_node(generator_b_input).unwrap().node;
+
+        for (inputs, generator) in [
+            (&first_inputs, &generator_a),
+            (&second_inputs, &generator_b),
+        ] {
+            for source in inputs {
+                database
+                    .create_edge(CreateEdgeInput {
+                        canvas_id: None,
+                        source_node_id: source.id.clone(),
+                        target_node_id: generator.id.clone(),
+                        kind: Some("input".to_owned()),
+                        metadata: json!({ "sourceKind": source.kind.clone() }),
+                    })
+                    .unwrap();
+            }
+        }
+
+        let folder_a = database
+            .group_related_nodes_into_folder(GroupRelatedNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                root_node_id: generator_a.id.clone(),
+            })
+            .unwrap();
+        let folder_b = database
+            .group_related_nodes_into_folder(GroupRelatedNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                root_node_id: generator_b.id.clone(),
+            })
+            .unwrap();
+        let merged = database
+            .merge_folders(MergeFoldersInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                folder_node_ids: vec![folder_a.folder_node_id, folder_b.folder_node_id],
+            })
+            .unwrap();
+
+        assert_eq!(merged.deduplicated_input_node_count, 5);
+        assert_eq!(merged.child.nodes.len(), 7);
+        assert_eq!(merged.child.edges.len(), 10);
+        for generator in [&generator_a, &generator_b] {
+            let connected_input_ids = merged
+                .child
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == "input" && edge.target_node_id == generator.id)
+                .map(|edge| edge.source_node_id.as_str())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(connected_input_ids.len(), 5);
+            let merged_generator = merged
+                .child
+                .nodes
+                .iter()
+                .find(|node| node.id == generator.id)
+                .unwrap();
+            let ordered_input_ids = merged_generator.content["mediaInputOrder"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(ordered_input_ids, connected_input_ids);
+        }
+    }
+
+    #[test]
+    fn merges_sibling_folders_and_restores_them_with_nested_content_on_undo() {
+        let database = Database::in_memory().unwrap();
+        let first_source = database
+            .create_node(text_node("First source", "merge-first-source"))
+            .unwrap()
+            .node;
+        let first_target = database
+            .create_node(text_node("First target", "merge-first-target"))
+            .unwrap()
+            .node;
+        database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: first_source.id.clone(),
+                target_node_id: first_target.id.clone(),
+                kind: Some("flow".to_owned()),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let first_folder = database
+            .group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                node_ids: vec![first_source.id.clone(), first_target.id.clone()],
+            })
+            .unwrap();
+
+        let mut nested_input = text_node("Nested", "merge-nested");
+        nested_input.canvas_id = Some(first_folder.child.canvas.id.clone());
+        let nested_node = database.create_node(nested_input).unwrap().node;
+        let nested_folder = database
+            .group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: first_folder.child.canvas.id.clone(),
+                node_ids: vec![nested_node.id.clone()],
+            })
+            .unwrap();
+
+        let second_source = database
+            .create_node(text_node("Second source", "merge-second-source"))
+            .unwrap()
+            .node;
+        let second_target = database
+            .create_node(text_node("Second target", "merge-second-target"))
+            .unwrap()
+            .node;
+        database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: second_source.id.clone(),
+                target_node_id: second_target.id.clone(),
+                kind: Some("flow".to_owned()),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let second_folder = database
+            .group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                node_ids: vec![second_source.id.clone(), second_target.id.clone()],
+            })
+            .unwrap();
+        let parent_folder_edge = database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: first_folder.folder_node_id.clone(),
+                target_node_id: second_folder.folder_node_id.clone(),
+                kind: Some("flow".to_owned()),
+                metadata: json!({}),
+            })
+            .unwrap();
+
+        let merged = database
+            .merge_folders(MergeFoldersInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                folder_node_ids: vec![
+                    first_folder.folder_node_id.clone(),
+                    second_folder.folder_node_id.clone(),
+                ],
+            })
+            .unwrap();
+
+        assert_eq!(merged.source_folder_count, 2);
+        assert_eq!(merged.merged_node_count, 5);
+        assert_eq!(merged.parent.nodes.len(), 1);
+        assert_eq!(merged.parent.nodes[0].id, merged.folder_node_id);
+        assert_eq!(merged.parent.nodes[0].width, FOLDER_NODE_WIDTH);
+        assert_eq!(merged.parent.nodes[0].height, FOLDER_NODE_HEIGHT);
+        assert!(merged.parent.edges.is_empty());
+        assert_eq!(merged.child.nodes.len(), 5);
+        assert_eq!(merged.child.edges.len(), 2);
+        assert!(merged
+            .child
+            .nodes
+            .iter()
+            .any(|node| node.id == nested_folder.folder_node_id));
+        assert_eq!(
+            database
+                .load_project(&nested_folder.child.canvas.id)
+                .unwrap()
+                .nodes
+                .len(),
+            1
+        );
+
+        let merged_canvas_id = merged.child.canvas.id.clone();
+        let restored = database
+            .undo_folder_merge(UndoFolderMergeInput { merge: merged.undo })
+            .unwrap();
+
+        assert_eq!(restored.nodes.len(), 2);
+        assert!(restored.nodes.iter().all(|node| node.kind == "folder"));
+        assert_eq!(restored.edges.len(), 1);
+        assert_eq!(restored.edges[0].id, parent_folder_edge.id);
+        let restored_first = database
+            .load_project(&first_folder.child.canvas.id)
+            .unwrap();
+        let restored_second = database
+            .load_project(&second_folder.child.canvas.id)
+            .unwrap();
+        assert_eq!(restored_first.nodes.len(), 3);
+        assert_eq!(restored_first.edges.len(), 1);
+        assert_eq!(restored_second.nodes.len(), 2);
+        assert_eq!(restored_second.edges.len(), 1);
+        assert_eq!(
+            database
+                .load_project(&nested_folder.child.canvas.id)
+                .unwrap()
+                .nodes
+                .len(),
+            1
+        );
+        assert!(database.load_project(&merged_canvas_id).is_err());
+    }
+
+    #[test]
+    fn cancels_or_recursively_deletes_a_folder_and_restores_both_actions() {
+        let database = Database::in_memory().unwrap();
+        let source = database
+            .create_node(text_node("Source", "folder-action-source"))
+            .unwrap()
+            .node;
+        let target = database
+            .create_node(text_node("Target", "folder-action-target"))
+            .unwrap()
+            .node;
+        database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: source.id.clone(),
+                target_node_id: target.id.clone(),
+                kind: Some("flow".to_owned()),
+                metadata: json!({}),
+            })
+            .unwrap();
+        let root_folder = database
+            .group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                node_ids: vec![source.id.clone(), target.id.clone()],
+            })
+            .unwrap();
+
+        let mut nested_input = text_node("Nested content", "folder-action-nested");
+        nested_input.canvas_id = Some(root_folder.child.canvas.id.clone());
+        let nested_node = database.create_node(nested_input).unwrap().node;
+        let nested_folder = database
+            .group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: root_folder.child.canvas.id.clone(),
+                node_ids: vec![nested_node.id.clone()],
+            })
+            .unwrap();
+        let outside = database
+            .create_node(text_node("Outside", "folder-action-outside"))
+            .unwrap()
+            .node;
+        let parent_edge = database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: root_folder.folder_node_id.clone(),
+                target_node_id: outside.id.clone(),
+                kind: Some("flow".to_owned()),
+                metadata: json!({}),
+            })
+            .unwrap();
+
+        let cancelled = database
+            .cancel_folder(FolderActionInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                folder_node_id: root_folder.folder_node_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(cancelled.moved_node_count, 3);
+        assert_eq!(cancelled.parent.nodes.len(), 4);
+        assert!(cancelled
+            .parent
+            .nodes
+            .iter()
+            .any(|node| node.id == nested_folder.folder_node_id));
+        assert_eq!(cancelled.parent.edges.len(), 1);
+        assert!(database.load_project(&root_folder.child.canvas.id).is_err());
+        assert_eq!(
+            database
+                .load_project(&nested_folder.child.canvas.id)
+                .unwrap()
+                .nodes
+                .len(),
+            1
+        );
+
+        let restored_after_cancel = database
+            .undo_cancel_folder(UndoCancelFolderInput {
+                cancellation: cancelled.undo,
+            })
+            .unwrap();
+        assert_eq!(restored_after_cancel.nodes.len(), 2);
+        assert_eq!(restored_after_cancel.edges.len(), 1);
+        assert_eq!(restored_after_cancel.edges[0].id, parent_edge.id);
+        assert_eq!(
+            database
+                .load_project(&root_folder.child.canvas.id)
+                .unwrap()
+                .nodes
+                .len(),
+            3
+        );
+
+        let deleted = database
+            .delete_folder_tree(FolderActionInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                folder_node_id: root_folder.folder_node_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(deleted.deleted_content_node_count, 4);
+        assert_eq!(deleted.parent.nodes, vec![outside.clone()]);
+        assert!(deleted.parent.edges.is_empty());
+        assert!(database.load_project(&root_folder.child.canvas.id).is_err());
+        assert!(database
+            .load_project(&nested_folder.child.canvas.id)
+            .is_err());
+
+        let restored_after_delete = database
+            .undo_delete_folder_tree(UndoDeleteFolderInput {
+                deletion: deleted.undo,
+            })
+            .unwrap();
+        assert_eq!(restored_after_delete.nodes.len(), 2);
+        assert_eq!(restored_after_delete.edges.len(), 1);
+        assert_eq!(restored_after_delete.edges[0].id, parent_edge.id);
+        let restored_root_child = database.load_project(&root_folder.child.canvas.id).unwrap();
+        assert_eq!(restored_root_child.nodes.len(), 3);
+        assert_eq!(restored_root_child.edges.len(), 1);
+        assert_eq!(
+            database
+                .load_project(&nested_folder.child.canvas.id)
+                .unwrap()
+                .nodes
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn cancelling_a_folder_restores_generated_video_ownership_connection() {
+        let database = Database::in_memory().unwrap();
+        let generator = database
+            .create_node(node_with_kind(
+                "video-generation",
+                "Generator",
+                "folder-restore-generator",
+            ))
+            .unwrap()
+            .node;
+        let mut preview_input = node_with_kind(
+            "generated-video",
+            "Generated preview",
+            "folder-restore-preview",
+        );
+        preview_input.content = json!({
+            "sourceGeneratorId": generator.id.clone(),
+            "seed": "123",
+            "comfyPromptId": "prompt-folder-restore",
+            "outputIndex": 0,
+        });
+        let preview = database.create_node(preview_input).unwrap().node;
+        let folder = database
+            .group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                node_ids: vec![preview.id.clone()],
+            })
+            .unwrap();
+
+        let cancelled = database
+            .cancel_folder(FolderActionInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                folder_node_id: folder.folder_node_id.clone(),
+            })
+            .unwrap();
+
+        assert_eq!(cancelled.undo.restored_source_edges.len(), 1);
+        assert_eq!(cancelled.parent.edges.len(), 1);
+        let ownership_edge = &cancelled.parent.edges[0];
+        assert_eq!(ownership_edge.source_node_id, generator.id);
+        assert_eq!(ownership_edge.target_node_id, preview.id);
+        assert_eq!(ownership_edge.kind, "output");
+        assert!(matches!(
+            database.delete_edge(&ownership_edge.id),
+            Err(CanvasError::Conflict(_))
+        ));
+
+        let restored = database
+            .undo_cancel_folder(UndoCancelFolderInput {
+                cancellation: cancelled.undo,
+            })
+            .unwrap();
+        assert_eq!(restored.nodes.len(), 2);
+        assert!(restored.edges.is_empty());
+        let restored_child = database.load_project(&folder.child.canvas.id).unwrap();
+        assert_eq!(restored_child.nodes.len(), 1);
+        assert_eq!(restored_child.nodes[0].id, preview.id);
+        assert!(restored_child.edges.is_empty());
+    }
+
+    #[test]
+    fn protects_generated_video_ownership_edges_from_deletion_and_folder_splitting() {
+        let database = Database::in_memory().unwrap();
+        let generator = database
+            .create_node(node_with_kind(
+                "video-generation",
+                "Generator",
+                "protected-generator",
+            ))
+            .unwrap()
+            .node;
+        let preview = database
+            .create_node(node_with_kind(
+                "generated-video",
+                "Preview",
+                "protected-preview",
+            ))
+            .unwrap()
+            .node;
+        let edge = database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: generator.id.clone(),
+                target_node_id: preview.id.clone(),
+                kind: Some("output".to_owned()),
+                metadata: json!({}),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            database.delete_edge(&edge.id),
+            Err(CanvasError::Conflict(_))
+        ));
+        assert!(matches!(
+            database.group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                node_ids: vec![generator.id.clone()],
+            }),
+            Err(CanvasError::Conflict(_))
+        ));
+
+        let unchanged = database.load_project(DEFAULT_CANVAS_ID).unwrap();
+        assert_eq!(unchanged.nodes.len(), 2);
+        assert_eq!(unchanged.edges.len(), 1);
+        assert_eq!(database.list_all_projects().unwrap().len(), 1);
+
+        let grouped = database
+            .group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                node_ids: vec![generator.id, preview.id],
+            })
+            .unwrap();
+        assert_eq!(grouped.child.nodes.len(), 2);
+        assert_eq!(grouped.child.edges.len(), 1);
+    }
+
+    #[test]
+    fn numbers_sibling_folders_and_keeps_folder_and_child_names_in_sync() {
+        let database = Database::in_memory().unwrap();
+        let first_node = database
+            .create_node(text_node("First", "folder-name-first"))
+            .unwrap()
+            .node;
+        let first = database
+            .group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                node_ids: vec![first_node.id],
+            })
+            .unwrap();
+        let second_node = database
+            .create_node(text_node("Second", "folder-name-second"))
+            .unwrap()
+            .node;
+        let second = database
+            .group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                node_ids: vec![second_node.id],
+            })
+            .unwrap();
+
+        assert_eq!(first.child.canvas.name, "新建目录");
+        assert_eq!(second.child.canvas.name, "新建目录 2");
+
+        let renamed_folder = database
+            .update_node(UpdateNodeInput {
+                id: first.folder_node_id.clone(),
+                title: Some("成片".to_owned()),
+                content: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                status: None,
+            })
+            .unwrap();
+        assert_eq!(renamed_folder.title, "成片");
+        assert_eq!(
+            database
+                .load_project(&first.child.canvas.id)
+                .unwrap()
+                .canvas
+                .name,
+            "成片"
+        );
+
+        database
+            .rename_project(&first.child.canvas.id, "分镜")
+            .unwrap();
+        let parent = database.load_project(DEFAULT_CANVAS_ID).unwrap();
+        assert_eq!(
+            parent
+                .nodes
+                .iter()
+                .find(|node| node.id == first.folder_node_id)
+                .unwrap()
+                .title,
+            "分镜"
+        );
+
+        let deduplicated = database
+            .update_node(UpdateNodeInput {
+                id: second.folder_node_id,
+                title: Some("分镜".to_owned()),
+                content: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                status: None,
+            })
+            .unwrap();
+        assert_eq!(deduplicated.title, "分镜 2");
+    }
+
+    #[test]
     fn rejects_edges_between_projects() {
         let database = Database::in_memory().unwrap();
         let source = database
@@ -2251,7 +5282,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_existing_canvas_tables_with_private_flag_defaulting_to_false() {
+    fn migrates_legacy_privacy_and_folder_dimensions() {
         let path = std::env::temp_dir().join(format!(
             "infinite-canvas-private-migration-{}.sqlite3",
             Uuid::new_v4()
@@ -2265,8 +5296,31 @@ mod tests {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE nodes (
+                    id TEXT PRIMARY KEY,
+                    canvas_id TEXT NOT NULL REFERENCES canvases(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content_json TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    request_id TEXT UNIQUE,
+                    x REAL NOT NULL,
+                    y REAL NOT NULL,
+                    width REAL NOT NULL,
+                    height REAL NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 INSERT INTO canvases (id, name, created_at, updated_at)
-                VALUES ('canvas:legacy', 'Legacy', '2026-01-01', '2026-01-01');",
+                VALUES ('canvas:legacy', 'Legacy', '2026-01-01', '2026-01-01');
+                INSERT INTO nodes (
+                    id, canvas_id, kind, title, content_json, source, request_id,
+                    x, y, width, height, status, created_at, updated_at
+                ) VALUES (
+                    'node:legacy-folder', 'canvas:legacy', 'folder', 'Legacy folder', '{}',
+                    'manual', NULL, 0, 0, 280, 180, 'ready', '2026-01-01', '2026-01-01'
+                );",
             )
             .unwrap();
         drop(connection);
@@ -2274,6 +5328,8 @@ mod tests {
         let database = Database::open(&path).unwrap();
         let project = database.load_project("canvas:legacy").unwrap();
         assert!(!project.canvas.is_private);
+        assert_eq!(project.nodes[0].width, FOLDER_NODE_WIDTH);
+        assert_eq!(project.nodes[0].height, FOLDER_NODE_HEIGHT);
         drop(database);
 
         std::fs::remove_file(path).unwrap();
@@ -2303,6 +5359,27 @@ mod tests {
 
         assert!(database.load_project(&project.canvas.id).is_err());
         assert_eq!(database.list_projects().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_root_project_removes_its_nested_canvas_tree() {
+        let database = Database::in_memory().unwrap();
+        let project = database.create_project("Nested project").unwrap();
+        let mut input = text_node("Nested source", "nested-project-source");
+        input.canvas_id = Some(project.canvas.id.clone());
+        let source = database.create_node(input).unwrap().node;
+        let grouped = database
+            .group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: project.canvas.id.clone(),
+                node_ids: vec![source.id],
+            })
+            .unwrap();
+
+        database.delete_project(&project.canvas.id).unwrap();
+
+        assert!(database.load_project(&project.canvas.id).is_err());
+        assert!(database.load_project(&grouped.child.canvas.id).is_err());
+        assert_eq!(database.list_all_projects().unwrap().len(), 1);
     }
 
     #[test]
@@ -2468,6 +5545,34 @@ mod tests {
         assert_eq!(recovered.prompt_set.scene_count, 10);
         assert_eq!(recovered.scenes.len(), 10);
         assert_eq!(database.list_prompt_sets().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn lists_prompt_sets_for_one_canvas_only() {
+        let database = Database::in_memory().unwrap();
+        database
+            .create_missing_prompt_scenes(
+                "default-canvas-prompt-set",
+                DEFAULT_CANVAS_ID,
+                prompt_scene_batch("default-canvas-scenes", &["S01"]),
+            )
+            .unwrap();
+        let second_canvas = database.create_project("Second canvas").unwrap().canvas;
+        database
+            .create_missing_prompt_scenes(
+                "second-canvas-prompt-set",
+                &second_canvas.id,
+                prompt_scene_batch("second-canvas-scenes", &["S01"]),
+            )
+            .unwrap();
+
+        let prompt_sets = database
+            .list_prompt_sets_for_canvas(&second_canvas.id)
+            .unwrap();
+
+        assert_eq!(prompt_sets.len(), 1);
+        assert_eq!(prompt_sets[0].prompt_set_id, "second-canvas-prompt-set");
+        assert_eq!(prompt_sets[0].canvas_id, second_canvas.id);
     }
 
     #[test]

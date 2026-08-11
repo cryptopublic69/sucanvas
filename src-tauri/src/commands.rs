@@ -23,12 +23,16 @@ use uuid::Uuid;
 use crate::{
     app_backup::{self, BackupSummary, RestoreSummary},
     models::{
-        AppLockStatus, ComfyClientTaskStatus, ComfyOutputFile, ComfyQueueSummary, ComfySubmitInput,
-        ComfySubmitResult, CreateEdgeInput, CreateNodeInput, CreateNodeResult, CreateProjectInput,
-        DeleteNodesInput, DeletedBatch, EdgeRecord, NodeRecord, ReplaceNodeAndDeleteInput,
-        ReplaceNodeAndDeleteResult, ResizeImageResult, RestoreNodeReplacementInput,
-        RestoreNodeReplacementResult, RuntimeInfo, SetAppLockInput, SetProjectPrivacyInput,
-        UpdateNodeInput, UpdateProjectInput, WorkspaceSnapshot,
+        AppLockStatus, CancelFolderResult, ComfyClientTaskStatus, ComfyOutputFile,
+        ComfyQueueSummary, ComfySubmitInput, ComfySubmitResult, CreateEdgeInput, CreateNodeInput,
+        CreateNodeResult, CreateProjectInput, DeleteFolderResult, DeleteNodesInput, DeletedBatch,
+        EdgeRecord, FolderActionInput, GroupNodesIntoFolderInput, GroupNodesIntoFolderResult,
+        GroupRelatedNodesIntoFolderInput, MergeFoldersInput, MergeFoldersResult, NodeRecord,
+        ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult, ResizeImageResult,
+        RestoreNodeReplacementInput, RestoreNodeReplacementResult, RuntimeInfo, SetAppLockInput,
+        SetProjectPrivacyInput, UndoCancelFolderInput, UndoDeleteFolderInput,
+        UndoFolderGroupingInput, UndoFolderMergeInput, UpdateNodeInput, UpdateProjectInput,
+        WorkspaceSnapshot,
     },
     workflow_modules::{
         self, SaveWorkflowModuleInput, WorkflowBindings, WorkflowInputContract,
@@ -240,6 +244,17 @@ pub fn load_workspace(
 }
 
 #[tauri::command]
+pub fn inspect_workspace(
+    canvas_id: String,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkspaceSnapshot, String> {
+    state
+        .database
+        .load_project(&canvas_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn list_projects(state: State<'_, ApplicationState>) -> Result<Vec<WorkspaceSnapshot>, String> {
     state
         .database
@@ -255,6 +270,105 @@ pub fn create_project(
     state
         .database
         .create_project(&input.name)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn group_nodes_into_folder(
+    input: GroupNodesIntoFolderInput,
+    state: State<'_, ApplicationState>,
+) -> Result<GroupNodesIntoFolderResult, String> {
+    state
+        .database
+        .group_nodes_into_folder(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn group_related_nodes_into_folder(
+    input: GroupRelatedNodesIntoFolderInput,
+    state: State<'_, ApplicationState>,
+) -> Result<GroupNodesIntoFolderResult, String> {
+    state
+        .database
+        .group_related_nodes_into_folder(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn undo_folder_grouping(
+    input: UndoFolderGroupingInput,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkspaceSnapshot, String> {
+    state
+        .database
+        .undo_folder_grouping(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn merge_folders(
+    input: MergeFoldersInput,
+    state: State<'_, ApplicationState>,
+) -> Result<MergeFoldersResult, String> {
+    state
+        .database
+        .merge_folders(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn undo_folder_merge(
+    input: UndoFolderMergeInput,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkspaceSnapshot, String> {
+    state
+        .database
+        .undo_folder_merge(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn cancel_folder(
+    input: FolderActionInput,
+    state: State<'_, ApplicationState>,
+) -> Result<CancelFolderResult, String> {
+    state
+        .database
+        .cancel_folder(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn undo_cancel_folder(
+    input: UndoCancelFolderInput,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkspaceSnapshot, String> {
+    state
+        .database
+        .undo_cancel_folder(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn delete_folder_tree(
+    input: FolderActionInput,
+    state: State<'_, ApplicationState>,
+) -> Result<DeleteFolderResult, String> {
+    state
+        .database
+        .delete_folder_tree(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn undo_delete_folder_tree(
+    input: UndoDeleteFolderInput,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkspaceSnapshot, String> {
+    state
+        .database
+        .undo_delete_folder_tree(input)
         .map_err(|error| error.to_string())
 }
 
@@ -578,7 +692,7 @@ pub(crate) fn cleanup_unreferenced_resize_images(
         .canonicalize()
         .map_err(|error| format!("无法读取 Resize 临时目录: {error}"))?;
     let referenced_paths = database
-        .list_projects()
+        .list_all_projects()
         .map_err(|error| error.to_string())?
         .into_iter()
         .flat_map(|project| project.nodes)
@@ -1707,6 +1821,7 @@ async fn upload_comfy_output_as_input(
         &output.filename,
         &output.subfolder,
         &output.file_type,
+        None,
     )?;
     let response = client
         .get(source_url)
@@ -1920,13 +2035,22 @@ fn comfy_view_url(
     filename: &str,
     subfolder: &str,
     file_type: &str,
+    cache_bust: Option<&str>,
 ) -> Result<String, String> {
     let mut url = Url::parse(&format!("{server_url}/view"))
         .map_err(|error| format!("ComfyUI 输出地址无效：{error}"))?;
-    url.query_pairs_mut()
+    let mut query = url.query_pairs_mut();
+    query
         .append_pair("filename", filename)
         .append_pair("subfolder", subfolder)
         .append_pair("type", file_type);
+    if let Some(cache_bust) = cache_bust.filter(|value| !value.is_empty()) {
+        // ComfyUI reuses output paths in some workflows.  Give each completed
+        // prompt a distinct media URL so WebView does not replay an older byte
+        // stream from its HTTP cache when that path has been overwritten.
+        query.append_pair("infinite_canvas_prompt", cache_bust);
+    }
+    drop(query);
     Ok(url.into())
 }
 
@@ -2303,7 +2427,13 @@ async fn submit_comfyui_workflow_inner(
                 continue;
             }
             outputs.push(ComfyOutputFile {
-                url: comfy_view_url(&server_url, &filename, &subfolder, &file_type)?,
+                url: comfy_view_url(
+                    &server_url,
+                    &filename,
+                    &subfolder,
+                    &file_type,
+                    Some(&prompt_id),
+                )?,
                 filename,
                 subfolder,
                 file_type,
@@ -2408,6 +2538,7 @@ fn comfy_outputs_from_history_entry(
     server_url: &str,
     entry: &Value,
 ) -> Result<Vec<ComfyOutputFile>, String> {
+    let prompt_id = entry.pointer("/prompt/1").and_then(Value::as_str);
     let mut raw_files = Vec::new();
     collect_video_files(entry.get("outputs").unwrap_or(&Value::Null), &mut raw_files);
     let mut seen = HashSet::new();
@@ -2418,7 +2549,7 @@ fn comfy_outputs_from_history_entry(
             continue;
         }
         outputs.push(ComfyOutputFile {
-            url: comfy_view_url(server_url, &filename, &subfolder, &file_type)?,
+            url: comfy_view_url(server_url, &filename, &subfolder, &file_type, prompt_id)?,
             filename,
             subfolder,
             file_type,
@@ -2805,13 +2936,14 @@ pub fn get_runtime_info(state: State<'_, ApplicationState>) -> RuntimeInfo {
 mod tests {
     use super::{
         cleanup_unreferenced_resize_images, comfy_execution_elapsed_seconds, comfy_input_task_path,
-        comfy_queue_summary_from_value, configure_h3_diffusion_model, configure_h3_generation,
-        configure_h3_ref_image_size, configure_h3_uploaded_media, configure_secondary_source_video,
-        delete_video_files_blocking, diffusion_models_from_object_info, hash_app_lock_password,
-        loras_from_object_info, media_format, resized_image_dimensions, resized_image_name,
-        resolve_filename_prefix_date, resolve_generation_seed, validate_new_app_lock_password,
-        validate_workflow_media_counts, verify_app_lock_hash, MediaFormat, WorkflowBindings,
-        WorkflowInputContract, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
+        comfy_queue_summary_from_value, comfy_view_url, configure_h3_diffusion_model,
+        configure_h3_generation, configure_h3_ref_image_size, configure_h3_uploaded_media,
+        configure_secondary_source_video, delete_video_files_blocking,
+        diffusion_models_from_object_info, hash_app_lock_password, loras_from_object_info,
+        media_format, resized_image_dimensions, resized_image_name, resolve_filename_prefix_date,
+        resolve_generation_seed, validate_new_app_lock_password, validate_workflow_media_counts,
+        verify_app_lock_hash, MediaFormat, WorkflowBindings, WorkflowInputContract,
+        AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
     use crate::{db::Database, models::CreateNodeInput};
     use serde_json::json;
@@ -3202,6 +3334,30 @@ mod tests {
         });
         let elapsed = comfy_execution_elapsed_seconds(&history_entry).unwrap();
         assert!((elapsed - 167.304).abs() < 0.001);
+    }
+
+    #[test]
+    fn cache_busts_completed_output_urls_by_prompt_id() {
+        let old_output = comfy_view_url(
+            "http://127.0.0.1:8188",
+            "video.mp4",
+            "primary",
+            "output",
+            Some("old-prompt"),
+        )
+        .unwrap();
+        let new_output = comfy_view_url(
+            "http://127.0.0.1:8188",
+            "video.mp4",
+            "primary",
+            "output",
+            Some("new-prompt"),
+        )
+        .unwrap();
+
+        assert_ne!(old_output, new_output);
+        assert!(old_output.contains("infinite_canvas_prompt=old-prompt"));
+        assert!(new_output.contains("infinite_canvas_prompt=new-prompt"));
     }
 
     #[test]

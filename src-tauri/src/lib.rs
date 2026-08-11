@@ -284,8 +284,18 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::load_workspace,
+            commands::inspect_workspace,
             commands::list_projects,
             commands::create_project,
+            commands::group_nodes_into_folder,
+            commands::group_related_nodes_into_folder,
+            commands::undo_folder_grouping,
+            commands::merge_folders,
+            commands::undo_folder_merge,
+            commands::cancel_folder,
+            commands::undo_cancel_folder,
+            commands::delete_folder_tree,
+            commands::undo_delete_folder_tree,
             commands::update_project,
             commands::set_project_private,
             commands::delete_project,

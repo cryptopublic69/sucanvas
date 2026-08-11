@@ -248,6 +248,187 @@ pub struct SetProjectPrivacyInput {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GroupNodesIntoFolderInput {
+    pub canvas_id: String,
+    pub node_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupRelatedNodesIntoFolderInput {
+    pub canvas_id: String,
+    pub root_node_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupNodesIntoFolderResult {
+    pub parent: WorkspaceSnapshot,
+    pub child: WorkspaceSnapshot,
+    pub folder_node_id: String,
+    pub removed_crossing_edge_count: usize,
+    #[serde(default)]
+    pub moved_node_count: usize,
+    #[serde(default)]
+    pub copied_input_node_count: usize,
+    pub undo: FolderGroupingUndoRecord,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderInputDuplicateRecord {
+    pub source_node_id: String,
+    pub duplicate_node_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderGroupingUndoRecord {
+    pub parent_canvas_id: String,
+    pub child_canvas_id: String,
+    pub folder_node_id: String,
+    pub nodes: Vec<NodeRecord>,
+    pub edges: Vec<EdgeRecord>,
+    #[serde(default)]
+    pub prompt_scene_bindings: Vec<PromptSceneBindingRecord>,
+    #[serde(default)]
+    pub duplicated_input_nodes: Vec<FolderInputDuplicateRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoFolderGroupingInput {
+    pub grouping: FolderGroupingUndoRecord,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeFoldersInput {
+    pub canvas_id: String,
+    pub folder_node_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderMergeSourceSnapshot {
+    pub folder_node: NodeRecord,
+    pub child_canvas: CanvasRecord,
+    pub folder_link_created_at: String,
+    pub nodes: Vec<NodeRecord>,
+    pub edges: Vec<EdgeRecord>,
+    #[serde(default)]
+    pub prompt_scene_bindings: Vec<PromptSceneBindingRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderMergeDeduplicatedInputRecord {
+    pub original_source_node_id: String,
+    pub kept_node_id: String,
+    pub removed_node_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderMergeUndoRecord {
+    pub parent_canvas_id: String,
+    pub merged_child_canvas_id: String,
+    pub merged_folder_node_id: String,
+    pub sources: Vec<FolderMergeSourceSnapshot>,
+    #[serde(default)]
+    pub parent_edges: Vec<EdgeRecord>,
+    #[serde(default)]
+    pub deduplicated_input_nodes: Vec<FolderMergeDeduplicatedInputRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeFoldersResult {
+    pub parent: WorkspaceSnapshot,
+    pub child: WorkspaceSnapshot,
+    pub folder_node_id: String,
+    pub merged_node_count: usize,
+    pub source_folder_count: usize,
+    #[serde(default)]
+    pub deduplicated_input_node_count: usize,
+    pub undo: FolderMergeUndoRecord,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoFolderMergeInput {
+    pub merge: FolderMergeUndoRecord,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderActionInput {
+    pub canvas_id: String,
+    pub folder_node_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelFolderUndoRecord {
+    pub parent_canvas_id: String,
+    pub source: FolderMergeSourceSnapshot,
+    #[serde(default)]
+    pub parent_edges: Vec<EdgeRecord>,
+    #[serde(default)]
+    pub restored_source_edges: Vec<EdgeRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelFolderResult {
+    pub parent: WorkspaceSnapshot,
+    pub moved_node_count: usize,
+    pub undo: CancelFolderUndoRecord,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoCancelFolderInput {
+    pub cancellation: CancelFolderUndoRecord,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasFolderLinkRecord {
+    pub folder_node_id: String,
+    pub child_canvas_id: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderTreeUndoRecord {
+    pub parent_canvas_id: String,
+    pub root_folder_node_id: String,
+    pub canvases: Vec<CanvasRecord>,
+    pub nodes: Vec<NodeRecord>,
+    pub edges: Vec<EdgeRecord>,
+    pub folder_links: Vec<CanvasFolderLinkRecord>,
+    #[serde(default)]
+    pub prompt_scene_bindings: Vec<PromptSceneBindingRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteFolderResult {
+    pub parent: WorkspaceSnapshot,
+    pub deleted_content_node_count: usize,
+    pub undo: FolderTreeUndoRecord,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoDeleteFolderInput {
+    pub deletion: FolderTreeUndoRecord,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateNodeInput {
     #[serde(default)]
     pub canvas_id: Option<String>,

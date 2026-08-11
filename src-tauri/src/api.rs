@@ -5,19 +5,20 @@ use std::{
 };
 
 use axum::{
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::{
     db::{CanvasError, CanvasResult, Database},
     models::{
         ApiConfig, AppendPromptVersionInput, CreateMissingPromptScenesInput, CreateNodeInput,
+        UpdateNodeInput,
     },
 };
 
@@ -44,6 +45,12 @@ struct ApiErrorResponse {
     error: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptSetListQuery {
+    active_canvas_only: Option<bool>,
+}
+
 pub fn write_config(path: &FsPath, config: &ApiConfig) -> CanvasResult<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -65,6 +72,7 @@ fn router(state: ApiState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/nodes", post(create_node))
+        .route("/v1/nodes:update", post(update_node))
         .route("/v1/prompt-sets", get(list_prompt_sets))
         .route(
             "/v1/prompt-sets/{prompt_set_id}/scenes",
@@ -130,11 +138,53 @@ async fn create_node(
     }
 }
 
-async fn list_prompt_sets(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+async fn update_node(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateNodeInput>,
+) -> Response {
     if !authorized(&headers, &state.token) {
         return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
     }
-    match state.database.list_prompt_sets() {
+
+    match state.database.update_node(input) {
+        Ok(node) => {
+            if let Some(app_handle) = state.app_handle.as_ref() {
+                let _ = app_handle.emit("canvas://node-updated", node.clone());
+            }
+            Json(node).into_response()
+        }
+        Err(error) => api_error(status_for_error(&error), &error.to_string()),
+    }
+}
+
+async fn list_prompt_sets(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<PromptSetListQuery>,
+) -> Response {
+    if !authorized(&headers, &state.token) {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
+    }
+
+    let result = if query.active_canvas_only.unwrap_or(false) {
+        let active_canvas_id = match state.active_canvas_id.read() {
+            Ok(active_canvas_id) => active_canvas_id.clone(),
+            Err(_) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "active project lock is poisoned",
+                );
+            }
+        };
+        state
+            .database
+            .list_prompt_sets_for_canvas(&active_canvas_id)
+    } else {
+        state.database.list_prompt_sets()
+    };
+
+    match result {
         Ok(prompt_sets) => Json(prompt_sets).into_response(),
         Err(error) => api_error(status_for_error(&error), &error.to_string()),
     }
