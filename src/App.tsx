@@ -353,6 +353,10 @@ function CanvasWorkspace() {
   const [showPrivateProjects, setShowPrivateProjects] = useState(() =>
     window.localStorage.getItem(PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY) !== "false",
   );
+  const [privateProjectVisibilityUnlockOpen, setPrivateProjectVisibilityUnlockOpen] = useState(false);
+  const [privateProjectVisibilityPassword, setPrivateProjectVisibilityPassword] = useState("");
+  const [privateProjectVisibilityUnlockBusy, setPrivateProjectVisibilityUnlockBusy] = useState(false);
+  const [privateProjectVisibilityUnlockError, setPrivateProjectVisibilityUnlockError] = useState("");
   const [privateProjectSearch, setPrivateProjectSearch] = useState("");
   const [privateProjectBusyId, setPrivateProjectBusyId] = useState<string | null>(null);
   const [appLockEnabled, setAppLockEnabled] = useState(false);
@@ -5634,6 +5638,46 @@ function CanvasWorkspace() {
     }
   }, [flushPendingPatches, reportError, setEdges, setNodes]);
 
+  const togglePrivateProjectVisibility = useCallback(() => {
+    if (showPrivateProjects) {
+      const activeProjectIsPrivate = activeProjectId !== null
+        && projects.some((project) => (
+          project.canvas.id === activeProjectId && project.canvas.isPrivate
+        ));
+      setShowPrivateProjects(false);
+      if (activeProjectIsPrivate) void returnToProjects();
+      return;
+    }
+    setPrivateProjectVisibilityPassword("");
+    setPrivateProjectVisibilityUnlockError("");
+    setPrivateProjectVisibilityUnlockOpen(true);
+  }, [activeProjectId, projects, returnToProjects, showPrivateProjects]);
+
+  const confirmPrivateProjectVisibility = useCallback(async () => {
+    if (!privateProjectVisibilityPassword || privateProjectVisibilityUnlockBusy) return;
+    setPrivateProjectVisibilityUnlockBusy(true);
+    setPrivateProjectVisibilityUnlockError("");
+    try {
+      const accepted = await invoke<boolean>("verify_app_lock_password", {
+        password: privateProjectVisibilityPassword,
+      });
+      if (!accepted) {
+        setPrivateProjectVisibilityPassword("");
+        setPrivateProjectVisibilityUnlockError("密码错误，请重新输入");
+        return;
+      }
+      setShowPrivateProjects(true);
+      setPrivateProjectVisibilityUnlockOpen(false);
+      setPrivateProjectVisibilityPassword("");
+      setNotice("已显示私密项目");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPrivateProjectVisibilityUnlockError(message);
+    } finally {
+      setPrivateProjectVisibilityUnlockBusy(false);
+    }
+  }, [privateProjectVisibilityPassword, privateProjectVisibilityUnlockBusy]);
+
   useEffect(() => {
     const handlePrivateProjectVisibilityShortcut = (event: KeyboardEvent) => {
       if (!event.ctrlKey || event.altKey || event.shiftKey || event.repeat) return;
@@ -5648,17 +5692,12 @@ function CanvasWorkspace() {
         return;
       }
       event.preventDefault();
-      const activeProjectIsPrivate = activeProjectId !== null
-        && projects.some((project) => (
-          project.canvas.id === activeProjectId && project.canvas.isPrivate
-        ));
-      setShowPrivateProjects((show) => !show);
-      if (activeProjectIsPrivate) void returnToProjects();
+      togglePrivateProjectVisibility();
     };
 
-    window.addEventListener("keydown", handlePrivateProjectVisibilityShortcut);
-    return () => window.removeEventListener("keydown", handlePrivateProjectVisibilityShortcut);
-  }, [activeProjectId, projects, returnToProjects]);
+    window.addEventListener("keydown", handlePrivateProjectVisibilityShortcut, true);
+    return () => window.removeEventListener("keydown", handlePrivateProjectVisibilityShortcut, true);
+  }, [togglePrivateProjectVisibility]);
 
   const createProject = useCallback(async () => {
     const name = newProjectName.trim();
@@ -7366,6 +7405,76 @@ function CanvasWorkspace() {
     document.body,
   );
 
+  const privateProjectVisibilityUnlockDialog = privateProjectVisibilityUnlockOpen && createPortal(
+    <div
+      className="project-dialog-backdrop"
+      onMouseDown={() => {
+        if (privateProjectVisibilityUnlockBusy) return;
+        setPrivateProjectVisibilityUnlockOpen(false);
+        setPrivateProjectVisibilityPassword("");
+        setPrivateProjectVisibilityUnlockError("");
+      }}
+    >
+      <form
+        className="project-dialog private-project-visibility-unlock-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="private-project-visibility-unlock-title"
+        aria-describedby="private-project-visibility-unlock-description"
+        onMouseDown={(event) => event.stopPropagation()}
+        onSubmit={(event) => {
+          event.preventDefault();
+          void confirmPrivateProjectVisibility();
+        }}
+      >
+        <div className="project-dialog-icon"><LockKeyhole size={22} /></div>
+        <div>
+          <h2 id="private-project-visibility-unlock-title">验证登录密码</h2>
+          <p id="private-project-visibility-unlock-description">输入登录密码后，才会恢复显示私密项目。</p>
+        </div>
+        <label>
+          登录密码
+          <input
+            type="password"
+            value={privateProjectVisibilityPassword}
+            onChange={(event) => setPrivateProjectVisibilityPassword(event.currentTarget.value)}
+            autoComplete="current-password"
+            autoFocus
+            disabled={privateProjectVisibilityUnlockBusy}
+          />
+        </label>
+        {privateProjectVisibilityUnlockError && (
+          <p className="private-project-visibility-unlock-error" role="alert">
+            {privateProjectVisibilityUnlockError}
+          </p>
+        )}
+        <div className="project-dialog-actions">
+          <button
+            type="button"
+            className="dialog-cancel"
+            disabled={privateProjectVisibilityUnlockBusy}
+            onClick={() => {
+              setPrivateProjectVisibilityUnlockOpen(false);
+              setPrivateProjectVisibilityPassword("");
+              setPrivateProjectVisibilityUnlockError("");
+            }}
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={privateProjectVisibilityUnlockBusy || !privateProjectVisibilityPassword}
+          >
+            <LockKeyhole size={14} />
+            {privateProjectVisibilityUnlockBusy ? "验证中…" : "验证并显示"}
+          </button>
+        </div>
+      </form>
+    </div>,
+    document.body,
+  );
+
   const appSettingsDialog = settingsOpen && createPortal(
     <>
     <div className="project-dialog-backdrop" onMouseDown={() => {
@@ -8010,7 +8119,7 @@ function CanvasWorkspace() {
               className={`private-project-visibility ${showPrivateProjects ? "is-active" : ""}`}
               role="switch"
               aria-checked={showPrivateProjects}
-              onClick={() => setShowPrivateProjects((show) => !show)}
+              onClick={togglePrivateProjectVisibility}
               title="显示或隐藏私密项目（Ctrl+H）"
             >
               {showPrivateProjects ? <Eye size={14} /> : <EyeOff size={14} />}
@@ -8563,6 +8672,7 @@ function CanvasWorkspace() {
           </div>
         )}
         {appSettingsDialog}
+        {privateProjectVisibilityUnlockDialog}
         {globalNoticeToast}
       </main>
     );
@@ -8846,6 +8956,7 @@ function CanvasWorkspace() {
           </div>
         )}
       </ReactFlow>
+      {privateProjectVisibilityUnlockDialog}
       {videoDeletionRequest && createPortal(
         <div
           className="project-dialog-backdrop"

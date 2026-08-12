@@ -425,6 +425,8 @@ button { color: inherit; }
 .app-lock-save:disabled,
 .app-lock-disable:disabled { opacity: .48; cursor: wait; }
 .project-dialog-actions { display: flex; grid-column: 1 / -1; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.private-project-visibility-unlock-dialog { width: min(420px, 100%); }
+.private-project-visibility-unlock-error { grid-column: 1 / -1; margin: 11px 0 0 !important; padding: 8px 9px; color: #efa4b0 !important; background: rgba(180, 63, 82, .10); border: 1px solid rgba(208, 91, 110, .30); border-radius: 8px; font-size: calc(9.5px + var(--ui-font-adjust)) !important; line-height: 1.4; }
 .dialog-cancel { height: 34px; padding: 0 13px; color: #959cac; background: transparent; border: 1px solid #343a47; border-radius: 8px; cursor: pointer; font-size: calc(11px + var(--ui-font-adjust)); }
 .dialog-cancel:hover { color: #e4e6ed; background: #20242e; }
 .project-delete-dialog .project-dialog-icon { color: #f19baa; background: rgba(210, 75, 94, .12); }
@@ -1564,6 +1566,7 @@ button { color: inherit; }
 :root[data-theme="light"] .app-lock-error-card > p { color: #a83c4e; }
 :root[data-theme="light"] .app-lock-screen.is-loading { background: #eef0f5; }
 :root[data-theme="light"] .project-delete-dialog .project-dialog-icon { color: #a83c4e; background: #fff0f2; }
+:root[data-theme="light"] .private-project-visibility-unlock-error { color: #a83c4e !important; background: #fff0f2; border-color: #edc2c9; }
 :root[data-theme="light"] .editor-exit-confirm-dialog .project-dialog-icon { color: #5a4cb4; background: #f0edff; }
 :root[data-theme="light"] .editor-exit-confirm-dialog p { color: #687182; }
 :root[data-theme="light"] .dialog-danger { color: #fff; background: #b43f52; border-color: #c95063; }
