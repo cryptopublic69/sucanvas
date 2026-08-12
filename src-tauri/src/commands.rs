@@ -1137,18 +1137,9 @@ fn loras_from_object_info(value: &Value, class_type: &str, directory: &str) -> V
 }
 
 #[tauri::command]
-pub async fn get_comfyui_h3_loras(
-    server_url: String,
-    workflow_module_id: Option<String>,
-    state: State<'_, ApplicationState>,
-) -> Result<Vec<String>, String> {
-    let bindings = if let Some(module_id) = workflow_module_id.as_deref() {
-        workflow_modules::get(&state.workflow_modules_dir, module_id)?
-            .adapter
-            .bindings
-    } else {
-        WorkflowBindings::default()
-    };
+pub async fn get_comfyui_h3_loras(server_url: String) -> Result<Vec<String>, String> {
+    const LORA_CLASS_TYPE: &str = "LoraLoaderModelOnly";
+    const LORA_DIRECTORY: &str = "MinimaxH3";
     let parsed_server =
         Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
     if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
@@ -1160,10 +1151,7 @@ pub async fn get_comfyui_h3_loras(
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?
-        .get(format!(
-            "{server_url}/object_info/{}",
-            bindings.lora_class_type
-        ))
+        .get(format!("{server_url}/object_info/{LORA_CLASS_TYPE}"))
         .send()
         .await
         .map_err(|error| format!("读取 ComfyUI LoRA 列表失败：{error}"))?
@@ -1174,8 +1162,8 @@ pub async fn get_comfyui_h3_loras(
         .map_err(|error| format!("解析 ComfyUI LoRA 列表失败：{error}"))?;
     Ok(loras_from_object_info(
         &value,
-        &bindings.lora_class_type,
-        &bindings.lora_directory,
+        LORA_CLASS_TYPE,
+        LORA_DIRECTORY,
     ))
 }
 

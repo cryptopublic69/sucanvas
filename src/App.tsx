@@ -552,6 +552,28 @@ interface H3ModelParameters {
   secondarySaturation: number;
 }
 
+interface VideoGenerationDefaults {
+  generationMode: VideoGenerationMode;
+  workflowModuleId: string;
+  workflowModuleRevision: string;
+  generationDiffusionModelName: string;
+  generationDuration: number;
+  generationAspectRatio: VideoAspectRatio;
+  generationPrimaryResolution: number;
+  generationSecondaryResolution: number;
+  generationLoraName: string;
+  generationLoraStrength: number;
+  generationLoraBypassed: boolean;
+  generationSecondaryLoraName: string;
+  generationSecondaryLoraStrength: number;
+  generationSecondaryLoraBypassed: boolean;
+  generationPrimaryVideoSteps: number;
+  generationSecondarySchedulerSteps: number;
+  seedMode: SeedMode;
+  generationSeed: string;
+  generationRefImageSize: RefImageSize;
+}
+
 type WorkflowCapability = "video-generation" | "image-generation";
 type WorkflowVariant = "reference-to-video" | "first-last-frame" | "image-to-video" | "last-frame-to-video" | "text-to-video" | "image-generation";
 type UiFontSize = "small" | "medium";
@@ -1496,6 +1518,7 @@ function generatedPlaceholderPositionStyle(nodeId: string, blobIndex: number): C
   } as CSSProperties;
 }
 const H3_MODEL_PARAMETERS_STORAGE_KEY = "infinite-canvas:h3-model-parameters";
+const VIDEO_GENERATION_DEFAULTS_STORAGE_KEY = "infinite-canvas:video-generation-defaults";
 const DEFAULT_H3_REFERENCE_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3全能参考工作流.json";
 const DEFAULT_H3_FIRST_LAST_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3首尾帧工作流.json";
 const DEFAULT_H3_IMAGE_TO_VIDEO_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3图生视频工作流.json";
@@ -2472,6 +2495,321 @@ function fixedSeedFromContent(content: JsonObject): string {
 function randomFixedSeed(): string {
   const values = crypto.getRandomValues(new Uint32Array(2));
   return ((BigInt(values[0]) << 32n) | BigInt(values[1])).toString();
+}
+
+function defaultVideoGenerationDefaults(): VideoGenerationDefaults {
+  return {
+    generationMode: "reference-to-video",
+    workflowModuleId: "",
+    workflowModuleRevision: "",
+    generationDiffusionModelName: DEFAULT_H3_DIFFUSION_MODEL_NAME,
+    generationDuration: 15,
+    generationAspectRatio: "16:9",
+    generationPrimaryResolution: 0.3,
+    generationSecondaryResolution: 0.7,
+    generationLoraName: "",
+    generationLoraStrength: 1,
+    generationLoraBypassed: false,
+    generationSecondaryLoraName: "",
+    generationSecondaryLoraStrength: 1,
+    generationSecondaryLoraBypassed: false,
+    generationPrimaryVideoSteps: 8,
+    generationSecondarySchedulerSteps: 8,
+    seedMode: "random",
+    generationSeed: DEFAULT_GENERATION_SEED,
+    generationRefImageSize: "match",
+  };
+}
+
+function videoGenerationDefaultsFromStorage(): VideoGenerationDefaults {
+  const fallback = defaultVideoGenerationDefaults();
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(VIDEO_GENERATION_DEFAULTS_STORAGE_KEY) ?? "null");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    const content = parsed as JsonObject;
+    return {
+      generationMode: videoGenerationModeFromContent(content),
+      workflowModuleId: typeof content.workflowModuleId === "string" ? content.workflowModuleId : fallback.workflowModuleId,
+      workflowModuleRevision: typeof content.workflowModuleRevision === "string"
+        ? content.workflowModuleRevision
+        : fallback.workflowModuleRevision,
+      generationDiffusionModelName: h3DiffusionModelNameFromContent(content),
+      generationDuration: videoDurationFromContent(content),
+      generationAspectRatio: videoAspectRatioFromContent(content),
+      generationPrimaryResolution: primaryVideoResolutionFromContent(content),
+      generationSecondaryResolution: secondaryVideoResolutionFromContent(content),
+      generationLoraName: h3LoraNameFromContent(content),
+      generationLoraStrength: h3LoraStrengthFromContent(content),
+      generationLoraBypassed: h3LoraBypassedFromContent(content),
+      generationSecondaryLoraName: h3SecondaryLoraNameFromContent(content),
+      generationSecondaryLoraStrength: h3SecondaryLoraStrengthFromContent(content),
+      generationSecondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(content),
+      generationPrimaryVideoSteps: primaryVideoStepsFromContent(content, fallback.generationPrimaryVideoSteps),
+      generationSecondarySchedulerSteps: secondarySchedulerStepsFromContent(
+        content,
+        fallback.generationSecondarySchedulerSteps,
+      ),
+      seedMode: seedModeFromContent(content),
+      generationSeed: fixedSeedFromContent(content),
+      generationRefImageSize: refImageSizeFromContent(content),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function VideoGenerationLoraDefaultsFields({
+  label,
+  loraName,
+  loraStrength,
+  loraBypassed,
+  steps,
+  stepsLabel,
+  h3LoraOptions,
+  secondary = false,
+  onChange,
+}: {
+  label: string;
+  loraName: string;
+  loraStrength: number;
+  loraBypassed: boolean;
+  steps: number;
+  stepsLabel: string;
+  h3LoraOptions: string[];
+  secondary?: boolean;
+  onChange: (patch: Partial<VideoGenerationDefaults>) => void;
+}) {
+  const selectedLoraAvailable = !loraName
+    || h3LoraOptions.some((option) => sameH3LoraName(option, loraName));
+  const prefix = secondary ? "二采" : "一采";
+  return (
+    <div className={`video-defaults-lora-fields ${loraBypassed ? "is-bypassed" : ""}`}>
+      <div className="video-defaults-lora-model-row">
+        <span>{label}</span>
+        <SettingsSelect
+          value={loraName}
+          disabled={(!secondary && loraBypassed) || !h3LoraOptions.length}
+          ariaLabel={`默认${prefix} LoRA`}
+          placeholder={selectedLoraAvailable ? "未选择 LoRA" : "未找到 LoRA"}
+          options={h3LoraOptions.map((lora) => ({ value: lora, label: h3LoraDisplayName(lora) }))}
+          onChange={(nextLoraName) => onChange(secondary
+            ? { generationSecondaryLoraName: nextLoraName, generationSecondaryLoraBypassed: false }
+            : { generationLoraName: nextLoraName })}
+        />
+        <span className="video-defaults-lora-toggle-label">启用</span>
+        <button
+          type="button"
+          className="video-lora-bypass-switch video-defaults-lora-toggle"
+          role="switch"
+          aria-checked={!loraBypassed}
+          aria-label={`启用默认${prefix} LoRA`}
+          title={loraBypassed ? `启用${prefix} LoRA` : `关闭${prefix} LoRA`}
+          onClick={() => onChange(secondary
+            ? { generationSecondaryLoraBypassed: !loraBypassed }
+            : { generationLoraBypassed: !loraBypassed })}
+        ><span aria-hidden="true" /></button>
+      </div>
+      <div className="video-defaults-lora-controls-row">
+        <span>权重</span>
+        <input
+          className="video-parameter-range"
+          type="range"
+          style={{ "--video-range-progress": `${(loraStrength / 2) * 100}%` } as CSSProperties}
+          disabled={loraBypassed}
+          min="0"
+          max="2"
+          step="0.05"
+          value={loraStrength}
+          onChange={(event) => onChange(secondary
+            ? { generationSecondaryLoraStrength: Number(event.currentTarget.value) }
+            : { generationLoraStrength: Number(event.currentTarget.value) })}
+          aria-label={`默认${prefix} LoRA 权重`}
+        />
+        <CompactDecimalInput
+          value={loraStrength}
+          min={0}
+          max={2}
+          disabled={loraBypassed}
+          ariaLabel={`手动输入默认${prefix} LoRA 权重`}
+          onChange={(nextStrength) => onChange(secondary
+            ? { generationSecondaryLoraStrength: nextStrength }
+            : { generationLoraStrength: nextStrength })}
+        />
+        <span>{stepsLabel}</span>
+        <CompactIntegerInput
+          value={steps}
+          min={1}
+          max={secondary ? 10000 : 1000}
+          ariaLabel={`默认${prefix}${stepsLabel}`}
+          onChange={(nextSteps) => onChange(secondary
+            ? { generationSecondarySchedulerSteps: nextSteps }
+            : { generationPrimaryVideoSteps: nextSteps })}
+        />
+      </div>
+    </div>
+  );
+}
+
+function VideoGenerationDefaultsEditor({
+  value,
+  workflowModules,
+  h3LoraOptions,
+  onChange,
+}: {
+  value: VideoGenerationDefaults;
+  workflowModules: WorkflowModuleRecord[];
+  h3LoraOptions: string[];
+  onChange: (patch: Partial<VideoGenerationDefaults>) => void;
+}) {
+  const availableModules = workflowModules.filter((module) => (
+    !module.deletedAt && module.capability === "video-generation"
+  ));
+  return (
+    <div className="video-node-body has-media video-defaults-editor">
+      <section className="video-defaults-card video-defaults-basic-card">
+      <div className="video-workflow-module-select">
+        <span>生成方案</span>
+        <SettingsSelect
+          value={value.workflowModuleId}
+          ariaLabel="新视频节点默认生成方案"
+          placeholder={availableModules.length ? "请选择方案" : "未配置可用方案"}
+          options={availableModules.map((module) => ({
+            value: module.id,
+            label: `${module.name} · ${module.revision}`,
+          }))}
+          onChange={(moduleId) => {
+            const module = availableModules.find((candidate) => candidate.id === moduleId);
+            if (!module) return;
+            onChange({
+              workflowModuleId: module.id,
+              workflowModuleRevision: module.revision,
+              generationMode: module.variant as VideoGenerationMode,
+              generationDiffusionModelName: module.defaults.diffusionModelName,
+              generationLoraName: module.defaults.loraName,
+              generationLoraStrength: module.defaults.loraStrength,
+              generationPrimaryVideoSteps: module.defaults.primaryVideoSteps,
+              generationSecondarySchedulerSteps: module.defaults.secondarySchedulerSteps,
+            });
+          }}
+        />
+      </div>
+      <div className="video-duration-control">
+        <label className="video-duration-inline">
+          <span>视频时长</span>
+          <input
+            className="video-parameter-range"
+            type="range"
+            style={{ "--video-range-progress": `${((value.generationDuration - 2) / 13) * 100}%` } as CSSProperties}
+            min="2"
+            max="15"
+            step="1"
+            value={value.generationDuration}
+            onChange={(event) => onChange({ generationDuration: Number(event.currentTarget.value) })}
+            aria-label="默认生成时长"
+          />
+          <output>{value.generationDuration} 秒</output>
+        </label>
+        <label className="video-aspect-ratio-inline video-defaults-aspect-ratio">
+          <span className="video-aspect-ratio-label">画面比例</span>
+          <SettingsSelect
+            value={value.generationAspectRatio}
+            ariaLabel="默认画面比例"
+            options={VIDEO_ASPECT_RATIO_OPTIONS.map((option) => ({ value: option.value, label: option.value }))}
+            onChange={(generationAspectRatio) => onChange({
+              generationAspectRatio: generationAspectRatio as VideoAspectRatio,
+            })}
+          />
+        </label>
+      </div>
+      <div className="video-resolution-pair" aria-label="默认一采和二采分辨率">
+        {([
+          ["一采大小", "generationPrimaryResolution", value.generationPrimaryResolution],
+          ["二采大小", "generationSecondaryResolution", value.generationSecondaryResolution],
+        ] as const).map(([label, key, resolution]) => (
+          <label className="video-resolution-inline" key={key}>
+            <span>{label}</span>
+            <input
+              className="video-parameter-range"
+              type="range"
+              style={{ "--video-range-progress": `${((resolution - 0.2) / 1.8) * 100}%` } as CSSProperties}
+              min="0.2"
+              max="2.0"
+              step="0.1"
+              value={resolution}
+              onChange={(event) => onChange({ [key]: Number(event.currentTarget.value) })}
+              aria-label={`默认${label}分辨率`}
+            />
+            <output>{resolution.toFixed(1)} MP</output>
+          </label>
+        ))}
+      </div>
+      </section>
+      <section className="video-defaults-card video-defaults-sampling-card is-primary">
+        <header>
+          <div><strong>一采参数</strong></div>
+        </header>
+      <VideoGenerationLoraDefaultsFields
+        label="LoRA 模型"
+        loraName={value.generationLoraName}
+        loraStrength={value.generationLoraStrength}
+        loraBypassed={value.generationLoraBypassed}
+        steps={value.generationPrimaryVideoSteps}
+        stepsLabel="视频步数"
+        h3LoraOptions={h3LoraOptions}
+        onChange={onChange}
+      />
+      </section>
+      <section className="video-defaults-card video-defaults-sampling-card is-secondary">
+        <header>
+          <div><strong>二采参数</strong></div>
+        </header>
+      <VideoGenerationLoraDefaultsFields
+        label="LoRA 模型"
+        loraName={value.generationSecondaryLoraName}
+        loraStrength={value.generationSecondaryLoraStrength}
+        loraBypassed={value.generationSecondaryLoraBypassed}
+        steps={value.generationSecondarySchedulerSteps}
+        stepsLabel="调度步数"
+        h3LoraOptions={h3LoraOptions}
+        secondary
+        onChange={onChange}
+      />
+      </section>
+      <div className="video-defaults-seed-row">
+        <div className="video-seed-control">
+          <span>生成种子</span>
+          <div className="video-seed-mode" aria-label="默认种子模式">
+            {(["random", "fixed"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={value.seedMode === mode ? "is-active" : ""}
+                aria-pressed={value.seedMode === mode}
+                onClick={() => onChange({ seedMode: mode })}
+              >{mode === "random" ? "随机" : "固定"}</button>
+            ))}
+          </div>
+          {value.seedMode === "fixed" ? (
+            <div className="video-seed-fixed">
+              <input
+                className="video-seed-input"
+                type="text"
+                inputMode="numeric"
+                maxLength={20}
+                value={value.generationSeed}
+                onChange={(event) => onChange({ generationSeed: event.currentTarget.value.replace(/\D/g, "") })}
+                aria-label="默认固定种子"
+                spellCheck={false}
+              />
+              <button type="button" className="video-seed-randomize" title="随机生成固定种子" aria-label="随机生成默认固定种子" onClick={() => onChange({ generationSeed: randomFixedSeed() })}>
+                <Dices size={14} />
+              </button>
+            </div>
+          ) : <span className="video-seed-hint">每次生成自动更换</span>}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function frameRoleFromContent(
@@ -6490,7 +6828,7 @@ function CanvasWorkspace() {
   const [canvasPath, setCanvasPath] = useState<CanvasRecord[]>([]);
   const [canvasBackground, setCanvasBackground] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [activeSettingsSection, setActiveSettingsSection] = useState<"general" | "workflows" | "model" | "backup" | "privacy" | "security">("general");
+  const [activeSettingsSection, setActiveSettingsSection] = useState<"general" | "workflows" | "video-defaults" | "model" | "backup" | "privacy" | "security">("general");
   const [appBackupBusy, setAppBackupBusy] = useState(false);
   const [appBackupMessage, setAppBackupMessage] = useState("");
   const [appBackupMessageKind, setAppBackupMessageKind] = useState<"success" | "error">("success");
@@ -6550,13 +6888,19 @@ function CanvasWorkspace() {
   const [ctrlNodeSelectionActive, setCtrlNodeSelectionActive] = useState(false);
   const [spacePanActive, setSpacePanActive] = useState(false);
   const [middlePanActive, setMiddlePanActive] = useState(false);
-  const [notice, setNotice] = useState("正在打开画布…");
+  const [notice, setNoticeValue] = useState("正在打开画布…");
+  const [noticeToastSequence, setNoticeToastSequence] = useState(0);
+  const [noticeToastVisible, setNoticeToastVisible] = useState(false);
+  const setNotice = useCallback((message: string) => {
+    setNoticeValue(message);
+    setNoticeToastSequence((current) => current + 1);
+  }, []);
   const [comfyQueueCounts, setComfyQueueCounts] = useState<ComfyQueueSummary>({
     runningCount: 0,
     pendingCount: 0,
     totalCount: 0,
   });
-  const [h3LoraOptions, setH3LoraOptions] = useState<string[]>([DEFAULT_H3_LORA_NAME]);
+  const [h3LoraOptions, setH3LoraOptions] = useState<string[]>([]);
   const [h3LoraCatalogLoaded, setH3LoraCatalogLoaded] = useState(false);
   const [h3LoraPreference, setH3LoraPreference] = useState(h3LoraPreferenceFromStorage);
   const [h3DiffusionModelOptions, setH3DiffusionModelOptions] = useState<string[]>([DEFAULT_H3_DIFFUSION_MODEL_NAME]);
@@ -6564,6 +6908,8 @@ function CanvasWorkspace() {
   const [h3DiffusionModelName, setH3DiffusionModelName] = useState(DEFAULT_H3_DIFFUSION_MODEL_NAME);
   const [h3ModelParameters, setH3ModelParameters] = useState(h3ModelParametersFromStorage);
   const [h3ModelParametersDraft, setH3ModelParametersDraft] = useState(h3ModelParameters);
+  const [videoGenerationDefaults, setVideoGenerationDefaults] = useState(videoGenerationDefaultsFromStorage);
+  const [videoGenerationDefaultsDraft, setVideoGenerationDefaultsDraft] = useState(videoGenerationDefaults);
   const [workflowModules, setWorkflowModules] = useState<WorkflowModuleRecord[]>([]);
   const [workflowModuleDefaults, setWorkflowModuleDefaults] = useState(workflowModuleDefaultsFromStorage);
   const [workflowModulesReady, setWorkflowModulesReady] = useState(false);
@@ -6734,6 +7080,13 @@ function CanvasWorkspace() {
       return next;
     });
   }, []);
+
+  useEffect(() => {
+    if (!notice.trim()) return;
+    setNoticeToastVisible(true);
+    const timer = window.setTimeout(() => setNoticeToastVisible(false), 2600);
+    return () => window.clearTimeout(timer);
+  }, [notice, noticeToastSequence]);
 
   useEffect(() => {
     nodesSnapshot.current = nodes;
@@ -6939,14 +7292,15 @@ function CanvasWorkspace() {
   const defaultH3WorkflowModuleId = workflowModuleDefaults["video-generation:reference-to-video"] ?? "";
 
   useEffect(() => {
-    if (!activeProjectId || !workflowModulesReady) return;
+    if (!workflowModulesReady) return;
     let disposed = false;
     const refresh = async () => {
       setH3LoraCatalogLoaded(false);
       try {
+        // The picker is intentionally scoped to the complete MinimaxH3 directory,
+        // not to a possibly stale per-workflow binding or a single bootstrap item.
         const loras = await invoke<string[]>("get_comfyui_h3_loras", {
           serverUrl: COMFYUI_SERVER_URL,
-          workflowModuleId: defaultH3WorkflowModuleId || undefined,
         });
         if (!disposed) {
           setH3LoraOptions((current) => (
@@ -6975,15 +7329,21 @@ function CanvasWorkspace() {
             });
           }
         }
-      } catch {
-        // Preserve the last successful catalog while ComfyUI is temporarily offline.
+      } catch (error) {
+        if (!disposed) {
+          setH3LoraCatalogLoaded(false);
+          if (settingsOpen && activeSettingsSection === "video-defaults") {
+            const message = error instanceof Error ? error.message : String(error);
+            setNotice(`读取 MinimaxH3 LoRA 列表失败：${message}`);
+          }
+        }
       }
     };
     void refresh();
     return () => {
       disposed = true;
     };
-  }, [activeProjectId, defaultH3WorkflowModuleId, workflowModulesReady]);
+  }, [activeSettingsSection, settingsOpen, workflowModulesReady]);
 
   useEffect(() => {
     if (!workflowModulesReady) return;
@@ -8234,7 +8594,6 @@ function CanvasWorkspace() {
     if (inputRoot) window.localStorage.setItem("infinite-canvas:comfy-input-root", inputRoot);
     else window.localStorage.removeItem("infinite-canvas:comfy-input-root");
     window.localStorage.setItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY, workflowPath);
-    setSettingsOpen(false);
     setNotice("ComfyUI 设置已保存");
   }, [comfyInputRootDraft, comfyOutputRootDraft, h3WorkflowPathDraft]);
 
@@ -8325,9 +8684,36 @@ function CanvasWorkspace() {
       H3_MODEL_PARAMETERS_STORAGE_KEY,
       JSON.stringify(h3ModelParametersDraft),
     );
-    setSettingsOpen(false);
     setNotice("模型参数已保存");
   }, [h3DiffusionModelName, h3LoraPreference, h3ModelParametersDraft, refreshWorkflowModules, reportError, selectedWorkflowModule, workflowModuleDefaults, workflowModules]);
+
+  const saveVideoGenerationDefaults = useCallback(() => {
+    if (!Number.isInteger(videoGenerationDefaultsDraft.generationDuration)
+      || videoGenerationDefaultsDraft.generationDuration < 2
+      || videoGenerationDefaultsDraft.generationDuration > 15) {
+      setNotice("默认生成时长必须是 2 到 15 秒的整数");
+      return;
+    }
+    if (!Number.isInteger(videoGenerationDefaultsDraft.generationPrimaryVideoSteps)
+      || videoGenerationDefaultsDraft.generationPrimaryVideoSteps < 1
+      || videoGenerationDefaultsDraft.generationPrimaryVideoSteps > 1000
+      || !Number.isInteger(videoGenerationDefaultsDraft.generationSecondarySchedulerSteps)
+      || videoGenerationDefaultsDraft.generationSecondarySchedulerSteps < 1
+      || videoGenerationDefaultsDraft.generationSecondarySchedulerSteps > 10000) {
+      setNotice("默认 Steps 数值无效");
+      return;
+    }
+    if (videoGenerationDefaultsDraft.seedMode === "fixed" && !videoGenerationDefaultsDraft.generationSeed) {
+      setNotice("固定种子不能为空");
+      return;
+    }
+    setVideoGenerationDefaults(videoGenerationDefaultsDraft);
+    window.localStorage.setItem(
+      VIDEO_GENERATION_DEFAULTS_STORAGE_KEY,
+      JSON.stringify(videoGenerationDefaultsDraft),
+    );
+    setNotice("视频生成默认值已保存，新建节点会使用这些参数");
+  }, [videoGenerationDefaultsDraft]);
 
   const clearAppLockPasswordFields = useCallback(() => {
     setAppLockCurrentPassword("");
@@ -11862,6 +12248,16 @@ function CanvasWorkspace() {
       && module.variant === "reference-to-video"
       && module.id === workflowModuleDefaults["video-generation:reference-to-video"]
     ));
+    const nodeDefaults = videoGenerationDefaults.workflowModuleId
+      ? videoGenerationDefaults
+      : {
+          ...videoGenerationDefaults,
+          generationMode: defaultWorkflowModule?.variant as VideoGenerationMode ?? videoGenerationDefaults.generationMode,
+          workflowModuleId: defaultWorkflowModule?.id ?? "",
+          workflowModuleRevision: defaultWorkflowModule?.revision ?? "",
+          generationDiffusionModelName: defaultWorkflowModule?.defaults.diffusionModelName
+            ?? videoGenerationDefaults.generationDiffusionModelName,
+        };
     try {
       const result = await invoke<CreateNodeResult>("create_node", {
         input: {
@@ -11872,26 +12268,8 @@ function CanvasWorkspace() {
             provider: "",
             model: "",
             status: "idle",
-            generationMode: "reference-to-video",
-            generationDuration: 15,
-            generationAspectRatio: "16:9",
-            generationPrimaryResolution: 0.3,
-            generationSecondaryResolution: 0.7,
             secondarySamplingEnabled: false,
-            workflowModuleId: defaultWorkflowModule?.id ?? "",
-            workflowModuleRevision: defaultWorkflowModule?.revision ?? "",
-            generationDiffusionModelName: defaultWorkflowModule?.defaults.diffusionModelName ?? h3DiffusionModelName,
-            generationLoraName: "",
-            generationLoraStrength: 1,
-            generationLoraBypassed: false,
-            generationSecondaryLoraName: "",
-            generationSecondaryLoraStrength: 1,
-            generationSecondaryLoraBypassed: false,
-            generationRefImageSize: "match",
-            generationPrimaryVideoSteps: 8,
-            generationSecondarySchedulerSteps: 8,
-            seedMode: "random",
-            generationSeed: DEFAULT_GENERATION_SEED,
+            ...nodeDefaults,
             manualHeight: VIDEO_NODE_BASE_HEIGHT,
             layoutTextInputCount: 0,
           },
@@ -11916,7 +12294,7 @@ function CanvasWorkspace() {
       finishNodePlacementReservation(placement.reservationId);
       reportError(error);
     }
-  }, [activeProjectId, finishNodePlacementReservation, h3DiffusionModelName, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes, workflowModuleDefaults, workflowModules]);
+  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes, videoGenerationDefaults, workflowModuleDefaults, workflowModules]);
 
   const openCanvasContextMenu = useCallback((event: MouseEvent | ReactMouseEvent) => {
     event.preventDefault();
@@ -13169,6 +13547,7 @@ function CanvasWorkspace() {
     setComfyInputRootDraft(comfyInputRoot);
     setH3WorkflowPathDraft(h3WorkflowPath);
     setH3ModelParametersDraft(h3ModelParameters);
+    setVideoGenerationDefaultsDraft(videoGenerationDefaults);
     clearAppLockPasswordFields();
     setAppLockMessage("");
     setPrivateProjectSearch("");
@@ -13218,6 +13597,13 @@ function CanvasWorkspace() {
       ? `“${selectedWorkflowModule.name}”及其全部恢复点将被永久删除，此操作无法撤销。`
       : "";
 
+  const globalNoticeToast = noticeToastVisible && createPortal(
+    <div className="global-notice-toast" role="status" aria-live="polite">
+      <span>{notice}</span>
+    </div>,
+    document.body,
+  );
+
   const appSettingsDialog = settingsOpen && createPortal(
     <>
     <div className="project-dialog-backdrop" onMouseDown={() => {
@@ -13228,6 +13614,7 @@ function CanvasWorkspace() {
         onSubmit={(event) => {
           event.preventDefault();
           if (activeSettingsSection === "general") saveComfySettings();
+          if (activeSettingsSection === "video-defaults") saveVideoGenerationDefaults();
           if (activeSettingsSection === "model") void saveH3ModelParameters();
         }}
         onMouseDown={(event) => event.stopPropagation()}
@@ -13238,6 +13625,15 @@ function CanvasWorkspace() {
             <h2>应用设置</h2>
             <p>管理 SuCanvas 的连接、工作流、完整备份和本机安全。</p>
           </div>
+          <button
+            type="button"
+            className="app-settings-close"
+            onClick={() => setSettingsOpen(false)}
+            title="关闭设置"
+            aria-label="关闭应用设置"
+          >
+            <X size={18} />
+          </button>
         </div>
         <div className="app-settings-body">
           <nav className="app-settings-nav" aria-label="设置类目">
@@ -13256,6 +13652,14 @@ function CanvasWorkspace() {
             >
               <Clapperboard size={16} />
               <span><strong>工作流方案</strong><small>多功能与多套方案</small></span>
+            </button>
+            <button
+              type="button"
+              className={activeSettingsSection === "video-defaults" ? "is-active" : ""}
+              onClick={() => setActiveSettingsSection("video-defaults")}
+            >
+              <SlidersHorizontal size={16} />
+              <span><strong>视频默认值</strong><small>新节点的生成参数</small></span>
             </button>
             <button
               type="button"
@@ -13663,6 +14067,22 @@ function CanvasWorkspace() {
                 </div>
               </section>
             )}
+            {activeSettingsSection === "video-defaults" && (
+              <section className="settings-pane video-defaults-settings-pane" aria-labelledby="video-defaults-settings-title">
+                <div className="settings-pane-heading">
+                  <div>
+                    <h3 id="video-defaults-settings-title">视频生成默认值</h3>
+                    <p>这里的参数会套用到之后新建的视频生成节点；已在画布上的节点不会被改动。</p>
+                  </div>
+                </div>
+                <VideoGenerationDefaultsEditor
+                  value={videoGenerationDefaultsDraft}
+                  workflowModules={workflowModules}
+                  h3LoraOptions={h3LoraOptions}
+                  onChange={(patch) => setVideoGenerationDefaultsDraft((current) => ({ ...current, ...patch }))}
+                />
+              </section>
+            )}
             {activeSettingsSection === "model" && (
               <section className="settings-pane model-settings-pane" aria-labelledby="model-settings-title">
                 <div className="settings-pane-heading">
@@ -14002,21 +14422,27 @@ function CanvasWorkspace() {
             )}
           </div>
         </div>
-        <div className="project-dialog-actions">
-          <button type="button" className="dialog-cancel" onClick={() => setSettingsOpen(false)}>
-            关闭
-          </button>
-          {activeSettingsSection === "general" && (
-            <button type="submit" className="primary-button">
-              保存基础设置
-            </button>
-          )}
-          {activeSettingsSection === "model" && (
-            <button type="submit" className="primary-button">
-              保存模型参数
-            </button>
-          )}
-        </div>
+        {(activeSettingsSection === "general"
+          || activeSettingsSection === "video-defaults"
+          || activeSettingsSection === "model") && (
+          <div className="project-dialog-actions">
+            {activeSettingsSection === "general" && (
+              <button type="submit" className="primary-button">
+                保存基础设置
+              </button>
+            )}
+            {activeSettingsSection === "video-defaults" && (
+              <button type="submit" className="primary-button">
+                保存为默认值
+              </button>
+            )}
+            {activeSettingsSection === "model" && (
+              <button type="submit" className="primary-button">
+                保存模型参数
+              </button>
+            )}
+          </div>
+        )}
       </form>
     </div>
     {workflowModuleDeletionMode && selectedWorkflowModule && (
@@ -14375,6 +14801,7 @@ function CanvasWorkspace() {
           </div>
         )}
         {appSettingsDialog}
+        {globalNoticeToast}
       </main>
     );
   }
@@ -15206,6 +15633,7 @@ function CanvasWorkspace() {
         </div>,
         document.body,
       )}
+      {globalNoticeToast}
     </main>
   );
 }
