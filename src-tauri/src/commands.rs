@@ -1532,6 +1532,19 @@ fn configure_h3_ref_image_size(
     )
 }
 
+fn configure_h3_strict_prompt_tags(
+    workflow: &mut Value,
+    strict_prompt_tags: bool,
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    set_workflow_input(
+        workflow,
+        &bindings.conditioning_node_id,
+        "strict_prompt_tags",
+        json!(strict_prompt_tags),
+    )
+}
+
 fn configure_h3_uploaded_media(
     workflow: &mut Value,
     variant: &str,
@@ -2340,6 +2353,9 @@ async fn submit_comfyui_workflow_inner(
         &bindings,
     )?;
     configure_h3_ref_image_size(&mut workflow, ref_image_size, bindings)?;
+    if let Some(strict_prompt_tags) = input.strict_prompt_tags {
+        configure_h3_strict_prompt_tags(&mut workflow, strict_prompt_tags, bindings)?;
+    }
     configure_h3_uploaded_media(
         &mut workflow,
         &adapter_variant,
@@ -2948,8 +2964,8 @@ mod tests {
     use super::{
         cleanup_unreferenced_resize_images, comfy_execution_elapsed_seconds, comfy_input_task_path,
         comfy_queue_summary_from_value, comfy_view_url, configure_h3_diffusion_model,
-        configure_h3_generation, configure_h3_ref_image_size, configure_h3_uploaded_media,
-        configure_secondary_source_video, delete_video_files_blocking,
+        configure_h3_generation, configure_h3_ref_image_size, configure_h3_strict_prompt_tags,
+        configure_h3_uploaded_media, configure_secondary_source_video, delete_video_files_blocking,
         diffusion_models_from_object_info, hash_app_lock_password, loras_from_object_info,
         media_format, resized_image_dimensions, resized_image_name, resolve_filename_prefix_date,
         resolve_generation_seed, validate_new_app_lock_password, validate_workflow_media_counts,
@@ -3036,6 +3052,16 @@ mod tests {
         });
         configure_h3_ref_image_size(&mut workflow, "match", &WorkflowBindings::default()).unwrap();
         assert_eq!(workflow["363"]["inputs"]["ref_image_size"], "match");
+    }
+
+    #[test]
+    fn configures_strict_prompt_tag_validation() {
+        let mut workflow = json!({
+            "363": { "inputs": { "strict_prompt_tags": true } }
+        });
+        configure_h3_strict_prompt_tags(&mut workflow, false, &WorkflowBindings::default())
+            .unwrap();
+        assert_eq!(workflow["363"]["inputs"]["strict_prompt_tags"], false);
     }
 
     #[test]

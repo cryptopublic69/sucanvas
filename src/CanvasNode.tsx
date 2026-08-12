@@ -355,6 +355,7 @@ interface GenerationSnapshot {
   secondaryLoraBypassed: boolean;
   refImageSize: RefImageSize;
   refImageSizeRecorded?: boolean;
+  strictPromptTags?: boolean;
   imagePaths: string[];
   imageRoles: FrameRole[];
   audioPaths: string[];
@@ -544,6 +545,7 @@ interface VideoGenerationDefaults {
   generationSecondarySchedulerSteps: number;
   seedMode: SeedMode;
   generationSeed: string;
+  generationStrictPromptTags: boolean;
   generationRefImageSize: RefImageSize;
 }
 
@@ -2091,6 +2093,7 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
     refImageSize: refImageSizeFromContent(snapshot),
     refImageSizeRecorded: typeof snapshot.refImageSize === "string"
       || typeof snapshot.generationRefImageSize === "string",
+    strictPromptTags: strictPromptTagsFromContent(snapshot),
     imagePaths: stringArray(snapshot.imagePaths),
     imageRoles: stringArray(snapshot.imageRoles).filter(
       (role): role is FrameRole => role === "first" || role === "last",
@@ -2471,6 +2474,11 @@ function fixedSeedFromContent(content: JsonObject): string {
     : DEFAULT_GENERATION_SEED;
 }
 
+function strictPromptTagsFromContent(content: JsonObject): boolean | undefined {
+  const value = content.generationStrictPromptTags ?? content.strictPromptTags;
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function randomFixedSeed(): string {
   const values = crypto.getRandomValues(new Uint32Array(2));
   return ((BigInt(values[0]) << 32n) | BigInt(values[1])).toString();
@@ -2496,6 +2504,7 @@ function defaultVideoGenerationDefaults(): VideoGenerationDefaults {
     generationSecondarySchedulerSteps: 8,
     seedMode: "random",
     generationSeed: DEFAULT_GENERATION_SEED,
+    generationStrictPromptTags: true,
     generationRefImageSize: "match",
   };
 }
@@ -2530,6 +2539,7 @@ function videoGenerationDefaultsFromStorage(): VideoGenerationDefaults {
       ),
       seedMode: seedModeFromContent(content),
       generationSeed: fixedSeedFromContent(content),
+      generationStrictPromptTags: strictPromptTagsFromContent(content) ?? fallback.generationStrictPromptTags,
       generationRefImageSize: refImageSizeFromContent(content),
     };
   } catch {
@@ -2580,7 +2590,6 @@ function VideoGenerationLoraDefaultsFields({
             ? { generationSecondaryLoraName: nextLoraName }
             : { generationLoraName: nextLoraName })}
         />
-        <span className="video-defaults-lora-toggle-label">启用</span>
         <button
           type="button"
           className="video-lora-bypass-switch video-defaults-lora-toggle"
@@ -2790,6 +2799,18 @@ function VideoGenerationDefaultsEditor({
               </button>
             </div>
           ) : <span className="video-seed-hint">每次生成自动更换</span>}
+        </div>
+        <div className="strict-prompt-tags-control">
+          <span>严格提示词</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={value.generationStrictPromptTags}
+            className="video-lora-bypass-switch video-defaults-lora-toggle"
+            onClick={() => onChange({ generationStrictPromptTags: !value.generationStrictPromptTags })}
+            title={value.generationStrictPromptTags ? "当前严格校验提示词素材标签" : "当前不严格校验提示词素材标签"}
+            aria-label="启用严格提示词校验"
+          ><span aria-hidden="true" /></button>
         </div>
       </div>
     </div>
@@ -7238,6 +7259,7 @@ export {
   secondaryVideoResolutionFromContent,
   seedModeFromContent,
   snapCanvasCoordinate,
+  strictPromptTagsFromContent,
   textFromContent,
   toFlowEdge,
   validCanvasColor,

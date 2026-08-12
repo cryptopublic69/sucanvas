@@ -162,6 +162,7 @@ import {
   secondaryVideoResolutionFromContent,
   seedModeFromContent,
   snapCanvasCoordinate,
+  strictPromptTagsFromContent,
   textFromContent,
   toFlowEdge,
   validCanvasColor,
@@ -2555,6 +2556,7 @@ function CanvasWorkspace() {
       secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(generator.content),
       refImageSize: refImageSizeFromContent(generator.content),
       refImageSizeRecorded: true,
+      strictPromptTags: strictPromptTagsFromContent(generator.content),
       imagePaths: imageAssets.map((asset) => asset.path),
       imageRoles: mode === "first-last-frame"
         ? imageAssets.map((asset) => asset.role)
@@ -3093,6 +3095,7 @@ function CanvasWorkspace() {
           secondaryLoraStrength: snapshot.secondaryLoraStrength,
           secondaryLoraBypassed: snapshot.secondaryLoraBypassed,
           refImageSize: snapshot.refImageSize,
+          strictPromptTags: snapshot.strictPromptTags,
           imagePaths: snapshot.imagePaths,
           imageRoles: snapshot.imageRoles,
           audioPaths: snapshot.audioPaths,
@@ -4111,6 +4114,7 @@ function CanvasWorkspace() {
           secondaryLoraStrength: snapshot.secondaryLoraStrength,
           secondaryLoraBypassed: snapshot.secondaryLoraBypassed,
           refImageSize: snapshot.refImageSize,
+          strictPromptTags: snapshot.strictPromptTags,
           imagePaths: snapshot.imagePaths,
           imageRoles: snapshot.imageRoles,
           audioPaths: snapshot.audioPaths,
@@ -7530,7 +7534,7 @@ function CanvasWorkspace() {
               onClick={() => setActiveSettingsSection("video-defaults")}
             >
               <SlidersHorizontal size={16} />
-              <span><strong>视频默认值</strong><small>新节点的生成参数</small></span>
+              <span><strong>视频生成参数</strong><small>新节点的生成参数</small></span>
             </button>
             <button
               type="button"
@@ -7942,7 +7946,7 @@ function CanvasWorkspace() {
               <section className="settings-pane video-defaults-settings-pane" aria-labelledby="video-defaults-settings-title">
                 <div className="settings-pane-heading">
                   <div>
-                    <h3 id="video-defaults-settings-title">视频生成默认值</h3>
+                    <h3 id="video-defaults-settings-title">视频生成参数</h3>
                     <p>这里的参数会套用到之后新建的视频生成节点；已在画布上的节点不会被改动。</p>
                   </div>
                 </div>

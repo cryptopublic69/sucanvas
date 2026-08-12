@@ -598,6 +598,8 @@ pub struct ComfySubmitInput {
     #[serde(default = "default_ref_image_size")]
     pub ref_image_size: String,
     #[serde(default)]
+    pub strict_prompt_tags: Option<bool>,
+    #[serde(default)]
     pub image_paths: Vec<String>,
     #[serde(default)]
     pub image_roles: Vec<String>,
