@@ -3012,6 +3012,28 @@ function toFlowEdge(edge: EdgeRecord): Edge {
   };
 }
 
+// React Flow resolves completed edges at the outside edge of the 16px handle,
+// while the handle's visual center sits on the node border. Pull the rendered
+// path back by the handle radius so lines visibly meet the node frame.
+const NODE_HANDLE_EDGE_INSET = 8;
+
+function edgeEndpointAtNodeBorder(
+  x: number,
+  y: number,
+  position: Position,
+): { x: number; y: number } {
+  switch (position) {
+    case Position.Left:
+      return { x: x + NODE_HANDLE_EDGE_INSET, y };
+    case Position.Right:
+      return { x: x - NODE_HANDLE_EDGE_INSET, y };
+    case Position.Top:
+      return { x, y: y + NODE_HANDLE_EDGE_INSET };
+    case Position.Bottom:
+      return { x, y: y - NODE_HANDLE_EDGE_INSET };
+  }
+}
+
 function CanvasEdge({
   id,
   sourceX,
@@ -3024,12 +3046,14 @@ function CanvasEdge({
   style,
   data,
 }: EdgeProps) {
+  const sourcePoint = edgeEndpointAtNodeBorder(sourceX, sourceY, sourcePosition);
+  const targetPoint = edgeEndpointAtNodeBorder(targetX, targetY, targetPosition);
   const [edgePath, labelX, labelY] = getBezierPath({
-    sourceX,
-    sourceY,
+    sourceX: sourcePoint.x,
+    sourceY: sourcePoint.y,
     sourcePosition,
-    targetX,
-    targetY,
+    targetX: targetPoint.x,
+    targetY: targetPoint.y,
     targetPosition,
   });
   const onDisconnect = (data as CanvasEdgeData | undefined)?.onDisconnect;
