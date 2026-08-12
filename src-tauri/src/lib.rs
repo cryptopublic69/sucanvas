@@ -287,6 +287,7 @@ pub fn run() {
             commands::inspect_workspace,
             commands::list_projects,
             commands::create_project,
+            commands::create_empty_folder,
             commands::group_nodes_into_folder,
             commands::group_related_nodes_into_folder,
             commands::undo_folder_grouping,

@@ -37,6 +37,7 @@ import {
   Play,
   Plus,
   RotateCcw,
+  Save,
   Scaling,
   Sparkles,
   Square,
@@ -49,6 +50,7 @@ import {
   ChangeEvent,
   CSSProperties,
   FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   WheelEvent as ReactWheelEvent,
@@ -161,6 +163,12 @@ interface GroupNodesIntoFolderResult {
   movedNodeCount: number;
   copiedInputNodeCount: number;
   undo: FolderGroupingUndoRecord;
+}
+
+interface CreateEmptyFolderResult {
+  parent: WorkspaceSnapshot;
+  child: WorkspaceSnapshot;
+  folderNodeId: string;
 }
 
 interface FolderMergeSourceSnapshot {
@@ -864,6 +872,7 @@ function CompactDecimalInput({
 interface SettingsSelectOption {
   value: string;
   label: string;
+  title?: string;
   disabled?: boolean;
 }
 
@@ -874,6 +883,7 @@ function SettingsSelect({
   disabled = false,
   ariaLabel,
   placeholder = "请选择",
+  title,
 }: {
   value: string;
   options: SettingsSelectOption[];
@@ -881,6 +891,7 @@ function SettingsSelect({
   disabled?: boolean;
   ariaLabel: string;
   placeholder?: string;
+  title?: string;
 }) {
   const [open, setOpen] = useState(false);
   const controlRef = useRef<HTMLDivElement>(null);
@@ -917,6 +928,7 @@ function SettingsSelect({
         aria-haspopup="listbox"
         aria-expanded={open}
         disabled={disabled}
+        title={title ?? selectedOption?.title}
         onClick={() => setOpen((current) => !current)}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -945,6 +957,7 @@ function SettingsSelect({
               aria-selected={option.value === value}
               className={option.value === value ? "is-active" : ""}
               disabled={option.disabled}
+              title={option.title}
               onClick={() => {
                 onChange(option.value);
                 setOpen(false);
@@ -976,6 +989,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   workflowModuleDefaults: Partial<Record<WorkflowModuleSlot, string>>;
   onH3LoraPreferenceChange: (preference: H3LoraPreferencePatch) => void;
   onChange: (id: string, patch: NodePatch) => void;
+  onSaveNode: (id: string) => Promise<void>;
   onMarkGeneratedVideoFullyPlayed: (id: string) => void;
   onExecutionCheck: (message: string, valid: boolean) => void;
   onExecute: (id: string) => Promise<void>;
@@ -992,7 +1006,6 @@ interface CanvasNodeData extends Record<string, unknown> {
   onDeletePromptVersion: (nodeId: string, versionId: string) => Promise<void>;
   onResizeImage: (id: string, maxEdge: number) => Promise<void>;
   onOpenFolder: (id: string) => void;
-  onDelete: (id: string, deleteSourceFile?: boolean) => void;
   onCopy: (text: string) => void;
 }
 
@@ -2549,7 +2562,7 @@ function VideoGenerationLoraDefaultsFields({
     || h3LoraOptions.some((option) => sameH3LoraName(option, loraName));
   const prefix = secondary ? "二采" : "一采";
   return (
-    <div className={`video-defaults-lora-fields ${loraBypassed ? "is-bypassed" : ""}`}>
+    <div className={`video-defaults-lora-fields ${secondary ? "is-secondary" : ""} ${loraBypassed ? "is-bypassed" : ""}`}>
       <div className="video-defaults-lora-model-row">
         <span>{label}</span>
         <SettingsSelect
@@ -2557,9 +2570,14 @@ function VideoGenerationLoraDefaultsFields({
           disabled={(!secondary && loraBypassed) || !h3LoraOptions.length}
           ariaLabel={`默认${prefix} LoRA`}
           placeholder={selectedLoraAvailable ? "未选择 LoRA" : "未找到 LoRA"}
-          options={h3LoraOptions.map((lora) => ({ value: lora, label: h3LoraDisplayName(lora) }))}
+          title={loraName || undefined}
+          options={h3LoraOptions.map((lora) => ({
+            value: lora,
+            label: h3LoraDisplayName(lora),
+            title: lora,
+          }))}
           onChange={(nextLoraName) => onChange(secondary
-            ? { generationSecondaryLoraName: nextLoraName, generationSecondaryLoraBypassed: false }
+            ? { generationSecondaryLoraName: nextLoraName }
             : { generationLoraName: nextLoraName })}
         />
         <span className="video-defaults-lora-toggle-label">启用</span>
@@ -3054,6 +3072,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     workflowModules,
     onH3LoraPreferenceChange,
     onChange,
+    onSaveNode,
     onMarkGeneratedVideoFullyPlayed,
     onExecutionCheck,
     onExecute,
@@ -3070,7 +3089,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onDeletePromptVersion,
     onResizeImage,
     onOpenFolder,
-    onDelete,
     onCopy,
   } = data;
   const [copied, setCopied] = useState(false);
@@ -3091,10 +3109,22 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [promptVersionTitleDraft, setPromptVersionTitleDraft] = useState("");
   const [textInformationOpen, setTextInformationOpen] = useState(false);
   const [generatedInfoOpen, setGeneratedInfoOpen] = useState(false);
+  const [generatedPromptDialogOpen, setGeneratedPromptDialogOpen] = useState(false);
   const [imageResizeDialogOpen, setImageResizeDialogOpen] = useState(false);
   const [imageResizeDraft, setImageResizeDraft] = useState(() => String(imageResizeDefaultFromStorage()));
   const [imageResizeError, setImageResizeError] = useState("");
   const [imageResizing, setImageResizing] = useState(false);
+  const [savingTextNodeId, setSavingTextNodeId] = useState<string | null>(null);
+  const [manualSaveStateByNodeId, setManualSaveStateByNodeId] = useState<Record<string, {
+    savedText: string;
+    savedInformation: string;
+    currentText: string;
+    currentInformation: string;
+  }>>({});
+  const [manualSaveVersionTitleStateByKey, setManualSaveVersionTitleStateByKey] = useState<Record<string, {
+    savedTitle: string;
+    currentTitle: string;
+  }>>({});
   const [connectedTextEditor, setConnectedTextEditor] = useState<{
     id: string;
     title: string;
@@ -3103,6 +3133,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     text: string;
     information: string;
   } | null>(null);
+  const [editorExitConfirmation, setEditorExitConfirmation] = useState<{
+    target: "expanded" | "connected";
+    nodeId: string;
+    versionId?: string;
+  } | null>(null);
+  const [savingEditorExit, setSavingEditorExit] = useState(false);
   const [draggedMediaId, setDraggedMediaId] = useState<string | null>(null);
   const [dragOverMediaId, setDragOverMediaId] = useState<string | null>(null);
   const [draggedTextId, setDraggedTextId] = useState<string | null>(null);
@@ -3328,6 +3364,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ? generationSnapshotFromContent(record.content)
     : null;
   const generatedVideoPrompt = generatedVideoSnapshot?.prompt ?? "";
+  const generatedVideoPromptInformation = generatedVideoSnapshot?.promptInformation ?? "";
   const generatedVideoPromptBaseTitle = promptNodeTitle
     || generatedVideoSnapshot?.promptNodeTitle
     || "";
@@ -3348,6 +3385,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     : `${formattedGenerationElapsed(record.content)}${generatedVideoSnapshot
       ? ` / ${generatedVideoSnapshot.durationSeconds}秒`
       : ""}`;
+  const preservesGeneratedVideoToolbarCtrlClick = (target: EventTarget | null) => (
+    isGeneratedVideo
+    && target instanceof Element
+    && Boolean(target.closest(".generated-video-footer button"))
+  );
   const mediaInputGroups = [
     { kind: "image", label: "图片", inputs: mediaInputs.filter((input) => input.kind === "image") },
     { kind: "audio", label: "音频", inputs: mediaInputs.filter((input) => input.kind === "audio") },
@@ -3550,6 +3592,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   useEffect(() => {
     if (!generatedInfoOpen) return;
     const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return;
       const target = event.target;
       if (target instanceof globalThis.Node && generatedInfoRef.current?.contains(target)) return;
       setGeneratedInfoOpen(false);
@@ -3596,27 +3639,106 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     setEditingPromptVersionTitleId(null);
     setPromptVersionTitleDraft("");
   }, [promptVersionMenuOpen]);
-
-
-  useEffect(() => {
-    if (!expanded && !connectedTextEditor) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (connectedTextEditor) setConnectedTextEditor(null);
-      else setExpanded(false);
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [connectedTextEditor, expanded]);
-
   const finishTitleEdit = () => {
     if (titleDraft !== record.title) onChange(id, { title: titleDraft });
     setEditingTitle(false);
   };
 
+  const markTextNodeChanged = (
+    nodeId: string,
+    nextText: string,
+    nextInformation: string,
+    originalText: string,
+    originalInformation: string,
+  ) => {
+    setManualSaveStateByNodeId((current) => {
+      const previous = current[nodeId] ?? {
+        savedText: originalText,
+        savedInformation: originalInformation,
+        currentText: originalText,
+        currentInformation: originalInformation,
+      };
+      return {
+        ...current,
+        [nodeId]: {
+          ...previous,
+          currentText: nextText,
+          currentInformation: nextInformation,
+        },
+      };
+    });
+  };
+
+  const isTextNodeManuallyUnsaved = (nodeId: string) => {
+    const state = manualSaveStateByNodeId[nodeId];
+    return Boolean(state) && (
+      state.currentText !== state.savedText
+      || state.currentInformation !== state.savedInformation
+    );
+  };
+
+  const promptVersionSaveKey = (nodeId: string, versionId: string) => `${nodeId}:${versionId}`;
+
+  const markPromptVersionTitleChanged = (
+    nodeId: string,
+    versionId: string,
+    nextTitle: string,
+    originalTitle: string,
+  ) => {
+    const key = promptVersionSaveKey(nodeId, versionId);
+    setManualSaveVersionTitleStateByKey((current) => {
+      const previous = current[key] ?? { savedTitle: originalTitle, currentTitle: originalTitle };
+      return {
+        ...current,
+        [key]: { ...previous, currentTitle: nextTitle },
+      };
+    });
+  };
+
+  const isPromptVersionTitleManuallyUnsaved = (nodeId: string, versionId?: string) => {
+    if (!versionId) return false;
+    const state = manualSaveVersionTitleStateByKey[promptVersionSaveKey(nodeId, versionId)];
+    return Boolean(state) && state.currentTitle !== state.savedTitle;
+  };
+
+  const isNodeManuallyUnsaved = (nodeId: string, versionId?: string) => (
+    isTextNodeManuallyUnsaved(nodeId)
+    || isPromptVersionTitleManuallyUnsaved(nodeId, versionId)
+  );
+
+  const createInitialPromptVersion = (nextText: string, nextInformation: string) => {
+    if (
+      !isPromptVersionNode
+      || promptVersions.length !== 0
+      || (!nextText.trim() && !nextInformation.trim())
+    ) return false;
+    const initialVersion: PromptVersionRecord = {
+      id: crypto.randomUUID(),
+      label: "v1",
+      title: record.title || "提示词",
+      text: nextText,
+      information: nextInformation,
+      createdAt: new Date().toISOString(),
+    };
+    onChange(id, {
+      content: {
+        ...record.content,
+        text: initialVersion.text,
+        information: initialVersion.information,
+        promptVersionNode: true,
+        promptVersions: [initialVersion],
+        activePromptVersionId: initialVersion.id,
+        bestPromptVersionId: "",
+      },
+    });
+    return true;
+  };
+
   const changeText = (event: ChangeEvent<HTMLTextAreaElement>) => {
     const nextText = event.currentTarget.value;
     setTextDraft(nextText);
+    markTextNodeChanged(id, nextText, informationDraft, savedText, savedInformation);
+    if (createInitialPromptVersion(nextText, informationDraft)) return;
     if (isPromptVersionNode && activePromptVersion) {
       onChange(id, {
         content: {
@@ -3637,6 +3759,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const changeInformation = (event: ChangeEvent<HTMLTextAreaElement>) => {
     const nextInformation = event.currentTarget.value;
     setInformationDraft(nextInformation);
+    markTextNodeChanged(id, textDraft, nextInformation, savedText, savedInformation);
+    if (createInitialPromptVersion(textDraft, nextInformation)) return;
     if (isPromptVersionNode && activePromptVersion) {
       onChange(id, {
         content: {
@@ -3666,6 +3790,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       information: informationDraft,
       createdAt: new Date().toISOString(),
     };
+    markTextNodeChanged(id, textDraft, informationDraft, savedText, savedInformation);
     onChange(id, {
       content: {
         ...record.content,
@@ -3682,6 +3807,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const selectPromptVersion = (version: PromptVersionRecord) => {
     setTextDraft(version.text);
     setInformationDraft(version.information);
+    markTextNodeChanged(id, version.text, version.information, savedText, savedInformation);
     onChange(id, {
       content: {
         ...record.content,
@@ -3704,12 +3830,24 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   };
 
   const cancelPromptVersionTitleEdit = () => {
+    const version = promptVersions.find((candidate) => candidate.id === editingPromptVersionTitleId);
+    if (version) {
+      markPromptVersionTitleChanged(id, version.id, version.title, version.title);
+    }
     setEditingPromptVersionTitleId(null);
     setPromptVersionTitleDraft("");
   };
 
+  const changePromptVersionTitleDraft = (version: PromptVersionRecord, nextTitle: string) => {
+    setPromptVersionTitleDraft(nextTitle);
+    markPromptVersionTitleChanged(id, version.id, nextTitle, version.title);
+  };
+
   const commitPromptVersionTitleEdit = (versionId: string) => {
     const nextTitle = promptVersionTitleDraft.trim() || "未命名版本";
+    const version = promptVersions.find((candidate) => candidate.id === versionId);
+    if (version) markPromptVersionTitleChanged(id, version.id, nextTitle, version.title);
+    markTextNodeChanged(id, textDraft, informationDraft, savedText, savedInformation);
     onChange(id, {
       content: {
         ...record.content,
@@ -3718,11 +3856,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         )),
       },
     });
-    cancelPromptVersionTitleEdit();
+    setEditingPromptVersionTitleId(null);
+    setPromptVersionTitleDraft("");
   };
 
   const markActivePromptVersionBest = () => {
     if (!activePromptVersion) return;
+    markTextNodeChanged(id, textDraft, informationDraft, savedText, savedInformation);
     onChange(id, {
       content: {
         ...record.content,
@@ -3761,6 +3901,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       text: version.text,
       information: version.information,
     });
+    markTextNodeChanged(
+      connectedTextEditor.id,
+      version.text,
+      version.information,
+      connectedTextEditor.text,
+      connectedTextEditor.information,
+    );
     onChange(connectedTextEditor.id, { content: nextContent });
   };
 
@@ -3787,6 +3934,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       content: nextContent,
       [field]: value,
     });
+    markTextNodeChanged(
+      connectedTextEditor.id,
+      field === "text" ? value : connectedTextEditor.text,
+      field === "information" ? value : connectedTextEditor.information,
+      connectedTextEditor.text,
+      connectedTextEditor.information,
+    );
     onChange(connectedTextEditor.id, { content: nextContent });
   };
 
@@ -3795,6 +3949,128 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1200);
   };
+
+  const saveTextNode = async (nodeId: string, versionId?: string) => {
+    if (savingTextNodeId === nodeId) return false;
+    const stateAtSave = manualSaveStateByNodeId[nodeId];
+    const versionTitleKey = versionId ? promptVersionSaveKey(nodeId, versionId) : null;
+    const versionTitleStateAtSave = versionTitleKey
+      ? manualSaveVersionTitleStateByKey[versionTitleKey]
+      : undefined;
+    setSavingTextNodeId(nodeId);
+    try {
+      await onSaveNode(nodeId);
+      setManualSaveStateByNodeId((current) => {
+        const state = current[nodeId];
+        if (
+          !state
+          || !stateAtSave
+          || state.currentText !== stateAtSave.currentText
+          || state.currentInformation !== stateAtSave.currentInformation
+        ) return current;
+        return {
+          ...current,
+          [nodeId]: {
+            ...state,
+            savedText: state.currentText,
+            savedInformation: state.currentInformation,
+          },
+        };
+      });
+      if (versionTitleKey && versionTitleStateAtSave) {
+        setManualSaveVersionTitleStateByKey((current) => {
+          const state = current[versionTitleKey];
+          if (!state || state.currentTitle !== versionTitleStateAtSave.currentTitle) return current;
+          return {
+            ...current,
+            [versionTitleKey]: { ...state, savedTitle: state.currentTitle },
+          };
+        });
+      }
+      return true;
+    } catch {
+      // The parent already shows the failed save reason in the global notice.
+      return false;
+    } finally {
+      setSavingTextNodeId((current) => (current === nodeId ? null : current));
+    }
+  };
+
+  const saveTextWithShortcut = (
+    event: ReactKeyboardEvent<HTMLTextAreaElement>,
+    nodeId: string,
+    versionId?: string,
+  ) => {
+    if (
+      event.nativeEvent.isComposing
+      || !(event.ctrlKey || event.metaKey)
+      || event.altKey
+      || event.key.toLowerCase() !== "s"
+    ) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void saveTextNode(nodeId, versionId);
+  };
+
+  const requestCloseExpandedEditor = () => {
+    if (isText && isNodeManuallyUnsaved(id, activePromptVersion?.id)) {
+      setEditorExitConfirmation({
+        target: "expanded",
+        nodeId: id,
+        versionId: activePromptVersion?.id,
+      });
+      return;
+    }
+    setExpanded(false);
+  };
+
+  const requestCloseConnectedTextEditor = () => {
+    if (!connectedTextEditor) return;
+    if (isNodeManuallyUnsaved(connectedTextEditor.id, connectedActivePromptVersion?.id)) {
+      setEditorExitConfirmation({
+        target: "connected",
+        nodeId: connectedTextEditor.id,
+        versionId: connectedActivePromptVersion?.id,
+      });
+      return;
+    }
+    setConnectedTextEditor(null);
+  };
+
+  const exitEditorWithoutManualSave = () => {
+    const confirmation = editorExitConfirmation;
+    if (!confirmation) return;
+    setEditorExitConfirmation(null);
+    if (confirmation.target === "connected") setConnectedTextEditor(null);
+    else setExpanded(false);
+  };
+
+  const saveAndExitEditor = async () => {
+    const confirmation = editorExitConfirmation;
+    if (!confirmation || savingEditorExit) return;
+    setSavingEditorExit(true);
+    try {
+      const saved = await saveTextNode(confirmation.nodeId, confirmation.versionId);
+      if (!saved) return;
+      setEditorExitConfirmation(null);
+      if (confirmation.target === "connected") setConnectedTextEditor(null);
+      else setExpanded(false);
+    } finally {
+      setSavingEditorExit(false);
+    }
+  };
+
+  useEffect(() => {
+    if ((!expanded && !connectedTextEditor) || editorExitConfirmation) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (connectedTextEditor) requestCloseConnectedTextEditor();
+      else requestCloseExpandedEditor();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [connectedTextEditor, editorExitConfirmation, expanded, requestCloseConnectedTextEditor, requestCloseExpandedEditor]);
 
   const copyGeneratedSeed = () => {
     if (!generatedVideoSeed) return;
@@ -3827,13 +4103,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     if (!Number.isFinite(video.duration) || video.duration <= 0) return;
     if (!video.ended && video.currentTime < video.duration - 0.01) return;
     markGeneratedVideoFullyPlayed();
-  };
-
-  const stopGeneratedVideoPlayback = () => {
-    const video = generatedVideoRef.current;
-    if (!video) return;
-    video.pause();
-    if (video.readyState > 0) video.currentTime = 0;
   };
 
   const applyNaturalMediaRatio = (naturalWidth: number, naturalHeight: number) => {
@@ -4236,6 +4505,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       className={`canvas-node kind-${record.kind} ${selected ? "is-selected" : ""} ${isPromptVersionNode ? "is-prompt-version-node" : ""} ${usesSecondaryGreenTheme ? "is-secondary-preview" : ""} ${usesCustomPreviewTheme ? "has-custom-preview-color" : ""} ${relationHighlighted ? "is-relation-highlighted" : ""} ${matched ? "" : "is-dimmed"}`}
       style={previewThemeStyle}
       onPointerDownCapture={(event) => {
+        if (preservesGeneratedVideoToolbarCtrlClick(event.target)) {
+          ctrlSelectionPointerId.current = null;
+          return;
+        }
         if (event.button !== 0 || !event.ctrlKey) {
           ctrlSelectionPointerId.current = null;
           return;
@@ -4264,12 +4537,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         ctrlSelectionPointerId.current = null;
       }}
       onClickCapture={(event) => {
+        if (preservesGeneratedVideoToolbarCtrlClick(event.target)) {
+          ctrlSelectionPointerId.current = null;
+          return;
+        }
         if (!event.ctrlKey && ctrlSelectionPointerId.current === null) return;
         event.preventDefault();
         event.stopPropagation();
         ctrlSelectionPointerId.current = null;
       }}
       onDoubleClickCapture={(event) => {
+        if (preservesGeneratedVideoToolbarCtrlClick(event.target)) return;
         if (!event.ctrlKey) return;
         event.preventDefault();
         event.stopPropagation();
@@ -4389,6 +4667,22 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             <Maximize2 size={13} />
           </button>
         )}
+        {(isText || isNote) && (
+          <button
+            type="button"
+            className={`nodrag node-action ${isNodeManuallyUnsaved(id, activePromptVersion?.id) ? "is-manual-save-dirty" : ""}`}
+            onClick={() => void saveTextNode(id, activePromptVersion?.id)}
+            disabled={savingTextNodeId === id}
+            title={savingTextNodeId === id
+              ? "正在保存到数据库…"
+              : isNodeManuallyUnsaved(id, activePromptVersion?.id)
+                ? "有未手动保存的修改，点击立即保存到数据库"
+                : "立即保存到数据库"}
+            aria-label={savingTextNodeId === id ? "正在保存文本节点" : "立即保存文本节点到数据库"}
+          >
+            <Save size={13} />
+          </button>
+        )}
         {supportsPreviewColor && (
           <div
             ref={previewColorControlRef}
@@ -4458,19 +4752,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             {copied ? <Check size={14} /> : <Copy size={14} />}
           </button>
         )}
-        {!isFolder && <button
-          className="nodrag node-action danger"
-          onClick={() => {
-            if (isGeneratedVideo) stopGeneratedVideoPlayback();
-            onDelete(id);
-          }}
-          title={isGenerationPlaceholder
-            ? "取消任务并删除占位节点"
-            : "删除节点"}
-          aria-label={isGenerationPlaceholder ? "取消任务并删除占位节点" : "删除节点"}
-        >
-          {isGenerationPlaceholder ? <X size={14} /> : <Trash2 size={14} />}
-        </button>}
         {isText && (
           <div
             ref={textInformationRef}
@@ -4484,8 +4765,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 setPreviewColorMenuOpen(false);
                 setTextInformationOpen((open) => !open);
               }}
-              title="查看和编辑 Information"
-              aria-label="查看和编辑 Information"
+              title="查看和编辑备注"
+              aria-label="查看和编辑备注"
               aria-expanded={textInformationOpen}
             >
               <Info size={13} />
@@ -4493,23 +4774,24 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             {textInformationOpen && (
               <aside
                 className="text-information-panel nowheel"
-                aria-label="提示词中文解释"
+                aria-label="提示词备注"
               >
                 <header>
                   <div>
-                    <strong>Information</strong>
+                    <strong>备注</strong>
                     <span>{isPromptVersionNode
-                      ? `${activePromptVersion?.label ?? "未创建版本"} · 中文解释`
-                      : "中文解释"}</span>
+                      ? `${activePromptVersion?.label ?? "未创建版本"} · 备注`
+                      : "当前提示词 · 备注"}</span>
                   </div>
                 </header>
                 <textarea
                   className="nowheel"
                   value={informationDraft}
                   onChange={changeInformation}
-                  placeholder="这里保存提示词的中文解释…"
+                  onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
+                  placeholder={isPromptVersionNode ? "这里记录本版本的备注…" : "这里记录当前提示词的备注…"}
                   spellCheck={false}
-                  aria-label="提示词中文解释内容"
+                  aria-label="提示词备注内容"
                 />
                 <footer>{informationDraft.length.toLocaleString()} 字符 · 自动保存</footer>
               </aside>
@@ -4561,7 +4843,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                             <span className="prompt-version-label">{version.label}</span>
                             <input
                               value={promptVersionTitleDraft}
-                              onChange={(event) => setPromptVersionTitleDraft(event.currentTarget.value)}
+                              onChange={(event) => changePromptVersionTitleDraft(version, event.currentTarget.value)}
                               onKeyDown={(event) => {
                                 if (event.key === "Enter") {
                                   event.preventDefault();
@@ -4665,6 +4947,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               className={`nodrag node-editor ${textEditorFocused ? "nowheel" : ""}`}
               value={textDraft}
               onChange={changeText}
+              onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
               onFocus={() => setTextEditorFocused(true)}
               onBlur={() => setTextEditorFocused(false)}
               aria-label={`${activePromptVersion?.label ?? "当前版本"}提示词内容`}
@@ -4678,6 +4961,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             className={`nodrag node-editor ${textEditorFocused ? "nowheel" : ""}`}
             value={textDraft}
             onChange={changeText}
+            onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
             onFocus={() => setTextEditorFocused(true)}
             onBlur={() => setTextEditorFocused(false)}
             aria-label="文本内容"
@@ -5006,22 +5290,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                         {h3DiffusionModelDisplayName(generatedVideoSnapshot.diffusionModelName)}
                       </strong>
                     </div>
-                    <div>
-                      <span>一采 LoRA</span>
-                      <strong title={generatedVideoSnapshot.loraName}>
-                        {h3LoraDisplayName(generatedVideoSnapshot.loraName)}
-                      </strong>
-                    </div>
-                    <div>
-                      <span>一采强度</span>
-                      <strong>
-                        {generatedVideoSnapshot.loraBypassed
-                          ? "未应用（Bypass）"
-                          : generatedVideoSnapshot.loraStrengthRecorded === false
-                            ? "未记录"
-                            : `×${generatedVideoSnapshot.loraStrength.toFixed(2)}`}
-                      </strong>
-                    </div>
                   </section>
                   <section className="generated-video-stage-info">
                     <h4>一采</h4>
@@ -5030,6 +5298,20 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       <dt>参考图模式</dt>
                       <dd>{generatedVideoSnapshot.refImageSizeRecorded === false ? "未记录" : generatedVideoSnapshot.refImageSize}</dd>
                       <dt>视频 / 音频 Steps</dt><dd>{generatedVideoSnapshot.primaryVideoSteps} / {generatedVideoSnapshot.primaryAudioSteps}</dd>
+                      <dt>LoRA</dt>
+                      <dd title={generatedVideoSnapshot.loraName || "一采 Bypass"}>
+                        {generatedVideoSnapshot.loraBypassed
+                          ? "未应用（Bypass）"
+                          : h3LoraDisplayName(generatedVideoSnapshot.loraName)}
+                      </dd>
+                      <dt>LoRA 强度</dt>
+                      <dd>
+                        {generatedVideoSnapshot.loraBypassed
+                          ? "—"
+                          : generatedVideoSnapshot.loraStrengthRecorded === false
+                            ? "未记录"
+                            : `×${generatedVideoSnapshot.loraStrength.toFixed(2)}`}
+                      </dd>
                       <dt>亮度 / 对比度 / 饱和度</dt>
                       <dd>{generatedVideoSnapshot.primaryBrightness.toFixed(2)} / {generatedVideoSnapshot.primaryContrast.toFixed(2)} / {generatedVideoSnapshot.primarySaturation.toFixed(2)}</dd>
                     </dl>
@@ -5041,11 +5323,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                         <dt>分辨率</dt><dd>{generatedVideoSnapshot.secondaryResolutionMegapixels.toFixed(1)} MP</dd>
                         <dt>参考图模式</dt>
                         <dd>{generatedVideoSnapshot.refImageSizeRecorded === false ? "未记录" : generatedVideoSnapshot.refImageSize}</dd>
-                        <dt>调度 Steps</dt><dd>{generatedVideoSnapshot.secondarySchedulerSteps}</dd>
+                        <dt>视频 Steps</dt><dd>{generatedVideoSnapshot.secondarySchedulerSteps}</dd>
                         <dt>LoRA</dt>
-                        <dd title={generatedVideoSnapshot.secondaryLoraName || "二采 Bypass"}>
+                        <dd title={generatedVideoSnapshot.secondaryLoraBypassed
+                          ? "—"
+                          : generatedVideoSnapshot.secondaryLoraName}>
                           {generatedVideoSnapshot.secondaryLoraBypassed
-                            ? "未应用（Bypass）"
+                            ? "—"
                             : h3LoraDisplayName(generatedVideoSnapshot.secondaryLoraName)}
                         </dd>
                         <dt>LoRA 强度</dt>
@@ -5068,6 +5352,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       </h4>
                       <button
                         type="button"
+                        disabled={!generatedVideoPrompt && !generatedVideoPromptInformation}
+                        onClick={() => {
+                          setGeneratedInfoOpen(false);
+                          setGeneratedPromptDialogOpen(true);
+                        }}
+                        title="在大窗中查看提示词和备注"
+                        aria-label="在大窗中查看提示词和备注"
+                      >
+                        <Maximize2 size={12} />
+                      </button>
+                      <button
+                        type="button"
                         disabled={!generatedVideoPrompt}
                         onClick={copyGeneratedPrompt}
                         title={promptCopied ? "提示词已复制" : "复制提示词"}
@@ -5082,20 +5378,67 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               )}
             </div>
           )}
-          <button
-            type="button"
-            className="nodrag node-action danger"
-            onClick={(event) => {
-              stopGeneratedVideoPlayback();
-              onDelete(id, event.ctrlKey && !isGenerationPlaceholder);
-            }}
-            title={isGenerationPlaceholder
-              ? "取消任务并删除占位节点"
-              : "删除视频；Ctrl+点击将跳过确认并永久删除源文件"}
-            aria-label={isGenerationPlaceholder ? "取消任务并删除占位节点" : "删除节点"}
-          >
-            {isGenerationPlaceholder ? <X size={14} /> : <Trash2 size={14} />}
-          </button>
+          {generatedPromptDialogOpen && createPortal(
+            <div
+              className="expanded-editor-backdrop"
+              onMouseDown={() => setGeneratedPromptDialogOpen(false)}
+            >
+              <section
+                className="expanded-editor-dialog is-prompt-version is-readonly"
+                role="dialog"
+                aria-modal="true"
+                aria-label="生成时提示词与备注"
+                onMouseDown={(event) => event.stopPropagation()}
+              >
+                <header className="expanded-editor-header">
+                  <span className="node-kind-icon"><FileText size={15} /></span>
+                  <div>
+                    <strong>{generatedVideoPromptTitle || "生成时提示词"}</strong>
+                    <span>生成时快照 · 只读</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setGeneratedPromptDialogOpen(false)}
+                    title="关闭"
+                    aria-label="关闭提示词查看窗口"
+                  >
+                    <X size={17} />
+                  </button>
+                </header>
+                <div className="expanded-prompt-layout">
+                  <section className="expanded-prompt-pane is-prompt">
+                    <header>
+                      <strong>提示词</strong>
+                      <span>{generatedVideoPrompt.length.toLocaleString()} 字符</span>
+                    </header>
+                    <textarea
+                      className="expanded-text-editor"
+                      value={generatedVideoPrompt}
+                      readOnly
+                      spellCheck={false}
+                      placeholder="未记录提示词"
+                      aria-label="生成时提示词，只读"
+                    />
+                  </section>
+                  <section className="expanded-prompt-pane is-information">
+                    <header>
+                      <strong>备注</strong>
+                      <span>{generatedVideoPromptInformation.length.toLocaleString()} 字符</span>
+                    </header>
+                    <textarea
+                      className="expanded-text-editor"
+                      value={generatedVideoPromptInformation}
+                      readOnly
+                      spellCheck={false}
+                      placeholder="未记录中文信息"
+                      aria-label="生成时备注，只读"
+                    />
+                  </section>
+                </div>
+              </section>
+            </div>,
+            document.body,
+          )}
           </div>
         </footer>
       )}
@@ -6340,17 +6683,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <Scaling size={14} />
             </button>
           )}
-          {(isImage || isAudioAsset) && (
-            <button
-              type="button"
-              className="nodrag node-action danger media-footer-delete"
-              onClick={() => onDelete(id)}
-              title="删除节点"
-              aria-label="删除节点"
-            >
-              <Trash2 size={14} />
-            </button>
-          )}
         </footer>
       )}
       {(isText || isImage || isAudioAsset || isVideoAsset || isVideoGeneration || isGeneratedVideo) && !isFolder && (
@@ -6418,9 +6750,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         document.body,
       )}
       {expanded && createPortal(
-        <div className="expanded-editor-backdrop" onMouseDown={() => setExpanded(false)}>
+        <div className="expanded-editor-backdrop" onMouseDown={requestCloseExpandedEditor}>
           <section
-            className={`expanded-editor-dialog ${isNote ? "is-note" : ""} ${isPromptVersionNode ? "is-prompt-version" : ""}`}
+            className={`expanded-editor-dialog ${isNote ? "is-note" : ""} ${isText ? "is-prompt-version" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-label={`${record.title || "未命名节点"} 放大编辑`}
@@ -6431,8 +6763,43 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 {isNote ? <StickyNote size={15} /> : <FileText size={15} />}
               </span>
               <div>
-                <strong>{record.title || "未命名节点"}</strong>
-                <span>{textDraft.length.toLocaleString()} 字符 · 自动保存</span>
+                {isPromptVersionNode && activePromptVersion && editingPromptVersionTitleId === activePromptVersion.id ? (
+                  <input
+                    className="expanded-editor-title-editor"
+                    value={promptVersionTitleDraft}
+                    onChange={(event) => changePromptVersionTitleDraft(activePromptVersion, event.currentTarget.value)}
+                    onBlur={() => commitPromptVersionTitleEdit(activePromptVersion.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        cancelPromptVersionTitleEdit();
+                      }
+                    }}
+                    autoFocus
+                    spellCheck={false}
+                    aria-label={`${activePromptVersion.label} 版本标题`}
+                  />
+                ) : (
+                  <strong
+                    className={isPromptVersionNode && activePromptVersion ? "is-editable" : ""}
+                    onDoubleClick={() => {
+                      if (activePromptVersion) beginPromptVersionTitleEdit(activePromptVersion);
+                    }}
+                    title={isPromptVersionNode && activePromptVersion
+                      ? "双击修改当前版本标题"
+                      : undefined}
+                  >
+                    {isPromptVersionNode
+                      ? activePromptVersion?.title || record.title || "未命名版本"
+                      : record.title || "未命名节点"}
+                  </strong>
+                )}
+                <span>{isPromptVersionNode && activePromptVersion
+                  ? `${activePromptVersion.label} · ${textDraft.length.toLocaleString()} 字符 · 自动保存 · 可手动保存`
+                  : `${textDraft.length.toLocaleString()} 字符 · 自动保存 · 可手动保存`}</span>
               </div>
               {isPromptVersionNode && (
                 <div className="expanded-editor-version-control">
@@ -6455,11 +6822,25 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   />
                 </div>
               )}
-              <button onClick={() => setExpanded(false)} title="关闭" aria-label="关闭放大编辑器">
+              <button
+                type="button"
+                className={isNodeManuallyUnsaved(id, activePromptVersion?.id) ? "is-manual-save-dirty" : ""}
+                onClick={() => void saveTextNode(id, activePromptVersion?.id)}
+                disabled={savingTextNodeId === id}
+                title={savingTextNodeId === id
+                  ? "正在保存到数据库…"
+                  : isNodeManuallyUnsaved(id, activePromptVersion?.id)
+                    ? "有未手动保存的修改，点击立即保存到数据库"
+                    : "立即保存到数据库"}
+                aria-label={savingTextNodeId === id ? "正在保存文本节点" : "立即保存文本节点到数据库"}
+              >
+                <Save size={16} />
+              </button>
+              <button onClick={requestCloseExpandedEditor} title="关闭" aria-label="关闭放大编辑器">
                 <X size={17} />
               </button>
             </header>
-            {isPromptVersionNode ? (
+            {isText ? (
               <div className="expanded-prompt-layout">
                 <section className="expanded-prompt-pane is-prompt">
                   <header>
@@ -6470,6 +6851,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     className="expanded-text-editor"
                     value={textDraft}
                     onChange={changeText}
+                    onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
                     autoFocus
                     spellCheck={false}
                     aria-label="提示词内容"
@@ -6477,16 +6859,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 </section>
                 <section className="expanded-prompt-pane is-information">
                   <header>
-                    <strong>中文提示词说明</strong>
+                    <strong>备注</strong>
                     <span>{informationDraft.length.toLocaleString()} 字符</span>
                   </header>
                   <textarea
                     className="expanded-text-editor"
                     value={informationDraft}
                     onChange={changeInformation}
+                    onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
                     spellCheck={false}
-                    placeholder="这里保存提示词的中文解释…"
-                    aria-label="中文提示词说明"
+                    placeholder={isPromptVersionNode ? "这里记录本版本的备注…" : "这里记录当前提示词的备注…"}
+                    aria-label="提示词备注"
                   />
                 </section>
               </div>
@@ -6495,6 +6878,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 className="expanded-text-editor"
                 value={textDraft}
                 onChange={changeText}
+                onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
                 autoFocus
                 spellCheck={false}
                 aria-label="放大文本内容"
@@ -6507,10 +6891,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       {connectedTextEditor && createPortal(
         <div
           className="expanded-editor-backdrop"
-          onMouseDown={() => setConnectedTextEditor(null)}
+          onMouseDown={requestCloseConnectedTextEditor}
         >
           <section
-            className={`expanded-editor-dialog ${connectedTextEditor.content.promptVersionNode === true ? "is-prompt-version" : ""}`}
+            className="expanded-editor-dialog is-prompt-version"
             role="dialog"
             aria-modal="true"
             aria-label={`${connectedTextEditor.title} 放大编辑`}
@@ -6520,7 +6904,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <span className="node-kind-icon"><FileText size={15} /></span>
               <div>
                 <strong>{connectedTextEditor.title}</strong>
-                <span>{connectedTextEditor.text.length.toLocaleString()} 字符 · 自动保存</span>
+                <span>{connectedTextEditor.text.length.toLocaleString()} 字符 · 自动保存 · 可手动保存</span>
               </div>
               {connectedTextEditor.content.promptVersionNode === true && (
                 <div className="expanded-editor-version-control">
@@ -6544,54 +6928,110 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 </div>
               )}
               <button
-                onClick={() => setConnectedTextEditor(null)}
+                type="button"
+                className={isNodeManuallyUnsaved(connectedTextEditor.id, connectedActivePromptVersion?.id) ? "is-manual-save-dirty" : ""}
+                onClick={() => void saveTextNode(connectedTextEditor.id, connectedActivePromptVersion?.id)}
+                disabled={savingTextNodeId === connectedTextEditor.id}
+                title={savingTextNodeId === connectedTextEditor.id
+                  ? "正在保存到数据库…"
+                  : isNodeManuallyUnsaved(connectedTextEditor.id, connectedActivePromptVersion?.id)
+                    ? "有未手动保存的修改，点击立即保存到数据库"
+                    : "立即保存到数据库"}
+                aria-label={savingTextNodeId === connectedTextEditor.id ? "正在保存已连接文本节点" : "立即保存已连接文本节点到数据库"}
+              >
+                <Save size={16} />
+              </button>
+              <button
+                onClick={requestCloseConnectedTextEditor}
                 title="关闭"
                 aria-label="关闭提示词编辑器"
               >
                 <X size={17} />
               </button>
             </header>
-            {connectedTextEditor.content.promptVersionNode === true ? (
-              <div className="expanded-prompt-layout">
-                <section className="expanded-prompt-pane is-prompt">
-                  <header>
-                    <strong>提示词</strong>
-                    <span>{connectedTextEditor.text.length.toLocaleString()} 字符</span>
-                  </header>
-                  <textarea
-                    className="expanded-text-editor"
-                    value={connectedTextEditor.text}
-                    onChange={(event) => changeConnectedPromptField("text", event.currentTarget.value)}
-                    autoFocus
-                    spellCheck={false}
-                    aria-label="已连接提示词内容"
-                  />
-                </section>
-                <section className="expanded-prompt-pane is-information">
-                  <header>
-                    <strong>中文提示词说明</strong>
-                    <span>{connectedTextEditor.information.length.toLocaleString()} 字符</span>
-                  </header>
-                  <textarea
-                    className="expanded-text-editor"
-                    value={connectedTextEditor.information}
-                    onChange={(event) => changeConnectedPromptField("information", event.currentTarget.value)}
-                    spellCheck={false}
-                    placeholder="这里保存提示词的中文解释…"
-                    aria-label="已连接提示词中文说明"
-                  />
-                </section>
-              </div>
-            ) : (
-              <textarea
-                className="expanded-text-editor"
-                value={connectedTextEditor.text}
-                onChange={(event) => changeConnectedPromptField("text", event.currentTarget.value)}
-                autoFocus
-                spellCheck={false}
-                aria-label="放大提示词内容"
-              />
-            )}
+            <div className="expanded-prompt-layout">
+              <section className="expanded-prompt-pane is-prompt">
+                <header>
+                  <strong>提示词</strong>
+                  <span>{connectedTextEditor.text.length.toLocaleString()} 字符</span>
+                </header>
+                <textarea
+                  className="expanded-text-editor"
+                  value={connectedTextEditor.text}
+                  onChange={(event) => changeConnectedPromptField("text", event.currentTarget.value)}
+                  onKeyDown={(event) => saveTextWithShortcut(event, connectedTextEditor.id, connectedActivePromptVersion?.id)}
+                  autoFocus
+                  spellCheck={false}
+                  aria-label="已连接提示词内容"
+                />
+              </section>
+              <section className="expanded-prompt-pane is-information">
+                <header>
+                  <strong>备注</strong>
+                  <span>{connectedTextEditor.information.length.toLocaleString()} 字符</span>
+                </header>
+                <textarea
+                  className="expanded-text-editor"
+                  value={connectedTextEditor.information}
+                  onChange={(event) => changeConnectedPromptField("information", event.currentTarget.value)}
+                  onKeyDown={(event) => saveTextWithShortcut(event, connectedTextEditor.id, connectedActivePromptVersion?.id)}
+                  spellCheck={false}
+                  placeholder={connectedTextEditor.content.promptVersionNode === true ? "这里记录本版本的备注…" : "这里保存提示词的中文备注…"}
+                  aria-label="已连接提示词备注"
+                />
+              </section>
+            </div>
+          </section>
+        </div>,
+        document.body,
+      )}
+      {editorExitConfirmation && createPortal(
+        <div
+          className="project-dialog-backdrop editor-exit-confirm-backdrop"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <section
+            className="project-dialog editor-exit-confirm-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby={`editor-exit-title-${id}`}
+            aria-describedby={`editor-exit-description-${id}`}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><Save size={22} /></div>
+            <div>
+              <h2 id={`editor-exit-title-${id}`}>提示词尚未手动保存</h2>
+              <p id={`editor-exit-description-${id}`}>
+                当前修改仍显示为绿色保存状态。是否先保存到数据库再退出？
+              </p>
+            </div>
+            <div className="project-dialog-actions">
+              <button
+                type="button"
+                className="dialog-cancel"
+                disabled={savingEditorExit}
+                onClick={() => setEditorExitConfirmation(null)}
+              >
+                继续编辑
+              </button>
+              <button
+                type="button"
+                className="dialog-danger"
+                disabled={savingEditorExit}
+                onClick={exitEditorWithoutManualSave}
+              >
+                不保存退出
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={savingEditorExit}
+                onClick={() => void saveAndExitEditor()}
+              >
+                <Save size={14} />
+                {savingEditorExit ? "保存中…" : "保存并退出"}
+              </button>
+            </div>
           </section>
         </div>,
         document.body,
@@ -6833,6 +7273,7 @@ export type {
   ComfyQueueSummary,
   ComfySubmitResult,
   CreateNodeResult,
+  CreateEmptyFolderResult,
   DeleteFolderResult,
   DeletedBatch,
   EdgeRecord,

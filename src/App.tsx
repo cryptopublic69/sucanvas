@@ -34,6 +34,7 @@ import {
   FileText,
   FolderKanban,
   FolderOpen,
+  FolderPlus,
   History,
   Image as ImageIcon,
   Link2,
@@ -195,6 +196,7 @@ import type {
   ComfyQueueSummary,
   ComfySubmitResult,
   CreateNodeResult,
+  CreateEmptyFolderResult,
   DeleteFolderResult,
   DeletedBatch,
   EdgeRecord,
@@ -460,7 +462,11 @@ function CanvasWorkspace() {
   const [folderGroupingBusy, setFolderGroupingBusy] = useState(false);
   const [videoDeletionRequest, setVideoDeletionRequest] = useState<VideoDeletionRequest | null>(null);
   const [videoRegenerationDraft, setVideoRegenerationDraft] = useState<VideoRegenerationDraft | null>(null);
+  const [videoRegenerationInformationOpen, setVideoRegenerationInformationOpen] = useState(false);
   const [secondarySampleDraft, setSecondarySampleDraft] = useState<SecondarySampleDraft | null>(null);
+  const selectedVideoRegenerationPrompt = videoRegenerationDraft?.promptOptions.find(
+    (option) => option.key === videoRegenerationDraft.selectedPromptKey,
+  ) ?? null;
   const saveTimers = useRef(new Map<string, number>());
   const pendingPatches = useRef(new Map<string, NodePatch>());
   const nodesSnapshot = useRef<CanvasFlowNode[]>([]);
@@ -1507,28 +1513,83 @@ function CanvasWorkspace() {
     [reportError, setNodes],
   );
 
+  const persistPatchImmediately = useCallback(
+    async (id: string, patch: NodePatch) => {
+      const activeTimer = saveTimers.current.get(id);
+      if (activeTimer) window.clearTimeout(activeTimer);
+      saveTimers.current.delete(id);
+      const pendingPatch = pendingPatches.current.get(id) ?? {};
+      pendingPatches.current.delete(id);
+      const nextPatch = { ...pendingPatch, ...patch };
+      setNotice("正在保存…");
+      try {
+        const updated = await invoke<NodeRecord>("update_node", { input: { id, ...nextPatch } });
+        if (!pendingPatches.current.has(id)) {
+          setNodes((current) => current.map((node) => (
+            node.id === id
+              ? {
+                  ...node,
+                  width: updated.width,
+                  height: updated.height,
+                  style: { ...node.style, width: updated.width, height: updated.height },
+                  data: { ...node.data, record: updated },
+                }
+              : node
+          )));
+        }
+        setNotice("所有更改已保存");
+      } catch (error) {
+        reportError(error);
+      }
+    },
+    [reportError, setNodes],
+  );
+
+  const manualSavedPromptContent = (content: JsonObject): JsonObject | null => {
+    const saved = content.manualSavedPromptContent;
+    return saved && typeof saved === "object" && !Array.isArray(saved)
+      ? saved as JsonObject
+      : null;
+  };
+
   const changeNode = useCallback(
     (id: string, patch: NodePatch) => {
+      const currentRecord = nodesSnapshot.current.find((node) => node.id === id)?.data.record;
+      const nextPatch = currentRecord?.kind === "text"
+        && patch.content
+        && !manualSavedPromptContent(currentRecord.content)
+        ? {
+            ...patch,
+            content: {
+              ...patch.content,
+              manualSavedPromptContent: { ...currentRecord.content },
+            },
+          }
+        : patch;
       setNodes((current) =>
         current.map((node) => {
           if (node.id !== id) return node;
-          const record = { ...node.data.record, ...patch };
+          const record = { ...node.data.record, ...nextPatch };
           return {
             ...node,
-            width: patch.width ?? node.width,
-            height: patch.height ?? node.height,
+            width: nextPatch.width ?? node.width,
+            height: nextPatch.height ?? node.height,
             style: {
               ...node.style,
-              width: patch.width ?? node.style?.width,
-              height: patch.height ?? node.style?.height,
+              width: nextPatch.width ?? node.style?.width,
+              height: nextPatch.height ?? node.style?.height,
             },
             data: { ...node.data, record },
           };
         }),
       );
-      persistPatch(id, patch);
+      if ("title" in nextPatch) {
+        void persistPatchImmediately(id, nextPatch);
+      } else {
+        persistPatch(id, nextPatch);
+      }
     },
-    [persistPatch, setNodes],
+    [persistPatch, persistPatchImmediately, setNodes],
   );
 
   const replaceNodeRecord = useCallback((record: NodeRecord) => {
@@ -1824,6 +1885,50 @@ function CanvasWorkspace() {
       if (patch) await invoke<NodeRecord>("update_node", { input: { id, ...patch } });
     }));
   }, []);
+
+  const saveTextNodeImmediately = useCallback(async (nodeId: string) => {
+    const timer = saveTimers.current.get(nodeId);
+    if (timer) window.clearTimeout(timer);
+    saveTimers.current.delete(nodeId);
+    const pendingPatch = pendingPatches.current.get(nodeId) ?? {};
+    pendingPatches.current.delete(nodeId);
+    const currentRecord = nodesSnapshot.current.find((node) => node.id === nodeId)?.data.record;
+    const draftContent = pendingPatch.content ?? currentRecord?.content;
+    if (!currentRecord || currentRecord.kind !== "text" || !draftContent) {
+      await flushNodePatches([nodeId]);
+      setNotice("已手动保存到数据库");
+      return;
+    }
+    const confirmedContent = { ...draftContent };
+    delete confirmedContent.manualSavedPromptContent;
+    try {
+      const updated = await invoke<NodeRecord>("update_node", {
+        input: {
+          id: nodeId,
+          ...pendingPatch,
+          content: {
+            ...draftContent,
+            manualSavedPromptContent: confirmedContent,
+          },
+        },
+      });
+      setNodes((current) => current.map((node) => (
+        node.id === nodeId
+          ? {
+              ...node,
+              width: updated.width,
+              height: updated.height,
+              style: { ...node.style, width: updated.width, height: updated.height },
+              data: { ...node.data, record: updated },
+            }
+          : node
+      )));
+      setNotice("已手动保存到数据库");
+    } catch (error) {
+      reportError(error);
+      throw error;
+    }
+  }, [flushNodePatches, reportError, setNodes]);
 
   const markGeneratedVideoFullyPlayed = useCallback((nodeId: string) => {
     const node = nodesSnapshot.current.find((candidate) => candidate.id === nodeId);
@@ -2401,13 +2506,16 @@ function CanvasWorkspace() {
     const activeTextInput = promptNodeId
       ? orderedTextInputs.find((input) => input.id === promptNodeId) ?? null
       : activeTextInputFromContent(generator.content, orderedTextInputs);
-    const activePromptVersion = activeTextInput
-      ? activePromptVersionFromContent(activeTextInput.content)
+    const activePromptContent = activeTextInput
+      ? manualSavedPromptContent(activeTextInput.content) ?? activeTextInput.content
+      : null;
+    const activePromptVersion = activePromptContent
+      ? activePromptVersionFromContent(activePromptContent)
       : null;
     return {
-      prompt: activeTextInput ? textFromContent(activeTextInput.content) : "",
+      prompt: activePromptContent ? textFromContent(activePromptContent) : "",
       promptInformation: activePromptVersion?.information
-        ?? (activeTextInput ? informationFromContent(activeTextInput.content) : ""),
+        ?? (activePromptContent ? informationFromContent(activePromptContent) : ""),
       promptNodeId: activeTextInput?.id ?? "",
       promptNodeTitle: activePromptVersion?.title || activeTextInput?.title || "",
       promptNodeIdSource: activeTextInput ? "captured" : "",
@@ -2692,11 +2800,26 @@ function CanvasWorkspace() {
     }
   }, [flushNodePatches, setEdges, setNodes]);
 
+  const flushVideoGenerationInputs = useCallback(async (targetId: string) => {
+    const nodeIds = new Set([targetId]);
+    edgesSnapshot.current
+      .filter((edge) => edge.target === targetId)
+      .forEach((edge) => nodeIds.add(edge.source));
+    await flushNodePatches([...nodeIds]);
+  }, [flushNodePatches]);
+
   const executeVideoNode = useCallback(async (
     targetId: string,
     regeneration?: VideoRegenerationRequest,
     options?: VideoExecutionOptions,
   ) => {
+    try {
+      await flushVideoGenerationInputs(targetId);
+    } catch (error) {
+      reportError(error);
+      setNotice("无法生成：提示词或节点参数保存失败");
+      return;
+    }
     const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
     if (!targetNode) {
       setNotice("无法执行：找不到视频生成节点");
@@ -3186,7 +3309,7 @@ function CanvasWorkspace() {
       if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
       unregisterComfyTask(targetId, clientId);
     }
-  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
+  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, flushVideoGenerationInputs, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
 
   const executeVideoNodeBatch = useCallback(async (targetId: string) => {
     const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
@@ -3500,6 +3623,7 @@ function CanvasWorkspace() {
         promptOptions.push(currentTextOption);
       }
     }
+    setVideoRegenerationInformationOpen(false);
     setVideoRegenerationDraft({
       previewId,
       previewTitle: preview.title || "视频预览",
@@ -4574,6 +4698,7 @@ function CanvasWorkspace() {
         workflowModuleDefaults,
         onH3LoraPreferenceChange: rememberH3LoraPreference,
         onChange: changeNode,
+        onSaveNode: saveTextNodeImmediately,
         onMarkGeneratedVideoFullyPlayed: markGeneratedVideoFullyPlayed,
         onExecutionCheck: reportExecutionCheck,
         onExecute: executeVideoNode,
@@ -4590,11 +4715,10 @@ function CanvasWorkspace() {
         onDeletePromptVersion: deletePromptVersionFromNode,
         onResizeImage: resizeImageNode,
         onOpenFolder: (nodeId: string) => openFolderRef.current(nodeId),
-        onDelete: deleteNode,
         onCopy: copyText,
       },
     }),
-    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3LoraOptions, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedVideo, workflowModuleDefaults, workflowModules],
+    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3LoraOptions, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedVideo, saveTextNodeImmediately, workflowModuleDefaults, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -5058,13 +5182,36 @@ function CanvasWorkspace() {
         copiedPromptVersionContent(sourceContent, versionIdMap),
       );
     });
+    const existingVideoGenerationTitles = new Set(
+      nodesSnapshot.current
+        .filter((node) => node.data.record.canvasId === activeProjectId && node.data.record.kind === "video-generation")
+        .map((node) => node.data.record.title.replace(/\s+/g, "")),
+    );
+    const copiedNodeTitle = (sourceNode: NodeRecord) => {
+      if (sourceNode.kind !== "video-generation") {
+        return `${sourceNode.title || "未命名节点"} 副本`;
+      }
+      let baseTitle = (sourceNode.title || "视频生成").trim();
+      while (/副本\s*\d*$/u.test(baseTitle)) {
+        baseTitle = baseTitle.replace(/\s*副本\s*\d*$/u, "").trim();
+      }
+      baseTitle ||= "视频生成";
+      let copyNumber = 1;
+      let nextTitle = `${baseTitle} 副本${copyNumber}`;
+      while (existingVideoGenerationTitles.has(nextTitle.replace(/\s+/g, ""))) {
+        copyNumber += 1;
+        nextTitle = `${baseTitle} 副本${copyNumber}`;
+      }
+      existingVideoGenerationTitles.add(nextTitle.replace(/\s+/g, ""));
+      return nextTitle;
+    };
     try {
       for (const sourceNode of clipboard.nodes) {
         const result = await invoke<CreateNodeResult>("create_node", {
           input: {
             canvasId: activeProjectId,
             kind: sourceNode.kind,
-            title: `${sourceNode.title || "未命名节点"} 副本`,
+            title: copiedNodeTitle(sourceNode),
             content: preparedContentByOriginalId.get(sourceNode.id) ?? {},
             source: "clipboard",
             x: snapCanvasCoordinate(sourceNode.x + placementDelta.x),
@@ -5656,7 +5803,6 @@ function CanvasWorkspace() {
       mounted = false;
       unlistenCreated?.();
       unlistenUpdated?.();
-      for (const timer of saveTimers.current.values()) window.clearTimeout(timer);
     };
   }, [makeFlowNode, reportError, screenToFlowPosition, setNodes]);
 
@@ -5776,6 +5922,46 @@ function CanvasWorkspace() {
     }
   }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes]);
 
+  const addEmptyFolder = useCallback(async (position?: { x: number; y: number }) => {
+    if (!activeProjectId || folderGroupingBusy) return;
+    const placement = reserveNodePlacement(activeProjectId, position, 420, 274.25);
+    setFolderGroupingBusy(true);
+    try {
+      const result = await invoke<CreateEmptyFolderResult>("create_empty_folder", {
+        input: {
+          canvasId: activeProjectId,
+          x: placement.position.x,
+          y: placement.position.y,
+        },
+      });
+      const folder = result.parent.nodes.find((node) => node.id === result.folderNodeId);
+      if (!folder) throw new Error("新建文件夹后未找到目录节点");
+      finishNodePlacementReservation(placement.reservationId, [folder]);
+      setNodes(result.parent.nodes.map((record) => ({
+        ...makeFlowNode(record),
+        selected: record.id === result.folderNodeId,
+      })));
+      setEdges(result.parent.edges.map(toFlowEdge));
+      setCanvasName(result.parent.canvas.name);
+      setCanvasPath((current) => current.map((canvas, index) => (
+        index === current.length - 1 ? result.parent.canvas : canvas
+      )));
+      setNotice(`已新建文件夹“${folder.title}”`);
+      if (!position) window.setTimeout(() => {
+        void setCenter(
+          folder.x + folder.width / 2,
+          folder.y + folder.height / 2,
+          { zoom: 1, duration: 350 },
+        );
+      }, 60);
+    } catch (error) {
+      finishNodePlacementReservation(placement.reservationId);
+      reportError(error);
+    } finally {
+      setFolderGroupingBusy(false);
+    }
+  }, [activeProjectId, finishNodePlacementReservation, folderGroupingBusy, makeFlowNode, reportError, reserveNodePlacement, setEdges, setNodes, setCenter]);
+
   const addVideoNode = useCallback(async (position?: { x: number; y: number }) => {
     if (!activeProjectId) return;
     const placement = reserveNodePlacement(
@@ -5842,7 +6028,7 @@ function CanvasWorkspace() {
     event.preventDefault();
     const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
     const menuWidth = uiFontSize === "medium" ? 220 : 190;
-    const menuHeight = uiFontSize === "medium" ? 264 : 228;
+    const menuHeight = uiFontSize === "medium" ? 326 : 286;
     setCanvasContextMenu({
       screenX: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
       screenY: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -5864,14 +6050,18 @@ function CanvasWorkspace() {
         selected: candidate.id === node.id,
       })));
     }
+    const hasDeletableSelectedNode = selectedNodeIds.some((nodeId) => (
+      nodesSnapshot.current.find((candidate) => candidate.id === nodeId)?.data.record.kind !== "folder"
+    ));
     const menuWidth = uiFontSize === "medium" ? 252 : 224;
-    const menuHeight = node.data.record.kind === "video-generation"
+    const menuBaseHeight = node.data.record.kind === "video-generation"
       ? 158
       : node.data.record.kind === "image"
         ? 176
-      : node.data.record.kind === "folder" && selectedNodeIds.length === 1
-        ? 176
-        : 104;
+        : node.data.record.kind === "folder" && selectedNodeIds.length === 1
+          ? 176
+          : 104;
+    const menuHeight = menuBaseHeight + (hasDeletableSelectedNode ? 52 : 0);
     setCanvasContextMenu({
       screenX: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
       screenY: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -6147,15 +6337,16 @@ function CanvasWorkspace() {
     }
   }, [activeComfyTaskCounts, activeProjectId, folderGroupingBusy, flushPendingPatches, loadFolderContentNodes, makeFlowNode, rememberUndoEntry, reportError, setEdges, setNodes]);
 
-  const createNodeFromContextMenu = useCallback((kind: "text" | "prompt-version" | "note" | "video-generation") => {
+  const createNodeFromContextMenu = useCallback((kind: "folder" | "text" | "prompt-version" | "note" | "video-generation") => {
     if (!canvasContextMenu) return;
     const position = { x: canvasContextMenu.flowX, y: canvasContextMenu.flowY };
     setCanvasContextMenu(null);
-    if (kind === "text") void addTextNode(position);
+    if (kind === "folder") void addEmptyFolder(position);
+    else if (kind === "text") void addTextNode(position);
     else if (kind === "prompt-version") void addPromptVersionNode(position);
     else if (kind === "note") void addNoteNode(position);
     else void addVideoNode(position);
-  }, [addNoteNode, addPromptVersionNode, addTextNode, addVideoNode, canvasContextMenu]);
+  }, [addEmptyFolder, addNoteNode, addPromptVersionNode, addTextNode, addVideoNode, canvasContextMenu]);
 
   useEffect(() => {
     if (!canvasContextMenu) return;
@@ -8397,6 +8588,9 @@ function CanvasWorkspace() {
     && contextMenuSelectedRecords.every((record) => record.kind === "folder");
   const isSingleFolderContextMenu = contextMenuSelectedRecords.length === 1
     && contextMenuSelectedRecords[0].kind === "folder";
+  const contextMenuDeletableNodeIds = contextMenuSelectedRecords
+    .filter((record) => record.kind !== "folder")
+    .map((record) => record.id);
 
   return (
     <main
@@ -8733,18 +8927,33 @@ function CanvasWorkspace() {
             <div className="video-regeneration-fields">
               <label className="video-regeneration-prompt-field">
                 提示词版本
-                <SettingsSelect
-                  value={videoRegenerationDraft.selectedPromptKey}
-                  options={videoRegenerationDraft.promptOptions.map((option) => ({
-                    value: option.key,
-                    label: option.label,
-                  }))}
-                  onChange={(selectedPromptKey) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    selectedPromptKey,
-                  }))}
-                  ariaLabel="重新生成提示词版本"
-                />
+                <div className="video-regeneration-prompt-controls">
+                  <SettingsSelect
+                    value={videoRegenerationDraft.selectedPromptKey}
+                    options={videoRegenerationDraft.promptOptions.map((option) => ({
+                      value: option.key,
+                      label: option.label,
+                    }))}
+                    onChange={(selectedPromptKey) => {
+                      setVideoRegenerationInformationOpen(false);
+                      setVideoRegenerationDraft((current) => current && ({
+                        ...current,
+                        selectedPromptKey,
+                      }));
+                    }}
+                    ariaLabel="重新生成提示词版本"
+                  />
+                  <button
+                    type="button"
+                    className="video-regeneration-information-button"
+                    onClick={() => setVideoRegenerationInformationOpen(true)}
+                    title="查看当前提示词版本的备注"
+                    aria-label="查看当前提示词版本的备注"
+                  >
+                    <StickyNote size={14} />
+                    <span>查看备注</span>
+                  </button>
+                </div>
               </label>
               <label>
                 Seed
@@ -8920,6 +9129,67 @@ function CanvasWorkspace() {
               </button>
             </div>
           </form>
+        </div>,
+        document.body,
+      )}
+      {videoRegenerationInformationOpen && videoRegenerationDraft && createPortal(
+        <div
+          className="expanded-editor-backdrop"
+          onMouseDown={() => setVideoRegenerationInformationOpen(false)}
+        >
+          <section
+            className="expanded-editor-dialog is-prompt-version is-readonly"
+            role="dialog"
+            aria-modal="true"
+            aria-label="重新生成提示词与备注"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="expanded-editor-header">
+              <span className="node-kind-icon"><FileText size={15} /></span>
+              <div>
+                <strong>{selectedVideoRegenerationPrompt?.label ?? "提示词版本"}</strong>
+                <span>当前选择版本 · 只读</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setVideoRegenerationInformationOpen(false)}
+                title="关闭"
+                aria-label="关闭提示词与备注查看窗口"
+              >
+                <X size={17} />
+              </button>
+            </header>
+            <div className="expanded-prompt-layout">
+              <section className="expanded-prompt-pane is-prompt">
+                <header>
+                  <strong>提示词</strong>
+                  <span>{(selectedVideoRegenerationPrompt?.prompt ?? "").length.toLocaleString()} 字符</span>
+                </header>
+                <textarea
+                  className="expanded-text-editor"
+                  value={selectedVideoRegenerationPrompt?.prompt ?? ""}
+                  readOnly
+                  spellCheck={false}
+                  placeholder="未记录提示词"
+                  aria-label="当前提示词版本的提示词，只读"
+                />
+              </section>
+              <section className="expanded-prompt-pane is-information">
+                <header>
+                  <strong>备注</strong>
+                  <span>{(selectedVideoRegenerationPrompt?.information ?? "").length.toLocaleString()} 字符</span>
+                </header>
+                <textarea
+                  className="expanded-text-editor"
+                  value={selectedVideoRegenerationPrompt?.information ?? ""}
+                  readOnly
+                  spellCheck={false}
+                  placeholder="该提示词版本未填写备注"
+                  aria-label="当前提示词版本的备注，只读"
+                />
+              </section>
+            </div>
+          </section>
         </div>,
         document.body,
       )}
@@ -9205,25 +9475,50 @@ function CanvasWorkspace() {
                   </span>
                 </button>
               )}
+              {contextMenuDeletableNodeIds.length > 0 && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="is-danger"
+                  onClick={() => {
+                    const deleteIds = new Set(contextMenuDeletableNodeIds);
+                    const nodesToDelete = nodesSnapshot.current.filter((node) => deleteIds.has(node.id));
+                    setCanvasContextMenu(null);
+                    void deleteCanvasNodes(nodesToDelete);
+                  }}
+                >
+                  <Trash2 size={15} />
+                  <span>
+                    <strong>{contextMenuDeletableNodeIds.length === 1 ? "删除节点" : "删除选中节点"}</strong>
+                    <small>{contextMenuDeletableNodeIds.length === 1
+                      ? "删除此节点，可按 Ctrl+Z 撤销"
+                      : `删除 ${contextMenuDeletableNodeIds.length} 个节点，可按 Ctrl+Z 撤销`}</small>
+                  </span>
+                </button>
+              )}
             </>
           ) : (
             <>
-              <span className="canvas-context-menu-title">新建节点</span>
+              <span className="canvas-context-menu-title">新建</span>
               <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("video-generation")}>
                 <Clapperboard size={15} />
                 <span><strong>视频生成节点</strong><small>连接素材并提交生成</small></span>
-              </button>
-              <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("text")}>
-                <FileText size={15} />
-                <span><strong>文本节点</strong><small>输入提示词或普通文本</small></span>
               </button>
               <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("prompt-version")}>
                 <History size={15} />
                 <span><strong>提示词迭代节点</strong><small>保留 v1、v2、v3 并选择生成版本</small></span>
               </button>
+              <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("text")}>
+                <FileText size={15} />
+                <span><strong>文本节点</strong><small>输入提示词或普通文本</small></span>
+              </button>
               <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("note")}>
                 <StickyNote size={15} />
                 <span><strong>备注节点</strong><small>记录说明和想法</small></span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("folder")}>
+                <FolderPlus size={15} />
+                <span><strong>新建文件夹</strong><small>创建一个空白目录</small></span>
               </button>
             </>
           )}

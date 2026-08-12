@@ -13,17 +13,18 @@ use uuid::Uuid;
 use crate::models::{
     AppendPromptVersionInput, AppendPromptVersionResult, CancelFolderResult,
     CancelFolderUndoRecord, CanvasFolderLinkRecord, CanvasRecord, CreateEdgeInput,
-    CreateMissingPromptScenesInput, CreateMissingPromptScenesResult, CreateNodeInput,
-    CreateNodeResult, DeleteFolderResult, DeletedBatch, EdgeRecord, FolderActionInput,
-    FolderGroupingUndoRecord, FolderInputDuplicateRecord, FolderMergeDeduplicatedInputRecord,
-    FolderMergeSourceSnapshot, FolderMergeUndoRecord, FolderTreeUndoRecord,
-    GroupNodesIntoFolderInput, GroupNodesIntoFolderResult, GroupRelatedNodesIntoFolderInput,
-    MergeFoldersInput, MergeFoldersResult, NodeRecord, PromptSceneBinding,
-    PromptSceneBindingRecord, PromptSceneMutation, PromptSetScenesResult, PromptSetSummary,
-    PromptVersionRecord, ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult,
-    RestoreNodeReplacementInput, RestoreNodeReplacementResult, UndoCancelFolderInput,
-    UndoDeleteFolderInput, UndoFolderGroupingInput, UndoFolderMergeInput, UpdateNodeInput,
-    WorkspaceSnapshot, DEFAULT_CANVAS_ID,
+    CreateEmptyFolderInput, CreateEmptyFolderResult, CreateMissingPromptScenesInput,
+    CreateMissingPromptScenesResult, CreateNodeInput, CreateNodeResult, DeleteFolderResult,
+    DeletedBatch, EdgeRecord, FolderActionInput, FolderGroupingUndoRecord,
+    FolderInputDuplicateRecord, FolderMergeDeduplicatedInputRecord, FolderMergeSourceSnapshot,
+    FolderMergeUndoRecord, FolderTreeUndoRecord, GroupNodesIntoFolderInput,
+    GroupNodesIntoFolderResult, GroupRelatedNodesIntoFolderInput, MergeFoldersInput,
+    MergeFoldersResult, NodeRecord, PromptSceneBinding, PromptSceneBindingRecord,
+    PromptSceneMutation, PromptSetScenesResult, PromptSetSummary, PromptVersionRecord,
+    ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult, RestoreNodeReplacementInput,
+    RestoreNodeReplacementResult, UndoCancelFolderInput, UndoDeleteFolderInput,
+    UndoFolderGroupingInput, UndoFolderMergeInput, UpdateNodeInput, WorkspaceSnapshot,
+    DEFAULT_CANVAS_ID,
 };
 
 const FOLDER_NODE_WIDTH: f64 = 420.0;
@@ -513,6 +514,77 @@ impl Database {
         input: GroupNodesIntoFolderInput,
     ) -> CanvasResult<GroupNodesIntoFolderResult> {
         self.group_nodes_into_folder_with_plan(&input.canvas_id, input.node_ids, None)
+    }
+
+    pub fn create_empty_folder(
+        &self,
+        input: CreateEmptyFolderInput,
+    ) -> CanvasResult<CreateEmptyFolderResult> {
+        let canvas_id = input.canvas_id.trim();
+        if canvas_id.is_empty() {
+            return Err(CanvasError::Validation(
+                "canvas id cannot be empty".to_owned(),
+            ));
+        }
+        if !input.x.is_finite() || !input.y.is_finite() {
+            return Err(CanvasError::Validation(
+                "folder position must be finite".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        load_workspace_from_connection(&transaction, canvas_id)?;
+
+        let folder_title = next_folder_title(&transaction, canvas_id)?;
+        let timestamp = now();
+        let child_canvas_id = format!("canvas:{}", Uuid::new_v4());
+        let folder_node_id = format!("node:{}", Uuid::new_v4());
+        let folder_content = json!({
+            "childCanvasId": child_canvas_id,
+            "nodeCount": 0,
+        });
+
+        transaction.execute(
+            "INSERT INTO canvases (id, name, is_private, created_at, updated_at)
+             SELECT ?1, ?2, is_private, ?3, ?3 FROM canvases WHERE id = ?4",
+            params![child_canvas_id, folder_title, timestamp, canvas_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO nodes (
+                id, canvas_id, kind, title, content_json, source, request_id,
+                x, y, width, height, status, created_at, updated_at
+             ) VALUES (?1, ?2, 'folder', ?3, ?4, 'manual', NULL,
+                       ?5, ?6, ?7, ?8, 'ready', ?9, ?9)",
+            params![
+                folder_node_id,
+                canvas_id,
+                folder_title,
+                serde_json::to_string(&folder_content)?,
+                input.x,
+                input.y,
+                FOLDER_NODE_WIDTH,
+                FOLDER_NODE_HEIGHT,
+                timestamp,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO canvas_folders (folder_node_id, child_canvas_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![folder_node_id, child_canvas_id, timestamp],
+        )?;
+
+        touch_canvas(&transaction, canvas_id)?;
+        touch_canvas(&transaction, &child_canvas_id)?;
+        let parent = load_workspace_from_connection(&transaction, canvas_id)?;
+        let child = load_workspace_from_connection(&transaction, &child_canvas_id)?;
+        transaction.commit()?;
+
+        Ok(CreateEmptyFolderResult {
+            parent,
+            child,
+            folder_node_id,
+        })
     }
 
     pub fn group_related_nodes_into_folder(
@@ -3972,6 +4044,32 @@ mod tests {
             source: Some("test".to_owned()),
             request_id: Some(request_id.to_owned()),
         }
+    }
+
+    #[test]
+    fn creates_an_empty_folder_at_the_requested_position() {
+        let database = Database::in_memory().unwrap();
+
+        let result = database
+            .create_empty_folder(CreateEmptyFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                x: 240.0,
+                y: 360.0,
+            })
+            .unwrap();
+
+        let folder = result
+            .parent
+            .nodes
+            .iter()
+            .find(|node| node.id == result.folder_node_id)
+            .unwrap();
+        assert_eq!(folder.kind, "folder");
+        assert_eq!(folder.x, 240.0);
+        assert_eq!(folder.y, 360.0);
+        assert_eq!(folder.content["nodeCount"], json!(0));
+        assert_eq!(result.child.canvas.name, folder.title);
+        assert!(result.child.nodes.is_empty());
     }
 
     #[test]

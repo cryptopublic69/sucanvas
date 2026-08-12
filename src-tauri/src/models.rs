@@ -263,6 +263,22 @@ pub struct GroupNodesIntoFolderInput {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateEmptyFolderInput {
+    pub canvas_id: String,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateEmptyFolderResult {
+    pub parent: WorkspaceSnapshot,
+    pub child: WorkspaceSnapshot,
+    pub folder_node_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GroupRelatedNodesIntoFolderInput {
     pub canvas_id: String,
     pub root_node_id: String,

@@ -24,9 +24,10 @@ use crate::{
     app_backup::{self, BackupSummary, RestoreSummary},
     models::{
         AppLockStatus, CancelFolderResult, ComfyClientTaskStatus, ComfyOutputFile,
-        ComfyQueueSummary, ComfySubmitInput, ComfySubmitResult, CreateEdgeInput, CreateNodeInput,
-        CreateNodeResult, CreateProjectInput, DeleteFolderResult, DeleteNodesInput, DeletedBatch,
-        EdgeRecord, FolderActionInput, GroupNodesIntoFolderInput, GroupNodesIntoFolderResult,
+        ComfyQueueSummary, ComfySubmitInput, ComfySubmitResult, CreateEdgeInput,
+        CreateEmptyFolderInput, CreateEmptyFolderResult, CreateNodeInput, CreateNodeResult,
+        CreateProjectInput, DeleteFolderResult, DeleteNodesInput, DeletedBatch, EdgeRecord,
+        FolderActionInput, GroupNodesIntoFolderInput, GroupNodesIntoFolderResult,
         GroupRelatedNodesIntoFolderInput, MergeFoldersInput, MergeFoldersResult, NodeRecord,
         ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult, ResizeImageResult,
         RestoreNodeReplacementInput, RestoreNodeReplacementResult, RuntimeInfo, SetAppLockInput,
@@ -281,6 +282,17 @@ pub fn group_nodes_into_folder(
     state
         .database
         .group_nodes_into_folder(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn create_empty_folder(
+    input: CreateEmptyFolderInput,
+    state: State<'_, ApplicationState>,
+) -> Result<CreateEmptyFolderResult, String> {
+    state
+        .database
+        .create_empty_folder(input)
         .map_err(|error| error.to_string())
 }
 
