@@ -298,6 +298,7 @@ pub fn run() {
             commands::undo_delete_folder_tree,
             commands::update_project,
             commands::set_project_private,
+            commands::set_project_preview_image,
             commands::delete_project,
             commands::create_node,
             commands::import_media,

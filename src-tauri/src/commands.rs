@@ -30,9 +30,9 @@ use crate::{
         GroupRelatedNodesIntoFolderInput, MergeFoldersInput, MergeFoldersResult, NodeRecord,
         ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult, ResizeImageResult,
         RestoreNodeReplacementInput, RestoreNodeReplacementResult, RuntimeInfo, SetAppLockInput,
-        SetProjectPrivacyInput, UndoCancelFolderInput, UndoDeleteFolderInput,
-        UndoFolderGroupingInput, UndoFolderMergeInput, UpdateNodeInput, UpdateProjectInput,
-        WorkspaceSnapshot,
+        SetProjectPreviewImageInput, SetProjectPrivacyInput, UndoCancelFolderInput,
+        UndoDeleteFolderInput, UndoFolderGroupingInput, UndoFolderMergeInput, UpdateNodeInput,
+        UpdateProjectInput, WorkspaceSnapshot,
     },
     workflow_modules::{
         self, SaveWorkflowModuleInput, WorkflowBindings, WorkflowInputContract,
@@ -391,6 +391,17 @@ pub fn set_project_private(
     state
         .database
         .set_project_private(&input.id, input.is_private)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_project_preview_image(
+    input: SetProjectPreviewImageInput,
+    state: State<'_, ApplicationState>,
+) -> Result<crate::models::CanvasRecord, String> {
+    state
+        .database
+        .set_project_preview_image(&input.project_id, &input.image_node_id)
         .map_err(|error| error.to_string())
 }
 

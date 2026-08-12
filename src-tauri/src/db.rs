@@ -92,6 +92,7 @@ impl Database {
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 is_private INTEGER NOT NULL DEFAULT 0,
+                preview_image_path TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -173,6 +174,13 @@ impl Database {
             )?;
         }
 
+        if !table_has_column(&connection, "canvases", "preview_image_path")? {
+            connection.execute(
+                "ALTER TABLE canvases ADD COLUMN preview_image_path TEXT",
+                [],
+            )?;
+        }
+
         connection.execute(
             "UPDATE nodes SET width = ?1, height = ?2 WHERE kind = 'folder'",
             params![FOLDER_NODE_WIDTH, FOLDER_NODE_HEIGHT],
@@ -215,6 +223,31 @@ impl Database {
                 transaction.execute(
                     "UPDATE nodes SET content_json = ?2 WHERE id = ?1",
                     params![id, serde_json::to_string(&content)?],
+                )?;
+                updated += 1;
+            }
+        }
+
+        let preview_rows = {
+            let mut statement = transaction.prepare(
+                "SELECT id, preview_image_path FROM canvases WHERE preview_image_path IS NOT NULL",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (id, preview_image_path) in preview_rows {
+            let mut value = Value::String(preview_image_path);
+            if rewrite_asset_paths_in_value(&mut value, legacy_assets_dir, assets_dir) {
+                let Value::String(rewritten_path) = value else {
+                    unreachable!("rewriting a string path must preserve its JSON type");
+                };
+                transaction.execute(
+                    "UPDATE canvases SET preview_image_path = ?2 WHERE id = ?1",
+                    params![id, rewritten_path],
                 )?;
                 updated += 1;
             }
@@ -329,15 +362,16 @@ impl Database {
             params![id, name, timestamp],
         )?;
         let record = transaction.query_row(
-            "SELECT id, name, is_private, created_at, updated_at FROM canvases WHERE id = ?1",
+            "SELECT id, name, is_private, preview_image_path, created_at, updated_at FROM canvases WHERE id = ?1",
             [id],
             |row| {
                 Ok(CanvasRecord {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     is_private: row.get::<_, i64>(2)? != 0,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
+                    preview_image_path: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
                 })
             },
         )?;
@@ -361,19 +395,97 @@ impl Database {
         }
         connection
             .query_row(
-                "SELECT id, name, is_private, created_at, updated_at FROM canvases WHERE id = ?1",
+                "SELECT id, name, is_private, preview_image_path, created_at, updated_at FROM canvases WHERE id = ?1",
                 [id],
                 |row| {
                     Ok(CanvasRecord {
                         id: row.get(0)?,
                         name: row.get(1)?,
                         is_private: row.get::<_, i64>(2)? != 0,
-                        created_at: row.get(3)?,
-                        updated_at: row.get(4)?,
+                        preview_image_path: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
                     })
                 },
             )
             .map_err(CanvasError::Database)
+    }
+
+    pub fn set_project_preview_image(
+        &self,
+        project_id: &str,
+        image_node_id: &str,
+    ) -> CanvasResult<CanvasRecord> {
+        if project_id.trim().is_empty() || image_node_id.trim().is_empty() {
+            return Err(CanvasError::Validation(
+                "project id and image node id cannot be empty".to_owned(),
+            ));
+        }
+
+        let connection = self.lock()?;
+        let (node_canvas_id, kind, content_json) = connection
+            .query_row(
+                "SELECT canvas_id, kind, content_json FROM nodes WHERE id = ?1",
+                [image_node_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                CanvasError::Validation(format!("image node not found: {image_node_id}"))
+            })?;
+        if kind != "image" {
+            return Err(CanvasError::Validation(
+                "only image assets can be used as a project preview".to_owned(),
+            ));
+        }
+
+        let belongs_to_project = connection.query_row(
+            "WITH RECURSIVE project_canvases(id) AS (
+                 SELECT ?1
+                 UNION ALL
+                 SELECT canvas_folders.child_canvas_id
+                 FROM canvas_folders
+                 JOIN nodes AS folder_nodes ON folder_nodes.id = canvas_folders.folder_node_id
+                 JOIN project_canvases ON project_canvases.id = folder_nodes.canvas_id
+             )
+             SELECT EXISTS(SELECT 1 FROM project_canvases WHERE id = ?2)",
+            params![project_id, node_canvas_id],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !belongs_to_project {
+            return Err(CanvasError::Validation(
+                "the selected image does not belong to this project".to_owned(),
+            ));
+        }
+
+        let content: Value = serde_json::from_str(&content_json)?;
+        let asset_path = content
+            .get("assetPath")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| {
+                CanvasError::Validation("the selected image has no asset path".to_owned())
+            })?;
+        let timestamp = now();
+        let changed = connection.execute(
+            "UPDATE canvases
+             SET preview_image_path = ?2, updated_at = ?3
+             WHERE id = ?1",
+            params![project_id, asset_path, timestamp],
+        )?;
+        if changed == 0 {
+            return Err(CanvasError::Validation(format!(
+                "project not found: {project_id}"
+            )));
+        }
+        load_workspace_from_connection(&connection, project_id).map(|snapshot| snapshot.canvas)
     }
 
     pub fn delete_project(&self, id: &str) -> CanvasResult<()> {
@@ -3481,15 +3593,16 @@ fn load_workspace_from_connection(
     canvas_id: &str,
 ) -> CanvasResult<WorkspaceSnapshot> {
     let canvas = connection.query_row(
-        "SELECT id, name, is_private, created_at, updated_at FROM canvases WHERE id = ?1",
+        "SELECT id, name, is_private, preview_image_path, created_at, updated_at FROM canvases WHERE id = ?1",
         [canvas_id],
         |row| {
             Ok(CanvasRecord {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 is_private: row.get::<_, i64>(2)? != 0,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
+                preview_image_path: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
             })
         },
     )?;
@@ -3983,6 +4096,42 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn stores_an_image_asset_as_the_project_preview() {
+        let database = Database::in_memory().unwrap();
+        let preview_path = r"C:\assets\project-preview.png";
+        let mut image = node_with_kind("image", "Preview", "project-preview-image");
+        image.content = json!({ "assetPath": preview_path });
+        let created = database.create_node(image).unwrap();
+
+        let canvas = database
+            .set_project_preview_image(DEFAULT_CANVAS_ID, &created.node.id)
+            .unwrap();
+
+        assert_eq!(canvas.preview_image_path.as_deref(), Some(preview_path));
+        assert_eq!(
+            database
+                .load_project(DEFAULT_CANVAS_ID)
+                .unwrap()
+                .canvas
+                .preview_image_path
+                .as_deref(),
+            Some(preview_path)
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_image_as_the_project_preview() {
+        let database = Database::in_memory().unwrap();
+        let created = database
+            .create_node(text_node("Not an image", "not-project-preview"))
+            .unwrap();
+
+        assert!(database
+            .set_project_preview_image(DEFAULT_CANVAS_ID, &created.node.id)
+            .is_err());
     }
 
     #[test]

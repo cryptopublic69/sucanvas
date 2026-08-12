@@ -13,6 +13,7 @@ pub struct CanvasRecord {
     pub id: String,
     pub name: String,
     pub is_private: bool,
+    pub preview_image_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -244,6 +245,13 @@ pub struct UpdateProjectInput {
 pub struct SetProjectPrivacyInput {
     pub id: String,
     pub is_private: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProjectPreviewImageInput {
+    pub project_id: String,
+    pub image_node_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
