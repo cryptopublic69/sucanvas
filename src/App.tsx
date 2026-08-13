@@ -480,6 +480,8 @@ function CanvasWorkspace() {
   ) ?? null;
   const saveTimers = useRef(new Map<string, number>());
   const pendingPatches = useRef(new Map<string, NodePatch>());
+  const contentGraphSyncTimer = useRef<number | null>(null);
+  const contentGraphSyncSequence = useRef(0);
   const nodesSnapshot = useRef<CanvasFlowNode[]>([]);
   const edgesSnapshot = useRef<Edge[]>([]);
   const contentNodesCache = useRef<CanvasFlowNode[]>([]);
@@ -4899,6 +4901,51 @@ function CanvasWorkspace() {
   );
   makeFlowNodeRef.current = makeFlowNode;
 
+  const scheduleContentGraphReconciliation = useCallback((canvasId: string) => {
+    const sequence = ++contentGraphSyncSequence.current;
+    if (contentGraphSyncTimer.current) {
+      window.clearTimeout(contentGraphSyncTimer.current);
+    }
+
+    const reconcile = async () => {
+      if (sequence !== contentGraphSyncSequence.current || activeProjectIdRef.current !== canvasId) return;
+      const hasPendingActiveCanvasPatches = [...pendingPatches.current.keys()].some((nodeId) => (
+        nodesSnapshot.current.find((node) => node.id === nodeId)?.data.record.canvasId === canvasId
+      ));
+      if (hasPendingActiveCanvasPatches) {
+        contentGraphSyncTimer.current = window.setTimeout(() => void reconcile(), 220);
+        return;
+      }
+
+      try {
+        const snapshot = await invoke<WorkspaceSnapshot>("inspect_workspace", { canvasId });
+        if (
+          sequence !== contentGraphSyncSequence.current
+          || activeProjectIdRef.current !== canvasId
+          || [...pendingPatches.current.keys()].some((nodeId) => (
+            nodesSnapshot.current.find((node) => node.id === nodeId)?.data.record.canvasId === canvasId
+          ))
+        ) return;
+
+        setProjects((current) => current.map((project) => (
+          project.canvas.id === canvasId ? snapshot : project
+        )));
+        setNodes((current) => {
+          const selectedNodeIds = new Set(current.filter((node) => node.selected).map((node) => node.id));
+          return snapshot.nodes.map((record) => ({
+            ...makeFlowNode(record),
+            selected: selectedNodeIds.has(record.id),
+          }));
+        });
+        setEdges(snapshot.edges.map(toFlowEdge));
+      } catch (error) {
+        reportError(error);
+      }
+    };
+
+    contentGraphSyncTimer.current = window.setTimeout(() => void reconcile(), 260);
+  }, [makeFlowNode, reportError, setEdges, setNodes]);
+
   const restoreCompletedComfyTask = useCallback(async (
     task: PersistedComfyTask,
     recovered: ComfyClientTaskStatus,
@@ -6130,16 +6177,21 @@ function CanvasWorkspace() {
           setEdges((current) => current.some((edge) => edge.id === record.id)
             ? current
             : [...current, toFlowEdge(record)]);
+          scheduleContentGraphReconciliation(record.canvasId);
           setNotice("内容关系已连接");
         });
         unlistenEdgeDeleted = await listen<string>("canvas://edge-deleted", (event) => {
           if (!mounted) return;
           const edgeId = event.payload;
+          const deletedEdge = edgesSnapshot.current.find((edge) => edge.id === edgeId);
+          const deletedEdgeData = deletedEdge?.data as CanvasEdgeData | undefined;
+          const deletedCanvasId = deletedEdgeData?.record?.canvasId;
           setProjects((current) => current.map((project) => ({
             ...project,
             edges: project.edges.filter((edge) => edge.id !== edgeId),
           })));
           setEdges((current) => current.filter((edge) => edge.id !== edgeId));
+          if (deletedCanvasId) scheduleContentGraphReconciliation(deletedCanvasId);
           setNotice("内容关系已断开");
         });
       } catch (error) {
@@ -6156,7 +6208,7 @@ function CanvasWorkspace() {
       unlistenEdgeCreated?.();
       unlistenEdgeDeleted?.();
     };
-  }, [makeFlowNode, reportError, screenToFlowPosition, setEdges, setNodes]);
+  }, [makeFlowNode, reportError, scheduleContentGraphReconciliation, screenToFlowPosition, setEdges, setNodes]);
 
   const addTextNode = useCallback(async (position?: { x: number; y: number }) => {
     if (!activeProjectId) return;

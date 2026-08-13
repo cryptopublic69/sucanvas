@@ -29,6 +29,7 @@ use crate::models::{
 
 const FOLDER_NODE_WIDTH: f64 = 420.0;
 const FOLDER_NODE_HEIGHT: f64 = 274.25;
+const CONTENT_ITERATION_NODE_WIDTH: f64 = 460.0;
 
 #[derive(Debug, Error)]
 pub enum CanvasError {
@@ -2124,7 +2125,7 @@ impl Database {
                 request_id,
                 x,
                 y,
-                width: 360.0,
+                width: CONTENT_ITERATION_NODE_WIDTH,
                 height: 320.0,
                 status: "ready".to_owned(),
                 created_at: timestamp.clone(),
@@ -2271,6 +2272,7 @@ impl Database {
             .unwrap_or(0)
             + 1;
         let timestamp = now();
+        let derived_from = content_version_sources(&transaction, &node.id)?;
         let version = PromptVersionRecord {
             id: format!("version:{}", Uuid::new_v4()),
             label: format!("v{version_number}"),
@@ -2286,7 +2288,7 @@ impl Database {
             created_at: timestamp.clone(),
             request_id: Some(input.request_id),
             source: Some(source),
-            derived_from: Vec::new(),
+            derived_from,
         };
         versions.push(version.clone());
         let content = node.content.as_object_mut().ok_or_else(|| {
@@ -2594,6 +2596,11 @@ impl Database {
         let source = input.source.unwrap_or_else(|| "app".to_owned());
         let request_id = input.request_id.filter(|value| !value.trim().is_empty());
         let content_json = serde_json::to_string(&input.content)?;
+        let default_width = if kind == "text" && is_content_iteration_node(&input.content) {
+            CONTENT_ITERATION_NODE_WIDTH
+        } else {
+            360.0
+        };
 
         let mut connection = self.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2619,7 +2626,7 @@ impl Database {
             request_id,
             x: input.x.unwrap_or(auto_x),
             y: input.y.unwrap_or(auto_y),
-            width: input.width.unwrap_or(360.0),
+            width: input.width.unwrap_or(default_width),
             height: input.height.unwrap_or(240.0),
             status: "ready".to_owned(),
             created_at: now(),
@@ -3739,6 +3746,7 @@ fn validate_prompt_title<'a>(label: &str, value: &'a str) -> CanvasResult<&'a st
             "{label} exceeds 500 characters"
         )));
     }
+    validate_visible_utf8_text(label, value)?;
     Ok(value)
 }
 
@@ -3753,6 +3761,7 @@ fn validate_prompt_text(text: &str, information: &str) -> CanvasResult<()> {
             "prompt text and information exceed 480 KiB".to_owned(),
         ));
     }
+    validate_visible_utf8_text("prompt information", information)?;
     Ok(())
 }
 
@@ -4693,7 +4702,7 @@ fn prompt_scene_batch_positions<'a>(
         return Ok(Vec::new());
     }
 
-    const NODE_WIDTH: f64 = 360.0;
+    const NODE_WIDTH: f64 = CONTENT_ITERATION_NODE_WIDTH;
     const GAP: f64 = 60.0;
 
     let existing_nodes = existing_bindings
@@ -4737,6 +4746,8 @@ fn validate_node_input(input: &CreateNodeInput) -> CanvasResult<()> {
             "node title exceeds 500 characters".to_owned(),
         ));
     }
+    validate_visible_utf8_text("node title", &input.title)?;
+    validate_visible_json_text(&input.content)?;
     let content_size = serde_json::to_vec(&input.content)?.len();
     if content_size > 512 * 1024 {
         return Err(CanvasError::Validation(
@@ -4763,6 +4774,8 @@ fn validate_node(node: &NodeRecord) -> CanvasResult<()> {
             "node title exceeds 500 characters".to_owned(),
         ));
     }
+    validate_visible_utf8_text("node title", &node.title)?;
+    validate_visible_json_text(&node.content)?;
     if serde_json::to_vec(&node.content)?.len() > 512 * 1024 {
         return Err(CanvasError::Validation(
             "node content exceeds 512 KiB".to_owned(),
@@ -4799,6 +4812,59 @@ fn validate_node(node: &NodeRecord) -> CanvasResult<()> {
         }
     }
     Ok(())
+}
+
+fn validate_visible_json_text(value: &Value) -> CanvasResult<()> {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                validate_visible_json_text(item)?;
+            }
+        }
+        Value::Object(object) => {
+            for (key, nested) in object {
+                if matches!(
+                    key.as_str(),
+                    "title" | "information" | "sceneTitle" | "promptSetTitle"
+                ) {
+                    if let Some(text) = nested.as_str() {
+                        validate_visible_utf8_text(key, text)?;
+                    }
+                }
+                validate_visible_json_text(nested)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_visible_utf8_text(label: &str, value: &str) -> CanvasResult<()> {
+    if contains_likely_utf8_mojibake(value) {
+        return Err(CanvasError::Validation(format!(
+            "{label} contains likely UTF-8 mojibake; refuse to persist corrupted text"
+        )));
+    }
+    Ok(())
+}
+
+fn contains_likely_utf8_mojibake(value: &str) -> bool {
+    let mut chars = value.chars().peekable();
+    while let Some(current) = chars.next() {
+        if matches!(current, '\u{00c2}' | '\u{00c3}' | '\u{00e2}' | '\u{00f0}') {
+            return true;
+        }
+        if matches!(
+            current,
+            '\u{00e4}' | '\u{00e5}' | '\u{00e6}' | '\u{00e7}' | '\u{00e8}' | '\u{00e9}'
+        ) && chars
+            .peek()
+            .is_some_and(|next| ('\u{0080}'..='\u{00bf}').contains(next))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn validate_kind(kind: &str) -> CanvasResult<()> {
@@ -5001,6 +5067,45 @@ mod tests {
         assert!(!duplicate.created);
         assert_eq!(first.node.id, duplicate.node.id);
         assert_eq!(duplicate.node.title, "First");
+    }
+
+    #[test]
+    fn defaults_content_iteration_nodes_to_the_shared_width() {
+        let database = Database::in_memory().unwrap();
+        let mut input = text_node("内容迭代", "content-width-default");
+        input.content = json!({
+            "text": "剧情概念",
+            "contentNode": true,
+            "contentType": "plot",
+            "promptVersions": []
+        });
+
+        let created = database.create_node(input).unwrap();
+
+        assert_eq!(created.node.width, CONTENT_ITERATION_NODE_WIDTH);
+    }
+
+    #[test]
+    fn rejects_likely_utf8_mojibake_in_visible_node_fields() {
+        let database = Database::in_memory().unwrap();
+        let mojibake = format!("\u{00e4}\u{00b8}\u{008e}");
+
+        let invalid_title = text_node(&format!("S1 {mojibake}"), "mojibake-title");
+        let title_error = database.create_node(invalid_title).unwrap_err();
+        assert!(title_error.to_string().contains("likely UTF-8 mojibake"));
+
+        let mut invalid_information = text_node("S1", "mojibake-information");
+        invalid_information.content = json!({
+            "text": "English prompt",
+            "information": format!("说明 {mojibake}")
+        });
+        let information_error = database.create_node(invalid_information).unwrap_err();
+        assert!(information_error
+            .to_string()
+            .contains("likely UTF-8 mojibake"));
+
+        let valid = text_node("中文标题", "valid-utf8-title");
+        assert!(database.create_node(valid).is_ok());
     }
 
     #[test]
@@ -6987,6 +7092,10 @@ mod tests {
             .scenes
             .iter()
             .all(|scene| scene.binding.latest_version.as_deref() == Some("v1")));
+        assert!(first
+            .scenes
+            .iter()
+            .all(|scene| scene.node.width == CONTENT_ITERATION_NODE_WIDTH));
         let first_row_y = first.scenes[0].node.y;
         assert!(first
             .scenes
@@ -7088,6 +7197,71 @@ mod tests {
                 .duration_seconds,
             15
         );
+    }
+
+    #[test]
+    fn appending_prompt_scene_versions_inherits_connected_active_storyboard_version() {
+        let database = Database::in_memory().unwrap();
+        let mut storyboard_input = text_node("场景 1", "prompt-scene-version-source");
+        storyboard_input.content = json!({
+            "text": "分镜 v3",
+            "contentNode": true,
+            "contentType": "storyboard",
+            "promptVersions": [{
+                "id": "storyboard-version-3",
+                "label": "v3",
+                "title": "场景 1",
+                "text": "分镜 v3",
+                "information": ""
+            }],
+            "activePromptVersionId": "storyboard-version-3"
+        });
+        let storyboard = database.create_node(storyboard_input).unwrap().node;
+        let created = database
+            .create_missing_prompt_scenes(
+                "prompt-set-version-provenance",
+                DEFAULT_CANVAS_ID,
+                prompt_scene_batch("create-prompt-provenance", &["S01"]),
+            )
+            .unwrap();
+        let prompt_node = created.scenes[0].node.clone();
+        database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: storyboard.id.clone(),
+                target_node_id: prompt_node.id,
+                kind: Some("content-derivation".to_owned()),
+                metadata: json!({ "relation": "content-derivation" }),
+            })
+            .unwrap();
+
+        let appended = database
+            .append_prompt_version(
+                "prompt-set-version-provenance",
+                "S01",
+                AppendPromptVersionInput {
+                    text: "Updated English prompt".to_owned(),
+                    information: "更新后的中文解释".to_owned(),
+                    reference_selection: None,
+                    generation_options: Some(crate::models::PromptGenerationOptions {
+                        duration_seconds: 12,
+                    }),
+                    title: None,
+                    source: Some("test".to_owned()),
+                    request_id: "append-prompt-provenance-v2".to_owned(),
+                    expected_version_count: Some(1),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(appended.version.label, "v2");
+        assert_eq!(appended.version.derived_from.len(), 1);
+        assert_eq!(appended.version.derived_from[0].node_id, storyboard.id);
+        assert_eq!(
+            appended.version.derived_from[0].version_id,
+            "storyboard-version-3"
+        );
+        assert_eq!(appended.version.derived_from[0].version_label, "v3");
     }
 
     #[test]

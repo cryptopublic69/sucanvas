@@ -1751,6 +1751,10 @@ const VIDEO_GENERATION_NODE_WIDTH = 460;
 const VIDEO_NODE_BASE_HEIGHT = 696;
 const VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS = 10;
 const VIDEO_NODE_TEXT_ROW_HEIGHT = 67;
+const VIDEO_NODE_IMAGE_GRID_COLUMNS = 5;
+const VIDEO_NODE_IMAGE_GRID_GAP = 6;
+const VIDEO_NODE_BODY_HORIZONTAL_PADDING = 28;
+const VIDEO_NODE_EXECUTION_AREA_HEIGHT = 72;
 const MATERIAL_NOTE_HEIGHT = 37;
 const MATERIAL_NODE_LAYOUT_VERSION = 2;
 const MEDIA_NODE_CHROME_HEIGHT = 73 + MATERIAL_NOTE_HEIGHT;
@@ -2083,20 +2087,30 @@ function videoGenerationAutoHeight(
   const audioCount = mediaKinds.filter((kind) => kind === "audio").length;
   const videoCount = mediaKinds.length - imageCount - audioCount;
   const listMediaRows = videoCount + Math.ceil(audioCount / 2);
-  const imageColumns = Math.max(1, Math.floor((Math.max(180, nodeWidth - 32) + 6) / 66));
+  // `.video-input-list.is-image-grid` always has five equal-width columns.
+  // Use that real CSS geometry rather than the old 66px estimate, otherwise a
+  // wider node underestimates its image grid and clips its execution controls.
+  const imageTileWidth = Math.max(
+    1,
+    (Math.max(180, nodeWidth - VIDEO_NODE_BODY_HORIZONTAL_PADDING)
+      - VIDEO_NODE_IMAGE_GRID_GAP * (VIDEO_NODE_IMAGE_GRID_COLUMNS - 1))
+      / VIDEO_NODE_IMAGE_GRID_COLUMNS,
+  );
   // The image group always appends a clear-all tile, so it also occupies a grid cell.
-  const imageRows = imageCount ? Math.ceil((imageCount + 1) / imageColumns) : 0;
+  const imageRows = imageCount
+    ? Math.ceil((imageCount + 1) / VIDEO_NODE_IMAGE_GRID_COLUMNS)
+    : 0;
   const textRows = Math.max(
     1,
     Math.min(VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS, textInputCount),
   );
   const contentHeight = 568
     + listMediaRows * 67
-    + imageRows * 66
     + groupCount * 36
     + textRows * VIDEO_NODE_TEXT_ROW_HEIGHT
     + (storyboardReferenceCompiler ? 190 : 0)
-    + 30;
+    + VIDEO_NODE_EXECUTION_AREA_HEIGHT
+    + imageRows * Math.ceil(imageTileWidth);
   return Math.min(
     2400,
     Math.max(
@@ -4021,6 +4035,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const isContentIterationNode = isText && isContentIterationContent(record.content);
   const contentNodeType = contentNodeTypeFromContent(record.content);
   const allPromptVersions = isContentIterationNode ? promptVersionsFromContent(record.content) : [];
+  const isContentTypeLocked = isContentIterationNode && allPromptVersions.length > 0;
   const storedActivePromptVersion = isContentIterationNode
     ? activePromptVersionFromContent(record.content)
     : null;
@@ -4028,30 +4043,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     const version = activePromptVersionFromContent(parent.content);
     return version ? [{ nodeId: parent.id, versionId: version.id, versionLabel: version.label }] : [];
   });
-  const isFilteredByActiveParentVersion = activeParentVersions.length > 0;
-  const canInferLegacyParentV1 = isFilteredByActiveParentVersion && contentParents.every((parent) => (
-    promptVersionsFromContent(parent.content).length === 1
-  ));
-  const versionMatchesActiveParents = (version: PromptVersionRecord) => (
-    activeParentVersions.every((parentVersion) => (
-      version.derivedFrom?.some((source) => (
-        source.nodeId === parentVersion.nodeId && source.versionId === parentVersion.versionId
-      ))
-      || (canInferLegacyParentV1 && !(version.derivedFrom?.length))
-    ))
-  );
-  const promptVersions = isFilteredByActiveParentVersion
-    ? allPromptVersions.filter(versionMatchesActiveParents)
-    : allPromptVersions;
+  // 上游版本仅作为新版本的来源快照和历史追溯信息，不能决定下游版本的可见性。
+  // 否则上游的局部更新会隐藏仍有效、但关联旧上游版本的下游内容。
+  const promptVersions = allPromptVersions;
   const activePromptVersion = promptVersions.find(
     (version) => version.id === storedActivePromptVersion?.id,
   ) ?? promptVersions[promptVersions.length - 1] ?? null;
-  const activeParentVersionLabel = activeParentVersions
-    .map((parentVersion) => {
-      const parent = contentParents.find((candidate) => candidate.id === parentVersion.nodeId);
-      return `${parent?.title || "上游内容"} ${parentVersion.versionLabel}`;
-    })
-    .join("、");
   const savedText = isContentIterationNode
     ? activePromptVersion?.text ?? ""
     : textFromContent(record.content);
@@ -4408,55 +4405,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   useEffect(() => {
     setInformationDraft(savedInformation);
   }, [savedInformation]);
-
-  useEffect(() => {
-    if (
-      !isContentIterationNode
-      || !isFilteredByActiveParentVersion
-      || !activePromptVersion
-      || activePromptVersion.id === storedActivePromptVersion?.id
-    ) return;
-    onChange(id, {
-      content: {
-        ...record.content,
-        text: activePromptVersion.text,
-        information: activePromptVersion.information,
-        activePromptVersionId: activePromptVersion.id,
-      },
-    });
-  }, [
-    activePromptVersion,
-    id,
-    isContentIterationNode,
-    isFilteredByActiveParentVersion,
-    onChange,
-    record.content,
-    storedActivePromptVersion?.id,
-  ]);
-
-  useEffect(() => {
-    if (!isContentIterationNode || !canInferLegacyParentV1) return;
-    const legacyVersions = allPromptVersions.filter((version) => !(version.derivedFrom?.length));
-    if (!legacyVersions.length) return;
-    onChange(id, {
-      content: {
-        ...record.content,
-        promptVersions: allPromptVersions.map((version) => (
-          version.derivedFrom?.length
-            ? version
-            : { ...version, derivedFrom: activeParentVersions }
-        )),
-      },
-    });
-  }, [
-    activeParentVersions,
-    allPromptVersions,
-    canInferLegacyParentV1,
-    id,
-    isContentIterationNode,
-    onChange,
-    record.content,
-  ]);
 
   useEffect(() => () => {
     if (videoResizeFrameRef.current !== null) {
@@ -4853,6 +4801,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   };
 
   const changeContentNodeType = (nextType: ContentNodeType) => {
+    if (isContentTypeLocked) return;
     onChange(id, {
       content: {
         ...record.content,
@@ -5996,6 +5945,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 type="button"
                 className="content-type-toggle"
                 onClick={() => setContentTypeMenuOpen((open) => !open)}
+                disabled={isContentTypeLocked}
                 aria-expanded={contentTypeMenuOpen}
                 aria-label="选择内容类型"
               >
@@ -6033,27 +5983,21 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               >
                 <History size={12} />
                 <strong>{activePromptVersion?.label ?? "未创建"}</strong>
-                <span>{isFilteredByActiveParentVersion
-                  ? `${promptVersions.length}/${allPromptVersions.length} 个版本`
-                  : `${promptVersions.length} 个版本`}</span>
+                <span>{`${promptVersions.length} 个版本`}</span>
                 <ChevronDown size={12} />
               </button>
               {promptVersionMenuOpen && (
                 <div className="prompt-version-menu" role="menu" aria-label="内容历史版本">
                   <header>
                     <strong>历史版本</strong>
-                    <span>{isFilteredByActiveParentVersion
-                      ? `仅显示基于 ${activeParentVersionLabel} 的版本`
-                      : "点击切换当前版本"}</span>
+                    <span>点击切换当前版本</span>
                   </header>
                   <div
                     className="prompt-version-menu-list nowheel"
                     onWheelCapture={scrollElementWithWheel}
                   >
                     {!promptVersions.length && (
-                      <div className="prompt-version-empty">{isFilteredByActiveParentVersion
-                        ? `没有基于 ${activeParentVersionLabel} 的版本`
-                        : "尚无版本，点击“新版本”创建 v1"}</div>
+                      <div className="prompt-version-empty">尚无版本，点击“新版本”创建 v1</div>
                     )}
                     {[...promptVersions].reverse().map((version) => (
                       <div
@@ -6153,24 +6097,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             >
               <Star size={13} fill={activePromptVersion?.id === bestPromptVersionId ? "currentColor" : "none"} />
             </button>
-            <button
-              type="button"
-              className="nodrag prompt-version-create"
-              onClick={createPromptVersion}
-              title={`复制当前内容并创建新版本；将锁定来源：${nextVersionProvenance}`}
-              aria-label={`创建新版本；将锁定来源：${nextVersionProvenance}`}
-            >
-              <Plus size={13} />
-              新版本
-            </button>
           </div>
           <div className="text-editor-shell prompt-version-editor-shell">
-            {isFilteredByActiveParentVersion && !activePromptVersion ? (
-              <div className="content-version-filter-empty">
-                <strong>没有对应版本</strong>
-                <span>当前仅显示基于 {activeParentVersionLabel} 创建的版本。</span>
-              </div>
-            ) : nodeMarkdownPreview ? (
+            {nodeMarkdownPreview ? (
               <MarkdownPreview source={textDraft} className="node-markdown-preview nowheel" />
             ) : (
               <textarea
@@ -8171,6 +8100,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   />
                 </div>
               )}
+              {isContentIterationNode && (
+                <button
+                  type="button"
+                  className="expanded-editor-create-version"
+                  onClick={createPromptVersion}
+                  title={`复制当前内容并创建新版本；将锁定来源：${nextVersionProvenance}`}
+                  aria-label={`添加新版本；将锁定来源：${nextVersionProvenance}`}
+                >
+                  <Plus size={14} />
+                  添加新版本
+                </button>
+              )}
               {isNote && (
                 <>
                   <button
@@ -8249,12 +8190,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       {expandedInformationHidden ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}
                     </button>
                   </header>
-                  {isFilteredByActiveParentVersion && !activePromptVersion ? (
-                    <div className="content-version-filter-empty is-expanded">
-                      <strong>没有对应版本</strong>
-                      <span>当前上游选择的是 {activeParentVersionLabel}，这里仅显示基于该版本创建的内容。</span>
-                    </div>
-                  ) : expandedTextMarkdownPreview ? (
+                  {expandedTextMarkdownPreview ? (
                     <MarkdownPreview source={textDraft} className="expanded-markdown-preview" enableSpaceTablePan />
                   ) : (
                     <textarea
