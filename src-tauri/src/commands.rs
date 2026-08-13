@@ -39,7 +39,7 @@ use crate::{
         self, SaveWorkflowModuleInput, WorkflowBindings, WorkflowInputContract,
         WorkflowModuleRecord, WorkflowModuleValidation,
     },
-    ApplicationState, RunningComfyTask,
+    ApplicationState, CanvasSelectionState, RunningComfyTask,
 };
 
 fn portable_frontend_settings(settings: BTreeMap<String, String>) -> BTreeMap<String, String> {
@@ -240,8 +240,60 @@ pub fn load_workspace(
     *state
         .active_canvas_id
         .write()
-        .map_err(|_| "active project lock is poisoned".to_owned())? = selected_id;
+        .map_err(|_| "active project lock is poisoned".to_owned())? = selected_id.clone();
+    *state
+        .current_canvas_selection
+        .write()
+        .map_err(|_| "canvas selection lock is poisoned".to_owned())? = CanvasSelectionState {
+        canvas_id: Some(selected_id),
+        node_ids: Vec::new(),
+        updated_at: Local::now().to_rfc3339(),
+    };
     Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn update_canvas_selection(
+    canvas_id: Option<String>,
+    node_ids: Vec<String>,
+    state: State<'_, ApplicationState>,
+) -> Result<(), String> {
+    let active_canvas_id = state
+        .active_canvas_id
+        .read()
+        .map_err(|_| "active project lock is poisoned".to_owned())?
+        .clone();
+    let canvas_id = canvas_id.and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    });
+    let mut selection = state
+        .current_canvas_selection
+        .write()
+        .map_err(|_| "canvas selection lock is poisoned".to_owned())?;
+
+    if canvas_id.as_deref() != Some(active_canvas_id.as_str()) {
+        *selection = CanvasSelectionState {
+            canvas_id: Some(active_canvas_id),
+            node_ids: Vec::new(),
+            updated_at: Local::now().to_rfc3339(),
+        };
+        return Ok(());
+    }
+
+    let mut seen = HashSet::new();
+    *selection = CanvasSelectionState {
+        canvas_id,
+        node_ids: node_ids
+            .into_iter()
+            .filter_map(|node_id| {
+                let node_id = node_id.trim().to_owned();
+                (!node_id.is_empty() && seen.insert(node_id.clone())).then_some(node_id)
+            })
+            .collect(),
+        updated_at: Local::now().to_rfc3339(),
+    };
+    Ok(())
 }
 
 #[tauri::command]

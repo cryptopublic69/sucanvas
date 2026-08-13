@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import {
   BaseEdge,
   Edge,
+  EdgeLabelRenderer,
   EdgeProps,
   Handle,
   Node,
@@ -21,6 +22,7 @@ import {
   Clapperboard,
   Copy,
   Dices,
+  Eye,
   FileText,
   Film,
   FolderOpen,
@@ -33,6 +35,8 @@ import {
   Music,
   Pause,
   Palette,
+  PanelRightClose,
+  PanelRightOpen,
   Pencil,
   Play,
   Plus,
@@ -53,6 +57,7 @@ import {
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
+  ReactNode,
   WheelEvent as ReactWheelEvent,
   memo,
   useEffect,
@@ -61,6 +66,249 @@ import {
 } from "react";
 
 type JsonObject = Record<string, unknown>;
+
+function markdownInline(source: string): ReactNode[] {
+  const tokens = source.split(/(`[^`]*`|\*\*[^*]+\*\*|__[^_]+__|\[[^\]]+\]\([^)]+\)|\*[^*]+\*|_[^_]+_)/g);
+  return tokens.filter(Boolean).map((token, index) => {
+    if (token.startsWith("`") && token.endsWith("`")) {
+      return <code key={index}>{token.slice(1, -1)}</code>;
+    }
+    if ((token.startsWith("**") && token.endsWith("**")) || (token.startsWith("__") && token.endsWith("__"))) {
+      return <strong key={index}>{token.slice(2, -2)}</strong>;
+    }
+    if ((token.startsWith("*") && token.endsWith("*")) || (token.startsWith("_") && token.endsWith("_"))) {
+      return <em key={index}>{token.slice(1, -1)}</em>;
+    }
+    const link = token.match(/^\[([^\]]+)\]\(([^\s)]+)\)$/);
+    if (link) {
+      const href = link[2];
+      if (/^(https?:|mailto:|#)/i.test(href)) {
+        return <a key={index} href={href} target={href.startsWith("#") ? undefined : "_blank"} rel="noreferrer">{link[1]}</a>;
+      }
+    }
+    return token;
+  });
+}
+
+function markdownTableCells(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return null;
+  const body = trimmed.replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let cell = "";
+  let escaped = false;
+  for (const character of body) {
+    if (escaped) {
+      cell += character;
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === "|") {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      cell += character;
+    }
+  }
+  if (escaped) cell += "\\";
+  cells.push(cell.trim());
+  return cells;
+}
+
+function isMarkdownTableDivider(cells: string[]) {
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function MarkdownPreview({
+  source,
+  className = "",
+  enableSpaceTablePan = false,
+}: {
+  source: string;
+  className?: string;
+  enableSpaceTablePan?: boolean;
+}) {
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const [tableDragging, setTableDragging] = useState(false);
+  const tableDragRef = useRef<{ pointerId: number; startX: number; startScrollLeft: number; element: HTMLDivElement } | null>(null);
+
+  useEffect(() => {
+    if (!enableSpaceTablePan) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.code === "Space") setSpaceHeld(true);
+    };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.code === "Space") setSpaceHeld(false);
+    };
+    const clearSpaceState = () => setSpaceHeld(false);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", clearSpaceState);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", clearSpaceState);
+    };
+  }, [enableSpaceTablePan]);
+
+  const startTableDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!enableSpaceTablePan || !spaceHeld || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const element = event.currentTarget;
+    tableDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startScrollLeft: element.scrollLeft,
+      element,
+    };
+    element.setPointerCapture(event.pointerId);
+    setTableDragging(true);
+  };
+
+  const moveTableDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = tableDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    drag.element.scrollLeft = drag.startScrollLeft - (event.clientX - drag.startX);
+  };
+
+  const endTableDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = tableDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (drag.element.hasPointerCapture(event.pointerId)) drag.element.releasePointerCapture(event.pointerId);
+    tableDragRef.current = null;
+    setTableDragging(false);
+  };
+
+  const blocks: ReactNode[] = [];
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  let paragraph: string[] = [];
+  let codeLines: string[] | null = null;
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    const key = `paragraph-${blocks.length}`;
+    blocks.push(<p key={key}>{paragraph.map((line, index) => (
+      <span key={index}>{index > 0 && <br />}{markdownInline(line)}</span>
+    ))}</p>);
+    paragraph = [];
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.startsWith("```")) {
+      flushParagraph();
+      if (codeLines) {
+        blocks.push(<pre key={`code-${blocks.length}`}><code>{codeLines.join("\n")}</code></pre>);
+        codeLines = null;
+      } else {
+        codeLines = [];
+      }
+      continue;
+    }
+    if (codeLines) {
+      codeLines.push(line);
+      continue;
+    }
+    if (!line.trim()) {
+      flushParagraph();
+      continue;
+    }
+    const tableHeader = markdownTableCells(line);
+    const tableDivider = index + 1 < lines.length ? markdownTableCells(lines[index + 1]) : null;
+    if (tableHeader && tableDivider && tableHeader.length === tableDivider.length && isMarkdownTableDivider(tableDivider)) {
+      flushParagraph();
+      const rows: string[][] = [];
+      index += 1;
+      while (index + 1 < lines.length) {
+        const nextRow = markdownTableCells(lines[index + 1]);
+        if (!nextRow || nextRow.length !== tableHeader.length) break;
+        index += 1;
+        rows.push(nextRow);
+      }
+      const key = `table-${blocks.length}`;
+      blocks.push(
+        <div
+          key={key}
+          className={`markdown-table-wrap ${enableSpaceTablePan ? "is-space-draggable" : ""} ${tableDragging ? "is-space-dragging" : ""}`.trim()}
+          onPointerDown={startTableDrag}
+          onPointerMove={moveTableDrag}
+          onPointerUp={endTableDrag}
+          onPointerCancel={endTableDrag}
+          title={enableSpaceTablePan ? "按住空格键后左右拖动查看表格" : undefined}
+        >
+          <table className="markdown-table">
+            <thead>
+              <tr>{tableHeader.map((cell, cellIndex) => <th key={cellIndex}>{markdownInline(cell)}</th>)}</tr>
+            </thead>
+            {rows.length > 0 && (
+              <tbody>
+                {rows.map((row, rowIndex) => (
+                  <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{markdownInline(cell)}</td>)}</tr>
+                ))}
+              </tbody>
+            )}
+          </table>
+        </div>,
+      );
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      const content = markdownInline(heading[2]);
+      const key = `heading-${blocks.length}`;
+      if (heading[1].length === 1) blocks.push(<h1 key={key}>{content}</h1>);
+      else if (heading[1].length === 2) blocks.push(<h2 key={key}>{content}</h2>);
+      else if (heading[1].length === 3) blocks.push(<h3 key={key}>{content}</h3>);
+      else blocks.push(<h4 key={key}>{content}</h4>);
+      continue;
+    }
+    if (/^([-*_])\1\1+\s*$/.test(line)) {
+      flushParagraph();
+      blocks.push(<hr key={`rule-${blocks.length}`} />);
+      continue;
+    }
+    const quote = line.match(/^>\s?(.*)$/);
+    if (quote) {
+      flushParagraph();
+      blocks.push(<blockquote key={`quote-${blocks.length}`}>{markdownInline(quote[1])}</blockquote>);
+      continue;
+    }
+    const unordered = line.match(/^[-*+]\s+(.+)$/);
+    if (unordered) {
+      flushParagraph();
+      const items: ReactNode[] = [<li key={index}>{markdownInline(unordered[1])}</li>];
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1].match(/^[-*+]\s+(.+)$/);
+        if (!next) break;
+        index += 1;
+        items.push(<li key={index}>{markdownInline(next[1])}</li>);
+      }
+      blocks.push(<ul key={`list-${blocks.length}`}>{items}</ul>);
+      continue;
+    }
+    const ordered = line.match(/^\d+[.)]\s+(.+)$/);
+    if (ordered) {
+      flushParagraph();
+      const items: ReactNode[] = [<li key={index}>{markdownInline(ordered[1])}</li>];
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1].match(/^\d+[.)]\s+(.+)$/);
+        if (!next) break;
+        index += 1;
+        items.push(<li key={index}>{markdownInline(next[1])}</li>);
+      }
+      blocks.push(<ol key={`ordered-${blocks.length}`}>{items}</ol>);
+      continue;
+    }
+    paragraph.push(line);
+  }
+  if (codeLines) blocks.push(<pre key={`code-${blocks.length}`}><code>{codeLines.join("\n")}</code></pre>);
+  flushParagraph();
+  return <div className={`nodrag markdown-preview ${className}`.trim()}>{blocks.length ? blocks : <p className="is-empty">暂无内容</p>}</div>;
+}
 
 function scrollElementWithWheel(event: ReactWheelEvent<HTMLDivElement>) {
   if (event.ctrlKey) return;
@@ -110,9 +358,48 @@ interface PromptVersionRecord {
   title: string;
   text: string;
   information: string;
+  referenceSelection?: StoryboardReferenceSelection;
+  generationOptions?: {
+    durationSeconds: number;
+  };
+  durationOverrideSeconds?: number;
   createdAt: string;
   requestId?: string;
   source?: string;
+  derivedFrom?: Array<{
+    nodeId: string;
+    versionId: string;
+    versionLabel: string;
+  }>;
+}
+
+type ContentNodeType = "plot" | "script" | "storyboard" | "prompt";
+
+const CONTENT_NODE_TYPE_OPTIONS: Array<{ value: ContentNodeType; label: string }> = [
+  { value: "plot", label: "剧情概念" },
+  { value: "script", label: "剧本" },
+  { value: "storyboard", label: "分镜" },
+  { value: "prompt", label: "生成提示词" },
+];
+
+function isContentIterationContent(content: JsonObject): boolean {
+  return content.contentNode === true
+    || content.promptVersionNode === true
+    || content.storySceneNode === true;
+}
+
+function contentNodeTypeFromContent(content: JsonObject): ContentNodeType {
+  if (content.contentType === "plot"
+    || content.contentType === "script"
+    || content.contentType === "storyboard"
+    || content.contentType === "prompt") {
+    return content.contentType;
+  }
+  return content.storySceneNode === true ? "storyboard" : "prompt";
+}
+
+function contentNodeTypeLabel(type: ContentNodeType): string {
+  return CONTENT_NODE_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? "内容";
 }
 
 interface PromptSceneBindingRecord {
@@ -323,6 +610,33 @@ interface ComfyClientTaskStatus {
   executionElapsedSeconds?: number | null;
 }
 
+type StoryboardReferenceKind = "image" | "audio" | "video";
+
+interface StoryboardReferenceAsset {
+  sourceId: string;
+  kind: StoryboardReferenceKind;
+  label: string;
+  subjectLabel?: string;
+  role: string;
+}
+
+interface StoryboardReferenceSelection {
+  sceneKey: string;
+  assets: StoryboardReferenceAsset[];
+}
+
+interface StoryboardReferenceMapping extends StoryboardReferenceAsset {
+  title: string;
+}
+
+interface StoryboardReferenceResolution {
+  selection: StoryboardReferenceSelection | null;
+  selectedMedia: NodeRecord[];
+  mappings: StoryboardReferenceMapping[];
+  skippedCount: number;
+  error: string;
+}
+
 interface GenerationSnapshot {
   prompt: string;
   promptInformation: string;
@@ -360,6 +674,11 @@ interface GenerationSnapshot {
   imageRoles: FrameRole[];
   audioPaths: string[];
   videoPaths: string[];
+  referenceCompilerMode?: boolean;
+  referenceSelection?: StoryboardReferenceSelection | null;
+  referenceSelectionError?: string;
+  referenceMappings?: StoryboardReferenceMapping[];
+  referenceCandidateCount?: number;
   workflowModuleId: string;
   workflowModuleRevision: string;
 }
@@ -382,6 +701,7 @@ interface VideoRegenerationPromptOption {
   label: string;
   prompt: string;
   information: string;
+  referenceSelection: StoryboardReferenceSelection | null;
   promptNodeId: string;
   promptNodeTitle: string;
   promptNodeIdSource: "captured" | "verified" | "";
@@ -982,6 +1302,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   activeTaskCount: number;
   inputCount: number;
   outputCount: number;
+  contentParents: NodeRecord[];
   mediaInputs: NodeRecord[];
   textInputCount: number;
   textInputs: NodeRecord[];
@@ -1425,12 +1746,15 @@ const NODE_HANDLE_BASE_SIZE_PX = 16;
 const NODE_HANDLE_MIN_SCREEN_SIZE_PX = 9;
 const EMPTY_NODE_RECORDS: NodeRecord[] = [];
 const AUDIO_NODE_MIN_HEIGHT = 240;
-const VIDEO_GENERATION_NODE_WIDTH = 360;
-const VIDEO_NODE_BASE_HEIGHT = 600;
+const LEGACY_VIDEO_GENERATION_NODE_WIDTH = 360;
+const VIDEO_GENERATION_NODE_WIDTH = 460;
+const VIDEO_NODE_BASE_HEIGHT = 696;
 const VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS = 10;
-const VIDEO_NODE_TEXT_ROW_HEIGHT = 51;
-const MEDIA_NODE_CHROME_HEIGHT = 73;
-const IMAGE_NODE_CHROME_HEIGHT = 38;
+const VIDEO_NODE_TEXT_ROW_HEIGHT = 67;
+const MATERIAL_NOTE_HEIGHT = 37;
+const MATERIAL_NODE_LAYOUT_VERSION = 2;
+const MEDIA_NODE_CHROME_HEIGHT = 73 + MATERIAL_NOTE_HEIGHT;
+const IMAGE_NODE_CHROME_HEIGHT = 38 + MATERIAL_NOTE_HEIGHT;
 const IMAGE_RESIZE_DEFAULT_STORAGE_KEY = "infinite-canvas:image-resize-max-edge";
 const DEFAULT_IMAGE_RESIZE_MAX_EDGE = 2048;
 const MIN_IMAGE_RESIZE_MAX_EDGE = 32;
@@ -1752,6 +2076,7 @@ function videoGenerationAutoHeight(
   mediaKinds: string[],
   textInputCount = 0,
   nodeWidth = 360,
+  storyboardReferenceCompiler = false,
 ): number {
   const groupCount = new Set(mediaKinds).size;
   const imageCount = mediaKinds.filter((kind) => kind === "image").length;
@@ -1759,16 +2084,18 @@ function videoGenerationAutoHeight(
   const videoCount = mediaKinds.length - imageCount - audioCount;
   const listMediaRows = videoCount + Math.ceil(audioCount / 2);
   const imageColumns = Math.max(1, Math.floor((Math.max(180, nodeWidth - 32) + 6) / 66));
-  const imageRows = imageCount ? Math.ceil(imageCount / imageColumns) : 0;
+  // The image group always appends a clear-all tile, so it also occupies a grid cell.
+  const imageRows = imageCount ? Math.ceil((imageCount + 1) / imageColumns) : 0;
   const textRows = Math.max(
     1,
     Math.min(VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS, textInputCount),
   );
-  const contentHeight = 463
-    + listMediaRows * 51
+  const contentHeight = 568
+    + listMediaRows * 67
     + imageRows * 66
-    + groupCount * 30
+    + groupCount * 36
     + textRows * VIDEO_NODE_TEXT_ROW_HEIGHT
+    + (storyboardReferenceCompiler ? 190 : 0)
     + 30;
   return Math.min(
     2400,
@@ -1851,6 +2178,25 @@ function copiedNodeContentForProject(
 
   for (const key of ["mediaInputOrder", "textInputOrder"]) {
     if (Array.isArray(copied[key])) copied[key] = remapNodeIdList(copied[key]);
+  }
+  if (Array.isArray(copied.promptVersions)) {
+    copied.promptVersions = copied.promptVersions.map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+      const version = { ...(value as JsonObject) };
+      if (!Array.isArray(version.derivedFrom)) return version;
+      version.derivedFrom = version.derivedFrom.flatMap((source) => {
+        if (!source || typeof source !== "object" || Array.isArray(source)) return [];
+        const item = source as JsonObject;
+        const nodeId = remapNodeId(item.nodeId);
+        if (!nodeId || typeof item.versionId !== "string") return [];
+        return [{
+          ...item,
+          nodeId,
+          versionId: versionIdMap.get(item.versionId) ?? item.versionId,
+        }];
+      });
+      return version;
+    });
   }
   for (const key of ["activeTextInputId", "sourceGeneratorId", "sourcePreviewId", "resizedFromNodeId"]) {
     if (typeof copied[key] !== "string") continue;
@@ -2049,6 +2395,32 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const snapshot = value as JsonObject;
   if (typeof snapshot.prompt !== "string" || !snapshot.prompt.trim()) return null;
+  const restoredSelection = storyboardReferenceSelectionFromValue(
+    snapshot.referenceSelection,
+  ).selection;
+  const referenceMappings = Array.isArray(snapshot.referenceMappings)
+    ? snapshot.referenceMappings.flatMap((value) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+        const mapping = value as JsonObject;
+        if (
+          typeof mapping.sourceId !== "string"
+          || (mapping.kind !== "image" && mapping.kind !== "audio" && mapping.kind !== "video")
+          || typeof mapping.label !== "string"
+          || typeof mapping.role !== "string"
+          || typeof mapping.title !== "string"
+        ) return [];
+        return [{
+          sourceId: mapping.sourceId,
+          kind: mapping.kind,
+          label: mapping.label,
+          ...(typeof mapping.subjectLabel === "string"
+            ? { subjectLabel: mapping.subjectLabel }
+            : {}),
+          role: mapping.role,
+          title: mapping.title,
+        } satisfies StoryboardReferenceMapping];
+      })
+    : [];
   return {
     prompt: snapshot.prompt,
     promptInformation: typeof snapshot.promptInformation === "string"
@@ -2100,6 +2472,16 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
     ),
     audioPaths: stringArray(snapshot.audioPaths),
     videoPaths: stringArray(snapshot.videoPaths),
+    referenceCompilerMode: snapshot.referenceCompilerMode === true,
+    referenceSelection: restoredSelection,
+    referenceSelectionError: typeof snapshot.referenceSelectionError === "string"
+      ? snapshot.referenceSelectionError
+      : "",
+    referenceMappings,
+    referenceCandidateCount: typeof snapshot.referenceCandidateCount === "number"
+      && Number.isFinite(snapshot.referenceCandidateCount)
+      ? Math.max(0, Math.floor(snapshot.referenceCandidateCount))
+      : 0,
     workflowModuleId: typeof snapshot.workflowModuleId === "string" ? snapshot.workflowModuleId : "",
     workflowModuleRevision: typeof snapshot.workflowModuleRevision === "string"
       ? snapshot.workflowModuleRevision
@@ -2841,6 +3223,35 @@ function activeTextInputFromContent(
   return orderedInputs.find((input) => input.id === activeId) ?? orderedInputs[0] ?? null;
 }
 
+function promptDurationSecondsFromVersion(version: PromptVersionRecord | null): number | null {
+  if (!version) return null;
+  const override = version.durationOverrideSeconds;
+  if (typeof override === "number" && Number.isInteger(override) && override >= 2 && override <= 15) {
+    return override;
+  }
+  const recommended = version.generationOptions?.durationSeconds;
+  return typeof recommended === "number" && Number.isInteger(recommended) && recommended >= 2 && recommended <= 15
+    ? recommended
+    : null;
+}
+
+function generationOptionsFromValue(value: unknown): { durationSeconds: number } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const durationSeconds = (value as JsonObject).durationSeconds;
+  return typeof durationSeconds === "number"
+    && Number.isInteger(durationSeconds)
+    && durationSeconds >= 2
+    && durationSeconds <= 15
+    ? { durationSeconds }
+    : null;
+}
+
+function durationOverrideSecondsFromValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 2 && value <= 15
+    ? value
+    : null;
+}
+
 function orderedNodeRecordsFromContent(
   content: JsonObject,
   orderKey: string,
@@ -2858,6 +3269,288 @@ function orderedNodeRecordsFromContent(
   return ordered;
 }
 
+function manualSavedPromptContentFromContent(content: JsonObject): JsonObject | null {
+  const saved = content.manualSavedPromptContent;
+  return saved && typeof saved === "object" && !Array.isArray(saved)
+    ? saved as JsonObject
+    : null;
+}
+
+function promptContentForExecution(content: JsonObject): JsonObject {
+  return manualSavedPromptContentFromContent(content) ?? content;
+}
+
+function storyboardReferenceSelectionFromValue(
+  value: unknown,
+): { selection: StoryboardReferenceSelection | null; error: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { selection: null, error: "当前提示词缺少内部素材选择数据" };
+  }
+  const object = value as JsonObject;
+  if (typeof object.sceneKey !== "string" || !object.sceneKey.trim()) {
+    return { selection: null, error: "内部素材选择缺少 sceneKey" };
+  }
+  if (!Array.isArray(object.assets)) {
+    return { selection: null, error: "内部素材选择缺少 assets 数组" };
+  }
+
+  const assets: StoryboardReferenceAsset[] = [];
+  const sourceIds = new Set<string>();
+  const counters: Record<StoryboardReferenceKind, number> = { image: 0, audio: 0, video: 0 };
+  const prefixes: Record<StoryboardReferenceKind, string> = {
+    image: "Picture",
+    audio: "Audio",
+    video: "Video",
+  };
+  const subjectLabels: string[] = [];
+  for (const [index, rawAsset] of object.assets.entries()) {
+    if (!rawAsset || typeof rawAsset !== "object" || Array.isArray(rawAsset)) {
+      return { selection: null, error: `内部素材选择第 ${index + 1} 项无效` };
+    }
+    const asset = rawAsset as JsonObject;
+    const kind = asset.kind;
+    if (kind !== "image" && kind !== "audio" && kind !== "video") {
+      return { selection: null, error: `内部素材选择第 ${index + 1} 项的 kind 无效` };
+    }
+    if (typeof asset.sourceId !== "string" || !asset.sourceId.trim()) {
+      return { selection: null, error: `内部素材选择第 ${index + 1} 项缺少 sourceId` };
+    }
+    if (sourceIds.has(asset.sourceId)) {
+      return { selection: null, error: `内部素材选择重复引用素材 ${asset.sourceId}` };
+    }
+    sourceIds.add(asset.sourceId);
+    counters[kind] += 1;
+    const expectedLabel = `${prefixes[kind]} ${counters[kind]}`;
+    if (asset.label !== expectedLabel) {
+      return {
+        selection: null,
+        error: `${prefixes[kind]} 标签必须连续编号，当前应为 ${expectedLabel}`,
+      };
+    }
+    if (typeof asset.role !== "string" || !asset.role.trim()) {
+      return { selection: null, error: `${expectedLabel} 缺少明确的 role` };
+    }
+    const subjectLabel = typeof asset.subjectLabel === "string"
+      ? asset.subjectLabel.trim()
+      : "";
+    if (subjectLabel && !/^Subject [1-9]\d*$/.test(subjectLabel)) {
+      return { selection: null, error: `${expectedLabel} 的 subjectLabel 格式无效` };
+    }
+    if (subjectLabel && !subjectLabels.includes(subjectLabel)) subjectLabels.push(subjectLabel);
+    assets.push({
+      sourceId: asset.sourceId,
+      kind,
+      label: expectedLabel,
+      ...(subjectLabel ? { subjectLabel } : {}),
+      role: asset.role.trim(),
+    });
+  }
+  for (const [index, subjectLabel] of subjectLabels.entries()) {
+    if (subjectLabel !== `Subject ${index + 1}`) {
+      return { selection: null, error: "Subject 标签必须按首次出现顺序从 Subject 1 连续编号" };
+    }
+  }
+  return {
+    selection: { sceneKey: object.sceneKey.trim(), assets },
+    error: "",
+  };
+}
+
+function referenceSelectionFromContent(content: JsonObject): StoryboardReferenceSelection | null {
+  return storyboardReferenceSelectionFromValue(content.referenceSelection).selection;
+}
+
+function storyboardPromptFields(record: NodeRecord | null): {
+  prompt: string;
+  information: string;
+  referenceSelection: StoryboardReferenceSelection | null;
+  durationSeconds: number | null;
+} {
+  if (!record) return { prompt: "", information: "", referenceSelection: null, durationSeconds: null };
+  const content = promptContentForExecution(record.content);
+  const activeVersion = activePromptVersionFromContent(content);
+  return {
+    prompt: activeVersion?.text ?? textFromContent(content),
+    information: activeVersion?.information ?? informationFromContent(content),
+    referenceSelection: activeVersion?.referenceSelection ?? referenceSelectionFromContent(content),
+    durationSeconds: promptDurationSecondsFromVersion(activeVersion),
+  };
+}
+
+function resolveStoryboardReferenceSelection(
+  prompt: string,
+  referenceSelection: StoryboardReferenceSelection | null,
+  mediaInputs: NodeRecord[],
+): StoryboardReferenceResolution {
+  const parsed = storyboardReferenceSelectionFromValue(referenceSelection);
+  if (!parsed.selection) {
+    return {
+      selection: null,
+      selectedMedia: [],
+      mappings: [],
+      skippedCount: mediaInputs.length,
+      error: parsed.error,
+    };
+  }
+  if (!parsed.selection.assets.length) {
+    return {
+      selection: parsed.selection,
+      selectedMedia: [],
+      mappings: [],
+      skippedCount: mediaInputs.length,
+      error: "当前分镜没有选中参考素材，应改用普通文生视频节点",
+    };
+  }
+
+  const candidatesById = new Map(mediaInputs.map((record) => [record.id, record]));
+  const selectedMedia: NodeRecord[] = [];
+  const mappings: StoryboardReferenceMapping[] = [];
+  for (const asset of parsed.selection.assets) {
+    const candidate = candidatesById.get(asset.sourceId);
+    if (!candidate) {
+      return {
+        selection: parsed.selection,
+        selectedMedia: [],
+        mappings: [],
+        skippedCount: mediaInputs.length,
+        error: `${asset.label} 对应的候选素材已断开或不存在：${asset.sourceId}`,
+      };
+    }
+    if (candidate.kind !== asset.kind) {
+      return {
+        selection: parsed.selection,
+        selectedMedia: [],
+        mappings: [],
+        skippedCount: mediaInputs.length,
+        error: `${asset.label} 的实际素材类型是 ${candidate.kind}，与内部选择的 ${asset.kind} 不一致`,
+      };
+    }
+    const assetPath = typeof candidate.content.assetPath === "string"
+      ? candidate.content.assetPath.trim()
+      : "";
+    if (!assetPath) {
+      return {
+        selection: parsed.selection,
+        selectedMedia: [],
+        mappings: [],
+        skippedCount: mediaInputs.length,
+        error: `${asset.label} 对应素材没有可提交的本地文件路径`,
+      };
+    }
+    selectedMedia.push(candidate);
+    mappings.push({ ...asset, title: candidate.title || candidate.id });
+  }
+
+  const imageCount = parsed.selection.assets.filter((asset) => asset.kind === "image").length;
+  const audioCount = parsed.selection.assets.filter((asset) => asset.kind === "audio").length;
+  const videoCount = parsed.selection.assets.filter((asset) => asset.kind === "video").length;
+  if (imageCount > 9) {
+    return { selection: parsed.selection, selectedMedia: [], mappings: [], skippedCount: mediaInputs.length, error: `当前分镜选中了 ${imageCount} 张图片，单次最多 9 张` };
+  }
+  if (audioCount > 2) {
+    return { selection: parsed.selection, selectedMedia: [], mappings: [], skippedCount: mediaInputs.length, error: `当前分镜选中了 ${audioCount} 个音频，单次最多 2 个` };
+  }
+  if (videoCount > 1) {
+    return { selection: parsed.selection, selectedMedia: [], mappings: [], skippedCount: mediaInputs.length, error: `当前分镜选中了 ${videoCount} 个视频，单次最多 1 个` };
+  }
+  if (videoCount) {
+    return { selection: parsed.selection, selectedMedia: [], mappings, skippedCount: mediaInputs.length, error: "当前 H3 工作流适配器尚未配置视频参考输入；候选视频可以保留，但本次不能选中提交" };
+  }
+
+  const promptLabels = new Set<string>();
+  for (const match of prompt.matchAll(/<(Picture|Audio|Video|Subject)\s+([1-9]\d*)>/g)) {
+    promptLabels.add(`${match[1]} ${match[2]}`);
+  }
+  const assetLabels = new Set(parsed.selection.assets.map((asset) => asset.label));
+  const subjectLabelSet = new Set(
+    parsed.selection.assets.flatMap((asset) => asset.subjectLabel ? [asset.subjectLabel] : []),
+  );
+  for (const label of [...assetLabels, ...subjectLabelSet]) {
+    if (!promptLabels.has(label)) {
+      return { selection: parsed.selection, selectedMedia: [], mappings, skippedCount: mediaInputs.length, error: `英文提示词缺少素材标签 <${label}>` };
+    }
+  }
+  for (const label of promptLabels) {
+    const allowed = label.startsWith("Subject ") ? subjectLabelSet : assetLabels;
+    if (!allowed.has(label)) {
+      return { selection: parsed.selection, selectedMedia: [], mappings, skippedCount: mediaInputs.length, error: `英文提示词引用了内部素材选择中不存在的标签 <${label}>` };
+    }
+  }
+
+  return {
+    selection: parsed.selection,
+    selectedMedia,
+    mappings,
+    skippedCount: Math.max(0, mediaInputs.length - selectedMedia.length),
+    error: "",
+  };
+}
+
+function storyboardReferenceCandidateCatalog(
+  generatorId: string,
+  mediaInputs: NodeRecord[],
+): string {
+  return JSON.stringify({
+    schema: "infinite-canvas-h3-candidate-catalog/v1",
+    generatorId,
+    assets: mediaInputs.map((record, index) => ({
+      sourceId: record.id,
+      kind: record.kind,
+      globalOrder: index + 1,
+      title: record.title || record.id,
+      semanticDescription: materialNoteFromContent(record.content).trim(),
+    })),
+  }, null, 2);
+}
+
+function h3ReferenceAssetCatalog(
+  generatorId: string,
+  mediaInputs: NodeRecord[],
+): string {
+  const referenceCounts: Record<"image" | "audio" | "video", number> = {
+    image: 0,
+    audio: 0,
+    video: 0,
+  };
+  const labelPrefixes: Record<"image" | "audio" | "video", string> = {
+    image: "Picture",
+    audio: "Audio",
+    video: "Video",
+  };
+  const limits = { images: 9, audios: 3, videos: 1 };
+  const assetCounts = { images: 0, audios: 0, videos: 0 };
+
+  const assets = mediaInputs.map((record, index) => {
+    const kind = record.kind as "image" | "audio" | "video";
+    referenceCounts[kind] += 1;
+    if (kind === "image") assetCounts.images += 1;
+    if (kind === "audio") assetCounts.audios += 1;
+    if (kind === "video") assetCounts.videos += 1;
+    return {
+      sourceId: record.id,
+      kind,
+      globalOrder: index + 1,
+      referenceLabel: `${labelPrefixes[kind]} ${referenceCounts[kind]}`,
+      title: record.title || record.id,
+      semanticDescription: materialNoteFromContent(record.content).trim(),
+      required: true,
+    };
+  });
+
+  return JSON.stringify({
+    schema: "infinite-canvas-h3-reference-assets/v1",
+    generatorId,
+    route: "reference-to-video",
+    assetPolicy: "all-listed-assets-required",
+    limits,
+    assetCounts,
+    isWithinLimits: assetCounts.images <= limits.images
+      && assetCounts.audios <= limits.audios
+      && assetCounts.videos <= limits.videos,
+    assets,
+  }, null, 2);
+}
+
 function validateVideoExecution(
   mode: VideoGenerationMode,
   content: JsonObject,
@@ -2868,6 +3561,34 @@ function validateVideoExecution(
   const audios = mediaInputs.filter((input) => input.kind === "audio");
   const videos = mediaInputs.filter((input) => input.kind === "video");
   const activeTextInput = activeTextInputFromContent(content, textInputs);
+
+  if (content.storyboardReferenceCompiler === true) {
+    if (mode !== "reference-to-video") {
+      return { valid: false, message: "分镜联动节点只支持全能参考生成方案" };
+    }
+    if (!textInputs.length || !activeTextInput) {
+      return { valid: false, message: "分镜联动节点至少需要连接一个带素材选择数据的提示词节点" };
+    }
+    const fields = storyboardPromptFields(activeTextInput);
+    if (!fields.prompt.trim()) {
+      return { valid: false, message: "当前选中的文字节点内容为空，请先填写" };
+    }
+    if (fields.durationSeconds === null) {
+      return { valid: false, message: "当前分镜提示词尚未设置时长，请在生成提示词节点中填写 2–15 秒" };
+    }
+    const selection = resolveStoryboardReferenceSelection(
+      fields.prompt,
+      fields.referenceSelection,
+      mediaInputs,
+    );
+    if (selection.error) return { valid: false, message: selection.error };
+    const selectedImages = selection.mappings.filter((asset) => asset.kind === "image").length;
+    const selectedAudios = selection.mappings.filter((asset) => asset.kind === "audio").length;
+    return {
+      valid: true,
+      message: `${selection.selection?.sceneKey ?? "当前分镜"} 检查通过：提交 ${selectedImages} 图、${selectedAudios} 音频，屏蔽 ${selection.skippedCount} 项`,
+    };
+  }
 
   if (mode === "text-to-video") {
     if (mediaInputs.length) {
@@ -2957,8 +3678,12 @@ function informationFromContent(content: JsonObject): string {
   return typeof content.information === "string" ? content.information : "";
 }
 
+function materialNoteFromContent(content: JsonObject): string {
+  return typeof content.materialNote === "string" ? content.materialNote : "";
+}
+
 function promptVersionsFromContent(content: JsonObject): PromptVersionRecord[] {
-  if (content.promptVersionNode !== true || !Array.isArray(content.promptVersions)) return [];
+  if (!isContentIterationContent(content) || !Array.isArray(content.promptVersions)) return [];
   return content.promptVersions.flatMap((value) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return [];
     const version = value as JsonObject;
@@ -2967,15 +3692,38 @@ function promptVersionsFromContent(content: JsonObject): PromptVersionRecord[] {
       || typeof version.label !== "string"
       || typeof version.text !== "string"
     ) return [];
+    const referenceSelection = storyboardReferenceSelectionFromValue(
+      version.referenceSelection,
+    ).selection;
+    const generationOptions = generationOptionsFromValue(version.generationOptions);
+    const durationOverrideSeconds = durationOverrideSecondsFromValue(version.durationOverrideSeconds);
     return [{
       id: version.id,
       label: version.label,
       title: typeof version.title === "string" ? version.title : version.label,
       text: version.text,
       information: typeof version.information === "string" ? version.information : "",
+      ...(referenceSelection ? { referenceSelection } : {}),
+      ...(generationOptions ? { generationOptions } : {}),
+      ...(durationOverrideSeconds !== null ? { durationOverrideSeconds } : {}),
       createdAt: typeof version.createdAt === "string" ? version.createdAt : "",
       ...(typeof version.requestId === "string" ? { requestId: version.requestId } : {}),
       ...(typeof version.source === "string" ? { source: version.source } : {}),
+      ...(Array.isArray(version.derivedFrom)
+        ? {
+            derivedFrom: version.derivedFrom.flatMap((source) => {
+              if (!source || typeof source !== "object" || Array.isArray(source)) return [];
+              const item = source as JsonObject;
+              return typeof item.nodeId === "string" && typeof item.versionId === "string"
+                ? [{
+                    nodeId: item.nodeId,
+                    versionId: item.versionId,
+                    versionLabel: typeof item.versionLabel === "string" ? item.versionLabel : "",
+                  }]
+                : [];
+            }),
+          }
+        : {}),
     }];
   });
 }
@@ -3006,7 +3754,9 @@ function toFlowEdge(edge: EdgeRecord): Edge {
     source: edge.sourceNodeId,
     target: edge.targetNodeId,
     type: "canvasEdge",
-    className: "canvas-edge",
+    className: edge.kind === "content-derivation" || edge.kind === "scene-branch"
+      ? "canvas-edge is-content-derivation"
+      : "canvas-edge",
     animated: false,
     data: { record: edge },
   };
@@ -3046,6 +3796,8 @@ function CanvasEdge({
   style,
   data,
 }: EdgeProps) {
+  const [isDisconnectVisible, setDisconnectVisible] = useState(false);
+  const disconnectHideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const sourcePoint = edgeEndpointAtNodeBorder(sourceX, sourceY, sourcePosition);
   const targetPoint = edgeEndpointAtNodeBorder(targetX, targetY, targetPosition);
   const [edgePath, labelX, labelY] = getBezierPath({
@@ -3057,7 +3809,26 @@ function CanvasEdge({
     targetPosition,
   });
   const onDisconnect = (data as CanvasEdgeData | undefined)?.onDisconnect;
+  const edgeKind = (data as CanvasEdgeData | undefined)?.record?.kind;
   const disconnect = () => onDisconnect?.(id);
+  const showDisconnect = () => {
+    if (disconnectHideTimer.current !== undefined) {
+      window.clearTimeout(disconnectHideTimer.current);
+      disconnectHideTimer.current = undefined;
+    }
+    setDisconnectVisible(true);
+  };
+  const hideDisconnect = () => {
+    if (disconnectHideTimer.current !== undefined) window.clearTimeout(disconnectHideTimer.current);
+    disconnectHideTimer.current = window.setTimeout(() => {
+      disconnectHideTimer.current = undefined;
+      setDisconnectVisible(false);
+    }, 100);
+  };
+
+  useEffect(() => () => {
+    if (disconnectHideTimer.current !== undefined) window.clearTimeout(disconnectHideTimer.current);
+  }, []);
 
   return (
     <>
@@ -3066,31 +3837,31 @@ function CanvasEdge({
         path={edgePath}
         markerEnd={markerEnd}
         style={style}
-        className="canvas-edge"
+        className={`canvas-edge ${edgeKind === "content-derivation" || edgeKind === "scene-branch" ? "is-content-derivation" : ""}`}
         interactionWidth={24}
       />
       {onDisconnect && (
-        <g
-          className="canvas-edge-disconnect nodrag nopan"
-          transform={`translate(${labelX} ${labelY})`}
-          role="button"
-          tabIndex={0}
-          aria-label="断开连线"
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            disconnect();
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            event.preventDefault();
-            event.stopPropagation();
-            disconnect();
-          }}
-        >
-          <circle r="11" />
-          <path d="M -3.5 -3.5 L 3.5 3.5 M 3.5 -3.5 L -3.5 3.5" />
-        </g>
+        <EdgeLabelRenderer>
+          <div
+            className="canvas-edge-disconnect-hit-area nodrag nopan"
+            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
+            onPointerEnter={showDisconnect}
+            onPointerLeave={hideDisconnect}
+          >
+            <button
+              type="button"
+              className={`canvas-edge-disconnect ${isDisconnectVisible ? "is-visible" : ""}`}
+              aria-label="断开连线"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                disconnect();
+              }}
+            >
+              <X size={13} strokeWidth={1.7} aria-hidden="true" />
+            </button>
+          </div>
+        </EdgeLabelRenderer>
       )}
     </>
   );
@@ -3109,6 +3880,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     activeTaskCount,
     inputCount,
     outputCount,
+    contentParents,
     mediaInputs,
     textInputCount,
     textInputs,
@@ -3137,11 +3909,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onCopy,
   } = data;
   const [copied, setCopied] = useState(false);
+  const [copiedMarkdownTarget, setCopiedMarkdownTarget] = useState<string | null>(null);
   const [promptCopied, setPromptCopied] = useState(false);
   const [errorCopied, setErrorCopied] = useState(false);
+  const [referenceCatalogCopied, setReferenceCatalogCopied] = useState(false);
   const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(record.title);
+  const [materialNoteDraft, setMaterialNoteDraft] = useState(() => materialNoteFromContent(record.content));
+  const [materialNoteFocused, setMaterialNoteFocused] = useState(false);
   const [titleOverflowing, setTitleOverflowing] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [previewColorMenuOpen, setPreviewColorMenuOpen] = useState(false);
@@ -3150,9 +3926,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [loraMenuOpen, setLoraMenuOpen] = useState(false);
   const [secondaryLoraMenuOpen, setSecondaryLoraMenuOpen] = useState(false);
   const [promptVersionMenuOpen, setPromptVersionMenuOpen] = useState(false);
+  const [contentTypeMenuOpen, setContentTypeMenuOpen] = useState(false);
   const [editingPromptVersionTitleId, setEditingPromptVersionTitleId] = useState<string | null>(null);
   const [promptVersionTitleDraft, setPromptVersionTitleDraft] = useState("");
   const [textInformationOpen, setTextInformationOpen] = useState(false);
+  const [nodeMarkdownPreview, setNodeMarkdownPreview] = useState(true);
+  const [informationMarkdownPreview, setInformationMarkdownPreview] = useState(true);
+  const [expandedTextMarkdownPreview, setExpandedTextMarkdownPreview] = useState(true);
+  const [expandedInformationMarkdownPreview, setExpandedInformationMarkdownPreview] = useState(true);
+  const [expandedInformationHidden, setExpandedInformationHidden] = useState(false);
+  const [connectedTextMarkdownPreview, setConnectedTextMarkdownPreview] = useState(true);
+  const [connectedInformationMarkdownPreview, setConnectedInformationMarkdownPreview] = useState(true);
+  const [connectedInformationHidden, setConnectedInformationHidden] = useState(false);
   const [generatedInfoOpen, setGeneratedInfoOpen] = useState(false);
   const [generatedPromptDialogOpen, setGeneratedPromptDialogOpen] = useState(false);
   const [imageResizeDialogOpen, setImageResizeDialogOpen] = useState(false);
@@ -3213,6 +3998,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const loraControlRef = useRef<HTMLDivElement>(null);
   const secondaryLoraControlRef = useRef<HTMLDivElement>(null);
   const promptVersionControlRef = useRef<HTMLDivElement>(null);
+  const contentTypeControlRef = useRef<HTMLDivElement>(null);
   const textInformationRef = useRef<HTMLDivElement>(null);
   const generatedInfoRef = useRef<HTMLDivElement>(null);
   const audioPreviewRefs = useRef(new Map<string, HTMLAudioElement>());
@@ -3231,21 +4017,71 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     direction: readonly [number, number];
   } | null>(null);
   const videoResizeFrameRef = useRef<number | null>(null);
-  const savedText = textFromContent(record.content);
   const isText = record.kind === "text";
-  const isPromptVersionNode = isText && record.content.promptVersionNode === true;
-  const promptVersions = isPromptVersionNode ? promptVersionsFromContent(record.content) : [];
-  const activePromptVersion = isPromptVersionNode
+  const isContentIterationNode = isText && isContentIterationContent(record.content);
+  const contentNodeType = contentNodeTypeFromContent(record.content);
+  const allPromptVersions = isContentIterationNode ? promptVersionsFromContent(record.content) : [];
+  const storedActivePromptVersion = isContentIterationNode
     ? activePromptVersionFromContent(record.content)
     : null;
-  const connectedPromptVersions = connectedTextEditor?.content.promptVersionNode === true
+  const activeParentVersions = contentParents.flatMap((parent) => {
+    const version = activePromptVersionFromContent(parent.content);
+    return version ? [{ nodeId: parent.id, versionId: version.id, versionLabel: version.label }] : [];
+  });
+  const isFilteredByActiveParentVersion = activeParentVersions.length > 0;
+  const canInferLegacyParentV1 = isFilteredByActiveParentVersion && contentParents.every((parent) => (
+    promptVersionsFromContent(parent.content).length === 1
+  ));
+  const versionMatchesActiveParents = (version: PromptVersionRecord) => (
+    activeParentVersions.every((parentVersion) => (
+      version.derivedFrom?.some((source) => (
+        source.nodeId === parentVersion.nodeId && source.versionId === parentVersion.versionId
+      ))
+      || (canInferLegacyParentV1 && !(version.derivedFrom?.length))
+    ))
+  );
+  const promptVersions = isFilteredByActiveParentVersion
+    ? allPromptVersions.filter(versionMatchesActiveParents)
+    : allPromptVersions;
+  const activePromptVersion = promptVersions.find(
+    (version) => version.id === storedActivePromptVersion?.id,
+  ) ?? promptVersions[promptVersions.length - 1] ?? null;
+  const activeParentVersionLabel = activeParentVersions
+    .map((parentVersion) => {
+      const parent = contentParents.find((candidate) => candidate.id === parentVersion.nodeId);
+      return `${parent?.title || "上游内容"} ${parentVersion.versionLabel}`;
+    })
+    .join("、");
+  const savedText = isContentIterationNode
+    ? activePromptVersion?.text ?? ""
+    : textFromContent(record.content);
+  const contentSourceLabel = (source: { nodeId: string; versionLabel: string }) => {
+    const parent = contentParents.find((candidate) => candidate.id === source.nodeId);
+    const parentType = parent
+      ? contentNodeTypeLabel(contentNodeTypeFromContent(parent.content))
+      : "上游内容";
+    const parentTitle = parent?.title.trim();
+    return `${parentType}${parentTitle ? `《${parentTitle}》` : ""} ${source.versionLabel || "未命名版本"}`;
+  };
+  const versionProvenance = (version: PromptVersionRecord | null | undefined) => {
+    const sources = (version?.derivedFrom ?? []).filter((source) => (
+      contentParents.some((parent) => parent.id === source.nodeId)
+    ));
+    return sources.length
+      ? sources.map(contentSourceLabel).join("、")
+      : "未记录上游版本";
+  };
+  const nextVersionProvenance = activeParentVersions.length
+    ? activeParentVersions.map(contentSourceLabel).join("、")
+    : "无上游内容";
+  const connectedPromptVersions = connectedTextEditor && isContentIterationContent(connectedTextEditor.content)
     ? promptVersionsFromContent(connectedTextEditor.content)
     : [];
-  const connectedActivePromptVersion = connectedTextEditor?.content.promptVersionNode === true
+  const connectedActivePromptVersion = connectedTextEditor && isContentIterationContent(connectedTextEditor.content)
     ? activePromptVersionFromContent(connectedTextEditor.content)
     : null;
-  const savedInformation = isPromptVersionNode
-    ? activePromptVersion?.information ?? informationFromContent(record.content)
+  const savedInformation = isContentIterationNode
+    ? activePromptVersion?.information ?? ""
     : informationFromContent(record.content);
   const bestPromptVersionId = typeof record.content.bestPromptVersionId === "string"
     ? record.content.bestPromptVersionId
@@ -3254,7 +4090,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const isImage = record.kind === "image";
   const isAudioAsset = record.kind === "audio";
   const isVideoAsset = record.kind === "video";
+  const isReferenceAsset = isImage || isAudioAsset || isVideoAsset;
   const isVideoGeneration = record.kind === "video-generation";
+  const isStoryboardReferenceCompiler = isVideoGeneration
+    && record.content.storyboardReferenceCompiler === true;
   const isGeneratedVideo = record.kind === "generated-video";
   const isFolder = record.kind === "folder";
   const sourceLabel = record.source === "manual"
@@ -3313,7 +4152,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const videoGenerationMode = videoGenerationModeFromContent(record.content);
   const availableWorkflowModules = workflowModules.filter(
     (module) => !module.deletedAt
-      && module.capability === "video-generation",
+      && module.capability === "video-generation"
+      && (!isStoryboardReferenceCompiler || module.variant === "reference-to-video"),
   );
   const configuredWorkflowModuleId = typeof record.content.workflowModuleId === "string"
     ? record.content.workflowModuleId
@@ -3329,6 +4169,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         mediaInputs.map((input) => input.kind),
         textInputs.length,
         record.width,
+        isStoryboardReferenceCompiler,
       )
     : record.height;
   const activeTextInputId = activeTextInputFromContent(record.content, textInputs)?.id ?? "";
@@ -3440,10 +4281,38 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     { kind: "audio", label: "音频", inputs: mediaInputs.filter((input) => input.kind === "audio") },
     { kind: "video", label: "视频", inputs: mediaInputs.filter((input) => input.kind === "video") },
   ].filter((group) => group.inputs.length > 0);
+  const activeStoryboardPrompt = isStoryboardReferenceCompiler
+    ? activeTextInputFromContent(record.content, textInputs)
+    : null;
+  const activeStoryboardFields = storyboardPromptFields(activeStoryboardPrompt);
+  const displayedVideoDuration = isStoryboardReferenceCompiler
+    ? activeStoryboardFields.durationSeconds
+    : videoDuration;
+  const activeStoryboardSelection = isStoryboardReferenceCompiler
+    ? resolveStoryboardReferenceSelection(
+        activeStoryboardFields.prompt,
+        activeStoryboardFields.referenceSelection,
+        mediaInputs,
+      )
+    : null;
+  const storyboardCandidateCatalog = isStoryboardReferenceCompiler
+    ? storyboardReferenceCandidateCatalog(id, mediaInputs)
+    : "";
+  const regularH3ReferenceCatalog = !isStoryboardReferenceCompiler
+    && videoGenerationMode === "reference-to-video"
+    ? h3ReferenceAssetCatalog(id, mediaInputs)
+    : "";
+  const referenceCatalog = isStoryboardReferenceCompiler
+    ? storyboardCandidateCatalog
+    : regularH3ReferenceCatalog;
 
   useEffect(() => {
     if (!editingTitle) setTitleDraft(record.title);
   }, [editingTitle, record.title]);
+
+  useEffect(() => {
+    if (!materialNoteFocused) setMaterialNoteDraft(materialNoteFromContent(record.content));
+  }, [materialNoteFocused, record.content]);
 
   useEffect(() => {
     if (!isGeneratedVideo || !generatedVideoUrl) return;
@@ -3494,19 +4363,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   }, [id, isGeneratedVideo, onChange, record.content, record.width, savedAspectRatio]);
 
   useEffect(() => {
-    if (!isImage || !savedAspectRatio || record.content.imageLayoutVersion === 1) return;
+    if ((!isImage && !isVideoAsset) || !savedAspectRatio || record.content.materialNodeLayoutVersion === MATERIAL_NODE_LAYOUT_VERSION) return;
     const fittedHeight = Math.min(
       2400,
-      record.width / savedAspectRatio + IMAGE_NODE_CHROME_HEIGHT,
+      record.width / savedAspectRatio + (isImage ? IMAGE_NODE_CHROME_HEIGHT : MEDIA_NODE_CHROME_HEIGHT),
     );
     onChange(id, {
       height: fittedHeight,
       content: {
         ...record.content,
-        imageLayoutVersion: 1,
+        materialNodeLayoutVersion: MATERIAL_NODE_LAYOUT_VERSION,
       },
     });
-  }, [id, isImage, onChange, record.content, record.width, savedAspectRatio]);
+  }, [id, isImage, isVideoAsset, onChange, record.content, record.width, savedAspectRatio]);
 
   useEffect(() => {
     if (!isGeneratedVideo) return;
@@ -3515,10 +4384,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   }, [id, isGeneratedVideo, onChange, record.title]);
 
   useEffect(() => {
-    if (isPromptVersionNode && record.title === "提示词版本") {
-      onChange(id, { title: "提示词迭代" });
+    if (isContentIterationNode && (record.title === "提示词版本" || record.title === "提示词迭代")) {
+      onChange(id, { title: "内容迭代" });
     }
-  }, [id, isPromptVersionNode, onChange, record.title]);
+  }, [id, isContentIterationNode, onChange, record.title]);
 
   useEffect(() => {
     if (!isGeneratedVideo || !validationMessage.startsWith("二采完成")) return;
@@ -3539,6 +4408,55 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   useEffect(() => {
     setInformationDraft(savedInformation);
   }, [savedInformation]);
+
+  useEffect(() => {
+    if (
+      !isContentIterationNode
+      || !isFilteredByActiveParentVersion
+      || !activePromptVersion
+      || activePromptVersion.id === storedActivePromptVersion?.id
+    ) return;
+    onChange(id, {
+      content: {
+        ...record.content,
+        text: activePromptVersion.text,
+        information: activePromptVersion.information,
+        activePromptVersionId: activePromptVersion.id,
+      },
+    });
+  }, [
+    activePromptVersion,
+    id,
+    isContentIterationNode,
+    isFilteredByActiveParentVersion,
+    onChange,
+    record.content,
+    storedActivePromptVersion?.id,
+  ]);
+
+  useEffect(() => {
+    if (!isContentIterationNode || !canInferLegacyParentV1) return;
+    const legacyVersions = allPromptVersions.filter((version) => !(version.derivedFrom?.length));
+    if (!legacyVersions.length) return;
+    onChange(id, {
+      content: {
+        ...record.content,
+        promptVersions: allPromptVersions.map((version) => (
+          version.derivedFrom?.length
+            ? version
+            : { ...version, derivedFrom: activeParentVersions }
+        )),
+      },
+    });
+  }, [
+    activeParentVersions,
+    allPromptVersions,
+    canInferLegacyParentV1,
+    id,
+    isContentIterationNode,
+    onChange,
+    record.content,
+  ]);
 
   useEffect(() => () => {
     if (videoResizeFrameRef.current !== null) {
@@ -3680,6 +4598,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   }, [promptVersionMenuOpen]);
 
   useEffect(() => {
+    if (!contentTypeMenuOpen) return;
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && contentTypeControlRef.current?.contains(target)) return;
+      setContentTypeMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [contentTypeMenuOpen]);
+
+  useEffect(() => {
     if (promptVersionMenuOpen) return;
     setEditingPromptVersionTitleId(null);
     setPromptVersionTitleDraft("");
@@ -3687,6 +4616,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const finishTitleEdit = () => {
     if (titleDraft !== record.title) onChange(id, { title: titleDraft });
     setEditingTitle(false);
+  };
+
+  const finishMaterialNoteEdit = () => {
+    const previousNote = materialNoteFromContent(record.content);
+    if (materialNoteDraft !== previousNote) {
+      onChange(id, {
+        content: {
+          ...record.content,
+          materialNote: materialNoteDraft,
+        },
+      });
+    }
+    setMaterialNoteFocused(false);
   };
 
   const markTextNodeChanged = (
@@ -3751,26 +4693,69 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     || isPromptVersionTitleManuallyUnsaved(nodeId, versionId)
   );
 
+  const clearManualSaveState = (nodeId: string) => {
+    setManualSaveStateByNodeId((current) => {
+      if (!current[nodeId]) return current;
+      const { [nodeId]: _discarded, ...remaining } = current;
+      return remaining;
+    });
+    setManualSaveVersionTitleStateByKey((current) => {
+      const prefix = `${nodeId}:`;
+      let changed = false;
+      const remaining = Object.fromEntries(Object.entries(current).filter(([key]) => {
+        const shouldKeep = !key.startsWith(prefix);
+        if (!shouldKeep) changed = true;
+        return shouldKeep;
+      }));
+      return changed ? remaining : current;
+    });
+  };
+
+  const discardTextNodeManualChanges = (nodeId: string, content: JsonObject) => {
+    const savedContent = manualSavedPromptContentFromContent(content);
+    if (savedContent) {
+      const restoredContent = { ...savedContent };
+      const restoredVersion = activePromptVersionFromContent(restoredContent);
+      if (nodeId === id) {
+        setTextDraft(restoredVersion?.text ?? textFromContent(restoredContent));
+        setInformationDraft(restoredVersion?.information ?? informationFromContent(restoredContent));
+      }
+      onChange(nodeId, { content: restoredContent });
+    }
+    clearManualSaveState(nodeId);
+  };
+
   const createInitialPromptVersion = (nextText: string, nextInformation: string) => {
     if (
-      !isPromptVersionNode
-      || promptVersions.length !== 0
+      !isContentIterationNode
+      || allPromptVersions.length !== 0
       || (!nextText.trim() && !nextInformation.trim())
     ) return false;
     const initialVersion: PromptVersionRecord = {
       id: crypto.randomUUID(),
       label: "v1",
-      title: record.title || "提示词",
+      title: record.title || "内容",
       text: nextText,
       information: nextInformation,
       createdAt: new Date().toISOString(),
+      derivedFrom: contentParents.flatMap((parent) => {
+        const parentVersion = activePromptVersionFromContent(parent.content);
+        return parentVersion
+          ? [{
+              nodeId: parent.id,
+              versionId: parentVersion.id,
+              versionLabel: parentVersion.label,
+            }]
+          : [];
+      }),
     };
     onChange(id, {
       content: {
         ...record.content,
         text: initialVersion.text,
         information: initialVersion.information,
-        promptVersionNode: true,
+        contentNode: true,
+        contentType: contentNodeType,
         promptVersions: [initialVersion],
         activePromptVersionId: initialVersion.id,
         bestPromptVersionId: "",
@@ -3784,7 +4769,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     setTextDraft(nextText);
     markTextNodeChanged(id, nextText, informationDraft, savedText, savedInformation);
     if (createInitialPromptVersion(nextText, informationDraft)) return;
-    if (isPromptVersionNode && activePromptVersion) {
+    if (isContentIterationNode && activePromptVersion) {
       onChange(id, {
         content: {
           ...record.content,
@@ -3806,7 +4791,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     setInformationDraft(nextInformation);
     markTextNodeChanged(id, textDraft, nextInformation, savedText, savedInformation);
     if (createInitialPromptVersion(textDraft, nextInformation)) return;
-    if (isPromptVersionNode && activePromptVersion) {
+    if (isContentIterationNode && activePromptVersion) {
       onChange(id, {
         content: {
           ...record.content,
@@ -3826,14 +4811,31 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   };
 
   const createPromptVersion = () => {
-    if (!isPromptVersionNode) return;
+    if (!isContentIterationNode) return;
+    const derivedFrom = contentParents.flatMap((parent) => {
+      const parentVersion = activePromptVersionFromContent(parent.content);
+      return parentVersion
+        ? [{
+            nodeId: parent.id,
+            versionId: parentVersion.id,
+            versionLabel: parentVersion.label,
+          }]
+        : [];
+    });
     const nextVersion: PromptVersionRecord = {
       id: crypto.randomUUID(),
-      label: nextPromptVersionLabel(promptVersions),
-      title: activePromptVersion?.title || record.title || "提示词",
+      label: nextPromptVersionLabel(allPromptVersions),
+      title: activePromptVersion?.title || record.title || "内容",
       text: textDraft,
       information: informationDraft,
       createdAt: new Date().toISOString(),
+      ...(activePromptVersion?.generationOptions
+        ? { generationOptions: activePromptVersion.generationOptions }
+        : {}),
+      ...(activePromptVersion?.durationOverrideSeconds !== undefined
+        ? { durationOverrideSeconds: activePromptVersion.durationOverrideSeconds }
+        : {}),
+      ...(derivedFrom.length ? { derivedFrom } : {}),
     };
     markTextNodeChanged(id, textDraft, informationDraft, savedText, savedInformation);
     onChange(id, {
@@ -3841,12 +4843,24 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         ...record.content,
         text: nextVersion.text,
         information: nextVersion.information,
-        promptVersionNode: true,
+        contentNode: true,
+        contentType: contentNodeType,
         promptVersions: [...promptVersions, nextVersion],
         activePromptVersionId: nextVersion.id,
       },
     });
     setPromptVersionMenuOpen(false);
+  };
+
+  const changeContentNodeType = (nextType: ContentNodeType) => {
+    onChange(id, {
+      content: {
+        ...record.content,
+        contentNode: true,
+        contentType: nextType,
+      },
+    });
+    setContentTypeMenuOpen(false);
   };
 
   const selectPromptVersion = (version: PromptVersionRecord) => {
@@ -3862,6 +4876,22 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       },
     });
     setPromptVersionMenuOpen(false);
+  };
+
+  const changeActivePromptDuration = (rawValue: string) => {
+    if (contentNodeType !== "prompt" || !activePromptVersion) return;
+    const nextDuration = Number(rawValue);
+    if (!Number.isInteger(nextDuration) || nextDuration < 2 || nextDuration > 15) return;
+    onChange(id, {
+      content: {
+        ...record.content,
+        promptVersions: allPromptVersions.map((version) => (
+          version.id === activePromptVersion.id
+            ? { ...version, durationOverrideSeconds: nextDuration }
+            : version
+        )),
+      },
+    });
   };
 
   const deletePromptVersion = async (versionId: string) => {
@@ -3929,6 +4959,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       text: inputText,
       information: inputPromptVersion?.information ?? informationFromContent(input.content),
     });
+    setConnectedTextMarkdownPreview(true);
+    setConnectedInformationMarkdownPreview(true);
+    setConnectedInformationHidden(false);
   };
 
   const selectConnectedPromptVersion = (version: PromptVersionRecord) => {
@@ -3989,10 +5022,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onChange(connectedTextEditor.id, { content: nextContent });
   };
 
-  const copyText = async () => {
-    onCopy(textDraft);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
+  const copyMarkdown = (target: string, value: string) => {
+    onCopy(value);
+    setCopiedMarkdownTarget(target);
+    window.setTimeout(() => {
+      setCopiedMarkdownTarget((current) => current === target ? null : current);
+    }, 1200);
   };
 
   const saveTextNode = async (nodeId: string, versionId?: string) => {
@@ -4067,6 +5102,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       return;
     }
     setExpanded(false);
+    setExpandedTextMarkdownPreview(true);
+    setExpandedInformationMarkdownPreview(true);
+    setExpandedInformationHidden(false);
   };
 
   const requestCloseConnectedTextEditor = () => {
@@ -4080,14 +5118,30 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       return;
     }
     setConnectedTextEditor(null);
+    setConnectedTextMarkdownPreview(true);
+    setConnectedInformationMarkdownPreview(true);
+    setConnectedInformationHidden(false);
   };
 
   const exitEditorWithoutManualSave = () => {
     const confirmation = editorExitConfirmation;
     if (!confirmation) return;
     setEditorExitConfirmation(null);
-    if (confirmation.target === "connected") setConnectedTextEditor(null);
-    else setExpanded(false);
+    if (confirmation.target === "connected") {
+      if (connectedTextEditor) {
+        discardTextNodeManualChanges(confirmation.nodeId, connectedTextEditor.content);
+      }
+      setConnectedTextEditor(null);
+      setConnectedTextMarkdownPreview(true);
+      setConnectedInformationMarkdownPreview(true);
+      setConnectedInformationHidden(false);
+    } else {
+      discardTextNodeManualChanges(confirmation.nodeId, record.content);
+      setExpanded(false);
+      setExpandedTextMarkdownPreview(true);
+      setExpandedInformationMarkdownPreview(true);
+      setExpandedInformationHidden(false);
+    }
   };
 
   const saveAndExitEditor = async () => {
@@ -4098,8 +5152,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       const saved = await saveTextNode(confirmation.nodeId, confirmation.versionId);
       if (!saved) return;
       setEditorExitConfirmation(null);
-      if (confirmation.target === "connected") setConnectedTextEditor(null);
-      else setExpanded(false);
+      if (confirmation.target === "connected") {
+        setConnectedTextEditor(null);
+        setConnectedTextMarkdownPreview(true);
+        setConnectedInformationMarkdownPreview(true);
+        setConnectedInformationHidden(false);
+      } else {
+        setExpanded(false);
+        setExpandedTextMarkdownPreview(true);
+        setExpandedInformationMarkdownPreview(true);
+        setExpandedInformationHidden(false);
+      }
     } finally {
       setSavingEditorExit(false);
     }
@@ -4139,6 +5202,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     window.setTimeout(() => setErrorCopied(false), 1200);
   };
 
+  const copyReferenceCatalog = () => {
+    if (!referenceCatalog) return;
+    onCopy(referenceCatalog);
+    setReferenceCatalogCopied(true);
+    window.setTimeout(() => setReferenceCatalogCopied(false), 1200);
+  };
+
   const markGeneratedVideoFullyPlayed = () => {
     if (!isUnplayedGeneratedVideo) return;
     onMarkGeneratedVideoFullyPlayed(id);
@@ -4170,7 +5240,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         aspectRatio,
         naturalWidth,
         naturalHeight,
-        ...(isImage ? { imageLayoutVersion: 1 } : {}),
+        ...((isImage || isVideoAsset) ? { materialNodeLayoutVersion: MATERIAL_NODE_LAYOUT_VERSION } : {}),
       },
       width: fittedWidth,
       height: fittedHeight,
@@ -4404,14 +5474,33 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       textInputs,
     );
     const emptyTextIndex = textInputs.findIndex(
-      (input) => !textFromContent(input.content).trim(),
+      (input) => !storyboardPromptFields(input).prompt.trim(),
     );
+    const compilerInvalidIndex = isStoryboardReferenceCompiler
+      ? textInputs.findIndex((input) => {
+          const fields = storyboardPromptFields(input);
+          return Boolean(resolveStoryboardReferenceSelection(
+            fields.prompt,
+            fields.referenceSelection,
+            mediaInputs,
+          ).error);
+        })
+      : -1;
+    const compilerInvalidMessage = compilerInvalidIndex >= 0
+      ? resolveStoryboardReferenceSelection(
+          storyboardPromptFields(textInputs[compilerInvalidIndex]).prompt,
+          storyboardPromptFields(textInputs[compilerInvalidIndex]).referenceSelection,
+          mediaInputs,
+        ).error
+      : "";
     const batchValidation = !result.valid
       ? result
       : textInputs.length < 2
         ? { valid: false, message: "批量提交至少需要接入两个文字提示词" }
         : emptyTextIndex >= 0
           ? { valid: false, message: `第 ${emptyTextIndex + 1} 个文字提示词内容为空，请先填写` }
+          : compilerInvalidIndex >= 0
+            ? { valid: false, message: `第 ${compilerInvalidIndex + 1} 个分镜不可执行：${compilerInvalidMessage}` }
           : { valid: true, message: `批量提交条件检查通过：共 ${textInputs.length} 个任务` };
     onChange(id, {
       content: {
@@ -4547,7 +5636,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
 
   return (
     <article
-      className={`canvas-node kind-${record.kind} ${selected ? "is-selected" : ""} ${isPromptVersionNode ? "is-prompt-version-node" : ""} ${usesSecondaryGreenTheme ? "is-secondary-preview" : ""} ${usesCustomPreviewTheme ? "has-custom-preview-color" : ""} ${relationHighlighted ? "is-relation-highlighted" : ""} ${matched ? "" : "is-dimmed"}`}
+      className={`canvas-node kind-${record.kind} ${isStoryboardReferenceCompiler ? "is-storyboard-reference-compiler" : ""} ${selected ? "is-selected" : ""} ${isContentIterationNode ? `is-content-iteration-node content-type-${contentNodeType}` : ""} ${usesSecondaryGreenTheme ? "is-secondary-preview" : ""} ${usesCustomPreviewTheme ? "has-custom-preview-color" : ""} ${relationHighlighted ? "is-relation-highlighted" : ""} ${matched ? "" : "is-dimmed"}`}
       style={previewThemeStyle}
       onPointerDownCapture={(event) => {
         if (preservesGeneratedVideoToolbarCtrlClick(event.target)) {
@@ -4645,8 +5734,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           onLostPointerCapture={finishVideoResize}
         />
       ))}
-      {(isVideoGeneration || isGeneratedVideo) && (
-        <Handle type="target" position={Position.Left} className="node-handle target-handle" />
+      {(isVideoGeneration || isGeneratedVideo || isContentIterationNode) && (
+        <Handle
+          type="target"
+          position={Position.Left}
+          className={`node-handle target-handle ${isContentIterationNode ? "content-derivation-target-handle" : ""}`}
+          title={isContentIterationNode ? "连接上游创作内容" : undefined}
+        />
       )}
       {!isGeneratedVideo && !isImage && !isAudioAsset && (
       <header className="node-header">
@@ -4662,8 +5756,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               : isVideoAsset || isGeneratedVideo
               ? <Film size={14} />
               : isVideoGeneration
-                ? <Clapperboard size={14} />
-                : isPromptVersionNode
+                ? isStoryboardReferenceCompiler
+                  ? <Sparkles size={14} />
+                  : <Clapperboard size={14} />
+                : isContentIterationNode
                   ? <History size={14} />
                   : <FileText size={14} />}
         </span>
@@ -4710,6 +5806,28 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             aria-label="放大编辑"
           >
             <Maximize2 size={13} />
+          </button>
+        )}
+        {!isContentIterationNode && (isText || isNote) && (
+          <button
+            type="button"
+            className={`nodrag node-action ${nodeMarkdownPreview ? "is-active-markdown" : ""}`}
+            onClick={() => setNodeMarkdownPreview((preview) => !preview)}
+            title={nodeMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+            aria-label={nodeMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+          >
+            {nodeMarkdownPreview ? <Pencil size={13} /> : <Eye size={13} />}
+          </button>
+        )}
+        {!isContentIterationNode && (isText || isNote) && (
+          <button
+            type="button"
+            className="nodrag node-action"
+            onClick={() => copyMarkdown("node", textDraft)}
+            title="复制 Markdown 原文"
+            aria-label="复制 Markdown 原文"
+          >
+            {copiedMarkdownTarget === "node" ? <Check size={14} /> : <Copy size={14} />}
           </button>
         )}
         {(isText || isNote) && (
@@ -4792,11 +5910,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             )}
           </div>
         )}
-        {(isText || isNote) && (
-          <button className="nodrag node-action" onClick={copyText} title="复制内容">
-            {copied ? <Check size={14} /> : <Copy size={14} />}
-          </button>
-        )}
         {isText && (
           <div
             ref={textInformationRef}
@@ -4808,7 +5921,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               className={`node-action text-information-button ${textInformationOpen ? "is-active" : ""}`}
               onClick={() => {
                 setPreviewColorMenuOpen(false);
-                setTextInformationOpen((open) => !open);
+                setTextInformationOpen((open) => {
+                  const nextOpen = !open;
+                  if (nextOpen) setInformationMarkdownPreview(true);
+                  return nextOpen;
+                });
               }}
               title="查看和编辑备注"
               aria-label="查看和编辑备注"
@@ -4824,20 +5941,42 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <header>
                   <div>
                     <strong>备注</strong>
-                    <span>{isPromptVersionNode
+                    <span>{isContentIterationNode
                       ? `${activePromptVersion?.label ?? "未创建版本"} · 备注`
                       : "当前提示词 · 备注"}</span>
                   </div>
+                  <button
+                    type="button"
+                    className={`markdown-mode-toggle ${informationMarkdownPreview ? "is-active" : ""}`}
+                    onClick={() => setInformationMarkdownPreview((preview) => !preview)}
+                    title={informationMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                    aria-label={informationMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                  >
+                    {informationMarkdownPreview ? <Pencil size={13} /> : <Eye size={13} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="markdown-copy-button"
+                    onClick={() => copyMarkdown("node-information", informationDraft)}
+                    title="复制 Markdown 原文"
+                    aria-label="复制 Markdown 原文"
+                  >
+                    {copiedMarkdownTarget === "node-information" ? <Check size={13} /> : <Copy size={13} />}
+                  </button>
                 </header>
-                <textarea
-                  className="nowheel"
-                  value={informationDraft}
-                  onChange={changeInformation}
-                  onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
-                  placeholder={isPromptVersionNode ? "这里记录本版本的备注…" : "这里记录当前提示词的备注…"}
-                  spellCheck={false}
-                  aria-label="提示词备注内容"
-                />
+                {informationMarkdownPreview ? (
+                  <MarkdownPreview source={informationDraft} className="text-information-markdown-preview nowheel" />
+                ) : (
+                  <textarea
+                    className="nowheel"
+                    value={informationDraft}
+                    onChange={changeInformation}
+                    onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
+                    placeholder={isContentIterationNode ? "这里记录本版本的备注…" : "这里记录当前文本的备注…"}
+                    spellCheck={false}
+                    aria-label="提示词备注内容"
+                  />
+                )}
                 <footer>{informationDraft.length.toLocaleString()} 字符 · 自动保存</footer>
               </aside>
             )}
@@ -4845,9 +5984,41 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         )}
       </header>
       )}
-      {(isText || isNote) && (isPromptVersionNode ? (
+      {(isText || isNote) && (isContentIterationNode ? (
         <div className="prompt-version-shell">
           <div className="prompt-version-toolbar">
+            <div
+              ref={contentTypeControlRef}
+              className="nodrag content-type-control"
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                className="content-type-toggle"
+                onClick={() => setContentTypeMenuOpen((open) => !open)}
+                aria-expanded={contentTypeMenuOpen}
+                aria-label="选择内容类型"
+              >
+                <strong>{contentNodeTypeLabel(contentNodeType)}</strong>
+                <ChevronDown size={12} />
+              </button>
+              {contentTypeMenuOpen && (
+                <div className="content-type-menu" role="menu" aria-label="内容类型">
+                  {CONTENT_NODE_TYPE_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={contentNodeType === option.value}
+                      className={contentNodeType === option.value ? "is-active" : ""}
+                      onClick={() => changeContentNodeType(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <div
               ref={promptVersionControlRef}
               className="nodrag prompt-version-control"
@@ -4858,25 +6029,31 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 className="prompt-version-toggle"
                 onClick={() => setPromptVersionMenuOpen((open) => !open)}
                 aria-expanded={promptVersionMenuOpen}
-                aria-label="选择提示词版本"
+                aria-label="选择内容版本"
               >
                 <History size={12} />
                 <strong>{activePromptVersion?.label ?? "未创建"}</strong>
-                <span>{promptVersions.length} 个版本</span>
+                <span>{isFilteredByActiveParentVersion
+                  ? `${promptVersions.length}/${allPromptVersions.length} 个版本`
+                  : `${promptVersions.length} 个版本`}</span>
                 <ChevronDown size={12} />
               </button>
               {promptVersionMenuOpen && (
-                <div className="prompt-version-menu" role="menu" aria-label="提示词历史版本">
+                <div className="prompt-version-menu" role="menu" aria-label="内容历史版本">
                   <header>
                     <strong>历史版本</strong>
-                    <span>点击切换生成版本</span>
+                    <span>{isFilteredByActiveParentVersion
+                      ? `仅显示基于 ${activeParentVersionLabel} 的版本`
+                      : "点击切换当前版本"}</span>
                   </header>
                   <div
                     className="prompt-version-menu-list nowheel"
                     onWheelCapture={scrollElementWithWheel}
                   >
                     {!promptVersions.length && (
-                      <div className="prompt-version-empty">尚无版本，点击“新版本”创建 v1</div>
+                      <div className="prompt-version-empty">{isFilteredByActiveParentVersion
+                        ? `没有基于 ${activeParentVersionLabel} 的版本`
+                        : "尚无版本，点击“新版本”创建 v1"}</div>
                     )}
                     {[...promptVersions].reverse().map((version) => (
                       <div
@@ -4931,7 +6108,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                                 <strong>{version.id === activePromptVersion?.id
                                   ? `当前 · ${version.title || "未命名版本"}`
                                   : version.title || "未命名版本"}</strong>
-                                <small>{version.text.trim().replace(/\s+/g, " ") || "空提示词"}</small>
                               </span>
                               {version.id === bestPromptVersionId && (
                                 <Star size={12} fill="currentColor" aria-label="最佳版本" />
@@ -4981,13 +6157,40 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               type="button"
               className="nodrag prompt-version-create"
               onClick={createPromptVersion}
-              title="复制当前内容并创建新版本"
+              title={`复制当前内容并创建新版本；将锁定来源：${nextVersionProvenance}`}
+              aria-label={`创建新版本；将锁定来源：${nextVersionProvenance}`}
             >
               <Plus size={13} />
               新版本
             </button>
           </div>
           <div className="text-editor-shell prompt-version-editor-shell">
+            {isFilteredByActiveParentVersion && !activePromptVersion ? (
+              <div className="content-version-filter-empty">
+                <strong>没有对应版本</strong>
+                <span>当前仅显示基于 {activeParentVersionLabel} 创建的版本。</span>
+              </div>
+            ) : nodeMarkdownPreview ? (
+              <MarkdownPreview source={textDraft} className="node-markdown-preview nowheel" />
+            ) : (
+              <textarea
+                className={`nodrag node-editor ${textEditorFocused ? "nowheel" : ""}`}
+                value={textDraft}
+                onChange={changeText}
+                onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
+                onFocus={() => setTextEditorFocused(true)}
+                onBlur={() => setTextEditorFocused(false)}
+                aria-label={`${activePromptVersion?.label ?? "当前版本"}提示词内容`}
+                spellCheck={false}
+              />
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="text-editor-shell">
+          {nodeMarkdownPreview ? (
+            <MarkdownPreview source={textDraft} className="node-markdown-preview nowheel" />
+          ) : (
             <textarea
               className={`nodrag node-editor ${textEditorFocused ? "nowheel" : ""}`}
               value={textDraft}
@@ -4995,23 +6198,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
               onFocus={() => setTextEditorFocused(true)}
               onBlur={() => setTextEditorFocused(false)}
-              aria-label={`${activePromptVersion?.label ?? "当前版本"}提示词内容`}
+              aria-label="文本内容"
               spellCheck={false}
             />
-          </div>
-        </div>
-      ) : (
-        <div className="text-editor-shell">
-          <textarea
-            className={`nodrag node-editor ${textEditorFocused ? "nowheel" : ""}`}
-            value={textDraft}
-            onChange={changeText}
-            onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
-            onFocus={() => setTextEditorFocused(true)}
-            onBlur={() => setTextEditorFocused(false)}
-            aria-label="文本内容"
-            spellCheck={false}
-          />
+          )}
         </div>
       ))}
       {isFolder && (
@@ -5152,6 +6342,33 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           ) : (
             <div className="asset-error">媒体资源不可用</div>
           )}
+        </div>
+      )}
+      {isReferenceAsset && (
+        <div className="nodrag material-note-field">
+          <label>
+            <span>素材备注</span>
+            <input
+              className="nodrag nowheel"
+              value={materialNoteDraft}
+              onPointerDown={(event) => event.stopPropagation()}
+              onFocus={() => setMaterialNoteFocused(true)}
+              onChange={(event) => setMaterialNoteDraft(event.currentTarget.value)}
+              onBlur={finishMaterialNoteEdit}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  event.currentTarget.blur();
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  setMaterialNoteDraft(materialNoteFromContent(record.content));
+                  event.currentTarget.blur();
+                }
+              }}
+              aria-label="素材备注"
+              spellCheck={false}
+            />
+          </label>
         </div>
       )}
       {isGeneratedVideo && (
@@ -5562,19 +6779,26 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 min="2"
                 max="15"
                 step="1"
-                value={videoDuration}
-                onChange={(event) => onChange(id, {
-                  content: {
-                    ...record.content,
-                    generationDuration: Number(event.currentTarget.value),
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                })}
+                value={displayedVideoDuration ?? 2}
+                disabled={isStoryboardReferenceCompiler}
+                onChange={(event) => {
+                  if (isStoryboardReferenceCompiler) return;
+                  onChange(id, {
+                    content: {
+                      ...record.content,
+                      generationDuration: Number(event.currentTarget.value),
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  });
+                }}
                 onPointerDown={(event) => event.stopPropagation()}
-                aria-label="生成时长"
+                aria-label={isStoryboardReferenceCompiler ? "当前分镜提示词时长，只读" : "生成时长"}
               />
-              <output>{videoDuration} 秒</output>
+              <output title={isStoryboardReferenceCompiler
+                ? "由当前高亮的生成提示词决定；请在生成提示词节点中调整"
+                : undefined}
+              >{displayedVideoDuration === null ? "未设置" : `${displayedVideoDuration} 秒`}</output>
             </label>
             <div ref={aspectRatioControlRef} className="video-aspect-ratio-inline">
               <button
@@ -6262,6 +7486,44 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               )}
             </ol>
           </section>
+          {isStoryboardReferenceCompiler && (
+            <section className={`storyboard-reference-panel ${activeStoryboardSelection?.error ? "is-invalid" : "is-valid"}`}>
+              <header>
+                <span className="storyboard-reference-panel-title">
+                  <Sparkles size={13} aria-hidden="true" />
+                  <strong>智能 H3 分镜提示词</strong>
+                </span>
+                <span className="storyboard-reference-scene">
+                  {activeStoryboardSelection?.selection?.sceneKey || "未识别分镜"}
+                </span>
+              </header>
+              <div
+                className="storyboard-reference-status"
+                title={activeStoryboardSelection?.error || undefined}
+              >
+                {!activeStoryboardPrompt
+                  ? "连接提示词后按其内部素材选择筛选实际提交素材"
+                  : activeStoryboardSelection?.error
+                    ? activeStoryboardSelection.error
+                    : `本次提交 ${activeStoryboardSelection?.selectedMedia.length ?? 0} 项，屏蔽 ${activeStoryboardSelection?.skippedCount ?? 0} 项`}
+              </div>
+              {Boolean(activeStoryboardSelection?.mappings.length) && (
+                <ol className="storyboard-reference-mappings">
+                  {activeStoryboardSelection!.mappings.map((mapping) => {
+                    const globalIndex = mediaInputs.findIndex((input) => input.id === mapping.sourceId) + 1;
+                    return (
+                      <li key={mapping.sourceId} title={`${mapping.title} · ${mapping.role}`}>
+                        <span>素材 {globalIndex}</span>
+                        <strong>→ {mapping.label}</strong>
+                        {mapping.subjectLabel && <em>/ {mapping.subjectLabel}</em>}
+                        <small>{mapping.title}</small>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+            </section>
+          )}
           {mediaInputs.length ? (
             <>
               <div className="video-input-heading">
@@ -6304,7 +7566,21 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                           ))}
                         </div>
                       )}
-                      <span>{group.inputs.length}</span>
+                      <span className="video-input-asset-count">{group.inputs.length}</span>
+                      {group.kind === "image" && Boolean(referenceCatalog) && (
+                        <button
+                          type="button"
+                          className="nodrag storyboard-reference-copy"
+                          aria-label={isStoryboardReferenceCompiler ? "复制图片候选清单" : "复制 H3 参考资产清单"}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            copyReferenceCatalog();
+                          }}
+                        >
+                          {referenceCatalogCopied ? <Check size={12} /> : <Copy size={12} />}
+                        </button>
+                      )}
                     </div>
                     <ol
                       className={`video-input-list ${group.kind === "image" ? "is-image-grid" : ""} ${group.kind === "audio" ? "is-audio-grid" : ""}`}
@@ -6683,7 +7959,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           <span className={`source-dot ${record.source === "manual" ? "manual" : "external"}`} />
           <span>{sourceLabel}</span>
           {isImage && <span className="image-dimension-label">{imageDimensionLabel}</span>}
-          {isPromptVersionNode && relationPromptVersionLabel && (
+          {isContentIterationNode && relationPromptVersionLabel && (
             <span
               className="prompt-relation-version"
               title={`当前关联视频使用 ${relationPromptVersionLabel} 生成`}
@@ -6698,8 +7974,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 ? `${record.content.nodeCount} 个节点`
                 : "子画布"
               : (isText || isNote)
-              ? isPromptVersionNode
-                ? `${promptVersions.length} 个版本 · ${textDraft.length.toLocaleString()} 字符`
+              ? isContentIterationNode
+                ? `${promptVersions.length} 个版本`
                 : `${textDraft.length.toLocaleString()} 字符`
               : (isAudioAsset || isVideoAsset)
                 ? originalName
@@ -6734,7 +8010,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         <Handle
           type="source"
           position={Position.Right}
-          className={`node-handle source-handle ${outputCount > 0 ? "is-connected" : ""}`}
+          className={`node-handle source-handle ${isContentIterationNode ? "content-derivation-source-handle" : ""} ${outputCount > 0 ? "is-connected" : ""}`}
+          title={isContentIterationNode ? "连接下游创作内容或视频节点" : undefined}
         />
       )}
       {imageResizeDialogOpen && createPortal(
@@ -6808,7 +8085,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 {isNote ? <StickyNote size={15} /> : <FileText size={15} />}
               </span>
               <div>
-                {isPromptVersionNode && activePromptVersion && editingPromptVersionTitleId === activePromptVersion.id ? (
+                {isContentIterationNode && activePromptVersion && editingPromptVersionTitleId === activePromptVersion.id ? (
                   <input
                     className="expanded-editor-title-editor"
                     value={promptVersionTitleDraft}
@@ -6829,31 +8106,58 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   />
                 ) : (
                   <strong
-                    className={isPromptVersionNode && activePromptVersion ? "is-editable" : ""}
+                    className={isContentIterationNode && activePromptVersion ? "is-editable" : ""}
                     onDoubleClick={() => {
                       if (activePromptVersion) beginPromptVersionTitleEdit(activePromptVersion);
                     }}
-                    title={isPromptVersionNode && activePromptVersion
+                    title={isContentIterationNode && activePromptVersion
                       ? "双击修改当前版本标题"
                       : undefined}
                   >
-                    {isPromptVersionNode
+                    {isContentIterationNode
                       ? activePromptVersion?.title || record.title || "未命名版本"
                       : record.title || "未命名节点"}
                   </strong>
                 )}
-                <span>{isPromptVersionNode && activePromptVersion
+                <span>{isContentIterationNode && activePromptVersion
                   ? `${activePromptVersion.label} · ${textDraft.length.toLocaleString()} 字符 · 自动保存 · 可手动保存`
                   : `${textDraft.length.toLocaleString()} 字符 · 自动保存 · 可手动保存`}</span>
+                {isContentIterationNode && activePromptVersion && (
+                  <span className="content-version-header-provenance">
+                    来源：{versionProvenance(activePromptVersion)}
+                  </span>
+                )}
               </div>
-              {isPromptVersionNode && (
+              {isContentIterationNode && (
+                contentNodeType === "prompt" && activePromptVersion && (
+                  <label className="expanded-editor-duration-control">
+                    <span>时长</span>
+                    <input
+                      type="number"
+                      min="2"
+                      max="15"
+                      step="1"
+                      value={promptDurationSecondsFromVersion(activePromptVersion) ?? ""}
+                      onChange={(event) => changeActivePromptDuration(event.currentTarget.value)}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      aria-label="当前生成提示词时长，2 到 15 秒"
+                      placeholder="未设置"
+                    />
+                    <small>{activePromptVersion.durationOverrideSeconds !== undefined
+                      ? "手动"
+                      : activePromptVersion.generationOptions ? "推荐" : "未设置"}</small>
+                  </label>
+                )
+              )}
+              {isContentIterationNode && (
                 <div className="expanded-editor-version-control">
                   <span>版本</span>
                   <SettingsSelect
                     value={activePromptVersion?.id ?? ""}
                     options={[...promptVersions].reverse().map((version) => ({
                       value: version.id,
-                      label: `${version.label} · ${version.title || "未命名版本"}`,
+                      label: version.label,
+                      title: `${version.label} · ${version.title || "未命名版本"}`,
                     }))}
                     onChange={(versionId) => {
                       const version = promptVersions.find(
@@ -6866,6 +8170,28 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     placeholder="未创建"
                   />
                 </div>
+              )}
+              {isNote && (
+                <>
+                  <button
+                    type="button"
+                    className={`markdown-mode-toggle ${expandedTextMarkdownPreview ? "is-active" : ""}`}
+                    onClick={() => setExpandedTextMarkdownPreview((preview) => !preview)}
+                    title={expandedTextMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                    aria-label={expandedTextMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                  >
+                    {expandedTextMarkdownPreview ? <Pencil size={14} /> : <Eye size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="markdown-copy-button"
+                    onClick={() => copyMarkdown("expanded-note", textDraft)}
+                    title="复制 Markdown 原文"
+                    aria-label="复制 Markdown 原文"
+                  >
+                    {copiedMarkdownTarget === "expanded-note" ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                </>
               )}
               <button
                 type="button"
@@ -6886,12 +8212,105 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               </button>
             </header>
             {isText ? (
-              <div className="expanded-prompt-layout">
+              <div className={`expanded-prompt-layout ${expandedInformationHidden ? "is-information-hidden" : ""}`}>
                 <section className="expanded-prompt-pane is-prompt">
                   <header>
                     <strong>提示词</strong>
                     <span>{textDraft.length.toLocaleString()} 字符</span>
+                    <button
+                      type="button"
+                      className={`markdown-mode-toggle ${expandedTextMarkdownPreview ? "is-active" : ""}`}
+                      onClick={() => setExpandedTextMarkdownPreview((preview) => !preview)}
+                      title={expandedTextMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                      aria-label={expandedTextMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                    >
+                      {expandedTextMarkdownPreview ? <Pencil size={14} /> : <Eye size={14} />}
+                    </button>
+                    <button
+                      type="button"
+                      className="markdown-copy-button"
+                      onClick={() => copyMarkdown("expanded-text", textDraft)}
+                      title="复制 Markdown 原文"
+                      aria-label="复制 Markdown 原文"
+                    >
+                      {copiedMarkdownTarget === "expanded-text" ? <Check size={14} /> : <Copy size={14} />}
+                    </button>
+                    <button
+                      type="button"
+                      className="expanded-information-toggle"
+                      onClick={(event) => {
+                        event.currentTarget.blur();
+                        setExpandedInformationHidden((hidden) => !hidden);
+                      }}
+                      title={expandedInformationHidden ? "显示备注栏" : "隐藏备注栏"}
+                      aria-label={expandedInformationHidden ? "显示备注栏" : "隐藏备注栏"}
+                      aria-pressed={expandedInformationHidden}
+                    >
+                      {expandedInformationHidden ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}
+                    </button>
                   </header>
+                  {isFilteredByActiveParentVersion && !activePromptVersion ? (
+                    <div className="content-version-filter-empty is-expanded">
+                      <strong>没有对应版本</strong>
+                      <span>当前上游选择的是 {activeParentVersionLabel}，这里仅显示基于该版本创建的内容。</span>
+                    </div>
+                  ) : expandedTextMarkdownPreview ? (
+                    <MarkdownPreview source={textDraft} className="expanded-markdown-preview" enableSpaceTablePan />
+                  ) : (
+                    <textarea
+                      className="expanded-text-editor"
+                      value={textDraft}
+                      onChange={changeText}
+                      onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
+                      autoFocus
+                      spellCheck={false}
+                      aria-label="提示词内容"
+                    />
+                  )}
+                </section>
+                <section className="expanded-prompt-pane is-information">
+                  <header>
+                    <strong>备注</strong>
+                    <span>{informationDraft.length.toLocaleString()} 字符</span>
+                    <button
+                      type="button"
+                      className={`markdown-mode-toggle ${expandedInformationMarkdownPreview ? "is-active" : ""}`}
+                      onClick={() => setExpandedInformationMarkdownPreview((preview) => !preview)}
+                      title={expandedInformationMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                      aria-label={expandedInformationMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                    >
+                      {expandedInformationMarkdownPreview ? <Pencil size={14} /> : <Eye size={14} />}
+                    </button>
+                    <button
+                      type="button"
+                      className="markdown-copy-button"
+                      onClick={() => copyMarkdown("expanded-information", informationDraft)}
+                      title="复制 Markdown 原文"
+                      aria-label="复制 Markdown 原文"
+                    >
+                      {copiedMarkdownTarget === "expanded-information" ? <Check size={14} /> : <Copy size={14} />}
+                    </button>
+                  </header>
+                  {expandedInformationMarkdownPreview ? (
+                  <MarkdownPreview source={informationDraft} className="expanded-markdown-preview is-information" enableSpaceTablePan />
+                  ) : (
+                    <textarea
+                      className="expanded-text-editor"
+                      value={informationDraft}
+                      onChange={changeInformation}
+                      onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
+                      spellCheck={false}
+                      placeholder={isContentIterationNode ? "这里记录本版本的备注…" : "这里记录当前文本的备注…"}
+                      aria-label="提示词备注"
+                    />
+                  )}
+                </section>
+              </div>
+            ) : (
+              <>
+                {expandedTextMarkdownPreview ? (
+                  <MarkdownPreview source={textDraft} className="expanded-markdown-preview" />
+                ) : (
                   <textarea
                     className="expanded-text-editor"
                     value={textDraft}
@@ -6899,35 +8318,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
                     autoFocus
                     spellCheck={false}
-                    aria-label="提示词内容"
+                    aria-label="放大文本内容"
                   />
-                </section>
-                <section className="expanded-prompt-pane is-information">
-                  <header>
-                    <strong>备注</strong>
-                    <span>{informationDraft.length.toLocaleString()} 字符</span>
-                  </header>
-                  <textarea
-                    className="expanded-text-editor"
-                    value={informationDraft}
-                    onChange={changeInformation}
-                    onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
-                    spellCheck={false}
-                    placeholder={isPromptVersionNode ? "这里记录本版本的备注…" : "这里记录当前提示词的备注…"}
-                    aria-label="提示词备注"
-                  />
-                </section>
-              </div>
-            ) : (
-              <textarea
-                className="expanded-text-editor"
-                value={textDraft}
-                onChange={changeText}
-                onKeyDown={(event) => saveTextWithShortcut(event, id, activePromptVersion?.id)}
-                autoFocus
-                spellCheck={false}
-                aria-label="放大文本内容"
-              />
+                )}
+              </>
             )}
           </section>
         </div>,
@@ -6951,7 +8345,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <strong>{connectedTextEditor.title}</strong>
                 <span>{connectedTextEditor.text.length.toLocaleString()} 字符 · 自动保存 · 可手动保存</span>
               </div>
-              {connectedTextEditor.content.promptVersionNode === true && (
+              {isContentIterationContent(connectedTextEditor.content) && (
                 <div className="expanded-editor-version-control">
                   <span>版本</span>
                   <SettingsSelect
@@ -6994,36 +8388,93 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <X size={17} />
               </button>
             </header>
-            <div className="expanded-prompt-layout">
+            <div className={`expanded-prompt-layout ${connectedInformationHidden ? "is-information-hidden" : ""}`}>
               <section className="expanded-prompt-pane is-prompt">
                 <header>
                   <strong>提示词</strong>
                   <span>{connectedTextEditor.text.length.toLocaleString()} 字符</span>
+                  <button
+                    type="button"
+                    className={`markdown-mode-toggle ${connectedTextMarkdownPreview ? "is-active" : ""}`}
+                    onClick={() => setConnectedTextMarkdownPreview((preview) => !preview)}
+                    title={connectedTextMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                    aria-label={connectedTextMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                  >
+                    {connectedTextMarkdownPreview ? <Pencil size={14} /> : <Eye size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="markdown-copy-button"
+                    onClick={() => copyMarkdown("connected-text", connectedTextEditor.text)}
+                    title="复制 Markdown 原文"
+                    aria-label="复制 Markdown 原文"
+                  >
+                    {copiedMarkdownTarget === "connected-text" ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="expanded-information-toggle"
+                    onClick={(event) => {
+                      event.currentTarget.blur();
+                      setConnectedInformationHidden((hidden) => !hidden);
+                    }}
+                    title={connectedInformationHidden ? "显示备注栏" : "隐藏备注栏"}
+                    aria-label={connectedInformationHidden ? "显示备注栏" : "隐藏备注栏"}
+                    aria-pressed={connectedInformationHidden}
+                  >
+                    {connectedInformationHidden ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}
+                  </button>
                 </header>
-                <textarea
-                  className="expanded-text-editor"
-                  value={connectedTextEditor.text}
-                  onChange={(event) => changeConnectedPromptField("text", event.currentTarget.value)}
-                  onKeyDown={(event) => saveTextWithShortcut(event, connectedTextEditor.id, connectedActivePromptVersion?.id)}
-                  autoFocus
-                  spellCheck={false}
-                  aria-label="已连接提示词内容"
-                />
+                {connectedTextMarkdownPreview ? (
+                  <MarkdownPreview source={connectedTextEditor.text} className="expanded-markdown-preview" enableSpaceTablePan />
+                ) : (
+                  <textarea
+                    className="expanded-text-editor"
+                    value={connectedTextEditor.text}
+                    onChange={(event) => changeConnectedPromptField("text", event.currentTarget.value)}
+                    onKeyDown={(event) => saveTextWithShortcut(event, connectedTextEditor.id, connectedActivePromptVersion?.id)}
+                    autoFocus
+                    spellCheck={false}
+                    aria-label="已连接提示词内容"
+                  />
+                )}
               </section>
               <section className="expanded-prompt-pane is-information">
                 <header>
                   <strong>备注</strong>
                   <span>{connectedTextEditor.information.length.toLocaleString()} 字符</span>
+                  <button
+                    type="button"
+                    className={`markdown-mode-toggle ${connectedInformationMarkdownPreview ? "is-active" : ""}`}
+                    onClick={() => setConnectedInformationMarkdownPreview((preview) => !preview)}
+                    title={connectedInformationMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                    aria-label={connectedInformationMarkdownPreview ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                  >
+                    {connectedInformationMarkdownPreview ? <Pencil size={14} /> : <Eye size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="markdown-copy-button"
+                    onClick={() => copyMarkdown("connected-information", connectedTextEditor.information)}
+                    title="复制 Markdown 原文"
+                    aria-label="复制 Markdown 原文"
+                  >
+                    {copiedMarkdownTarget === "connected-information" ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
                 </header>
-                <textarea
-                  className="expanded-text-editor"
-                  value={connectedTextEditor.information}
-                  onChange={(event) => changeConnectedPromptField("information", event.currentTarget.value)}
-                  onKeyDown={(event) => saveTextWithShortcut(event, connectedTextEditor.id, connectedActivePromptVersion?.id)}
-                  spellCheck={false}
-                  placeholder={connectedTextEditor.content.promptVersionNode === true ? "这里记录本版本的备注…" : "这里保存提示词的中文备注…"}
-                  aria-label="已连接提示词备注"
-                />
+                {connectedInformationMarkdownPreview ? (
+                  <MarkdownPreview source={connectedTextEditor.information} className="expanded-markdown-preview is-information" enableSpaceTablePan />
+                ) : (
+                  <textarea
+                    className="expanded-text-editor"
+                    value={connectedTextEditor.information}
+                    onChange={(event) => changeConnectedPromptField("information", event.currentTarget.value)}
+                    onKeyDown={(event) => saveTextWithShortcut(event, connectedTextEditor.id, connectedActivePromptVersion?.id)}
+                    spellCheck={false}
+                    placeholder={isContentIterationContent(connectedTextEditor.content) ? "这里记录本版本的备注…" : "这里保存当前文本的备注…"}
+                    aria-label="已连接提示词备注"
+                  />
+                )}
               </section>
             </div>
           </section>
@@ -7216,6 +8667,7 @@ export {
   SettingsSelect,
   UI_FONT_SIZE_STORAGE_KEY,
   VIDEO_GENERATION_DEFAULTS_STORAGE_KEY,
+  LEGACY_VIDEO_GENERATION_NODE_WIDTH,
   VIDEO_GENERATION_NODE_WIDTH,
   VIDEO_NODE_BASE_HEIGHT,
   VIDEO_REGENERATION_NUMBER_CONFIG,
@@ -7261,6 +8713,7 @@ export {
   h3SecondaryLoraStrengthFromContent,
   incomingNodePosition,
   informationFromContent,
+  isContentIterationContent,
   isSecondaryComfyTask,
   loadImageNaturalSize,
   mappedComfyOutputPath,
@@ -7273,6 +8726,7 @@ export {
   persistedComfyTasksFromStorage,
   primaryVideoResolutionFromContent,
   primaryVideoStepsFromContent,
+  promptDurationSecondsFromVersion,
   promptVersionsFromContent,
   randomFixedSeed,
   recordAtCurrentFlowPosition,
@@ -7283,6 +8737,8 @@ export {
   secondaryVideoResolutionFromContent,
   seedModeFromContent,
   snapCanvasCoordinate,
+  referenceSelectionFromContent,
+  resolveStoryboardReferenceSelection,
   strictPromptTagsFromContent,
   textFromContent,
   toFlowEdge,
@@ -7340,6 +8796,9 @@ export type {
   SecondarySampleNumericField,
   SecondarySampleOverrides,
   SpacingGuide,
+  StoryboardReferenceMapping,
+  StoryboardReferenceResolution,
+  StoryboardReferenceSelection,
   UiFontSize,
   VideoAspectRatio,
   VideoDeletionChoice,

@@ -79,11 +79,34 @@ pub struct PromptVersionRecord {
     pub title: String,
     pub text: String,
     pub information: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_selection: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_options: Option<PromptGenerationOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_override_seconds: Option<u8>,
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derived_from: Vec<ContentVersionSource>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptGenerationOptions {
+    pub duration_seconds: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentVersionSource {
+    pub node_id: String,
+    pub version_id: String,
+    #[serde(default)]
+    pub version_label: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -96,6 +119,10 @@ pub struct PromptSceneBinding {
     pub scene_key: String,
     pub scene_title: String,
     pub node_id: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
     pub latest_version: Option<String>,
     pub version_count: usize,
     pub updated_at: String,
@@ -127,6 +154,10 @@ pub struct CreatePromptSceneInput {
     pub text: String,
     #[serde(default)]
     pub information: String,
+    #[serde(default)]
+    pub reference_selection: Option<serde_json::Value>,
+    #[serde(default)]
+    pub generation_options: Option<PromptGenerationOptions>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -166,6 +197,10 @@ pub struct AppendPromptVersionInput {
     #[serde(default)]
     pub information: String,
     #[serde(default)]
+    pub reference_selection: Option<serde_json::Value>,
+    #[serde(default)]
+    pub generation_options: Option<PromptGenerationOptions>,
+    #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
@@ -181,6 +216,28 @@ pub struct AppendPromptVersionResult {
     pub node: NodeRecord,
     pub version: PromptVersionRecord,
     pub created: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendContentVersionResult {
+    pub node: NodeRecord,
+    pub version: PromptVersionRecord,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateNodesBatchInput {
+    pub nodes: Vec<CreateNodeInput>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateNodesBatchResult {
+    pub nodes: Vec<CreateNodeResult>,
+    pub created_count: usize,
+    pub existing_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -31,6 +31,13 @@ pub struct RunningComfyTask {
     cleanup_started: AtomicBool,
 }
 
+#[derive(Clone, Default)]
+pub struct CanvasSelectionState {
+    pub canvas_id: Option<String>,
+    pub node_ids: Vec<String>,
+    pub updated_at: String,
+}
+
 #[derive(Clone)]
 pub struct ApplicationState {
     database: Database,
@@ -42,6 +49,7 @@ pub struct ApplicationState {
     app_lock_path: PathBuf,
     app_lock_guard: Arc<Mutex<()>>,
     active_canvas_id: Arc<RwLock<String>>,
+    current_canvas_selection: Arc<RwLock<CanvasSelectionState>>,
     running_comfy_tasks: Arc<Mutex<HashMap<String, Arc<RunningComfyTask>>>>,
 }
 
@@ -236,6 +244,7 @@ pub fn run() {
                 eprintln!("Updated asset paths in {rewritten_nodes} migrated canvas nodes");
             }
             let active_canvas_id = Arc::new(RwLock::new(DEFAULT_CANVAS_ID.to_owned()));
+            let current_canvas_selection = Arc::new(RwLock::new(CanvasSelectionState::default()));
 
             let listener = TcpListener::bind("127.0.0.1:0")?;
             let address = listener.local_addr()?;
@@ -266,6 +275,7 @@ pub fn run() {
                 app_lock_path,
                 app_lock_guard: Arc::new(Mutex::new(())),
                 active_canvas_id: active_canvas_id.clone(),
+                current_canvas_selection: current_canvas_selection.clone(),
                 running_comfy_tasks: Arc::new(Mutex::new(HashMap::new())),
             });
 
@@ -274,6 +284,7 @@ pub fn run() {
                 token,
                 app_handle: Some(app.handle().clone()),
                 active_canvas_id,
+                current_canvas_selection,
             };
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = api::serve(listener, api_state).await {
@@ -334,6 +345,7 @@ pub fn run() {
             commands::import_workflow_module_bundle,
             commands::restore_workflow_module_bundle,
             commands::get_runtime_info,
+            commands::update_canvas_selection,
             commands::get_app_lock_status,
             commands::verify_app_lock_password,
             commands::set_app_lock_password,

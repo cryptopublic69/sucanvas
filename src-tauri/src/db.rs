@@ -11,20 +11,20 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::models::{
-    AppendPromptVersionInput, AppendPromptVersionResult, CancelFolderResult,
-    CancelFolderUndoRecord, CanvasFolderLinkRecord, CanvasRecord, CreateEdgeInput,
-    CreateEmptyFolderInput, CreateEmptyFolderResult, CreateMissingPromptScenesInput,
-    CreateMissingPromptScenesResult, CreateNodeInput, CreateNodeResult, DeleteFolderResult,
-    DeletedBatch, EdgeRecord, FolderActionInput, FolderGroupingUndoRecord,
-    FolderInputDuplicateRecord, FolderMergeDeduplicatedInputRecord, FolderMergeSourceSnapshot,
-    FolderMergeUndoRecord, FolderTreeUndoRecord, GroupNodesIntoFolderInput,
-    GroupNodesIntoFolderResult, GroupRelatedNodesIntoFolderInput, MergeFoldersInput,
-    MergeFoldersResult, NodeRecord, PromptSceneBinding, PromptSceneBindingRecord,
-    PromptSceneMutation, PromptSetScenesResult, PromptSetSummary, PromptVersionRecord,
-    ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult, RestoreNodeReplacementInput,
-    RestoreNodeReplacementResult, UndoCancelFolderInput, UndoDeleteFolderInput,
-    UndoFolderGroupingInput, UndoFolderMergeInput, UpdateNodeInput, WorkspaceSnapshot,
-    DEFAULT_CANVAS_ID,
+    AppendContentVersionResult, AppendPromptVersionInput, AppendPromptVersionResult,
+    CancelFolderResult, CancelFolderUndoRecord, CanvasFolderLinkRecord, CanvasRecord,
+    ContentVersionSource, CreateEdgeInput, CreateEmptyFolderInput, CreateEmptyFolderResult,
+    CreateMissingPromptScenesInput, CreateMissingPromptScenesResult, CreateNodeInput,
+    CreateNodeResult, DeleteFolderResult, DeletedBatch, EdgeRecord, FolderActionInput,
+    FolderGroupingUndoRecord, FolderInputDuplicateRecord, FolderMergeDeduplicatedInputRecord,
+    FolderMergeSourceSnapshot, FolderMergeUndoRecord, FolderTreeUndoRecord,
+    GroupNodesIntoFolderInput, GroupNodesIntoFolderResult, GroupRelatedNodesIntoFolderInput,
+    MergeFoldersInput, MergeFoldersResult, NodeRecord, PromptGenerationOptions, PromptSceneBinding,
+    PromptSceneBindingRecord, PromptSceneMutation, PromptSetScenesResult, PromptSetSummary,
+    PromptVersionRecord, ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult,
+    RestoreNodeReplacementInput, RestoreNodeReplacementResult, UndoCancelFolderInput,
+    UndoDeleteFolderInput, UndoFolderGroupingInput, UndoFolderMergeInput, UpdateNodeInput,
+    WorkspaceSnapshot, DEFAULT_CANVAS_ID,
 };
 
 const FOLDER_NODE_WIDTH: f64 = 420.0;
@@ -181,6 +181,10 @@ impl Database {
                 [],
             )?;
         }
+
+        migrate_legacy_storyboard_reference_data(&connection)?;
+        migrate_content_iteration_nodes(&connection)?;
+        migrate_legacy_content_version_provenance(&connection)?;
 
         connection.execute(
             "UPDATE nodes SET width = ?1, height = ?2 WHERE kind = 'folder'",
@@ -1963,6 +1967,8 @@ impl Database {
             validate_prompt_identifier("scene key", &scene.scene_key, 64)?;
             validate_prompt_title("scene title", &scene.title)?;
             validate_prompt_text(&scene.text, &scene.information)?;
+            validate_reference_selection(scene.reference_selection.as_ref())?;
+            validate_generation_options(scene.generation_options.as_ref())?;
             if !seen_scene_keys.insert(scene.scene_key.clone()) {
                 return Err(CanvasError::Validation(format!(
                     "duplicate scene key in request: {}",
@@ -2023,6 +2029,18 @@ impl Database {
             .into_iter()
             .map(|binding| (binding.scene_key.clone(), binding))
             .collect::<BTreeMap<_, _>>();
+        let missing_scene_count = input
+            .scenes
+            .iter()
+            .filter(|scene| !existing_by_key.contains_key(&scene.scene_key))
+            .count();
+        let mut missing_scene_positions = prompt_scene_batch_positions(
+            &transaction,
+            &canvas_id,
+            existing_by_key.values(),
+            missing_scene_count,
+        )?
+        .into_iter();
         let mut mutations = Vec::with_capacity(input.scenes.len());
         let mut created_count = 0;
 
@@ -2060,9 +2078,13 @@ impl Database {
                 title: scene.title.clone(),
                 text: scene.text.clone(),
                 information: scene.information.clone(),
+                reference_selection: scene.reference_selection.clone(),
+                generation_options: scene.generation_options.clone(),
+                duration_override_seconds: None,
                 created_at: timestamp.clone(),
                 request_id: version_request_id.clone(),
                 source: Some(source.clone()),
+                derived_from: Vec::new(),
             };
             let request_id = input
                 .request_id
@@ -2075,7 +2097,9 @@ impl Database {
                     )));
                 }
             }
-            let (x, y) = next_position(&transaction, &canvas_id)?;
+            let (x, y) = missing_scene_positions.next().ok_or_else(|| {
+                CanvasError::Conflict("prompt scene batch placement was incomplete".to_owned())
+            })?;
             let node = NodeRecord {
                 id: format!("node:{}", Uuid::new_v4()),
                 canvas_id: canvas_id.clone(),
@@ -2084,7 +2108,10 @@ impl Database {
                 content: json!({
                     "text": scene.text,
                     "information": scene.information,
-                    "promptVersionNode": true,
+                    "referenceSelection": scene.reference_selection,
+                    "generationOptions": scene.generation_options,
+                    "contentNode": true,
+                    "contentType": "prompt",
                     "promptVersions": [version],
                     "activePromptVersionId": version_id,
                     "bestPromptVersionId": "",
@@ -2162,6 +2189,8 @@ impl Database {
         validate_prompt_identifier("prompt set id", prompt_set_id, 128)?;
         validate_prompt_identifier("scene key", scene_key, 64)?;
         validate_prompt_text(&input.text, &input.information)?;
+        validate_reference_selection(input.reference_selection.as_ref())?;
+        validate_generation_options(input.generation_options.as_ref())?;
         validate_optional_request_id(Some(&input.request_id))?;
         let source = input
             .source
@@ -2184,8 +2213,7 @@ impl Database {
                 binding_record.node_id
             ))
         })?;
-        if node.kind != "text" || node.content.get("promptVersionNode") != Some(&Value::Bool(true))
-        {
+        if node.kind != "text" || !is_content_iteration_node(&node.content) {
             return Err(CanvasError::Conflict(format!(
                 "bound node is not a prompt version node: {}",
                 node.id
@@ -2252,9 +2280,13 @@ impl Database {
                 .unwrap_or_else(|| binding_record.scene_title.clone()),
             text: input.text,
             information: input.information,
+            reference_selection: input.reference_selection,
+            generation_options: input.generation_options,
+            duration_override_seconds: None,
             created_at: timestamp.clone(),
             request_id: Some(input.request_id),
             source: Some(source),
+            derived_from: Vec::new(),
         };
         versions.push(version.clone());
         let content = node.content.as_object_mut().ok_or_else(|| {
@@ -2265,7 +2297,18 @@ impl Database {
             "information".to_owned(),
             Value::String(version.information.clone()),
         );
-        content.insert("promptVersionNode".to_owned(), Value::Bool(true));
+        content.insert(
+            "referenceSelection".to_owned(),
+            version.reference_selection.clone().unwrap_or(Value::Null),
+        );
+        content.insert(
+            "generationOptions".to_owned(),
+            serde_json::to_value(&version.generation_options)?,
+        );
+        content.insert("contentNode".to_owned(), Value::Bool(true));
+        content
+            .entry("contentType".to_owned())
+            .or_insert_with(|| Value::String("prompt".to_owned()));
         content.insert(
             "promptVersions".to_owned(),
             serde_json::to_value(&versions)?,
@@ -2309,6 +2352,235 @@ impl Database {
             version,
             created: true,
         })
+    }
+
+    pub fn append_content_version(
+        &self,
+        node_id: &str,
+        input: AppendPromptVersionInput,
+    ) -> CanvasResult<AppendContentVersionResult> {
+        validate_prompt_identifier("node id", node_id, 160)?;
+        validate_prompt_text(&input.text, &input.information)?;
+        validate_reference_selection(input.reference_selection.as_ref())?;
+        validate_generation_options(input.generation_options.as_ref())?;
+        validate_optional_request_id(Some(&input.request_id))?;
+        let source = input
+            .source
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "codex".to_owned());
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut node = get_node_by_id(&transaction, node_id)?
+            .ok_or_else(|| CanvasError::NotFound(format!("content node not found: {node_id}")))?;
+        if node.kind != "text" || !is_content_iteration_node(&node.content) {
+            return Err(CanvasError::Conflict(format!(
+                "node is not a content iteration node: {}",
+                node.id
+            )));
+        }
+
+        let mut versions = prompt_versions_from_content(&node.content)?;
+        if let Some((request_node_id, version_id)) =
+            get_prompt_version_request(&transaction, &input.request_id)?
+        {
+            if request_node_id != node.id {
+                return Err(CanvasError::Conflict(format!(
+                    "content version request id was already used: {}",
+                    input.request_id
+                )));
+            }
+            let existing = versions
+                .iter()
+                .find(|version| version.id == version_id)
+                .cloned()
+                .ok_or_else(|| {
+                    CanvasError::Conflict(format!(
+                        "request {} was already applied, but its version was deleted",
+                        input.request_id
+                    ))
+                })?;
+            transaction.commit()?;
+            return Ok(AppendContentVersionResult {
+                node,
+                version: existing,
+                created: false,
+            });
+        }
+        if let Some(expected_version_count) = input.expected_version_count {
+            if versions.len() != expected_version_count {
+                return Err(CanvasError::Conflict(format!(
+                    "version count changed for content node {node_id}: expected {expected_version_count}, actual {}",
+                    versions.len()
+                )));
+            }
+        }
+
+        let version_number = versions
+            .iter()
+            .filter_map(|version| {
+                version
+                    .label
+                    .strip_prefix(['v', 'V'])
+                    .and_then(|value| value.parse::<usize>().ok())
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let timestamp = now();
+        let derived_from = content_version_sources(&transaction, &node.id)?;
+        let version = PromptVersionRecord {
+            id: format!("version:{}", Uuid::new_v4()),
+            label: format!("v{version_number}"),
+            title: input
+                .title
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| node.title.clone()),
+            text: input.text,
+            information: input.information,
+            reference_selection: input.reference_selection,
+            generation_options: input.generation_options,
+            duration_override_seconds: None,
+            created_at: timestamp.clone(),
+            request_id: Some(input.request_id),
+            source: Some(source),
+            derived_from,
+        };
+        versions.push(version.clone());
+        let content = node.content.as_object_mut().ok_or_else(|| {
+            CanvasError::Conflict(format!(
+                "content node payload is not an object: {}",
+                node.id
+            ))
+        })?;
+        content.insert("text".to_owned(), Value::String(version.text.clone()));
+        content.insert(
+            "information".to_owned(),
+            Value::String(version.information.clone()),
+        );
+        content.insert(
+            "referenceSelection".to_owned(),
+            version.reference_selection.clone().unwrap_or(Value::Null),
+        );
+        content.insert("contentNode".to_owned(), Value::Bool(true));
+        content
+            .entry("contentType".to_owned())
+            .or_insert_with(|| Value::String("prompt".to_owned()));
+        content.insert(
+            "promptVersions".to_owned(),
+            serde_json::to_value(&versions)?,
+        );
+        content.insert(
+            "activePromptVersionId".to_owned(),
+            Value::String(version.id.clone()),
+        );
+        node.updated_at = timestamp.clone();
+        validate_node(&node)?;
+        write_node_update(&transaction, &node)?;
+        insert_prompt_version_request(
+            &transaction,
+            version.request_id.as_deref().unwrap_or_default(),
+            &node.id,
+            &version.id,
+            &timestamp,
+        )?;
+        touch_canvas(&transaction, &node.canvas_id)?;
+        transaction.commit()?;
+
+        Ok(AppendContentVersionResult {
+            node,
+            version,
+            created: true,
+        })
+    }
+
+    pub fn delete_content_version(
+        &self,
+        node_id: &str,
+        version_id: &str,
+    ) -> CanvasResult<NodeRecord> {
+        validate_prompt_identifier("node id", node_id, 160)?;
+        validate_prompt_identifier("version id", version_id, 160)?;
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut node = get_node_by_id(&transaction, node_id)?
+            .ok_or_else(|| CanvasError::NotFound(format!("content node not found: {node_id}")))?;
+        if node.kind != "text" || !is_content_iteration_node(&node.content) {
+            return Err(CanvasError::Conflict(format!(
+                "node is not a content iteration node: {}",
+                node.id
+            )));
+        }
+
+        let mut versions = prompt_versions_from_content(&node.content)?;
+        if versions.len() <= 1 {
+            return Err(CanvasError::Conflict(
+                "the only content version cannot be deleted".to_owned(),
+            ));
+        }
+        let removed_index = versions
+            .iter()
+            .position(|version| version.id == version_id)
+            .ok_or_else(|| {
+                CanvasError::NotFound(format!("content version not found: {version_id}"))
+            })?;
+        versions.remove(removed_index);
+
+        let active_version_id = node
+            .content
+            .get("activePromptVersionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let active_version = versions
+            .iter()
+            .find(|version| version.id == active_version_id)
+            .or_else(|| versions.get(removed_index.saturating_sub(1)))
+            .or_else(|| versions.last())
+            .cloned()
+            .ok_or_else(|| {
+                CanvasError::Conflict("content node has no remaining version".to_owned())
+            })?;
+
+        let content = node.content.as_object_mut().ok_or_else(|| {
+            CanvasError::Conflict(format!(
+                "content node payload is not an object: {}",
+                node.id
+            ))
+        })?;
+        content.insert(
+            "text".to_owned(),
+            Value::String(active_version.text.clone()),
+        );
+        content.insert(
+            "information".to_owned(),
+            Value::String(active_version.information.clone()),
+        );
+        content.insert(
+            "referenceSelection".to_owned(),
+            active_version
+                .reference_selection
+                .clone()
+                .unwrap_or(Value::Null),
+        );
+        content.insert(
+            "promptVersions".to_owned(),
+            serde_json::to_value(&versions)?,
+        );
+        content.insert(
+            "activePromptVersionId".to_owned(),
+            Value::String(active_version.id.clone()),
+        );
+        node.updated_at = now();
+        validate_node(&node)?;
+        write_node_update(&transaction, &node)?;
+        transaction.execute(
+            "DELETE FROM prompt_version_requests WHERE node_id = ?1 AND version_id = ?2",
+            params![node_id, version_id],
+        )?;
+        touch_canvas(&transaction, &node.canvas_id)?;
+        transaction.commit()?;
+        Ok(node)
     }
 
     pub fn create_node(&self, input: CreateNodeInput) -> CanvasResult<CreateNodeResult> {
@@ -2731,6 +3003,13 @@ impl Database {
     }
 
     pub fn create_edge(&self, input: CreateEdgeInput) -> CanvasResult<EdgeRecord> {
+        self.create_edge_with_status(input).map(|(edge, _)| edge)
+    }
+
+    pub fn create_edge_with_status(
+        &self,
+        input: CreateEdgeInput,
+    ) -> CanvasResult<(EdgeRecord, bool)> {
         if input.source_node_id == input.target_node_id {
             return Err(CanvasError::Validation(
                 "an edge cannot connect a node to itself".to_owned(),
@@ -2741,7 +3020,10 @@ impl Database {
             .as_deref()
             .unwrap_or(DEFAULT_CANVAS_ID)
             .to_owned();
-        let kind = input.kind.unwrap_or_else(|| "flow".to_owned());
+        let mut kind = input.kind.unwrap_or_else(|| "flow".to_owned());
+        if kind == "scene-branch" {
+            kind = "content-derivation".to_owned();
+        }
         validate_kind(&kind)?;
         let metadata_json = serde_json::to_string(&input.metadata)?;
         let connection = self.lock()?;
@@ -2753,6 +3035,39 @@ impl Database {
             return Err(CanvasError::Validation(
                 "an edge cannot connect nodes across projects".to_owned(),
             ));
+        }
+        if kind == "content-derivation" || kind == "scene-branch" {
+            let source_is_content =
+                source.kind == "text" && is_content_iteration_node(&source.content);
+            let target_is_content =
+                target.kind == "text" && is_content_iteration_node(&target.content);
+            if !source_is_content || !target_is_content {
+                return Err(CanvasError::Validation(
+                    "a content-derivation edge must connect two content iteration nodes".to_owned(),
+                ));
+            }
+            let creates_cycle: Option<i64> = connection
+                .query_row(
+                    "WITH RECURSIVE descendants(node_id) AS (
+                       SELECT target_node_id FROM edges
+                       WHERE canvas_id = ?1 AND source_node_id = ?2
+                         AND kind IN ('content-derivation', 'scene-branch')
+                       UNION
+                       SELECT edges.target_node_id FROM edges
+                       JOIN descendants ON edges.source_node_id = descendants.node_id
+                       WHERE edges.canvas_id = ?1
+                         AND edges.kind IN ('content-derivation', 'scene-branch')
+                     )
+                     SELECT 1 FROM descendants WHERE node_id = ?3 LIMIT 1",
+                    params![canvas_id, input.target_node_id, input.source_node_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if creates_cycle.is_some() {
+                return Err(CanvasError::Validation(
+                    "a content-derivation edge cannot create a cycle".to_owned(),
+                ));
+            }
         }
 
         let existing = connection
@@ -2767,7 +3082,7 @@ impl Database {
             )
             .optional()?;
         if let Some(edge) = existing {
-            return Ok(edge);
+            return Ok((edge, false));
         }
 
         let edge = EdgeRecord {
@@ -2795,7 +3110,90 @@ impl Database {
             ],
         )?;
         touch_canvas(&connection, &edge.canvas_id)?;
-        Ok(edge)
+        Ok((edge, true))
+    }
+
+    pub fn place_node_to_the_right_of(
+        &self,
+        source_node_id: &str,
+        target_node_id: &str,
+    ) -> CanvasResult<NodeRecord> {
+        const CONTENT_DERIVATION_GAP: f64 = 60.0;
+        let source = {
+            let connection = self.lock()?;
+            get_node_by_id(&connection, source_node_id)?
+                .ok_or_else(|| CanvasError::Validation("source node not found".to_owned()))?
+        };
+
+        self.update_node(UpdateNodeInput {
+            id: target_node_id.to_owned(),
+            title: None,
+            content: None,
+            x: Some(source.x + source.width + CONTENT_DERIVATION_GAP),
+            y: Some(source.y),
+            width: None,
+            height: None,
+            status: None,
+        })
+    }
+
+    pub fn capture_active_version_sources(&self, target_node_id: &str) -> CanvasResult<NodeRecord> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut target = get_node_by_id(&transaction, target_node_id)?
+            .ok_or_else(|| CanvasError::Validation("target node not found".to_owned()))?;
+        let sources = content_version_sources(&transaction, target_node_id)?;
+        let active_version_id = target
+            .content
+            .get("activePromptVersionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let Some(active_version_id) = active_version_id else {
+            transaction.commit()?;
+            return Ok(target);
+        };
+        let Some(versions) = target
+            .content
+            .get_mut("promptVersions")
+            .and_then(Value::as_array_mut)
+        else {
+            transaction.commit()?;
+            return Ok(target);
+        };
+        let Some(active_version) = versions.iter_mut().find(|version| {
+            version.get("id").and_then(Value::as_str) == Some(active_version_id.as_str())
+        }) else {
+            transaction.commit()?;
+            return Ok(target);
+        };
+        let Some(active_version) = active_version.as_object_mut() else {
+            transaction.commit()?;
+            return Ok(target);
+        };
+        let mut existing_sources = active_version
+            .get("derivedFrom")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut changed = false;
+        for source in sources {
+            let source_is_recorded = existing_sources.iter().any(|entry| {
+                entry.get("nodeId").and_then(Value::as_str) == Some(source.node_id.as_str())
+            });
+            if !source_is_recorded {
+                existing_sources.push(serde_json::to_value(source)?);
+                changed = true;
+            }
+        }
+        if changed {
+            active_version.insert("derivedFrom".to_owned(), Value::Array(existing_sources));
+            validate_node(&target)?;
+            target.updated_at = now();
+            write_node_update(&transaction, &target)?;
+            touch_canvas(&transaction, &target.canvas_id)?;
+        }
+        transaction.commit()?;
+        Ok(target)
     }
 
     pub fn delete_edge(&self, id: &str) -> CanvasResult<()> {
@@ -3049,6 +3447,30 @@ fn prompt_versions_from_content(content: &Value) -> CanvasResult<Vec<PromptVersi
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
+                reference_selection: object
+                    .get("referenceSelection")
+                    .filter(|value| !value.is_null())
+                    .cloned(),
+                generation_options: object
+                    .get("generationOptions")
+                    .filter(|value| !value.is_null())
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|_| {
+                        CanvasError::Conflict(
+                            "prompt version generationOptions is invalid".to_owned(),
+                        )
+                    })?,
+                duration_override_seconds: object
+                    .get("durationOverrideSeconds")
+                    .filter(|value| !value.is_null())
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|_| {
+                        CanvasError::Conflict(
+                            "prompt version durationOverrideSeconds is invalid".to_owned(),
+                        )
+                    })?,
                 created_at: object
                     .get("createdAt")
                     .and_then(Value::as_str)
@@ -3062,9 +3484,60 @@ fn prompt_versions_from_content(content: &Value) -> CanvasResult<Vec<PromptVersi
                     .get("source")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                derived_from: object
+                    .get("derivedFrom")
+                    .and_then(Value::as_array)
+                    .map(|sources| {
+                        sources
+                            .iter()
+                            .filter_map(|source| serde_json::from_value(source.clone()).ok())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
         })
         .collect()
+}
+
+fn content_version_sources(
+    connection: &Connection,
+    target_node_id: &str,
+) -> CanvasResult<Vec<ContentVersionSource>> {
+    let mut statement = connection.prepare(
+        "SELECT source_node_id
+         FROM edges
+         WHERE target_node_id = ?1
+           AND kind IN ('content-derivation', 'scene-branch')
+         ORDER BY created_at ASC, id ASC",
+    )?;
+    let source_ids = statement
+        .query_map([target_node_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut sources = Vec::new();
+    for source_id in source_ids {
+        let Some(source_node) = get_node_by_id(connection, &source_id)? else {
+            continue;
+        };
+        if source_node.kind != "text" || !is_content_iteration_node(&source_node.content) {
+            continue;
+        }
+        let versions = prompt_versions_from_content(&source_node.content)?;
+        let active_version_id = source_node
+            .content
+            .get("activePromptVersionId")
+            .and_then(Value::as_str);
+        let active_version = active_version_id
+            .and_then(|version_id| versions.iter().find(|version| version.id == version_id))
+            .or_else(|| versions.last());
+        if let Some(version) = active_version {
+            sources.push(ContentVersionSource {
+                node_id: source_node.id,
+                version_id: version.id.clone(),
+                version_label: version.label.clone(),
+            });
+        }
+    }
+    Ok(sources)
 }
 
 fn get_prompt_version_request(
@@ -3164,6 +3637,10 @@ fn prompt_scene_binding_view_from_node(
         scene_key: binding.scene_key.clone(),
         scene_title: binding.scene_title.clone(),
         node_id: binding.node_id.clone(),
+        x: node.x,
+        y: node.y,
+        width: node.width,
+        height: node.height,
         latest_version,
         version_count: versions.len(),
         updated_at: std::cmp::max(binding.updated_at.clone(), node.updated_at.clone()),
@@ -3275,6 +3752,379 @@ fn validate_prompt_text(text: &str, information: &str) -> CanvasResult<()> {
         return Err(CanvasError::Validation(
             "prompt text and information exceed 480 KiB".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_reference_selection(selection: Option<&Value>) -> CanvasResult<()> {
+    let Some(selection) = selection else {
+        return Ok(());
+    };
+    let object = selection.as_object().ok_or_else(|| {
+        CanvasError::Validation("referenceSelection must be an object".to_owned())
+    })?;
+    let scene_key = object
+        .get("sceneKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    validate_prompt_identifier("reference selection scene key", scene_key, 64)?;
+    let assets = object
+        .get("assets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CanvasError::Validation("referenceSelection assets must be an array".to_owned())
+        })?;
+    if assets.len() > 100 {
+        return Err(CanvasError::Validation(
+            "referenceSelection cannot exceed 100 assets".to_owned(),
+        ));
+    }
+    for asset in assets {
+        let asset = asset.as_object().ok_or_else(|| {
+            CanvasError::Validation("referenceSelection asset must be an object".to_owned())
+        })?;
+        for field in ["sourceId", "kind", "label", "role"] {
+            if asset
+                .get(field)
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(CanvasError::Validation(format!(
+                    "referenceSelection asset {field} is required"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_generation_options(options: Option<&PromptGenerationOptions>) -> CanvasResult<()> {
+    let Some(options) = options else {
+        return Ok(());
+    };
+    if !(2..=15).contains(&options.duration_seconds) {
+        return Err(CanvasError::Validation(
+            "generationOptions durationSeconds must be an integer from 2 to 15".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_content_iteration_node(content: &Value) -> bool {
+    content.get("contentNode") == Some(&Value::Bool(true))
+        || content.get("promptVersionNode") == Some(&Value::Bool(true))
+        || content.get("storySceneNode") == Some(&Value::Bool(true))
+}
+
+fn migrate_content_iteration_nodes(connection: &Connection) -> CanvasResult<()> {
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT id, title, content_json, created_at FROM nodes
+             WHERE kind = 'text' AND (
+               content_json LIKE '%\"contentNode\":true%'
+               OR content_json LIKE '%\"promptVersionNode\":true%'
+               OR content_json LIKE '%\"storySceneNode\":true%'
+             )",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    for (id, title, content_json, created_at) in rows {
+        let mut content: Value = serde_json::from_str(&content_json)?;
+        let Some(object) = content.as_object_mut() else {
+            continue;
+        };
+        let was_story_scene = object.get("storySceneNode") == Some(&Value::Bool(true));
+        let content_type = object
+            .get("contentType")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "plot" | "script" | "storyboard" | "prompt"))
+            .unwrap_or(if was_story_scene {
+                "storyboard"
+            } else {
+                "prompt"
+            })
+            .to_owned();
+        object.insert("contentNode".to_owned(), Value::Bool(true));
+        object.insert("contentType".to_owned(), Value::String(content_type));
+        object.remove("storySceneNode");
+        object.remove("promptVersionNode");
+
+        let has_versions = object
+            .get("promptVersions")
+            .and_then(Value::as_array)
+            .is_some_and(|versions| !versions.is_empty());
+        let text = object
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let information = object
+            .get("information")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if !has_versions && (!text.is_empty() || !information.is_empty()) {
+            let version_id = format!("version:{}", Uuid::new_v4());
+            object.insert(
+                "promptVersions".to_owned(),
+                json!([{
+                    "id": version_id.clone(),
+                    "label": "v1",
+                    "title": title,
+                    "text": text,
+                    "information": information,
+                    "createdAt": created_at,
+                    "source": "migration"
+                }]),
+            );
+            object.insert(
+                "activePromptVersionId".to_owned(),
+                Value::String(version_id),
+            );
+            object
+                .entry("bestPromptVersionId".to_owned())
+                .or_insert_with(|| Value::String(String::new()));
+        }
+
+        connection.execute(
+            "UPDATE nodes SET content_json = ?2,
+               title = CASE WHEN title IN ('提示词版本', '提示词迭代') THEN '内容迭代' ELSE title END
+             WHERE id = ?1",
+            params![id, serde_json::to_string(&content)?],
+        )?;
+    }
+
+    connection.execute(
+        "UPDATE OR IGNORE edges
+         SET kind = 'content-derivation',
+             metadata_json = '{\"relation\":\"content-derivation\"}'
+         WHERE kind = 'scene-branch'",
+        [],
+    )?;
+    connection.execute("DELETE FROM edges WHERE kind = 'scene-branch'", [])?;
+    Ok(())
+}
+
+fn migrate_legacy_content_version_provenance(connection: &Connection) -> CanvasResult<()> {
+    let target_ids = {
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT target_node_id
+             FROM edges
+             WHERE kind = 'content-derivation'",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids
+    };
+
+    for target_id in target_ids {
+        let Some(mut target) = get_node_by_id(connection, &target_id)? else {
+            continue;
+        };
+        if target.kind != "text" || !is_content_iteration_node(&target.content) {
+            continue;
+        }
+
+        let source_ids = {
+            let mut statement = connection.prepare(
+                "SELECT source_node_id FROM edges
+                 WHERE target_node_id = ?1 AND kind = 'content-derivation'
+                 ORDER BY created_at ASC, id ASC",
+            )?;
+            let ids = statement
+                .query_map([&target_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        let mut sources = Vec::new();
+        let mut can_infer_legacy_provenance = !source_ids.is_empty();
+        for source_id in source_ids {
+            let Some(source) = get_node_by_id(connection, &source_id)? else {
+                can_infer_legacy_provenance = false;
+                break;
+            };
+            if source.kind != "text" || !is_content_iteration_node(&source.content) {
+                can_infer_legacy_provenance = false;
+                break;
+            }
+            let versions = prompt_versions_from_content(&source.content)?;
+            if versions.len() != 1 {
+                can_infer_legacy_provenance = false;
+                break;
+            }
+            sources.push(ContentVersionSource {
+                node_id: source.id,
+                version_id: versions[0].id.clone(),
+                version_label: versions[0].label.clone(),
+            });
+        }
+        if !can_infer_legacy_provenance {
+            continue;
+        }
+        let sources_json = serde_json::to_value(&sources)?;
+
+        let Some(versions) = target
+            .content
+            .get_mut("promptVersions")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        let mut changed = false;
+        for version in versions {
+            let has_sources = version
+                .get("derivedFrom")
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty());
+            if !has_sources {
+                version.as_object_mut().map(|object| {
+                    object.insert("derivedFrom".to_owned(), sources_json.clone());
+                });
+                changed = true;
+            }
+        }
+        if changed {
+            connection.execute(
+                "UPDATE nodes SET content_json = ?2 WHERE id = ?1",
+                params![target.id, serde_json::to_string(&target.content)?],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn legacy_storyboard_reference_selection(information: &str) -> Option<(String, Value)> {
+    const START: &str = "[[INFINITE_CANVAS_H3_REFERENCE_MANIFEST_V1]]";
+    const END: &str = "[[/INFINITE_CANVAS_H3_REFERENCE_MANIFEST_V1]]";
+    let start = information.find(START)?;
+    let end = information.find(END)?;
+    if end <= start || information[start + START.len()..].contains(START) {
+        return None;
+    }
+    let mut selection: Value =
+        serde_json::from_str(information[start + START.len()..end].trim()).ok()?;
+    let object = selection.as_object_mut()?;
+    object.remove("schema");
+    validate_reference_selection(Some(&selection)).ok()?;
+    let before = information[..start].trim_end();
+    let after = information[end + END.len()..].trim_start();
+    let cleaned = match (before.is_empty(), after.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => before.to_owned(),
+        (true, false) => after.to_owned(),
+        (false, false) => format!("{before}\n\n{after}"),
+    };
+    Some((cleaned, selection))
+}
+
+fn migrate_legacy_storyboard_reference_data(connection: &Connection) -> CanvasResult<()> {
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT id, content_json FROM nodes
+             WHERE content_json LIKE '%INFINITE_CANVAS_H3_REFERENCE_MANIFEST_V1%'
+                OR content_json LIKE '%referenceManifest%'",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    for (id, content_json) in rows {
+        let mut content: Value = serde_json::from_str(&content_json)?;
+        let Some(content_object) = content.as_object_mut() else {
+            continue;
+        };
+        let mut changed = false;
+
+        if let Some(information) = content_object
+            .get("information")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            if let Some((cleaned, selection)) = legacy_storyboard_reference_selection(&information)
+            {
+                content_object.insert("information".to_owned(), Value::String(cleaned));
+                content_object.insert("referenceSelection".to_owned(), selection);
+                changed = true;
+            }
+        }
+
+        if let Some(versions) = content_object
+            .get_mut("promptVersions")
+            .and_then(Value::as_array_mut)
+        {
+            for version in versions {
+                let Some(version_object) = version.as_object_mut() else {
+                    continue;
+                };
+                let Some(information) = version_object
+                    .get("information")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                if let Some((cleaned, selection)) =
+                    legacy_storyboard_reference_selection(&information)
+                {
+                    version_object.insert("information".to_owned(), Value::String(cleaned));
+                    version_object.insert("referenceSelection".to_owned(), selection);
+                    changed = true;
+                }
+            }
+        }
+
+        if let Some(snapshot) = content_object
+            .get_mut("generationSnapshot")
+            .and_then(Value::as_object_mut)
+        {
+            if let Some(information) = snapshot
+                .get("promptInformation")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                if let Some((cleaned, selection)) =
+                    legacy_storyboard_reference_selection(&information)
+                {
+                    snapshot.insert("promptInformation".to_owned(), Value::String(cleaned));
+                    snapshot.insert("referenceSelection".to_owned(), selection);
+                    changed = true;
+                }
+            }
+            if let Some(mut selection) = snapshot.remove("referenceManifest") {
+                if let Some(object) = selection.as_object_mut() {
+                    object.remove("schema");
+                }
+                snapshot.insert("referenceSelection".to_owned(), selection);
+                changed = true;
+            }
+            if let Some(error) = snapshot.remove("referenceManifestError") {
+                snapshot.insert("referenceSelectionError".to_owned(), error);
+                changed = true;
+            }
+        }
+
+        if changed {
+            connection.execute(
+                "UPDATE nodes SET content_json = ?2 WHERE id = ?1",
+                params![id, serde_json::to_string(&content)?],
+            )?;
+        }
     }
     Ok(())
 }
@@ -3833,6 +4683,53 @@ fn next_position(connection: &Connection, canvas_id: &str) -> CanvasResult<(f64,
     }
 }
 
+fn prompt_scene_batch_positions<'a>(
+    connection: &Connection,
+    canvas_id: &str,
+    existing_bindings: impl Iterator<Item = &'a PromptSceneBindingRecord>,
+    count: usize,
+) -> CanvasResult<Vec<(f64, f64)>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    const NODE_WIDTH: f64 = 360.0;
+    const GAP: f64 = 60.0;
+
+    let existing_nodes = existing_bindings
+        .map(|binding| {
+            get_node_by_id(connection, &binding.node_id)?.ok_or_else(|| {
+                CanvasError::Conflict(format!(
+                    "scene binding points to a missing node: {}",
+                    binding.node_id
+                ))
+            })
+        })
+        .collect::<CanvasResult<Vec<_>>>()?;
+
+    let (start_x, row_y) = if let Some(first) = existing_nodes.first() {
+        let right_edge = existing_nodes
+            .iter()
+            .map(|node| node.x + node.width)
+            .fold(first.x + first.width, f64::max);
+        (right_edge + GAP, first.y)
+    } else {
+        let (min_x, max_bottom) = connection.query_row(
+            "SELECT MIN(x), MAX(y + height) FROM nodes WHERE canvas_id = ?1",
+            [canvas_id],
+            |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, Option<f64>>(1)?)),
+        )?;
+        match (min_x, max_bottom) {
+            (Some(x), Some(bottom)) => (x, bottom + GAP),
+            _ => (80.0, 80.0),
+        }
+    };
+
+    Ok((0..count)
+        .map(|index| (start_x + index as f64 * (NODE_WIDTH + GAP), row_y))
+        .collect())
+}
+
 fn validate_node_input(input: &CreateNodeInput) -> CanvasResult<()> {
     validate_kind(input.kind.as_deref().unwrap_or("text"))?;
     if input.title.chars().count() > 500 {
@@ -3884,6 +4781,22 @@ fn validate_node(node: &NodeRecord) -> CanvasResult<()> {
         return Err(CanvasError::Validation(
             "node size is outside the supported range".to_owned(),
         ));
+    }
+    if node.kind == "text"
+        && is_content_iteration_node(&node.content)
+        && node.content.get("contentType").and_then(Value::as_str) == Some("prompt")
+    {
+        for version in prompt_versions_from_content(&node.content)? {
+            validate_generation_options(version.generation_options.as_ref())?;
+            if let Some(duration_override_seconds) = version.duration_override_seconds {
+                if !(2..=15).contains(&duration_override_seconds) {
+                    return Err(CanvasError::Validation(
+                        "prompt version durationOverrideSeconds must be an integer from 2 to 15"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -4030,6 +4943,8 @@ mod tests {
             title: format!("场景 {scene_key}"),
             text: format!("English prompt for {scene_key}"),
             information: format!("{scene_key} 的中文解释"),
+            reference_selection: None,
+            generation_options: None,
         }
     }
 
@@ -4274,6 +5189,313 @@ mod tests {
         database.delete_node(&source.node.id).unwrap();
         let snapshot = database.load_project(DEFAULT_CANVAS_ID).unwrap();
         assert!(snapshot.edges.is_empty());
+    }
+
+    #[test]
+    fn backfills_legacy_content_version_provenance_only_for_single_version_sources() {
+        let database = Database::in_memory().unwrap();
+        let mut source_input = text_node("隔壁房", "legacy-provenance-source");
+        source_input.content = json!({
+            "text": "剧情概念",
+            "contentNode": true,
+            "contentType": "plot",
+            "promptVersions": [{
+                "id": "plot-v1",
+                "label": "v1",
+                "title": "隔壁房",
+                "text": "剧情概念",
+                "information": ""
+            }],
+            "activePromptVersionId": "plot-v1"
+        });
+        let source = database.create_node(source_input).unwrap().node;
+        let mut target_input = text_node("隔壁房", "legacy-provenance-target");
+        target_input.content = json!({
+            "text": "剧本",
+            "contentNode": true,
+            "contentType": "script",
+            "promptVersions": [{
+                "id": "script-v1",
+                "label": "v1",
+                "title": "隔壁房",
+                "text": "剧本",
+                "information": ""
+            }],
+            "activePromptVersionId": "script-v1"
+        });
+        let target = database.create_node(target_input).unwrap().node;
+        database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: source.id.clone(),
+                target_node_id: target.id.clone(),
+                kind: Some("content-derivation".to_owned()),
+                metadata: json!({ "relation": "content-derivation" }),
+            })
+            .unwrap();
+
+        let connection = database.lock().unwrap();
+        migrate_legacy_content_version_provenance(&connection).unwrap();
+        drop(connection);
+
+        let migrated = database.load_project(DEFAULT_CANVAS_ID).unwrap();
+        let migrated_target = migrated
+            .nodes
+            .into_iter()
+            .find(|node| node.id == target.id)
+            .unwrap();
+        let version = prompt_versions_from_content(&migrated_target.content)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(version.derived_from.len(), 1);
+        assert_eq!(version.derived_from[0].node_id, source.id);
+        assert_eq!(version.derived_from[0].version_id, "plot-v1");
+    }
+
+    #[test]
+    fn places_a_new_content_derivation_target_to_the_right_of_its_source() {
+        let database = Database::in_memory().unwrap();
+        let mut source_input = text_node("剧情概念", "right-of-source-parent");
+        source_input.content = json!({
+            "text": "故事概念",
+            "contentNode": true,
+            "contentType": "plot"
+        });
+        source_input.x = Some(120.0);
+        source_input.y = Some(180.0);
+        source_input.width = Some(360.0);
+        let source = database.create_node(source_input).unwrap().node;
+
+        let mut target_input = text_node("剧本", "right-of-source-child");
+        target_input.content = json!({
+            "text": "剧本内容",
+            "contentNode": true,
+            "contentType": "script"
+        });
+        let target = database.create_node(target_input).unwrap().node;
+
+        let (edge, created) = database
+            .create_edge_with_status(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: source.id.clone(),
+                target_node_id: target.id.clone(),
+                kind: Some("content-derivation".to_owned()),
+                metadata: json!({
+                    "relation": "content-derivation",
+                    "layoutPlacement": "right-of-source"
+                }),
+            })
+            .unwrap();
+        assert!(created);
+        assert_eq!(edge.kind, "content-derivation");
+
+        let positioned = database
+            .place_node_to_the_right_of(&source.id, &target.id)
+            .unwrap();
+        assert_eq!(positioned.x, 540.0);
+        assert_eq!(positioned.y, 180.0);
+
+        let (_, retried) = database
+            .create_edge_with_status(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: source.id,
+                target_node_id: target.id,
+                kind: Some("content-derivation".to_owned()),
+                metadata: json!({ "relation": "content-derivation" }),
+            })
+            .unwrap();
+        assert!(!retried);
+    }
+
+    #[test]
+    fn persists_content_derivations_with_multiple_parents_and_rejects_cycles() {
+        let database = Database::in_memory().unwrap();
+        let mut first_scene_input = text_node("场景1", "scene-branch-source-1");
+        first_scene_input.content = json!({
+            "text": "完整场景一",
+            "contentNode": true,
+            "contentType": "script"
+        });
+        let first_scene = database.create_node(first_scene_input).unwrap().node;
+
+        let mut second_scene_input = text_node("场景2", "scene-branch-source-2");
+        second_scene_input.content = json!({
+            "text": "完整场景二",
+            "contentNode": true,
+            "contentType": "script"
+        });
+        let second_scene = database.create_node(second_scene_input).unwrap().node;
+
+        let mut prompt_input = text_node("S1", "scene-branch-target");
+        prompt_input.content = json!({
+            "text": "H3 prompt",
+            "contentNode": true,
+            "contentType": "storyboard",
+            "promptVersions": []
+        });
+        let prompt = database.create_node(prompt_input).unwrap().node;
+
+        let edge = database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: first_scene.id.clone(),
+                target_node_id: prompt.id.clone(),
+                kind: Some("content-derivation".to_owned()),
+                metadata: json!({ "relation": "content-derivation" }),
+            })
+            .unwrap();
+        let second_edge = database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: second_scene.id.clone(),
+                target_node_id: prompt.id.clone(),
+                kind: Some("content-derivation".to_owned()),
+                metadata: json!({ "relation": "content-derivation" }),
+            })
+            .unwrap();
+        let snapshot = database.load_project(DEFAULT_CANVAS_ID).unwrap();
+        assert_eq!(snapshot.edges, vec![edge, second_edge]);
+
+        let error = database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: prompt.id,
+                target_node_id: first_scene.id,
+                kind: Some("content-derivation".to_owned()),
+                metadata: json!({ "relation": "content-derivation" }),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot create a cycle"));
+    }
+
+    #[test]
+    fn appends_content_versions_with_exact_upstream_version_provenance() {
+        let database = Database::in_memory().unwrap();
+        let mut story_input = text_node("故事脚本", "content-version-source");
+        story_input.content = json!({
+            "text": "故事 v1",
+            "contentNode": true,
+            "contentType": "plot",
+            "promptVersions": [{
+                "id": "story-version-1",
+                "label": "v1",
+                "title": "故事脚本",
+                "text": "故事 v1",
+                "information": ""
+            }],
+            "activePromptVersionId": "story-version-1"
+        });
+        let story = database.create_node(story_input).unwrap().node;
+        let mut storyboard_input = text_node("场景1", "content-version-target");
+        storyboard_input.content = json!({
+            "text": "分镜 v1",
+            "contentNode": true,
+            "contentType": "storyboard",
+            "promptVersions": [{
+                "id": "storyboard-version-1",
+                "label": "v1",
+                "title": "场景1",
+                "text": "分镜 v1",
+                "information": ""
+            }],
+            "activePromptVersionId": "storyboard-version-1"
+        });
+        let storyboard = database.create_node(storyboard_input).unwrap().node;
+        database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: story.id.clone(),
+                target_node_id: storyboard.id.clone(),
+                kind: Some("content-derivation".to_owned()),
+                metadata: json!({ "relation": "content-derivation" }),
+            })
+            .unwrap();
+
+        let captured = database
+            .capture_active_version_sources(&storyboard.id)
+            .unwrap();
+        let initial_version = prompt_versions_from_content(&captured.content)
+            .unwrap()
+            .into_iter()
+            .find(|version| version.id == "storyboard-version-1")
+            .unwrap();
+        assert_eq!(initial_version.derived_from.len(), 1);
+        assert_eq!(initial_version.derived_from[0].node_id, story.id);
+        assert_eq!(
+            initial_version.derived_from[0].version_id,
+            "story-version-1"
+        );
+
+        let appended = database
+            .append_content_version(
+                &storyboard.id,
+                AppendPromptVersionInput {
+                    text: "分镜 v2".to_owned(),
+                    information: "根据故事 v1 修改".to_owned(),
+                    reference_selection: None,
+                    generation_options: None,
+                    title: None,
+                    source: Some("test".to_owned()),
+                    request_id: "append-content-version-v2".to_owned(),
+                    expected_version_count: Some(1),
+                },
+            )
+            .unwrap();
+
+        assert!(appended.created);
+        assert_eq!(appended.version.label, "v2");
+        assert_eq!(appended.version.derived_from.len(), 1);
+        assert_eq!(appended.version.derived_from[0].node_id, story.id);
+        assert_eq!(
+            appended.version.derived_from[0].version_id,
+            "story-version-1"
+        );
+        assert_eq!(appended.version.derived_from[0].version_label, "v1");
+
+        let retry = database
+            .append_content_version(
+                &storyboard.id,
+                AppendPromptVersionInput {
+                    text: "分镜 v2".to_owned(),
+                    information: "根据故事 v1 修改".to_owned(),
+                    reference_selection: None,
+                    generation_options: None,
+                    title: None,
+                    source: Some("test".to_owned()),
+                    request_id: "append-content-version-v2".to_owned(),
+                    expected_version_count: Some(1),
+                },
+            )
+            .unwrap();
+        assert!(!retry.created);
+        assert_eq!(retry.version.id, appended.version.id);
+    }
+
+    #[test]
+    fn rejects_content_derivation_edges_with_the_wrong_node_roles() {
+        let database = Database::in_memory().unwrap();
+        let ordinary_text = database
+            .create_node(text_node("普通文本", "scene-branch-invalid-source"))
+            .unwrap()
+            .node;
+        let prompt = database
+            .create_node(text_node("普通目标", "scene-branch-invalid-target"))
+            .unwrap()
+            .node;
+
+        let error = database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: ordinary_text.id,
+                target_node_id: prompt.id,
+                kind: Some("content-derivation".to_owned()),
+                metadata: json!({}),
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("must connect two content iteration nodes"));
     }
 
     #[test]
@@ -5765,6 +6987,14 @@ mod tests {
             .scenes
             .iter()
             .all(|scene| scene.binding.latest_version.as_deref() == Some("v1")));
+        let first_row_y = first.scenes[0].node.y;
+        assert!(first
+            .scenes
+            .iter()
+            .all(|scene| (scene.node.y - first_row_y).abs() < f64::EPSILON));
+        assert!(first.scenes.windows(2).all(|pair| {
+            (pair[1].node.x - pair[0].node.x - pair[0].node.width - 60.0).abs() < f64::EPSILON
+        }));
 
         let retry = database
             .create_missing_prompt_scenes(
@@ -5788,10 +7018,138 @@ mod tests {
             )
             .unwrap();
         assert_eq!(second.created_count, 5);
+        assert!(second
+            .scenes
+            .iter()
+            .all(|scene| (scene.node.y - first_row_y).abs() < f64::EPSILON));
+        assert!(second.scenes[0].node.x > first.scenes[4].node.x + first.scenes[4].node.width);
+        assert!(second.scenes.windows(2).all(|pair| {
+            (pair[1].node.x - pair[0].node.x - pair[0].node.width - 60.0).abs() < f64::EPSILON
+        }));
         let recovered = database.get_prompt_set_scenes("prompt-set-001").unwrap();
         assert_eq!(recovered.prompt_set.scene_count, 10);
         assert_eq!(recovered.scenes.len(), 10);
+        assert!(recovered
+            .scenes
+            .iter()
+            .all(|scene| (scene.y - first_row_y).abs() < f64::EPSILON));
         assert_eq!(database.list_prompt_sets().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn persists_prompt_scene_generation_duration() {
+        let database = Database::in_memory().unwrap();
+        let mut scene = prompt_scene("S01");
+        scene.generation_options = Some(crate::models::PromptGenerationOptions {
+            duration_seconds: 12,
+        });
+        let created = database
+            .create_missing_prompt_scenes(
+                "prompt-set-duration",
+                DEFAULT_CANVAS_ID,
+                CreateMissingPromptScenesInput {
+                    canvas_id: None,
+                    prompt_set_title: "Duration".to_owned(),
+                    scenes: vec![scene],
+                    source: Some("test".to_owned()),
+                    request_id: Some("create-duration".to_owned()),
+                },
+            )
+            .unwrap();
+        let version = prompt_versions_from_content(&created.scenes[0].node.content)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(version.generation_options.unwrap().duration_seconds, 12);
+
+        let appended = database
+            .append_prompt_version(
+                "prompt-set-duration",
+                "S01",
+                AppendPromptVersionInput {
+                    text: "Updated English prompt".to_owned(),
+                    information: "更新后的中文解释".to_owned(),
+                    reference_selection: None,
+                    generation_options: Some(crate::models::PromptGenerationOptions {
+                        duration_seconds: 15,
+                    }),
+                    title: None,
+                    source: Some("test".to_owned()),
+                    request_id: "append-duration".to_owned(),
+                    expected_version_count: Some(1),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            appended
+                .version
+                .generation_options
+                .unwrap()
+                .duration_seconds,
+            15
+        );
+    }
+
+    #[test]
+    fn stores_reference_selection_separately_from_prompt_information() {
+        let database = Database::in_memory().unwrap();
+        let reference_selection = json!({
+            "sceneKey": "S01",
+            "assets": [
+                {
+                    "sourceId": "image-node-1",
+                    "kind": "image",
+                    "label": "Picture 1",
+                    "role": "main character"
+                }
+            ]
+        });
+        let mut scene = prompt_scene("S01");
+        scene.reference_selection = Some(reference_selection.clone());
+
+        let created = database
+            .create_missing_prompt_scenes(
+                "prompt-set-reference-selection",
+                DEFAULT_CANVAS_ID,
+                CreateMissingPromptScenesInput {
+                    canvas_id: None,
+                    prompt_set_title: "素材选择测试".to_owned(),
+                    scenes: vec![scene],
+                    source: Some("test".to_owned()),
+                    request_id: Some("create-reference-selection".to_owned()),
+                },
+            )
+            .unwrap();
+
+        let content = &created.scenes[0].node.content;
+        assert_eq!(content["information"], json!("S01 的中文解释"));
+        assert_eq!(content["referenceSelection"], reference_selection);
+        assert_eq!(
+            content["promptVersions"][0]["referenceSelection"],
+            content["referenceSelection"]
+        );
+        assert!(!content["information"]
+            .as_str()
+            .unwrap()
+            .contains("referenceSelection"));
+    }
+
+    #[test]
+    fn extracts_legacy_reference_data_without_leaving_it_in_information() {
+        let information = concat!(
+            "这是给用户查看的中文说明。\n\n",
+            "[[INFINITE_CANVAS_H3_REFERENCE_MANIFEST_V1]]\n",
+            "{\"schema\":\"infinite-canvas-h3-reference/v1\",\"sceneKey\":\"S02\",",
+            "\"assets\":[{\"sourceId\":\"image-node-3\",\"kind\":\"image\",",
+            "\"label\":\"Picture 1\",\"role\":\"location\"}]}\n",
+            "[[/INFINITE_CANVAS_H3_REFERENCE_MANIFEST_V1]]"
+        );
+
+        let (cleaned, selection) = legacy_storyboard_reference_selection(information).unwrap();
+
+        assert_eq!(cleaned, "这是给用户查看的中文说明。");
+        assert_eq!(selection["sceneKey"], json!("S02"));
+        assert!(selection.get("schema").is_none());
     }
 
     #[test]
@@ -5836,6 +7194,8 @@ mod tests {
         let append = |scene_key: &str, request_id: &str| AppendPromptVersionInput {
             text: format!("Improved English prompt for {scene_key}"),
             information: format!("{scene_key} 改进后的中文解释"),
+            reference_selection: None,
+            generation_options: None,
             title: None,
             source: Some("test".to_owned()),
             request_id: request_id.to_owned(),
@@ -5888,6 +7248,8 @@ mod tests {
                 AppendPromptVersionInput {
                     text: "Second English prompt".to_owned(),
                     information: "第二版中文解释".to_owned(),
+                    reference_selection: None,
+                    generation_options: None,
                     title: None,
                     source: Some("test".to_owned()),
                     request_id: "append-before-delete".to_owned(),
@@ -5914,6 +7276,8 @@ mod tests {
                 AppendPromptVersionInput {
                     text: "Second English prompt".to_owned(),
                     information: "第二版中文解释".to_owned(),
+                    reference_selection: None,
+                    generation_options: None,
                     title: None,
                     source: Some("test".to_owned()),
                     request_id: "append-before-delete".to_owned(),

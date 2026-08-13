@@ -95,6 +95,7 @@ import {
   SettingsSelect,
   UI_FONT_SIZE_STORAGE_KEY,
   VIDEO_GENERATION_DEFAULTS_STORAGE_KEY,
+  LEGACY_VIDEO_GENERATION_NODE_WIDTH,
   VIDEO_GENERATION_NODE_WIDTH,
   VIDEO_NODE_BASE_HEIGHT,
   VIDEO_REGENERATION_NUMBER_CONFIG,
@@ -140,6 +141,7 @@ import {
   h3SecondaryLoraStrengthFromContent,
   incomingNodePosition,
   informationFromContent,
+  isContentIterationContent,
   isSecondaryComfyTask,
   loadImageNaturalSize,
   mappedComfyOutputPath,
@@ -152,6 +154,7 @@ import {
   persistedComfyTasksFromStorage,
   primaryVideoResolutionFromContent,
   primaryVideoStepsFromContent,
+  promptDurationSecondsFromVersion,
   promptVersionsFromContent,
   randomFixedSeed,
   recordAtCurrentFlowPosition,
@@ -162,6 +165,8 @@ import {
   secondaryVideoResolutionFromContent,
   seedModeFromContent,
   snapCanvasCoordinate,
+  referenceSelectionFromContent,
+  resolveStoryboardReferenceSelection,
   strictPromptTagsFromContent,
   textFromContent,
   toFlowEdge,
@@ -218,6 +223,7 @@ import type {
   SecondarySampleNumericField,
   SecondarySampleOverrides,
   SpacingGuide,
+  StoryboardReferenceSelection,
   UiFontSize,
   VideoAspectRatio,
   VideoDeletionChoice,
@@ -640,6 +646,18 @@ function CanvasWorkspace() {
     () => nodes.filter((node) => node.selected).length > 1,
     [nodes],
   );
+  const canvasSelectionSyncKey = useRef("");
+
+  useEffect(() => {
+    const nodeIds = nodes.filter((node) => node.selected).map((node) => node.id);
+    const syncKey = `${activeProjectId ?? ""}:${nodeIds.join(",")}`;
+    if (canvasSelectionSyncKey.current === syncKey) return;
+    canvasSelectionSyncKey.current = syncKey;
+    void invoke("update_canvas_selection", {
+      canvasId: activeProjectId,
+      nodeIds,
+    }).catch(() => undefined);
+  }, [activeProjectId, nodes]);
 
   useEffect(() => {
     if (!multiNodeSelectionActive) return;
@@ -656,9 +674,13 @@ function CanvasWorkspace() {
     const nodeKinds = new Map(contentNodes.map((node) => [node.id, node.data.record.kind]));
     return new Set(edges.filter((edge) => {
       const kind = (edge.data as CanvasEdgeData | undefined)?.record?.kind;
-      return kind === "output"
-        && nodeKinds.get(edge.source) === "video-generation"
-        && nodeKinds.get(edge.target) === "generated-video";
+      return kind === "content-derivation"
+        || kind === "scene-branch"
+        || (
+          kind === "output"
+          && nodeKinds.get(edge.source) === "video-generation"
+          && nodeKinds.get(edge.target) === "generated-video"
+        );
     }).map((edge) => edge.id));
   }, [contentNodes, edges]);
 
@@ -1800,10 +1822,19 @@ function CanvasWorkspace() {
         ? Math.max(0, Math.floor(record.content.layoutTextInputCount))
         : null;
       const mediaKinds = mediaKindsByTarget.get(node.id) ?? [];
+      // Upgrade only nodes that still use the former default width. Any other
+      // width is an intentional user resize and must remain untouched.
+      const shouldUpgradeLegacyWidth = record.width === LEGACY_VIDEO_GENERATION_NODE_WIDTH;
+      const targetWidth = shouldUpgradeLegacyWidth
+        ? VIDEO_GENERATION_NODE_WIDTH
+        : record.width;
+      const shouldRenameStoryboardGenerator = record.content.storyboardReferenceCompiler === true
+        && record.title === "分镜联动视频生成";
       const fullContentHeight = videoGenerationAutoHeight(
         mediaKinds,
         currentTextInputCount,
-        record.width,
+        targetWidth,
+        record.content.storyboardReferenceCompiler === true,
       );
       // Media groups do not scroll: let a newly connected reference asset grow
       // the outer node until its complete group is visible. Text rows remain
@@ -1817,7 +1848,8 @@ function CanvasWorkspace() {
         const currentTextOnlyHeight = videoGenerationAutoHeight(
           [],
           currentTextInputCount,
-          record.width,
+          targetWidth,
+          record.content.storyboardReferenceCompiler === true,
         );
         desiredHeight = Math.min(
           fullContentHeight,
@@ -1827,7 +1859,8 @@ function CanvasWorkspace() {
         const previousContentHeight = videoGenerationAutoHeight(
           mediaKinds,
           storedLayoutTextInputCount,
-          record.width,
+          targetWidth,
+          record.content.storyboardReferenceCompiler === true,
         );
         desiredHeight = Math.min(
           fullContentHeight,
@@ -1852,13 +1885,17 @@ function CanvasWorkspace() {
         ? storedActiveTextId
         : connectedTextIds[0] ?? "";
       if (
-        Math.abs(record.height - desiredHeight) < 0.5
+        !shouldUpgradeLegacyWidth
+        && !shouldRenameStoryboardGenerator
+        && Math.abs(record.height - desiredHeight) < 0.5
         && storedManualHeight !== null
         && Math.abs(storedManualHeight - desiredHeight) < 0.5
         && storedActiveTextId === activeTextInputId
         && storedLayoutTextInputCount === currentTextInputCount
       ) continue;
       changeNode(node.id, {
+        ...(shouldRenameStoryboardGenerator ? { title: "智能视频生成" } : {}),
+        width: targetWidth,
         height: desiredHeight,
         content: {
           ...record.content,
@@ -1951,8 +1988,8 @@ function CanvasWorkspace() {
   const deletePromptVersionFromNode = useCallback(async (nodeId: string, versionId: string) => {
     const flowNode = nodesSnapshot.current.find((node) => node.id === nodeId);
     const record = flowNode?.data.record;
-    if (!record || record.content.promptVersionNode !== true) {
-      setNotice("找不到提示词迭代节点");
+    if (!record || !isContentIterationContent(record.content)) {
+      setNotice("找不到内容迭代节点");
       return;
     }
     const versions = promptVersionsFromContent(record.content);
@@ -2447,6 +2484,12 @@ function CanvasWorkspace() {
   const generationSnapshotForGenerator = useCallback((
     generatorId: string,
     promptNodeId?: string,
+    promptOverride?: {
+      prompt: string;
+      information: string;
+      referenceSelection: StoryboardReferenceSelection | null;
+      durationSeconds?: number;
+    },
   ): GenerationSnapshot | null => {
     const generator = nodesSnapshot.current.find(
       (node) => node.id === generatorId,
@@ -2475,17 +2518,6 @@ function CanvasWorkspace() {
     const orderedIds = new Set(orderedMedia.map((record) => record.id));
     orderedMedia.push(...mediaInputs.filter((record) => !orderedIds.has(record.id)));
     const mode = videoGenerationModeFromContent(generator.content);
-    const assetPaths = (kind: string) => orderedMedia
-      .filter((record) => record.kind === kind)
-      .map((record) => typeof record.content.assetPath === "string" ? record.content.assetPath : "")
-      .filter(Boolean);
-    const imageAssets = orderedMedia
-      .filter((record) => record.kind === "image")
-      .map((record, index) => ({
-        path: typeof record.content.assetPath === "string" ? record.content.assetPath : "",
-        role: frameRoleFromContent(generator.content, record.id, index),
-      }))
-      .filter((asset) => Boolean(asset.path));
     const capability = workflowCapabilityForVideoMode(mode);
     const slot = workflowSlotForVideoMode(mode);
     const configuredModuleId = typeof generator.content.workflowModuleId === "string"
@@ -2517,16 +2549,47 @@ function CanvasWorkspace() {
     const activePromptVersion = activePromptContent
       ? activePromptVersionFromContent(activePromptContent)
       : null;
+    const prompt = promptOverride?.prompt
+      ?? (activePromptContent ? textFromContent(activePromptContent) : "");
+    const promptInformation = promptOverride?.information
+      ?? activePromptVersion?.information
+      ?? (activePromptContent ? informationFromContent(activePromptContent) : "");
+    const promptReferenceSelection = promptOverride?.referenceSelection
+      ?? activePromptVersion?.referenceSelection
+      ?? (activePromptContent ? referenceSelectionFromContent(activePromptContent) : null);
+    const referenceCompilerMode = generator.content.storyboardReferenceCompiler === true;
+    const promptDurationSeconds = promptOverride?.durationSeconds
+      ?? promptDurationSecondsFromVersion(activePromptVersion);
+    const referenceSelection = referenceCompilerMode
+      ? resolveStoryboardReferenceSelection(prompt, promptReferenceSelection, orderedMedia)
+      : null;
+    // A compiler error must produce an empty submission list. Never fall back to
+    // uploading every connected candidate, because that reintroduces pollution.
+    const submittedMedia = referenceCompilerMode
+      ? referenceSelection?.selectedMedia ?? []
+      : orderedMedia;
+    const assetPaths = (kind: string) => submittedMedia
+      .filter((record) => record.kind === kind)
+      .map((record) => typeof record.content.assetPath === "string" ? record.content.assetPath : "")
+      .filter(Boolean);
+    const imageAssets = submittedMedia
+      .filter((record) => record.kind === "image")
+      .map((record, index) => ({
+        path: typeof record.content.assetPath === "string" ? record.content.assetPath : "",
+        role: frameRoleFromContent(generator.content, record.id, index),
+      }))
+      .filter((asset) => Boolean(asset.path));
     return {
-      prompt: activePromptContent ? textFromContent(activePromptContent) : "",
-      promptInformation: activePromptVersion?.information
-        ?? (activePromptContent ? informationFromContent(activePromptContent) : ""),
+      prompt,
+      promptInformation,
       promptNodeId: activeTextInput?.id ?? "",
       promptNodeTitle: activePromptVersion?.title || activeTextInput?.title || "",
       promptNodeIdSource: activeTextInput ? "captured" : "",
       promptVersionId: activePromptVersion?.id ?? "",
       promptVersionLabel: activePromptVersion?.label ?? "",
-      durationSeconds: videoDurationFromContent(generator.content),
+      durationSeconds: referenceCompilerMode
+        ? promptDurationSeconds ?? 0
+        : videoDurationFromContent(generator.content),
       aspectRatio: videoAspectRatioFromContent(generator.content),
       primaryResolutionMegapixels: primaryVideoResolutionFromContent(generator.content),
       secondaryResolutionMegapixels: secondaryVideoResolutionFromContent(generator.content),
@@ -2563,6 +2626,13 @@ function CanvasWorkspace() {
         : [],
       audioPaths: assetPaths("audio"),
       videoPaths: assetPaths("video"),
+      ...(referenceCompilerMode ? {
+        referenceCompilerMode: true,
+        referenceSelection: referenceSelection?.selection ?? null,
+        referenceSelectionError: referenceSelection?.error ?? "",
+        referenceMappings: referenceSelection?.mappings ?? [],
+        referenceCandidateCount: orderedMedia.length,
+      } : {}),
       workflowModuleId: workflowModule?.id ?? "",
       workflowModuleRevision: workflowModule?.revision ?? "",
     };
@@ -2861,6 +2931,51 @@ function CanvasWorkspace() {
     if (!snapshot?.prompt.trim()) {
       setNotice("无法执行：找不到已保存的提示词与素材参数");
       return;
+    }
+    const referenceCompilerMode = target.content.storyboardReferenceCompiler === true
+      || snapshot.referenceCompilerMode === true;
+    if (referenceCompilerMode) {
+      if (!Number.isInteger(snapshot.durationSeconds) || snapshot.durationSeconds < 2 || snapshot.durationSeconds > 15) {
+        const message = "当前分镜提示词尚未设置时长，请在生成提示词节点中填写 2–15 秒";
+        changeNode(targetId, {
+          content: { ...target.content, status: "invalid", validationMessage: message },
+        });
+        setNotice(`无法执行：${message}`);
+        return;
+      }
+      const imageMappingCount = snapshot.referenceMappings?.filter(
+        (mapping) => mapping.kind === "image",
+      ).length ?? 0;
+      const audioMappingCount = snapshot.referenceMappings?.filter(
+        (mapping) => mapping.kind === "audio",
+      ).length ?? 0;
+      const videoMappingCount = snapshot.referenceMappings?.filter(
+        (mapping) => mapping.kind === "video",
+      ).length ?? 0;
+      const referenceError = snapshot.referenceSelectionError
+        || (!snapshot.referenceSelection ? "当前提示词缺少内部素材选择数据" : "")
+        || (snapshot.imagePaths.length !== imageMappingCount
+          ? "内部选择的图片与实际提交路径数量不一致"
+          : "")
+        || (snapshot.audioPaths.length !== audioMappingCount
+          ? "内部选择的音频与实际提交路径数量不一致"
+          : "")
+        || (snapshot.videoPaths.length !== videoMappingCount
+          ? "内部选择的视频与实际提交路径数量不一致"
+          : "")
+        || (snapshot.imagePaths.length > 9 ? "当前分镜单次最多提交 9 张图片" : "")
+        || (snapshot.audioPaths.length > 2 ? "当前分镜单次最多提交 2 个音频" : "")
+        || (snapshot.videoPaths.length ? "当前 H3 工作流适配器尚未配置视频参考输入" : "")
+        || (!snapshot.imagePaths.length && !snapshot.audioPaths.length
+          ? "当前分镜没有可提交的图片或音频参考"
+          : "");
+      if (referenceError) {
+        changeNode(targetId, {
+          content: { ...target.content, status: "invalid", validationMessage: referenceError },
+        });
+        setNotice(`无法执行：${referenceError}`);
+        return;
+      }
     }
     const mode = videoGenerationModeFromContent(target.content);
     const capability = workflowCapabilityForVideoMode(mode);
@@ -3245,7 +3360,7 @@ function CanvasWorkspace() {
           generationCount: (typeof latest.content.generationCount === "number"
             ? latest.content.generationCount
             : 0) + 1,
-          generationDuration: videoDurationFromContent(latest.content),
+          generationDuration: snapshot.durationSeconds,
           generationPrimaryResolution: primaryVideoResolutionFromContent(latest.content),
           generationSecondaryResolution: secondaryVideoResolutionFromContent(latest.content),
           secondarySamplingEnabled: false,
@@ -3352,6 +3467,33 @@ function CanvasWorkspace() {
     const invalidSnapshotIndex = snapshots.findIndex((snapshot) => !snapshot?.prompt.trim());
     if (invalidSnapshotIndex >= 0) {
       const message = `第 ${invalidSnapshotIndex + 1} 个文字提示词内容为空，无法批量提交`;
+      changeNode(targetId, {
+        content: { ...target.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(message);
+      return;
+    }
+    const invalidDurationIndex = snapshots.findIndex((snapshot) => (
+      snapshot?.referenceCompilerMode === true
+      && (!Number.isInteger(snapshot.durationSeconds) || snapshot.durationSeconds < 2 || snapshot.durationSeconds > 15)
+    ));
+    if (invalidDurationIndex >= 0) {
+      const message = `第 ${invalidDurationIndex + 1} 个分镜尚未设置时长，请在生成提示词节点中填写 2–15 秒`;
+      changeNode(targetId, {
+        content: { ...target.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(message);
+      return;
+    }
+    const invalidReferenceIndex = snapshots.findIndex((snapshot) => (
+      snapshot?.referenceCompilerMode === true
+      && Boolean(snapshot.referenceSelectionError || !snapshot.referenceSelection)
+    ));
+    if (invalidReferenceIndex >= 0) {
+      const invalidSnapshot = snapshots[invalidReferenceIndex];
+      const detail = invalidSnapshot?.referenceSelectionError
+        || "缺少内部素材选择数据";
+      const message = `第 ${invalidReferenceIndex + 1} 个分镜不可执行：${detail}`;
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
@@ -3470,7 +3612,16 @@ function CanvasWorkspace() {
       setNotice("无法重新生成：该视频缺少历史参数快照或原视频生成节点");
       return;
     }
-    const currentGeneratorSnapshot = generationSnapshotForGenerator(sourceGeneratorId);
+    const currentGeneratorSnapshot = generationSnapshotForGenerator(
+      sourceGeneratorId,
+      snapshot.promptNodeId,
+      {
+        prompt: snapshot.prompt,
+        information: snapshot.promptInformation,
+        referenceSelection: snapshot.referenceSelection ?? null,
+        durationSeconds: snapshot.durationSeconds,
+      },
+    );
     const snapshotWithCurrentMedia = currentGeneratorSnapshot
       ? {
           ...snapshot,
@@ -3478,6 +3629,11 @@ function CanvasWorkspace() {
           imageRoles: currentGeneratorSnapshot.imageRoles,
           audioPaths: currentGeneratorSnapshot.audioPaths,
           videoPaths: currentGeneratorSnapshot.videoPaths,
+          referenceCompilerMode: currentGeneratorSnapshot.referenceCompilerMode,
+          referenceSelection: currentGeneratorSnapshot.referenceSelection,
+          referenceSelectionError: currentGeneratorSnapshot.referenceSelectionError,
+          referenceMappings: currentGeneratorSnapshot.referenceMappings,
+          referenceCandidateCount: currentGeneratorSnapshot.referenceCandidateCount,
         }
       : snapshot;
 
@@ -3523,6 +3679,7 @@ function CanvasWorkspace() {
       label: `${snapshot.promptVersionLabel ? `${snapshot.promptVersionLabel} · ` : ""}${snapshot.promptNodeTitle || "生成时提示词"}（历史快照）`,
       prompt: snapshot.prompt,
       information: snapshot.promptInformation,
+      referenceSelection: snapshot.referenceSelection ?? null,
       promptNodeId: snapshot.promptNodeId,
       promptNodeTitle: snapshot.promptNodeTitle,
       promptNodeIdSource: snapshot.promptNodeIdSource,
@@ -3568,7 +3725,7 @@ function CanvasWorkspace() {
 
     let promptOptions: VideoRegenerationPromptOption[] = [snapshotPromptOption];
     let selectedPromptKey = snapshotPromptOption.key;
-    if (promptNode?.data.record.content.promptVersionNode === true) {
+    if (promptNode && isContentIterationContent(promptNode.data.record.content)) {
       const promptRecord = promptNode.data.record;
       const versions = promptVersionsFromContent(promptRecord.content);
       const usedVersion = versions.find((version) => (
@@ -3587,6 +3744,9 @@ function CanvasWorkspace() {
             : version.title || promptRecord.title}${isUsedVersion ? "（当前视频）" : ""}`,
           prompt: isUsedVersion ? snapshot.prompt : version.text,
           information: isUsedVersion ? snapshot.promptInformation : version.information,
+          referenceSelection: isUsedVersion
+            ? snapshot.referenceSelection ?? null
+            : version.referenceSelection ?? null,
           promptNodeId: promptRecord.id,
           promptNodeTitle: isUsedVersion
             ? snapshot.promptNodeTitle || version.title || promptRecord.title
@@ -3612,6 +3772,7 @@ function CanvasWorkspace() {
         label: promptRecord.title || "提示词",
         prompt: textFromContent(promptRecord.content),
         information: informationFromContent(promptRecord.content),
+        referenceSelection: referenceSelectionFromContent(promptRecord.content),
         promptNodeId: promptRecord.id,
         promptNodeTitle: promptRecord.title,
         promptNodeIdSource: "captured",
@@ -3623,6 +3784,7 @@ function CanvasWorkspace() {
           ...currentTextOption,
           prompt: snapshot.prompt,
           information: snapshot.promptInformation,
+          referenceSelection: snapshot.referenceSelection ?? null,
           label: `${currentTextOption.label}（当前视频）`,
         }];
         selectedPromptKey = currentTextOption.key;
@@ -3747,6 +3909,7 @@ function CanvasWorkspace() {
       promptNodeIdSource: selectedPrompt.promptNodeIdSource,
       promptVersionId: selectedPrompt.promptVersionId,
       promptVersionLabel: selectedPrompt.promptVersionLabel,
+      referenceSelection: selectedPrompt.referenceSelection,
       durationSeconds: draft.durationSeconds,
       primaryResolutionMegapixels: Math.round(draft.primaryResolutionMegapixels * 10) / 10,
       loraStrength: Math.round(draft.loraStrength * 100) / 100,
@@ -4604,7 +4767,12 @@ function CanvasWorkspace() {
         .map((node) => node.id),
     );
     const videoInputEdges = edgesSnapshot.current
-      .filter((edge) => copiedVideoIds.has(edge.target))
+      .filter((edge) => {
+        if (copiedVideoIds.has(edge.target)) return true;
+        const kind = (edge.data as CanvasEdgeData | undefined)?.record?.kind;
+        return copiedIds.has(edge.target)
+          && (kind === "content-derivation" || kind === "scene-branch");
+      })
       .map((edge): NodeClipboardEdge => {
         const edgeRecord = (edge.data as { record?: EdgeRecord } | undefined)?.record;
         return {
@@ -4697,6 +4865,7 @@ function CanvasWorkspace() {
         activeTaskCount: activeComfyTaskCounts[record.id] ?? 0,
         inputCount: 0,
         outputCount: 0,
+        contentParents: [],
         mediaInputs: [],
         textInputCount: 0,
         textInputs: [],
@@ -5150,7 +5319,7 @@ function CanvasWorkspace() {
     };
   }, [activeProjectId, changeNode, forgetComfyTask, registerComfyTask, reportError, restoreCompletedComfyTask, unregisterComfyTask, updateGenerationPlaceholder]);
 
-  const pasteCopiedNodes = useCallback(async (allowOverlap = false) => {
+  const pasteCopiedNodes = useCallback(async (placeAtViewportCenter = true) => {
     const clipboard = nodeClipboard.current;
     if (!activeProjectId || !clipboard?.nodes.length) return;
 
@@ -5159,18 +5328,19 @@ function CanvasWorkspace() {
     const sourceTop = Math.min(...clipboard.nodes.map((node) => node.y));
     const sourceRight = Math.max(...clipboard.nodes.map((node) => node.x + node.width));
     const sourceBottom = Math.max(...clipboard.nodes.map((node) => node.y + node.height));
-    const requestedPosition = { x: sourceLeft + pasteOffset, y: sourceTop + pasteOffset };
-    const placement = allowOverlap
-      ? null
-      : reserveNodePlacement(
+    const sourceOffsetPosition = { x: sourceLeft + pasteOffset, y: sourceTop + pasteOffset };
+    const placement = placeAtViewportCenter
+      ? reserveNodePlacement(
           activeProjectId,
-          requestedPosition,
+          undefined,
           sourceRight - sourceLeft,
           sourceBottom - sourceTop,
-        );
+        )
+      : null;
+    const targetPosition = placement?.position ?? sourceOffsetPosition;
     const placementDelta = {
-      x: (placement?.position.x ?? requestedPosition.x) - sourceLeft,
-      y: (placement?.position.y ?? requestedPosition.y) - sourceTop,
+      x: targetPosition.x - sourceLeft,
+      y: targetPosition.y - sourceTop,
     };
     const createdByOriginalId = new Map<string, NodeRecord>();
     const createdNodes: CanvasFlowNode[] = [];
@@ -5332,10 +5502,10 @@ function CanvasWorkspace() {
         if (!selectedIds.length) return;
         event.preventDefault();
         copyNodesToClipboard(selectedIds);
-        void pasteCopiedNodes(true);
+        void pasteCopiedNodes(false);
       } else if (key === "v" && nodeClipboard.current) {
         event.preventDefault();
-        void pasteCopiedNodes(true);
+        void pasteCopiedNodes();
       }
     };
 
@@ -5505,7 +5675,7 @@ function CanvasWorkspace() {
         ];
       });
       setNotice(entry.kind === "prompt-migration"
-        ? "已撤销接入，恢复文本节点及提示词迭代节点"
+        ? "已撤销接入，恢复文本节点及内容迭代节点"
         : `已撤销删除，恢复 ${restored.restored.nodes.length} 个节点`);
     } catch (error) {
       undoStack.current.push(entry);
@@ -5743,7 +5913,10 @@ function CanvasWorkspace() {
   useEffect(() => {
     let mounted = true;
     let unlistenCreated: (() => void) | undefined;
+    let unlistenCreatedBatch: (() => void) | undefined;
     let unlistenUpdated: (() => void) | undefined;
+    let unlistenEdgeCreated: (() => void) | undefined;
+    let unlistenEdgeDeleted: (() => void) | undefined;
 
     const load = async () => {
       try {
@@ -5804,6 +5977,112 @@ function CanvasWorkspace() {
             setNotice(`已接收来自 ${record.source} 的新节点`);
           })();
         });
+        unlistenCreatedBatch = await listen<NodeRecord[]>("canvas://nodes-created", (event) => {
+          void (async () => {
+            if (!mounted || !event.payload.length) return;
+            let records = event.payload;
+            const activeCanvasId = activeProjectIdRef.current;
+            const activeRecords = records.filter((record) => record.canvasId === activeCanvasId);
+            if (activeCanvasId && activeRecords.length) {
+              const minX = Math.min(...activeRecords.map((record) => record.x));
+              const minY = Math.min(...activeRecords.map((record) => record.y));
+              const maxX = Math.max(...activeRecords.map((record) => record.x + record.width));
+              const maxY = Math.max(...activeRecords.map((record) => record.y + record.height));
+              const batchWidth = Math.max(1, maxX - minX);
+              const batchHeight = Math.max(1, maxY - minY);
+              const viewportCenter = screenToFlowPosition({
+                x: window.innerWidth / 2,
+                y: window.innerHeight / 2,
+              });
+              const incomingIds = new Set(activeRecords.map((record) => record.id));
+              const position = nonOverlappingNodePosition(
+                {
+                  x: viewportCenter.x - batchWidth / 2,
+                  y: viewportCenter.y - batchHeight / 2,
+                },
+                batchWidth,
+                batchHeight,
+                [
+                  ...nodesSnapshot.current
+                    .map(recordAtCurrentFlowPosition)
+                    .filter((record) => !incomingIds.has(record.id)),
+                  ...incomingPlacementReservations.current,
+                ],
+              );
+              const deltaX = position.x - minX;
+              const deltaY = position.y - minY;
+              const reservationId = `incoming-batch-placement:${crypto.randomUUID()}`;
+              const now = new Date().toISOString();
+              incomingPlacementReservations.current.push({
+                id: reservationId,
+                canvasId: activeCanvasId,
+                kind: "placement-reservation",
+                title: "",
+                content: {},
+                source: "placement-reservation",
+                requestId: reservationId,
+                x: position.x,
+                y: position.y,
+                width: batchWidth,
+                height: batchHeight,
+                status: "reserved",
+                createdAt: now,
+                updatedAt: now,
+              });
+              try {
+                const relocated = await Promise.all(activeRecords.map((record) => (
+                  invoke<NodeRecord>("update_node", {
+                    input: {
+                      id: record.id,
+                      x: snapCanvasCoordinate(record.x + deltaX),
+                      y: snapCanvasCoordinate(record.y + deltaY),
+                    },
+                  })
+                )));
+                const relocatedById = new Map(relocated.map((record) => [record.id, record]));
+                records = records.map((record) => relocatedById.get(record.id) ?? record);
+              } catch (error) {
+                reportError(error);
+              } finally {
+                incomingPlacementReservations.current = incomingPlacementReservations.current
+                  .filter((record) => record.id !== reservationId);
+              }
+            }
+
+            if (!mounted) return;
+            const recordsByCanvas = new Map<string, NodeRecord[]>();
+            for (const record of records) {
+              const grouped = recordsByCanvas.get(record.canvasId) ?? [];
+              grouped.push(record);
+              recordsByCanvas.set(record.canvasId, grouped);
+            }
+            setProjects((current) => current.map((project) => {
+              const additions = recordsByCanvas.get(project.canvas.id) ?? [];
+              if (!additions.length) return project;
+              const existingIds = new Set(project.nodes.map((node) => node.id));
+              const missing = additions.filter((record) => !existingIds.has(record.id));
+              if (!missing.length) return project;
+              const updatedAt = missing.reduce(
+                (latest, record) => record.updatedAt > latest ? record.updatedAt : latest,
+                project.canvas.updatedAt,
+              );
+              return {
+                ...project,
+                canvas: { ...project.canvas, updatedAt },
+                nodes: [...project.nodes, ...missing],
+              };
+            }));
+            const visibleRecords = records.filter(
+              (record) => record.canvasId === activeProjectIdRef.current,
+            );
+            if (!visibleRecords.length) return;
+            setNodes((current) => appendUniqueById(
+              current,
+              visibleRecords.map((record) => makeFlowNode(record)),
+            ));
+            setNotice(`已接收 ${visibleRecords.length} 个内容节点`);
+          })();
+        });
         unlistenUpdated = await listen<NodeRecord>("canvas://node-updated", (event) => {
           if (!mounted) return;
           const record = event.payload;
@@ -5836,6 +6115,33 @@ function CanvasWorkspace() {
           });
           setNotice(`已接收来自 ${record.source} 的提示词新版本`);
         });
+        unlistenEdgeCreated = await listen<EdgeRecord>("canvas://edge-created", (event) => {
+          if (!mounted) return;
+          const record = event.payload;
+          setProjects((current) => current.map((project) => {
+            if (project.canvas.id !== record.canvasId) return project;
+            if (project.edges.some((edge) => edge.id === record.id)) return project;
+            return {
+              ...project,
+              edges: [...project.edges, record],
+            };
+          }));
+          if (activeProjectIdRef.current !== record.canvasId) return;
+          setEdges((current) => current.some((edge) => edge.id === record.id)
+            ? current
+            : [...current, toFlowEdge(record)]);
+          setNotice("内容关系已连接");
+        });
+        unlistenEdgeDeleted = await listen<string>("canvas://edge-deleted", (event) => {
+          if (!mounted) return;
+          const edgeId = event.payload;
+          setProjects((current) => current.map((project) => ({
+            ...project,
+            edges: project.edges.filter((edge) => edge.id !== edgeId),
+          })));
+          setEdges((current) => current.filter((edge) => edge.id !== edgeId));
+          setNotice("内容关系已断开");
+        });
       } catch (error) {
         reportError(error);
       }
@@ -5845,9 +6151,12 @@ function CanvasWorkspace() {
     return () => {
       mounted = false;
       unlistenCreated?.();
+      unlistenCreatedBatch?.();
       unlistenUpdated?.();
+      unlistenEdgeCreated?.();
+      unlistenEdgeDeleted?.();
     };
-  }, [makeFlowNode, reportError, screenToFlowPosition, setNodes]);
+  }, [makeFlowNode, reportError, screenToFlowPosition, setEdges, setNodes]);
 
   const addTextNode = useCallback(async (position?: { x: number; y: number }) => {
     if (!activeProjectId) return;
@@ -5900,11 +6209,12 @@ function CanvasWorkspace() {
         input: {
           canvasId: activeProjectId,
           kind: "text",
-          title: "提示词迭代",
+          title: "内容迭代",
           content: {
             text: "",
             information: "",
-            promptVersionNode: true,
+            contentNode: true,
+            contentType: "plot",
             promptVersions: [],
             activePromptVersionId: "",
             bestPromptVersionId: "",
@@ -5918,7 +6228,7 @@ function CanvasWorkspace() {
       });
       finishNodePlacementReservation(placement.reservationId, [result.node]);
       setNodes((current) => [...current, makeFlowNode(result.node)]);
-      setNotice("提示词迭代节点已创建");
+      setNotice("内容迭代节点已创建");
       if (!position) window.setTimeout(() => {
         void setCenter(
           result.node.x + result.node.width / 2,
@@ -6005,13 +6315,19 @@ function CanvasWorkspace() {
     }
   }, [activeProjectId, finishNodePlacementReservation, folderGroupingBusy, makeFlowNode, reportError, reserveNodePlacement, setEdges, setNodes, setCenter]);
 
-  const addVideoNode = useCallback(async (position?: { x: number; y: number }) => {
+  const addVideoNode = useCallback(async (
+    position?: { x: number; y: number },
+    storyboardReferenceCompiler = false,
+  ) => {
     if (!activeProjectId) return;
+    const initialHeight = storyboardReferenceCompiler
+      ? videoGenerationAutoHeight([], 0, VIDEO_GENERATION_NODE_WIDTH, true)
+      : VIDEO_NODE_BASE_HEIGHT;
     const placement = reserveNodePlacement(
       activeProjectId,
       position,
       VIDEO_GENERATION_NODE_WIDTH,
-      VIDEO_NODE_BASE_HEIGHT,
+      initialHeight,
     );
     const defaultWorkflowModule = workflowModules.find((module) => (
       !module.deletedAt
@@ -6019,9 +6335,18 @@ function CanvasWorkspace() {
       && module.variant === "reference-to-video"
       && module.id === workflowModuleDefaults["video-generation:reference-to-video"]
     ));
-    const nodeDefaults = videoGenerationDefaults.workflowModuleId
-      ? videoGenerationDefaults
-      : {
+    const nodeDefaults = storyboardReferenceCompiler
+      ? {
+          ...videoGenerationDefaults,
+          generationMode: "reference-to-video" as VideoGenerationMode,
+          workflowModuleId: defaultWorkflowModule?.id ?? "",
+          workflowModuleRevision: defaultWorkflowModule?.revision ?? "",
+          generationDiffusionModelName: defaultWorkflowModule?.defaults.diffusionModelName
+            ?? videoGenerationDefaults.generationDiffusionModelName,
+        }
+      : videoGenerationDefaults.workflowModuleId
+        ? videoGenerationDefaults
+        : {
           ...videoGenerationDefaults,
           generationMode: defaultWorkflowModule?.variant as VideoGenerationMode ?? videoGenerationDefaults.generationMode,
           workflowModuleId: defaultWorkflowModule?.id ?? "",
@@ -6034,26 +6359,27 @@ function CanvasWorkspace() {
         input: {
           canvasId: activeProjectId,
           kind: "video-generation",
-          title: "视频生成",
+          title: storyboardReferenceCompiler ? "智能视频生成" : "视频生成",
           content: {
             provider: "",
             model: "",
             status: "idle",
             secondarySamplingEnabled: false,
             ...nodeDefaults,
-            manualHeight: VIDEO_NODE_BASE_HEIGHT,
+            ...(storyboardReferenceCompiler ? { storyboardReferenceCompiler: true } : {}),
+            manualHeight: initialHeight,
             layoutTextInputCount: 0,
           },
           source: "manual",
           x: placement.position.x,
           y: placement.position.y,
           width: VIDEO_GENERATION_NODE_WIDTH,
-          height: VIDEO_NODE_BASE_HEIGHT,
+          height: initialHeight,
         },
       });
       finishNodePlacementReservation(placement.reservationId, [result.node]);
       setNodes((current) => [...current, makeFlowNode(result.node)]);
-      setNotice("视频生成节点已创建");
+      setNotice(storyboardReferenceCompiler ? "智能视频生成节点已创建" : "视频生成节点已创建");
       if (!position) window.setTimeout(() => {
         void setCenter(
           result.node.x + result.node.width / 2,
@@ -6071,7 +6397,7 @@ function CanvasWorkspace() {
     event.preventDefault();
     const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
     const menuWidth = uiFontSize === "medium" ? 220 : 190;
-    const menuHeight = uiFontSize === "medium" ? 326 : 286;
+    const menuHeight = uiFontSize === "medium" ? 410 : 360;
     setCanvasContextMenu({
       screenX: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
       screenY: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -6380,7 +6706,7 @@ function CanvasWorkspace() {
     }
   }, [activeComfyTaskCounts, activeProjectId, folderGroupingBusy, flushPendingPatches, loadFolderContentNodes, makeFlowNode, rememberUndoEntry, reportError, setEdges, setNodes]);
 
-  const createNodeFromContextMenu = useCallback((kind: "folder" | "text" | "prompt-version" | "note" | "video-generation") => {
+  const createNodeFromContextMenu = useCallback((kind: "folder" | "text" | "prompt-version" | "note" | "video-generation" | "storyboard-video-generation") => {
     if (!canvasContextMenu) return;
     const position = { x: canvasContextMenu.flowX, y: canvasContextMenu.flowY };
     setCanvasContextMenu(null);
@@ -6388,7 +6714,7 @@ function CanvasWorkspace() {
     else if (kind === "text") void addTextNode(position);
     else if (kind === "prompt-version") void addPromptVersionNode(position);
     else if (kind === "note") void addNoteNode(position);
-    else void addVideoNode(position);
+    else void addVideoNode(position, kind === "storyboard-video-generation");
   }, [addEmptyFolder, addNoteNode, addPromptVersionNode, addTextNode, addVideoNode, canvasContextMenu]);
 
   useEffect(() => {
@@ -6548,13 +6874,40 @@ function CanvasWorkspace() {
       const source = contentNodes.find((node) => node.id === connection.source)?.data.record;
       const target = contentNodes.find((node) => node.id === connection.target)?.data.record;
       if (!source || !target) return "找不到要连接的节点";
-      if (!(["text", "image", "audio", "video"].includes(source.kind) && target.kind === "video-generation")) {
-        return "只能连接到视频生成节点";
-      }
       if (validationEdges.some(
         (edge) => edge.source === connection.source && edge.target === connection.target,
       )) {
         return "这两个节点已经连接";
+      }
+
+      const sourceIsContent = source.kind === "text" && isContentIterationContent(source.content);
+      const targetIsContent = target.kind === "text" && isContentIterationContent(target.content);
+      if (sourceIsContent && targetIsContent) {
+        const derivationEdges = validationEdges.filter((edge) => {
+          const edgeKind = (edge.data as CanvasEdgeData | undefined)?.record?.kind;
+          return edgeKind === "content-derivation" || edgeKind === "scene-branch";
+        });
+        const visited = new Set<string>();
+        const pending = [target.id];
+        while (pending.length) {
+          const current = pending.pop()!;
+          if (current === source.id) return "这条关联会形成内容循环";
+          if (visited.has(current)) continue;
+          visited.add(current);
+          derivationEdges
+            .filter((edge) => edge.source === current)
+            .forEach((edge) => pending.push(edge.target));
+        }
+        return null;
+      }
+      if (targetIsContent) {
+        return "内容迭代节点的左侧只能连接另一个内容迭代节点";
+      }
+      if (sourceIsContent && target.kind !== "video-generation") {
+        return "内容迭代节点只能连接下游内容或视频生成节点";
+      }
+      if (!(["text", "image", "audio", "video"].includes(source.kind) && target.kind === "video-generation")) {
+        return "只能连接到视频生成节点";
       }
 
       const mode = videoGenerationModeFromContent(target.content);
@@ -6613,6 +6966,8 @@ function CanvasWorkspace() {
       if (validationError !== "这两个节点已经连接" || !connection.source || !connection.target) {
         return false;
       }
+      const targetNode = contentNodes.find((node) => node.id === connection.target);
+      if (targetNode?.data.record.kind !== "video-generation") return false;
       const sourceNode = contentNodes.find((node) => node.id === connection.source);
       if (!sourceNode?.selected) return false;
       return contentNodes.some((node) => (
@@ -6635,6 +6990,38 @@ function CanvasWorkspace() {
         setNotice("找不到要连接的节点");
         return;
       }
+      const sourceIsContent = sourceNode.data.record.kind === "text"
+        && isContentIterationContent(sourceNode.data.record.content);
+      const targetIsContent = targetNode.data.record.kind === "text"
+        && isContentIterationContent(targetNode.data.record.content);
+      if (sourceIsContent && targetIsContent) {
+        const validationError = connectionValidationError(connection, edgesSnapshot.current);
+        if (validationError) {
+          setNotice(validationError);
+          return;
+        }
+        try {
+          const record = await invoke<EdgeRecord>("create_edge", {
+            input: {
+              canvasId: activeProjectId,
+              sourceNodeId: sourceNode.id,
+              targetNodeId: targetNode.id,
+              kind: "content-derivation",
+              metadata: {
+                relation: "content-derivation",
+                sourceKind: "content",
+                targetKind: "content",
+                captureInitialVersionSources: true,
+              },
+            },
+          });
+          setEdges((current) => appendUniqueById(current, [toFlowEdge(record)]));
+          setNotice(`已建立“${sourceNode.data.record.title}”到“${targetNode.data.record.title}”的内容关联`);
+        } catch (error) {
+          reportError(error);
+        }
+        return;
+      }
       const inputKinds = new Set(["text", "image", "audio", "video"]);
       const selectedInputNodes = sourceNode.selected && inputKinds.has(sourceNode.data.record.kind)
         ? nodesSnapshot.current.filter((node) => (
@@ -6647,7 +7034,7 @@ function CanvasWorkspace() {
       const batchUsesHorizontalPromptOrder = selectedInputNodes.length > 1
         && batchIsTextOnly
         && selectedInputNodes.every((node) => (
-          node.data.record.content.promptVersionNode === true
+          isContentIterationContent(node.data.record.content)
         ));
       if (selectedInputNodes.length > 1) {
         selectedInputNodes.sort((left, right) => {
@@ -6834,7 +7221,8 @@ function CanvasWorkspace() {
 
   useEffect(() => {
     const handleDeleteShortcut = (event: KeyboardEvent) => {
-      if (event.key !== "Backspace" && event.key !== "Delete") return;
+      if (event.key !== "Delete") return;
+      if (document.querySelector(".expanded-editor-backdrop")) return;
       const target = event.target;
       if (
         target instanceof HTMLInputElement
@@ -6848,7 +7236,7 @@ function CanvasWorkspace() {
         || edgesSnapshot.current.some((edge) => edge.selected);
       if (!hasSelection) return;
       event.preventDefault();
-      void deleteSelectedElements(event.key === "Delete" && event.ctrlKey);
+      void deleteSelectedElements(event.ctrlKey);
     };
     window.addEventListener("keydown", handleDeleteShortcut);
     return () => window.removeEventListener("keydown", handleDeleteShortcut);
@@ -6948,8 +7336,11 @@ function CanvasWorkspace() {
     }
 
     if (anchor.kind === "text") {
+      if (isContentIterationContent(anchor.content)) {
+        return new Set<string>();
+      }
       const relatedIds = new Set<string>([anchor.id]);
-      const activePromptVersionId = anchor.content.promptVersionNode === true
+      const activePromptVersionId = isContentIterationContent(anchor.content)
         ? activePromptVersionFromContent(anchor.content)?.id ?? ""
         : null;
       contentNodes.forEach((node) => {
@@ -6978,7 +7369,7 @@ function CanvasWorkspace() {
       if (promptNode?.kind === "text") relatedIds.add(promptNode.id);
     }
     return relatedIds;
-  }, [contentNodes, relationAnchorId]);
+  }, [contentNodes, edges, relationAnchorId]);
 
   const relationPromptVersionLabels = useMemo(() => {
     const labels = new Map<string, string>();
@@ -6989,7 +7380,7 @@ function CanvasWorkspace() {
     const snapshot = generationSnapshotFromContent(anchor.content);
     if (!snapshot?.promptNodeId) return labels;
     const promptNode = recordsById.get(snapshot.promptNodeId);
-    if (promptNode?.kind !== "text" || promptNode.content.promptVersionNode !== true) return labels;
+    if (promptNode?.kind !== "text" || !isContentIterationContent(promptNode.content)) return labels;
     const versionLabel = snapshot.promptVersionLabel
       || promptVersionsFromContent(promptNode.content).find(
         (version) => version.id === snapshot.promptVersionId,
@@ -7009,21 +7400,25 @@ function CanvasWorkspace() {
       );
       targetIds.forEach((targetId) => activateTextInput(targetId, node.id));
     }
-    setRelationAnchorId(kind === "text" || kind === "generated-video" ? node.id : null);
+    setRelationAnchorId(
+      kind === "generated-video" || (kind === "text" && !isContentIterationContent(node.data.record.content))
+        ? node.id
+        : null,
+    );
   }, [activateTextInput]);
 
   const interactiveEdges = useMemo(
     () => edges.map((edge) => {
-      const protectedGenerationEdge = protectedGenerationEdgeIds.has(edge.id);
+      const protectedRelationshipEdge = protectedGenerationEdgeIds.has(edge.id);
       return {
         ...edge,
         type: "canvasEdge",
-        selectable: !protectedGenerationEdge,
-        deletable: !protectedGenerationEdge,
-        focusable: !protectedGenerationEdge,
+        selectable: !protectedRelationshipEdge,
+        deletable: !protectedRelationshipEdge,
+        focusable: !protectedRelationshipEdge,
         data: {
           ...edge.data,
-          onDisconnect: protectedGenerationEdge
+          onDisconnect: protectedRelationshipEdge
             ? undefined
             : (edgeId: string) => void disconnectEdge(edgeId),
         },
@@ -7036,11 +7431,18 @@ function CanvasWorkspace() {
     () => {
       const recordsById = new Map(contentNodes.map((node) => [node.id, node.data.record]));
       const inputRecordsByTarget = new Map<string, NodeRecord[]>();
+      const contentParentsByTarget = new Map<string, NodeRecord[]>();
       const outputCountBySource = new Map<string, number>();
       edges.forEach((edge) => {
         outputCountBySource.set(edge.source, (outputCountBySource.get(edge.source) ?? 0) + 1);
         const source = recordsById.get(edge.source);
         if (!source) return;
+        const edgeKind = (edge.data as CanvasEdgeData | undefined)?.record?.kind;
+        if (edgeKind === "content-derivation" || edgeKind === "scene-branch") {
+          const parents = contentParentsByTarget.get(edge.target) ?? [];
+          parents.push(source);
+          contentParentsByTarget.set(edge.target, parents);
+        }
         const inputRecords = inputRecordsByTarget.get(edge.target);
         if (inputRecords) inputRecords.push(source);
         else inputRecordsByTarget.set(edge.target, [source]);
@@ -7074,6 +7476,10 @@ function CanvasWorkspace() {
         orderedMedia.push(...connectedMedia.filter((record) => !orderedIds.has(record.id)));
 
         const previousData = previous?.result.data;
+        const rawContentParents = contentParentsByTarget.get(node.id) ?? EMPTY_NODE_RECORDS;
+        const contentParents = previousData && nodeRecordArraysEqual(previousData.contentParents, rawContentParents)
+          ? previousData.contentParents
+          : rawContentParents;
         const mediaInputs = previousData && nodeRecordArraysEqual(previousData.mediaInputs, orderedMedia)
           ? previousData.mediaInputs
           : orderedMedia;
@@ -7105,6 +7511,7 @@ function CanvasWorkspace() {
           && previousData.activeTaskCount === activeTaskCount
           && previousData.inputCount === inputRecords.length
           && previousData.outputCount === outputCount
+          && previousData.contentParents === contentParents
           && previousData.mediaInputs === mediaInputs
           && previousData.textInputCount === connectedText.length
           && previousData.textInputs === textInputs
@@ -7123,6 +7530,7 @@ function CanvasWorkspace() {
               activeTaskCount,
               inputCount: inputRecords.length,
               outputCount,
+              contentParents,
               mediaInputs,
               textInputCount: connectedText.length,
               textInputs,
@@ -9619,9 +10027,13 @@ function CanvasWorkspace() {
                 <Clapperboard size={15} />
                 <span><strong>视频生成节点</strong><small>连接素材并提交生成</small></span>
               </button>
+              <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("storyboard-video-generation")}>
+                <Sparkles size={15} />
+                <span><strong>智能视频生成</strong><small>按分镜内部选择自动筛选提交素材</small></span>
+              </button>
               <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("prompt-version")}>
                 <History size={15} />
-                <span><strong>提示词迭代节点</strong><small>保留 v1、v2、v3 并选择生成版本</small></span>
+                <span><strong>内容迭代节点</strong><small>存储剧情、剧本、分镜或生成提示词</small></span>
               </button>
               <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("text")}>
                 <FileText size={15} />
