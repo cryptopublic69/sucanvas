@@ -1406,6 +1406,8 @@ button { color: inherit; }
 .expanded-editor-header > button.is-manual-save-dirty:hover { color: #83eda8; }
 .expanded-editor-header > .expanded-editor-create-version { display: flex; width: auto; align-items: center; gap: 5px; padding: 0 9px; color: #bcb5ef; background: rgba(139, 124, 246, .10); border: 1px solid rgba(139, 124, 246, .28); font-size: calc(10px + var(--ui-font-adjust)); font-weight: 700; white-space: nowrap; }
 .expanded-editor-header > .expanded-editor-create-version:hover { color: #fff; background: rgba(139, 124, 246, .22); border-color: rgba(163, 151, 255, .58); }
+.expanded-editor-header > .expanded-editor-delete-version { display: flex; width: auto; align-items: center; gap: 5px; padding: 0 9px; color: #f1a2ad; background: rgba(225, 91, 110, .10); border: 1px solid rgba(225, 91, 110, .28); font-size: calc(10px + var(--ui-font-adjust)); font-weight: 700; white-space: nowrap; }
+.expanded-editor-header > .expanded-editor-delete-version:hover { color: #fff; background: rgba(225, 91, 110, .22); border-color: rgba(249, 139, 155, .58); }
 .expanded-editor-header > .expanded-editor-version-control { display: flex; width: min(300px, 30vw); min-width: 0; flex: 0 0 auto; align-items: center; gap: 8px; color: #7f8798; font-size: calc(10px + var(--ui-font-adjust)); }
 .expanded-editor-version-control > span { margin: 0; white-space: nowrap; }
 .expanded-editor-version-control .settings-custom-select { flex: 1; }
@@ -2017,6 +2019,8 @@ button { color: inherit; }
 :root[data-theme="light"] .expanded-editor-header > button:hover { color: #303644; background: #eceff4; }
 :root[data-theme="light"] .expanded-editor-header > .expanded-editor-create-version { color: #554aa7; background: #ece9ff; border-color: #c9c3ec; }
 :root[data-theme="light"] .expanded-editor-header > .expanded-editor-create-version:hover { color: #fff; background: #675bcc; border-color: #675bcc; }
+:root[data-theme="light"] .expanded-editor-header > .expanded-editor-delete-version { color: #a6394a; background: #ffedef; border-color: #efc1c8; }
+:root[data-theme="light"] .expanded-editor-header > .expanded-editor-delete-version:hover { color: #fff; background: #c74e61; border-color: #c74e61; }
 :root[data-theme="light"] .expanded-editor-version-control { color: #737b8b; }
 :root[data-theme="light"] .expanded-editor-version-control .settings-custom-select-toggle { color: #45405f; background: #f6f5fb; border-color: #d4d1e2; }
 :root[data-theme="light"] .expanded-editor-version-control .settings-custom-select-toggle:hover { color: #332b76; border-color: #9e95d1; }

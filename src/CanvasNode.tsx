@@ -3944,9 +3944,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [editingPromptVersionTitleId, setEditingPromptVersionTitleId] = useState<string | null>(null);
   const [promptVersionTitleDraft, setPromptVersionTitleDraft] = useState("");
   const [textInformationOpen, setTextInformationOpen] = useState(false);
-  const [nodeMarkdownPreview, setNodeMarkdownPreview] = useState(true);
+  // Editing is the default in the compact node, regardless of where its
+  // content came from. Markdown is an explicit user-selected preview mode.
+  const [nodeMarkdownPreview, setNodeMarkdownPreview] = useState(false);
   const [informationMarkdownPreview, setInformationMarkdownPreview] = useState(true);
-  const [expandedTextMarkdownPreview, setExpandedTextMarkdownPreview] = useState(true);
+  // Content iteration is read first in the expanded dialog; its editor remains
+  // one explicit toggle away. Compact nodes stay editing-first.
+  const [expandedTextMarkdownPreview, setExpandedTextMarkdownPreview] = useState(
+    () => isContentIterationContent(record.content),
+  );
   const [expandedInformationMarkdownPreview, setExpandedInformationMarkdownPreview] = useState(true);
   const [expandedInformationHidden, setExpandedInformationHidden] = useState(false);
   const [connectedTextMarkdownPreview, setConnectedTextMarkdownPreview] = useState(true);
@@ -4035,7 +4041,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const isContentIterationNode = isText && isContentIterationContent(record.content);
   const contentNodeType = contentNodeTypeFromContent(record.content);
   const allPromptVersions = isContentIterationNode ? promptVersionsFromContent(record.content) : [];
-  const isContentTypeLocked = isContentIterationNode && allPromptVersions.length > 0;
+  // The type remains adjustable while there is only one version. Once history
+  // branches beyond v1, keep the node-level type stable across every version.
+  const isContentTypeLocked = isContentIterationNode && allPromptVersions.length > 1;
   const storedActivePromptVersion = isContentIterationNode
     ? activePromptVersionFromContent(record.content)
     : null;
@@ -4760,6 +4768,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
 
   const createPromptVersion = () => {
     if (!isContentIterationNode) return;
+    const nextText = "";
+    const nextInformation = "";
     const derivedFrom = contentParents.flatMap((parent) => {
       const parentVersion = activePromptVersionFromContent(parent.content);
       return parentVersion
@@ -4774,8 +4784,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       id: crypto.randomUUID(),
       label: nextPromptVersionLabel(allPromptVersions),
       title: activePromptVersion?.title || record.title || "内容",
-      text: textDraft,
-      information: informationDraft,
+      text: nextText,
+      information: nextInformation,
       createdAt: new Date().toISOString(),
       ...(activePromptVersion?.generationOptions
         ? { generationOptions: activePromptVersion.generationOptions }
@@ -4785,7 +4795,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         : {}),
       ...(derivedFrom.length ? { derivedFrom } : {}),
     };
-    markTextNodeChanged(id, textDraft, informationDraft, savedText, savedInformation);
+    setTextDraft(nextText);
+    setInformationDraft(nextInformation);
+    markTextNodeChanged(id, nextText, nextInformation, savedText, savedInformation);
     onChange(id, {
       content: {
         ...record.content,
@@ -8105,11 +8117,30 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   type="button"
                   className="expanded-editor-create-version"
                   onClick={createPromptVersion}
-                  title={`复制当前内容并创建新版本；将锁定来源：${nextVersionProvenance}`}
-                  aria-label={`添加新版本；将锁定来源：${nextVersionProvenance}`}
+                  title={`创建空白的新版本；将锁定来源：${nextVersionProvenance}`}
+                  aria-label={`添加空白新版本；将锁定来源：${nextVersionProvenance}`}
                 >
                   <Plus size={14} />
                   添加新版本
+                </button>
+              )}
+              {isContentIterationNode && (
+                <button
+                  type="button"
+                  className="expanded-editor-delete-version"
+                  onClick={() => {
+                    if (activePromptVersion) void deletePromptVersion(activePromptVersion.id);
+                  }}
+                  disabled={!activePromptVersion}
+                  title={activePromptVersion
+                    ? `删除当前版本 ${activePromptVersion.label}`
+                    : "尚未创建版本"}
+                  aria-label={activePromptVersion
+                    ? `删除当前版本 ${activePromptVersion.label}`
+                    : "尚未创建版本"}
+                >
+                  <Trash2 size={14} />
+                  删除版本
                 </button>
               )}
               {isNote && (
