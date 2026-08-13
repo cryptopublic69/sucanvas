@@ -7452,6 +7452,18 @@ function CanvasWorkspace() {
       );
       targetIds.forEach((targetId) => activateTextInput(targetId, node.id));
     }
+    if (kind === "generated-video") {
+      const snapshot = generationSnapshotFromContent(node.data.record.content);
+      const sourceGeneratorId = typeof node.data.record.content.sourceGeneratorId === "string"
+        ? node.data.record.content.sourceGeneratorId
+        : "";
+      // A generated video is a historical execution of one concrete prompt.
+      // Restore that prompt as the generator's active text input when the video
+      // is selected, mirroring the existing prompt-node -> generator behavior.
+      if (sourceGeneratorId && snapshot?.promptNodeId) {
+        activateTextInput(sourceGeneratorId, snapshot.promptNodeId);
+      }
+    }
     setRelationAnchorId(
       kind === "generated-video" || (kind === "text" && !isContentIterationContent(node.data.record.content))
         ? node.id
