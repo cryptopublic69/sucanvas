@@ -70,7 +70,7 @@ import {
   ALIGNMENT_SNAP_TOLERANCE_PX,
   AUDIO_NODE_MIN_HEIGHT,
   CANVAS_GRID_SIZE,
-  COMFYUI_SERVER_URL,
+  COMFYUI_SERVER_URL_STORAGE_KEY,
   COMFY_TASK_STORAGE_KEY,
   DEFAULT_H3_DIFFUSION_MODEL_NAME,
   DEFAULT_H3_FIRST_LAST_WORKFLOW_PATH,
@@ -78,6 +78,7 @@ import {
   DEFAULT_H3_LAST_FRAME_TO_VIDEO_WORKFLOW_PATH,
   DEFAULT_H3_LORA_NAME,
   DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
+  DEFAULT_COMFYUI_SERVER_URL,
   EMPTY_NODE_RECORDS,
   GENERATED_VIDEO_FOOTER_HEIGHT,
   GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH,
@@ -387,6 +388,12 @@ function CanvasWorkspace() {
   const [comfyInputRootDraft, setComfyInputRootDraft] = useState(() =>
     window.localStorage.getItem("infinite-canvas:comfy-input-root") ?? "",
   );
+  const [comfyUiServerUrl, setComfyUiServerUrl] = useState(() =>
+    window.localStorage.getItem(COMFYUI_SERVER_URL_STORAGE_KEY) ?? DEFAULT_COMFYUI_SERVER_URL,
+  );
+  const [comfyUiServerUrlDraft, setComfyUiServerUrlDraft] = useState(() =>
+    window.localStorage.getItem(COMFYUI_SERVER_URL_STORAGE_KEY) ?? DEFAULT_COMFYUI_SERVER_URL,
+  );
   const [h3WorkflowPath, setH3WorkflowPath] = useState(() =>
     window.localStorage.getItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY)
       ?? DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
@@ -501,6 +508,7 @@ function CanvasWorkspace() {
   const persistedComfyTasks = useRef<PersistedComfyTask[]>(persistedComfyTasksFromStorage());
   const comfyOutputRootRef = useRef(comfyOutputRoot);
   const comfyInputRootRef = useRef(comfyInputRoot);
+  const comfyUiServerUrlRef = useRef(comfyUiServerUrl);
   const h3WorkflowPathRef = useRef(h3WorkflowPath);
   const makeFlowNodeRef = useRef<((record: NodeRecord, matched?: boolean) => CanvasFlowNode) | null>(null);
   const openFolderRef = useRef<(nodeId: string) => void>(() => undefined);
@@ -820,6 +828,10 @@ function CanvasWorkspace() {
   }, [comfyInputRoot]);
 
   useEffect(() => {
+    comfyUiServerUrlRef.current = comfyUiServerUrl;
+  }, [comfyUiServerUrl]);
+
+  useEffect(() => {
     h3WorkflowPathRef.current = h3WorkflowPath;
   }, [h3WorkflowPath]);
 
@@ -829,7 +841,7 @@ function CanvasWorkspace() {
     const poll = async () => {
       try {
         const summary = await invoke<ComfyQueueSummary>("get_comfyui_queue_summary", {
-          serverUrl: COMFYUI_SERVER_URL,
+          serverUrl: comfyUiServerUrl,
         });
         if (!disposed) setComfyQueueCounts(summary);
       } catch {
@@ -842,7 +854,7 @@ function CanvasWorkspace() {
       disposed = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, []);
+  }, [comfyUiServerUrl]);
 
   const defaultH3WorkflowModuleId = workflowModuleDefaults["video-generation:reference-to-video"] ?? "";
 
@@ -855,7 +867,7 @@ function CanvasWorkspace() {
         // The picker is intentionally scoped to the complete MinimaxH3 directory,
         // not to a possibly stale per-workflow binding or a single bootstrap item.
         const loras = await invoke<string[]>("get_comfyui_h3_loras", {
-          serverUrl: COMFYUI_SERVER_URL,
+          serverUrl: comfyUiServerUrl,
         });
         if (!disposed) {
           setH3LoraOptions((current) => (
@@ -898,14 +910,14 @@ function CanvasWorkspace() {
     return () => {
       disposed = true;
     };
-  }, [activeSettingsSection, settingsOpen, showGlobalNotice, workflowModulesReady]);
+  }, [activeSettingsSection, comfyUiServerUrl, settingsOpen, showGlobalNotice, workflowModulesReady]);
 
   useEffect(() => {
     if (!workflowModulesReady) return;
     let disposed = false;
     setH3DiffusionModelCatalogLoaded(false);
     void invoke<string[]>("get_comfyui_h3_diffusion_models", {
-      serverUrl: COMFYUI_SERVER_URL,
+      serverUrl: comfyUiServerUrl,
       workflowModuleId: defaultH3WorkflowModuleId || undefined,
     }).then((models) => {
       if (disposed) return;
@@ -924,7 +936,7 @@ function CanvasWorkspace() {
     return () => {
       disposed = true;
     };
-  }, [defaultH3WorkflowModuleId, workflowModulesReady]);
+  }, [comfyUiServerUrl, defaultH3WorkflowModuleId, workflowModulesReady]);
 
   const toggleTheme = () => setTheme((current) => current === "dark" ? "light" : "dark");
 
@@ -1585,6 +1597,7 @@ function CanvasWorkspace() {
     (id: string, patch: NodePatch) => {
       const currentRecord = nodesSnapshot.current.find((node) => node.id === id)?.data.record;
       const nextPatch = currentRecord?.kind === "text"
+        && isContentIterationContent(currentRecord.content)
         && patch.content
         && !manualSavedPromptContent(currentRecord.content)
         ? {
@@ -1943,6 +1956,30 @@ function CanvasWorkspace() {
       setNotice("已手动保存到数据库");
       return;
     }
+    if (!isContentIterationContent(currentRecord.content)) {
+      const automaticContent = { ...draftContent };
+      delete automaticContent.manualSavedPromptContent;
+      const updated = await invoke<NodeRecord>("update_node", {
+        input: {
+          id: nodeId,
+          ...pendingPatch,
+          content: automaticContent,
+        },
+      });
+      setNodes((current) => current.map((node) => (
+        node.id === nodeId
+          ? {
+              ...node,
+              width: updated.width,
+              height: updated.height,
+              style: { ...node.style, width: updated.width, height: updated.height },
+              data: { ...node.data, record: updated },
+            }
+          : node
+      )));
+      setNotice("已自动保存到数据库");
+      return;
+    }
     const confirmedContent = { ...draftContent };
     delete confirmedContent.manualSavedPromptContent;
     try {
@@ -2091,7 +2128,7 @@ function CanvasWorkspace() {
       cancelledComfyClients.current.add(task.clientId);
       try {
         await invoke<string | null>("cancel_comfyui_workflow", {
-          serverUrl: COMFYUI_SERVER_URL,
+          serverUrl: comfyUiServerUrlRef.current,
           clientId: task.clientId,
         });
       } catch (error) {
@@ -2262,23 +2299,40 @@ function CanvasWorkspace() {
       .trim()
       .replace(/^"|"$/g, "")
       .replace(/[\\/]+$/, "");
+    const serverUrl = comfyUiServerUrlDraft
+      .trim()
+      .replace(/^"|"$/g, "")
+      .replace(/\/+$/, "");
+    try {
+      const parsed = new URL(serverUrl);
+      if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+        throw new Error();
+      }
+    } catch {
+      showGlobalNotice("ComfyUI 服务地址无效，请填写 http:// 或 https:// 开头的完整地址");
+      return;
+    }
     const outputRoot = normalizePath(comfyOutputRootDraft);
     const inputRoot = normalizePath(comfyInputRootDraft);
     const workflowPath = normalizePath(h3WorkflowPathDraft)
       || DEFAULT_H3_REFERENCE_WORKFLOW_PATH;
     comfyOutputRootRef.current = outputRoot;
     comfyInputRootRef.current = inputRoot;
+    comfyUiServerUrlRef.current = serverUrl;
     h3WorkflowPathRef.current = workflowPath;
     setComfyOutputRoot(outputRoot);
     setComfyInputRoot(inputRoot);
+    setComfyUiServerUrl(serverUrl);
+    setComfyUiServerUrlDraft(serverUrl);
     setH3WorkflowPath(workflowPath);
     if (outputRoot) window.localStorage.setItem("infinite-canvas:comfy-output-root", outputRoot);
     else window.localStorage.removeItem("infinite-canvas:comfy-output-root");
     if (inputRoot) window.localStorage.setItem("infinite-canvas:comfy-input-root", inputRoot);
     else window.localStorage.removeItem("infinite-canvas:comfy-input-root");
+    window.localStorage.setItem(COMFYUI_SERVER_URL_STORAGE_KEY, serverUrl);
     window.localStorage.setItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY, workflowPath);
     showGlobalNotice("ComfyUI 设置已保存");
-  }, [comfyInputRootDraft, comfyOutputRootDraft, h3WorkflowPathDraft, showGlobalNotice]);
+  }, [comfyInputRootDraft, comfyOutputRootDraft, comfyUiServerUrlDraft, h3WorkflowPathDraft, showGlobalNotice]);
 
   const saveH3ModelParameters = useCallback(async () => {
     const {
@@ -2546,7 +2600,9 @@ function CanvasWorkspace() {
       ? orderedTextInputs.find((input) => input.id === promptNodeId) ?? null
       : activeTextInputFromContent(generator.content, orderedTextInputs);
     const activePromptContent = activeTextInput
-      ? manualSavedPromptContent(activeTextInput.content) ?? activeTextInput.content
+      ? (isContentIterationContent(activeTextInput.content)
+        ? manualSavedPromptContent(activeTextInput.content) ?? activeTextInput.content
+        : activeTextInput.content)
       : null;
     const activePromptVersion = activePromptContent
       ? activePromptVersionFromContent(activePromptContent)
@@ -3157,7 +3213,7 @@ function CanvasWorkspace() {
     let progressSocket: WebSocket | null = null;
     let preserveComfyTaskRecord = false;
     try {
-      progressSocket = await openComfyProgressSocket(clientId);
+      progressSocket = await openComfyProgressSocket(clientId, comfyUiServerUrlRef.current);
       if (cancelledComfyClients.current.has(clientId)) {
         throw new Error("ComfyUI 生成已取消");
       }
@@ -3182,7 +3238,7 @@ function CanvasWorkspace() {
       });
       const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow", {
         input: {
-          serverUrl: COMFYUI_SERVER_URL,
+          serverUrl: comfyUiServerUrlRef.current,
           workflowModuleId: snapshot.workflowModuleId,
           workflowPath: h3WorkflowPathRef.current,
           inputRootPath: comfyInputRootRef.current,
@@ -3246,7 +3302,7 @@ function CanvasWorkspace() {
             fileType: output.fileType,
             seed: result.seed,
             comfyPromptId: result.promptId,
-            comfyServerUrl: COMFYUI_SERVER_URL,
+            comfyServerUrl: comfyUiServerUrlRef.current,
             sourceGeneratorId: targetId,
             outputIndex: index,
             aspectRatio: videoAspectRatioValue(snapshot.aspectRatio),
@@ -3356,7 +3412,7 @@ function CanvasWorkspace() {
             ? `本次生成完成，仍有 ${remainingTaskCount} 个任务正在执行或排队`
             : `生成完成，已创建 ${result.outputs.length} 个独立预览节点`,
           comfyPromptId: result.promptId,
-          comfyServerUrl: COMFYUI_SERVER_URL,
+          comfyServerUrl: comfyUiServerUrlRef.current,
           lastGenerationSeed: result.seed,
           generatedSeeds,
           generationCount: (typeof latest.content.generationCount === "number"
@@ -3564,7 +3620,7 @@ function CanvasWorkspace() {
         try {
           const [status] = await invoke<ComfyClientTaskStatus[]>(
             "get_comfyui_client_task_statuses",
-            { serverUrl: COMFYUI_SERVER_URL, clientIds: [item.clientId] },
+            { serverUrl: comfyUiServerUrlRef.current, clientIds: [item.clientId] },
           );
           if (status && status.status !== "missing") {
             submissionObserved = true;
@@ -4185,7 +4241,7 @@ function CanvasWorkspace() {
     let progressSocket: WebSocket | null = null;
     let preserveComfyTaskRecord = false;
     try {
-      progressSocket = await openComfyProgressSocket(clientId);
+      progressSocket = await openComfyProgressSocket(clientId, comfyUiServerUrlRef.current);
       if (cancelledComfyClients.current.has(clientId)) {
         throw new Error("ComfyUI 二采已取消");
       }
@@ -4249,7 +4305,7 @@ function CanvasWorkspace() {
       });
       const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow", {
         input: {
-          serverUrl: COMFYUI_SERVER_URL,
+          serverUrl: comfyUiServerUrlRef.current,
           workflowModuleId: snapshot.workflowModuleId,
           workflowPath: h3WorkflowPathRef.current,
           inputRootPath: comfyInputRootRef.current,
@@ -4306,7 +4362,7 @@ function CanvasWorkspace() {
           fileType: output.fileType,
           seed: result.seed,
           comfyPromptId: result.promptId,
-          comfyServerUrl: COMFYUI_SERVER_URL,
+          comfyServerUrl: comfyUiServerUrlRef.current,
           sourceGeneratorId,
           sourcePreviewId: previewId,
           outputIndex: index,
@@ -4526,7 +4582,7 @@ function CanvasWorkspace() {
 
     try {
       const cleanupWarning = await invoke<string | null>("cancel_comfyui_workflow", {
-        serverUrl: COMFYUI_SERVER_URL,
+        serverUrl: comfyUiServerUrlRef.current,
         clientId,
       });
       forgetComfyTask(clientId);
@@ -5006,7 +5062,7 @@ function CanvasWorkspace() {
           fileType: output.fileType,
           seed: recovered.seed ?? "",
           comfyPromptId: recovered.promptId,
-          comfyServerUrl: COMFYUI_SERVER_URL,
+          comfyServerUrl: comfyUiServerUrlRef.current,
           sourceGeneratorId,
           ...(secondaryTask ? { sourcePreviewId: task.nodeId } : {}),
           outputIndex: index,
@@ -5134,7 +5190,7 @@ function CanvasWorkspace() {
         ? `已恢复一个完成任务，仍有 ${remainingTaskCount} 个任务正在执行或排队`
         : `已恢复完成任务并创建 ${recovered.outputs.length} 个视频预览`,
       comfyPromptId: recovered.promptId,
-      comfyServerUrl: COMFYUI_SERVER_URL,
+      comfyServerUrl: comfyUiServerUrlRef.current,
       lastGenerationSeed: recovered.seed ?? "",
       generatedSeeds,
       generationCount: (typeof latest.content.generationCount === "number"
@@ -5160,7 +5216,7 @@ function CanvasWorkspace() {
         || connectingRecoveredComfyClients.current.has(task.clientId)
       ) return;
       connectingRecoveredComfyClients.current.add(task.clientId);
-      void openComfyProgressSocket(task.clientId).then((socket) => {
+      void openComfyProgressSocket(task.clientId, comfyUiServerUrlRef.current).then((socket) => {
         connectingRecoveredComfyClients.current.delete(task.clientId);
         if (
           !socket
@@ -5220,7 +5276,7 @@ function CanvasWorkspace() {
         try {
           const statuses = await invoke<ComfyClientTaskStatus[]>(
             "get_comfyui_client_task_statuses",
-            { serverUrl: COMFYUI_SERVER_URL, clientIds: tasks.map((task) => task.clientId) },
+            { serverUrl: comfyUiServerUrlRef.current, clientIds: tasks.map((task) => task.clientId) },
           );
           const updatedNodeContents = new Map<string, JsonObject>();
           for (const recovered of statuses) {
@@ -7822,6 +7878,7 @@ function CanvasWorkspace() {
   const openAppSettings = () => {
     setComfyOutputRootDraft(comfyOutputRoot);
     setComfyInputRootDraft(comfyInputRoot);
+    setComfyUiServerUrlDraft(comfyUiServerUrl);
     setH3WorkflowPathDraft(h3WorkflowPath);
     setH3ModelParametersDraft(h3ModelParameters);
     setVideoGenerationDefaultsDraft(videoGenerationDefaults);
@@ -8067,7 +8124,7 @@ function CanvasWorkspace() {
               <section className="settings-pane general-settings-pane" aria-labelledby="general-settings-title">
                 <div className="settings-pane-heading">
                   <h3 id="general-settings-title">基础设置</h3>
-                  <p>调整界面显示，并配置远程 ComfyUI 的 Windows 映射路径。</p>
+                  <p>配置远程 ComfyUI 的服务地址与 Windows 映射路径。</p>
                 </div>
                 <section className="ui-font-size-setting" aria-labelledby="ui-font-size-setting-title">
                   <div>
@@ -8090,6 +8147,24 @@ function CanvasWorkspace() {
                     ))}
                   </div>
                 </section>
+        <label>
+          ComfyUI 服务地址
+          <input
+            value={comfyUiServerUrlDraft}
+            onChange={(event) => setComfyUiServerUrlDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setSettingsOpen(false);
+              }
+            }}
+            placeholder="例如：http://192.168.5.108:8188"
+            spellCheck={false}
+          />
+          <small>
+            ComfyUI 网页与 API 的服务地址。保存后，生成提交、队列、预览和进度连接都会改用此地址。
+          </small>
+        </label>
         <label>
           ComfyUI 输入映射目录
           <input

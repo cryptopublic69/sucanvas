@@ -1771,7 +1771,8 @@ const BATCH_GENERATION_PREVIEW_GAP_OFFSET = 130;
 const GENERATED_VIDEO_PREVIEW_LAYOUT_VERSION = 5;
 const DEFAULT_GENERATED_VIDEO_ASPECT_RATIO = 16 / 9;
 const SHOW_NODE_SEARCH = false;
-const COMFYUI_SERVER_URL = "http://192.168.5.108:8188";
+const DEFAULT_COMFYUI_SERVER_URL = "http://192.168.5.108:8188";
+const COMFYUI_SERVER_URL_STORAGE_KEY = "infinite-canvas:comfy-server-url";
 const DEFAULT_GENERATION_SEED = "56456340597885880";
 const DEFAULT_H3_DIFFUSION_MODEL_NAME = "MinimaxH3\\minimax_h3_fl2va_pruned_int8_convrot.safetensors";
 const DEFAULT_H3_LORA_NAME = "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors";
@@ -1942,9 +1943,12 @@ function comfyWebSocketUrl(serverUrl: string, clientId: string): string {
   return url.toString();
 }
 
-function openComfyProgressSocket(clientId: string): Promise<WebSocket | null> {
+function openComfyProgressSocket(
+  clientId: string,
+  serverUrl: string,
+): Promise<WebSocket | null> {
   return new Promise((resolve) => {
-    const socket = new WebSocket(comfyWebSocketUrl(COMFYUI_SERVER_URL, clientId));
+    const socket = new WebSocket(comfyWebSocketUrl(serverUrl, clientId));
     let settled = false;
     const finish = (result: WebSocket | null) => {
       if (settled) return;
@@ -4644,9 +4648,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     return Boolean(state) && state.currentTitle !== state.savedTitle;
   };
 
+  const requiresManualTextSave = (nodeId: string) => {
+    if (nodeId === id) return isContentIterationNode;
+    return connectedTextEditor?.id === nodeId
+      && isContentIterationContent(connectedTextEditor.content);
+  };
+
   const isNodeManuallyUnsaved = (nodeId: string, versionId?: string) => (
-    isTextNodeManuallyUnsaved(nodeId)
-    || isPromptVersionTitleManuallyUnsaved(nodeId, versionId)
+    requiresManualTextSave(nodeId)
+    && (
+      isTextNodeManuallyUnsaved(nodeId)
+      || isPromptVersionTitleManuallyUnsaved(nodeId, versionId)
+    )
   );
 
   const clearManualSaveState = (nodeId: string) => {
@@ -5791,7 +5804,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             {copiedMarkdownTarget === "node" ? <Check size={14} /> : <Copy size={14} />}
           </button>
         )}
-        {(isText || isNote) && (
+        {(isNote || isContentIterationNode) && (
           <button
             type="button"
             className={`nodrag node-action ${isNodeManuallyUnsaved(id, activePromptVersion?.id) ? "is-manual-save-dirty" : ""}`}
@@ -8165,20 +8178,22 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   </button>
                 </>
               )}
-              <button
-                type="button"
-                className={isNodeManuallyUnsaved(id, activePromptVersion?.id) ? "is-manual-save-dirty" : ""}
-                onClick={() => void saveTextNode(id, activePromptVersion?.id)}
-                disabled={savingTextNodeId === id}
-                title={savingTextNodeId === id
-                  ? "正在保存到数据库…"
-                  : isNodeManuallyUnsaved(id, activePromptVersion?.id)
-                    ? "有未手动保存的修改，点击立即保存到数据库"
-                    : "立即保存到数据库"}
-                aria-label={savingTextNodeId === id ? "正在保存文本节点" : "立即保存文本节点到数据库"}
-              >
-                <Save size={16} />
-              </button>
+              {(isNote || isContentIterationNode) && (
+                <button
+                  type="button"
+                  className={isNodeManuallyUnsaved(id, activePromptVersion?.id) ? "is-manual-save-dirty" : ""}
+                  onClick={() => void saveTextNode(id, activePromptVersion?.id)}
+                  disabled={savingTextNodeId === id}
+                  title={savingTextNodeId === id
+                    ? "正在保存到数据库…"
+                    : isNodeManuallyUnsaved(id, activePromptVersion?.id)
+                      ? "有未手动保存的修改，点击立即保存到数据库"
+                      : "立即保存到数据库"}
+                  aria-label={savingTextNodeId === id ? "正在保存文本节点" : "立即保存文本节点到数据库"}
+                >
+                  <Save size={16} />
+                </button>
+              )}
               <button onClick={requestCloseExpandedEditor} title="关闭" aria-label="关闭放大编辑器">
                 <X size={17} />
               </button>
@@ -8333,20 +8348,22 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   />
                 </div>
               )}
-              <button
-                type="button"
-                className={isNodeManuallyUnsaved(connectedTextEditor.id, connectedActivePromptVersion?.id) ? "is-manual-save-dirty" : ""}
-                onClick={() => void saveTextNode(connectedTextEditor.id, connectedActivePromptVersion?.id)}
-                disabled={savingTextNodeId === connectedTextEditor.id}
-                title={savingTextNodeId === connectedTextEditor.id
-                  ? "正在保存到数据库…"
-                  : isNodeManuallyUnsaved(connectedTextEditor.id, connectedActivePromptVersion?.id)
-                    ? "有未手动保存的修改，点击立即保存到数据库"
-                    : "立即保存到数据库"}
-                aria-label={savingTextNodeId === connectedTextEditor.id ? "正在保存已连接文本节点" : "立即保存已连接文本节点到数据库"}
-              >
-                <Save size={16} />
-              </button>
+              {isContentIterationContent(connectedTextEditor.content) && (
+                <button
+                  type="button"
+                  className={isNodeManuallyUnsaved(connectedTextEditor.id, connectedActivePromptVersion?.id) ? "is-manual-save-dirty" : ""}
+                  onClick={() => void saveTextNode(connectedTextEditor.id, connectedActivePromptVersion?.id)}
+                  disabled={savingTextNodeId === connectedTextEditor.id}
+                  title={savingTextNodeId === connectedTextEditor.id
+                    ? "正在保存到数据库…"
+                    : isNodeManuallyUnsaved(connectedTextEditor.id, connectedActivePromptVersion?.id)
+                      ? "有未手动保存的修改，点击立即保存到数据库"
+                      : "立即保存到数据库"}
+                  aria-label={savingTextNodeId === connectedTextEditor.id ? "正在保存已连接文本节点" : "立即保存已连接文本节点到数据库"}
+                >
+                  <Save size={16} />
+                </button>
+              )}
               <button
                 onClick={requestCloseConnectedTextEditor}
                 title="关闭"
@@ -8609,7 +8626,8 @@ export {
   ALIGNMENT_SNAP_TOLERANCE_PX,
   AUDIO_NODE_MIN_HEIGHT,
   CANVAS_GRID_SIZE,
-  COMFYUI_SERVER_URL,
+  COMFYUI_SERVER_URL_STORAGE_KEY,
+  DEFAULT_COMFYUI_SERVER_URL,
   COMFY_TASK_STORAGE_KEY,
   DEFAULT_H3_DIFFUSION_MODEL_NAME,
   DEFAULT_H3_FIRST_LAST_WORKFLOW_PATH,
