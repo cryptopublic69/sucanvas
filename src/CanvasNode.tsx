@@ -4696,6 +4696,30 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     }
   };
 
+  const zoomCanvasFromGeneratedInfoWheel = (event: ReactWheelEvent<HTMLElement>) => {
+    if (!event.ctrlKey) {
+      event.stopPropagation();
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const flowBounds = document.querySelector(".react-flow")?.getBoundingClientRect();
+    if (!flowBounds) return;
+    const viewport = getViewport();
+    const nextZoom = Math.max(
+      0.12,
+      Math.min(2.2, viewport.zoom * Math.exp(-event.deltaY * 0.002)),
+    );
+    if (Math.abs(nextZoom - viewport.zoom) < 0.0001) return;
+    const pointerX = event.clientX - flowBounds.left;
+    const pointerY = event.clientY - flowBounds.top;
+    void setViewport({
+      x: pointerX - (pointerX - viewport.x) * (nextZoom / viewport.zoom),
+      y: pointerY - (pointerY - viewport.y) * (nextZoom / viewport.zoom),
+      zoom: nextZoom,
+    });
+  };
+
   useEffect(() => {
     if (!loraMenuOpen) return;
     const closeOnOutsidePointerDown = (event: PointerEvent) => {
@@ -6666,9 +6690,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   onPointerMove={moveGeneratedInfoMiddlePan}
                   onPointerUp={endGeneratedInfoMiddlePan}
                   onPointerCancel={endGeneratedInfoMiddlePan}
-                  onWheelCapture={(event) => {
-                    if (!event.ctrlKey) event.stopPropagation();
-                  }}
+                  onWheelCapture={zoomCanvasFromGeneratedInfoWheel}
                 >
                   <header>
                     <div>
