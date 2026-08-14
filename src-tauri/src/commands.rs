@@ -2268,14 +2268,14 @@ async fn submit_comfyui_workflow_inner(
     {
         return Err("二采分辨率必须在0.2到2.0 MP之间".to_owned());
     }
-    if !(1..=1000).contains(&input.primary_video_steps) {
-        return Err("一采 Video Steps 必须在1到1000之间".to_owned());
+    if input.primary_video_steps < 1 {
+        return Err("一采 Video Steps 必须是正整数".to_owned());
     }
-    if !(input.primary_video_steps..=1000).contains(&input.primary_audio_steps) {
-        return Err("一采 Audio Steps 必须在1到1000之间，且不能小于 Video Steps".to_owned());
+    if input.primary_audio_steps < input.primary_video_steps {
+        return Err("一采 Audio Steps 不能小于 Video Steps".to_owned());
     }
-    if !(1..=10000).contains(&input.secondary_scheduler_steps) {
-        return Err("二采基本调度器 Steps 必须在1到10000之间".to_owned());
+    if input.secondary_scheduler_steps < 1 {
+        return Err("二采基本调度器 Steps 必须是正整数".to_owned());
     }
     let ref_image_size = input.ref_image_size.trim();
     if !matches!(ref_image_size, "max" | "match") {

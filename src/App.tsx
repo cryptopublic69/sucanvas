@@ -503,6 +503,7 @@ function CanvasWorkspace() {
   const missingRecoveredTaskPolls = useRef(new Map<string, number>());
   const recoveredComfySockets = useRef(new Map<string, WebSocket>());
   const connectingRecoveredComfyClients = useRef(new Set<string>());
+  const externalFileDragActive = useRef(false);
   const recoveredNodeActiveKeys = useRef(new Map<string, string>());
   const completedGenerationPlaceholders = useRef(new Set<string>());
   const persistedComfyTasks = useRef<PersistedComfyTask[]>(persistedComfyTasksFromStorage());
@@ -753,7 +754,7 @@ function CanvasWorkspace() {
     const preventMiddleAutoScroll = (event: MouseEvent) => {
       if (event.button !== 1) return;
       const target = event.target;
-      if (target instanceof Element && target.closest(".react-flow")) {
+      if (target instanceof Element && target.closest(".react-flow, .generated-video-info-panel")) {
         event.preventDefault();
       }
     };
@@ -2637,6 +2638,10 @@ function CanvasWorkspace() {
         role: frameRoleFromContent(generator.content, record.id, index),
       }))
       .filter((asset) => Boolean(asset.path));
+    const primaryVideoSteps = primaryVideoStepsFromContent(
+      generator.content,
+      moduleParameters.primaryVideoSteps,
+    );
     return {
       prompt,
       promptInformation,
@@ -2651,11 +2656,8 @@ function CanvasWorkspace() {
       aspectRatio: videoAspectRatioFromContent(generator.content),
       primaryResolutionMegapixels: primaryVideoResolutionFromContent(generator.content),
       secondaryResolutionMegapixels: secondaryVideoResolutionFromContent(generator.content),
-      primaryVideoSteps: primaryVideoStepsFromContent(
-        generator.content,
-        moduleParameters.primaryVideoSteps,
-      ),
-      primaryAudioSteps: moduleParameters.primaryAudioSteps,
+      primaryVideoSteps,
+      primaryAudioSteps: Math.max(primaryVideoSteps, moduleParameters.primaryAudioSteps),
       secondarySchedulerSteps: secondarySchedulerStepsFromContent(
         generator.content,
         moduleParameters.secondarySchedulerSteps,
@@ -6272,7 +6274,7 @@ function CanvasWorkspace() {
       activeProjectId,
       position,
       VIDEO_GENERATION_NODE_WIDTH,
-      240,
+      320,
     );
     try {
       const result = await invoke<CreateNodeResult>("create_node", {
@@ -6285,7 +6287,7 @@ function CanvasWorkspace() {
           x: placement.position.x,
           y: placement.position.y,
           width: VIDEO_GENERATION_NODE_WIDTH,
-          height: 240,
+          height: 320,
         },
       });
       finishNodePlacementReservation(placement.reservationId, [result.node]);
@@ -6947,17 +6949,26 @@ function CanvasWorkspace() {
       unlisten = await getCurrentWebview().onDragDropEvent((event) => {
         if (disposed) return;
         if (!activeProjectIdRef.current) return;
-        if (event.payload.type === "enter" || event.payload.type === "over") {
-          setDropActive(true);
+        if (event.payload.type === "enter") {
+          externalFileDragActive.current = event.payload.paths.some((path) => path.trim());
+          setDropActive(externalFileDragActive.current);
+          return;
+        }
+        if (event.payload.type === "over") {
+          setDropActive(externalFileDragActive.current);
           return;
         }
         if (event.payload.type === "leave") {
+          externalFileDragActive.current = false;
           setDropActive(false);
           return;
         }
+        const paths = event.payload.paths.filter((path) => path.trim());
+        externalFileDragActive.current = false;
         setDropActive(false);
+        if (!paths.length) return;
         const ratio = window.devicePixelRatio || 1;
-        void importMedia(event.payload.paths, {
+        void importMedia(paths, {
           x: event.payload.position.x / ratio,
           y: event.payload.position.y / ratio,
         });
@@ -8126,83 +8137,93 @@ function CanvasWorkspace() {
                   <h3 id="general-settings-title">基础设置</h3>
                   <p>配置远程 ComfyUI 的服务地址与 Windows 映射路径。</p>
                 </div>
-                <section className="ui-font-size-setting" aria-labelledby="ui-font-size-setting-title">
-                  <div>
-                    <strong id="ui-font-size-setting-title">界面字号</strong>
-                    <small>中字号会同步扩大文字、控件高度和菜单间距。</small>
+                <section className="general-settings-group" aria-labelledby="appearance-settings-title">
+                  <div className="general-settings-group-heading">
+                    <h4 id="appearance-settings-title">界面</h4>
+                    <p>调整应用中的文字与控件显示密度。</p>
                   </div>
-                  <div className="ui-font-size-options" role="radiogroup" aria-label="界面字号">
-                    {(["small", "medium"] as const).map((size) => (
-                      <button
-                        key={size}
-                        type="button"
-                        role="radio"
-                        aria-checked={uiFontSize === size}
-                        className={uiFontSize === size ? "is-active" : ""}
-                        onClick={() => setUiFontSize(size)}
-                      >
-                        <span aria-hidden="true">Aa</span>
-                        {size === "small" ? "小" : "中"}
-                      </button>
-                    ))}
+                  <section className="ui-font-size-setting" aria-labelledby="ui-font-size-setting-title">
+                    <div>
+                      <strong id="ui-font-size-setting-title">界面字号</strong>
+                      <small>中字号会同步扩大文字、控件高度和菜单间距。</small>
+                    </div>
+                    <div className="ui-font-size-options" role="radiogroup" aria-label="界面字号">
+                      {(["small", "medium"] as const).map((size) => (
+                        <button
+                          key={size}
+                          type="button"
+                          role="radio"
+                          aria-checked={uiFontSize === size}
+                          className={uiFontSize === size ? "is-active" : ""}
+                          onClick={() => setUiFontSize(size)}
+                        >
+                          <span aria-hidden="true">Aa</span>
+                          {size === "small" ? "小" : "中"}
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                </section>
+                <section className="general-settings-group comfyui-settings-group" aria-label="ComfyUI 配置">
+                  <div className="comfyui-settings-fields">
+                    <label>
+                      ComfyUI 服务地址
+                      <input
+                        value={comfyUiServerUrlDraft}
+                        onChange={(event) => setComfyUiServerUrlDraft(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            setSettingsOpen(false);
+                          }
+                        }}
+                        placeholder="例如：http://192.168.5.108:8188"
+                        spellCheck={false}
+                      />
+                      <small>
+                        ComfyUI 网页与 API 的服务地址。保存后，生成提交、队列、预览和进度连接都会改用此地址。
+                      </small>
+                    </label>
+                    <label>
+                      ComfyUI 输入映射目录
+                      <input
+                        value={comfyInputRootDraft}
+                        onChange={(event) => setComfyInputRootDraft(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            setSettingsOpen(false);
+                          }
+                        }}
+                        placeholder="例如：X:\ComfyUI_windows_portable\ComfyUI\input"
+                        spellCheck={false}
+                      />
+                      <small>
+                        请填写 ComfyUI 的 input 根目录，例如
+                        X:\ComfyUI_windows_portable\ComfyUI\input。不要包含 infinite-canvas；程序会自动创建并在任务结束后清理
+                        infinite-canvas\任务ID。留空则不自动清理。
+                      </small>
+                    </label>
+                    <label>
+                      ComfyUI 输出映射目录
+                      <input
+                        value={comfyOutputRootDraft}
+                        onChange={(event) => setComfyOutputRootDraft(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            setSettingsOpen(false);
+                          }
+                        }}
+                        placeholder="例如：X:\ComfyUI_windows_portable\ComfyUI\output"
+                        spellCheck={false}
+                      />
+                      <small>
+                        请选择或填写远端 ComfyUI 的 output 根目录，不要包含生成任务的子文件夹和文件名。
+                      </small>
+                    </label>
                   </div>
                 </section>
-        <label>
-          ComfyUI 服务地址
-          <input
-            value={comfyUiServerUrlDraft}
-            onChange={(event) => setComfyUiServerUrlDraft(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setSettingsOpen(false);
-              }
-            }}
-            placeholder="例如：http://192.168.5.108:8188"
-            spellCheck={false}
-          />
-          <small>
-            ComfyUI 网页与 API 的服务地址。保存后，生成提交、队列、预览和进度连接都会改用此地址。
-          </small>
-        </label>
-        <label>
-          ComfyUI 输入映射目录
-          <input
-            value={comfyInputRootDraft}
-            onChange={(event) => setComfyInputRootDraft(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setSettingsOpen(false);
-              }
-            }}
-            placeholder="例如：X:\ComfyUI_windows_portable\ComfyUI\input"
-            spellCheck={false}
-          />
-          <small>
-            请填写 ComfyUI 的 input 根目录，例如
-            X:\ComfyUI_windows_portable\ComfyUI\input。不要包含 infinite-canvas；程序会自动创建并在任务结束后清理
-            infinite-canvas\任务ID。留空则不自动清理。
-          </small>
-        </label>
-        <label>
-          ComfyUI 输出映射目录
-          <input
-            value={comfyOutputRootDraft}
-            onChange={(event) => setComfyOutputRootDraft(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setSettingsOpen(false);
-              }
-            }}
-            placeholder="例如：X:\ComfyUI_windows_portable\ComfyUI\output"
-            spellCheck={false}
-          />
-          <small>
-            请选择或填写远端 ComfyUI 的 output 根目录，不要包含生成任务的子文件夹和文件名。
-          </small>
-        </label>
               </section>
             )}
             {activeSettingsSection === "workflows" && (

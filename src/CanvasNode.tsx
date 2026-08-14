@@ -14,6 +14,7 @@ import {
   ResizeControlVariant,
   getBezierPath,
   useReactFlow,
+  useStore,
 } from "@xyflow/react";
 import {
   Check,
@@ -1036,6 +1037,95 @@ function ModelParameterNumberInput({
   );
 }
 
+function OptionalPromptDurationInput({
+  value,
+  canClear,
+  onChange,
+  onClear,
+}: {
+  value: number | null;
+  canClear: boolean;
+  onChange: (value: number) => void;
+  onClear: () => void;
+}) {
+  const [draft, setDraft] = useState(value === null ? "" : String(value));
+  useEffect(() => {
+    setDraft(value === null ? "" : String(value));
+  }, [value]);
+
+  const commit = () => {
+    const trimmed = draft.trim();
+    if (!trimmed) {
+      if (canClear) onClear();
+      else setDraft(value === null ? "" : String(value));
+      return;
+    }
+    const next = Number(trimmed);
+    if (Number.isInteger(next) && next >= 2 && next <= 15) {
+      onChange(next);
+      return;
+    }
+    setDraft(value === null ? "" : String(value));
+  };
+  const adjust = (direction: -1 | 1) => {
+    const current = value ?? (direction > 0 ? 1 : 2);
+    onChange(Math.min(15, Math.max(2, current + direction)));
+  };
+
+  return (
+    <div className={`expanded-editor-duration-number-input ${canClear ? "has-clear" : ""}`}>
+      <input
+        type="text"
+        inputMode="numeric"
+        pattern="[0-9]*"
+        value={draft}
+        onChange={(event) => setDraft(event.currentTarget.value)}
+        onBlur={commit}
+        onPointerDown={(event) => event.stopPropagation()}
+        aria-label="当前生成提示词时长，2 到 15 秒；留空表示未设置"
+        placeholder="未设置"
+      />
+      {canClear && (
+        <button
+          type="button"
+          className="expanded-editor-duration-clear"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => {
+            setDraft("");
+            onClear();
+          }}
+          title="清除时长"
+          aria-label="清除时长，恢复为未设置"
+        >
+          <X size={13} />
+        </button>
+      )}
+      <span className="expanded-editor-duration-stepper">
+        <button
+          type="button"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => adjust(1)}
+          disabled={value === 15}
+          title="增加时长"
+          aria-label="增加时长"
+        >
+          <ChevronUp size={12} strokeWidth={2} />
+        </button>
+        <button
+          type="button"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => adjust(-1)}
+          disabled={value === null || value <= 2}
+          title="减少时长"
+          aria-label="减少时长"
+        >
+          <ChevronDown size={12} strokeWidth={2} />
+        </button>
+      </span>
+    </div>
+  );
+}
+
 function CompactIntegerInput({
   value,
   min,
@@ -1045,7 +1135,7 @@ function CompactIntegerInput({
 }: {
   value: number;
   min: number;
-  max: number;
+  max?: number;
   ariaLabel: string;
   onChange: (value: number) => void;
 }) {
@@ -1059,7 +1149,9 @@ function CompactIntegerInput({
   const validDraftValue = (text: string) => {
     if (!/^\d+$/.test(text)) return null;
     const parsed = Number(text);
-    return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : null;
+    return Number.isSafeInteger(parsed) && parsed >= min && (max === undefined || parsed <= max)
+      ? parsed
+      : null;
   };
   const restoreOrCommit = () => {
     const parsed = validDraftValue(draft);
@@ -1076,6 +1168,7 @@ function CompactIntegerInput({
       type="text"
       inputMode="numeric"
       pattern="[0-9]*"
+      draggable={false}
       value={draft}
       aria-label={ariaLabel}
       onFocus={() => setFocused(true)}
@@ -1106,11 +1199,14 @@ function CompactIntegerInput({
         if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
         event.preventDefault();
         const current = validDraftValue(draft) ?? value;
-        const next = Math.min(max, Math.max(min, current + (event.key === "ArrowUp" ? 1 : -1)));
+        const next = max === undefined
+          ? Math.max(min, current + (event.key === "ArrowUp" ? 1 : -1))
+          : Math.min(max, Math.max(min, current + (event.key === "ArrowUp" ? 1 : -1)));
         setDraft(String(next));
         onChange(next);
       }}
       onPointerDown={(event) => event.stopPropagation()}
+      onDragStart={(event) => event.preventDefault()}
     />
   );
 }
@@ -2672,6 +2768,14 @@ function validH3Step(value: unknown, fallback: number, maximum: number): number 
     : fallback;
 }
 
+function positiveH3Step(value: unknown, fallback: number): number {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 1
+    ? value
+    : fallback;
+}
+
 function validH3ColorAdjustment(value: unknown, fallback: number): number {
   return typeof value === "number"
     && Number.isFinite(value)
@@ -2754,18 +2858,16 @@ function secondaryVideoResolutionFromContent(content: JsonObject): number {
 }
 
 function primaryVideoStepsFromContent(content: JsonObject, fallback: number): number {
-  return validH3Step(
+  return positiveH3Step(
     content.generationPrimaryVideoSteps ?? content.primaryVideoSteps,
     fallback,
-    1000,
   );
 }
 
 function secondarySchedulerStepsFromContent(content: JsonObject, fallback: number): number {
-  return validH3Step(
+  return positiveH3Step(
     content.generationSecondarySchedulerSteps ?? content.secondarySchedulerSteps,
     fallback,
-    10000,
   );
 }
 
@@ -3888,7 +3990,8 @@ function CanvasEdge({
 const edgeTypes = { canvasEdge: CanvasEdge };
 
 function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
-  const { getZoom, setNodes } = useReactFlow<CanvasFlowNode, Edge>();
+  const { getViewport, getZoom, setNodes, setViewport } = useReactFlow<CanvasFlowNode, Edge>();
+  const viewportTransform = useStore((state) => state.transform);
   const ctrlSelectionPointerId = useRef<number | null>(null);
   const {
     record,
@@ -3963,6 +4066,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [connectedInformationMarkdownPreview, setConnectedInformationMarkdownPreview] = useState(true);
   const [connectedInformationHidden, setConnectedInformationHidden] = useState(false);
   const [generatedInfoOpen, setGeneratedInfoOpen] = useState(false);
+  const [generatedInfoPosition, setGeneratedInfoPosition] = useState({ left: 16, top: 16 });
+  const [generatedInfoPanning, setGeneratedInfoPanning] = useState(false);
   const [generatedPromptDialogOpen, setGeneratedPromptDialogOpen] = useState(false);
   const [imageResizeDialogOpen, setImageResizeDialogOpen] = useState(false);
   const [imageResizeDraft, setImageResizeDraft] = useState(() => String(imageResizeDefaultFromStorage()));
@@ -4025,6 +4130,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const contentTypeControlRef = useRef<HTMLDivElement>(null);
   const textInformationRef = useRef<HTMLDivElement>(null);
   const generatedInfoRef = useRef<HTMLDivElement>(null);
+  const generatedInfoPanelRef = useRef<HTMLElement>(null);
+  const generatedInfoPanRef = useRef<{
+    pointerId: number;
+    clientX: number;
+    clientY: number;
+    viewport: { x: number; y: number; zoom: number };
+  } | null>(null);
   const audioPreviewRefs = useRef(new Map<string, HTMLAudioElement>());
   const generatedVideoRef = useRef<HTMLVideoElement | null>(null);
   const videoResizeBaseRef = useRef<{
@@ -4193,7 +4305,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     selectedNodeWorkflowModule?.defaults.secondarySchedulerSteps
       ?? DEFAULT_H3_MODEL_PARAMETERS.secondarySchedulerSteps,
   );
-  const primaryVideoStepsMaximum = selectedNodeWorkflowModule?.defaults.primaryAudioSteps ?? 1000;
   const h3LoraName = h3LoraNameFromContent(record.content);
   const h3LoraStrength = h3LoraStrengthFromContent(record.content);
   const h3LoraBypassed = h3LoraBypassedFromContent(record.content);
@@ -4258,6 +4369,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const generatedVideoSnapshot = isGeneratedVideo
     ? generationSnapshotFromContent(record.content)
     : null;
+  const generatedVideoWorkflowModule = generatedVideoSnapshot?.workflowModuleId
+    ? workflowModules.find((module) => module.id === generatedVideoSnapshot.workflowModuleId) ?? null
+    : null;
+  const generatedVideoWorkflowLabel = generatedVideoWorkflowModule
+    ? `${generatedVideoWorkflowModule.name} · ${generatedVideoSnapshot?.workflowModuleRevision || generatedVideoWorkflowModule.revision}`
+    : generatedVideoSnapshot?.workflowModuleId
+      ? `方案已缺失 · ${generatedVideoSnapshot.workflowModuleRevision || "未记录版本"}`
+      : "未记录";
   const generatedVideoPrompt = generatedVideoSnapshot?.prompt ?? "";
   const generatedVideoPromptInformation = generatedVideoSnapshot?.promptInformation ?? "";
   const generatedVideoPromptBaseTitle = promptNodeTitle
@@ -4518,11 +4637,64 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       if (event.button !== 0) return;
       const target = event.target;
       if (target instanceof globalThis.Node && generatedInfoRef.current?.contains(target)) return;
+      if (target instanceof globalThis.Node && generatedInfoPanelRef.current?.contains(target)) return;
       setGeneratedInfoOpen(false);
     };
     document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
   }, [generatedInfoOpen]);
+
+  useEffect(() => {
+    if (!generatedInfoOpen) return;
+    const buttonBounds = generatedInfoRef.current?.getBoundingClientRect();
+    if (!buttonBounds) return;
+    const nodeBounds = generatedInfoRef.current?.closest(".canvas-node")?.getBoundingClientRect();
+    const panelHeight = generatedInfoPanelRef.current?.getBoundingClientRect().height ?? 520;
+    const viewportPadding = 16;
+    const left = buttonBounds.right + 10;
+    const alignedBottom = nodeBounds?.bottom ?? buttonBounds.bottom;
+    const top = Math.max(
+      viewportPadding,
+      Math.min(window.innerHeight - panelHeight - viewportPadding, alignedBottom - panelHeight),
+    );
+    setGeneratedInfoPosition((current) => (
+      current.left === left && current.top === top ? current : { left, top }
+    ));
+  }, [generatedInfoOpen, record.height, record.width, record.x, record.y, viewportTransform]);
+
+  const beginGeneratedInfoMiddlePan = (event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 1) return;
+    event.preventDefault();
+    const viewport = getViewport();
+    generatedInfoPanRef.current = {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      viewport,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setGeneratedInfoPanning(true);
+  };
+
+  const moveGeneratedInfoMiddlePan = (event: ReactPointerEvent<HTMLElement>) => {
+    const pan = generatedInfoPanRef.current;
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    void setViewport({
+      x: pan.viewport.x + event.clientX - pan.clientX,
+      y: pan.viewport.y + event.clientY - pan.clientY,
+      zoom: pan.viewport.zoom,
+    });
+  };
+
+  const endGeneratedInfoMiddlePan = (event: ReactPointerEvent<HTMLElement>) => {
+    const pan = generatedInfoPanRef.current;
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    generatedInfoPanRef.current = null;
+    setGeneratedInfoPanning(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
 
   useEffect(() => {
     if (!loraMenuOpen) return;
@@ -4810,6 +4982,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     };
     setTextDraft(nextText);
     setInformationDraft(nextInformation);
+    // A newly added version is blank and intended for immediate authoring.
+    // The expanded content-iteration dialog otherwise opens in preview mode.
+    setExpandedTextMarkdownPreview(false);
     markTextNodeChanged(id, nextText, nextInformation, savedText, savedInformation);
     onChange(id, {
       content: {
@@ -4852,9 +5027,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     setPromptVersionMenuOpen(false);
   };
 
-  const changeActivePromptDuration = (rawValue: string) => {
+  const changeActivePromptDuration = (nextDuration: number) => {
     if (contentNodeType !== "prompt" || !activePromptVersion) return;
-    const nextDuration = Number(rawValue);
     if (!Number.isInteger(nextDuration) || nextDuration < 2 || nextDuration > 15) return;
     onChange(id, {
       content: {
@@ -4864,6 +5038,20 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             ? { ...version, durationOverrideSeconds: nextDuration }
             : version
         )),
+      },
+    });
+  };
+
+  const clearActivePromptDuration = () => {
+    if (activePromptVersion?.durationOverrideSeconds === undefined) return;
+    onChange(id, {
+      content: {
+        ...record.content,
+        promptVersions: allPromptVersions.map((version) => {
+          if (version.id !== activePromptVersion.id) return version;
+          const { durationOverrideSeconds: _durationOverrideSeconds, ...versionWithoutDuration } = version;
+          return versionWithoutDuration;
+        }),
       },
     });
   };
@@ -6456,7 +6644,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 className={`node-action generated-video-info-button ${generatedInfoOpen ? "is-active" : ""}`}
                 onClick={() => {
                   setPreviewColorMenuOpen(false);
-                  setGeneratedInfoOpen((open) => !open);
+                  if (generatedInfoOpen) {
+                    setGeneratedInfoOpen(false);
+                    return;
+                  }
+                  setGeneratedInfoOpen(true);
                 }}
                 title="查看生成信息"
                 aria-label="查看生成信息"
@@ -6464,10 +6656,16 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               >
                 <Info size={13} />
               </button>
-              {generatedInfoOpen && (
+              {generatedInfoOpen && createPortal(
                 <aside
-                  className="generated-video-info-panel"
+                  ref={generatedInfoPanelRef}
+                  className={`generated-video-info-panel ${generatedInfoPanning ? "is-middle-panning" : ""}`}
                   aria-label="视频生成信息"
+                  style={generatedInfoPosition}
+                  onPointerDown={beginGeneratedInfoMiddlePan}
+                  onPointerMove={moveGeneratedInfoMiddlePan}
+                  onPointerUp={endGeneratedInfoMiddlePan}
+                  onPointerCancel={endGeneratedInfoMiddlePan}
                   onWheelCapture={(event) => {
                     if (!event.ctrlKey) event.stopPropagation();
                   }}
@@ -6506,6 +6704,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                         {h3DiffusionModelDisplayName(generatedVideoSnapshot.diffusionModelName)}
                       </strong>
                     </div>
+                    <div>
+                      <span>生成方案</span>
+                      <strong title={generatedVideoWorkflowModule?.id ?? generatedVideoSnapshot.workflowModuleId ?? "未记录"}>
+                        {generatedVideoWorkflowLabel}
+                      </strong>
+                    </div>
                   </section>
                   <section className="generated-video-stage-info">
                     <h4>一采</h4>
@@ -6515,9 +6719,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       <dd>{generatedVideoSnapshot.refImageSizeRecorded === false ? "未记录" : generatedVideoSnapshot.refImageSize}</dd>
                       <dt>视频 / 音频 Steps</dt><dd>{generatedVideoSnapshot.primaryVideoSteps} / {generatedVideoSnapshot.primaryAudioSteps}</dd>
                       <dt>LoRA</dt>
-                      <dd title={generatedVideoSnapshot.loraName || "一采 Bypass"}>
+                      <dd title={generatedVideoSnapshot.loraBypassed ? "—" : generatedVideoSnapshot.loraName}>
                         {generatedVideoSnapshot.loraBypassed
-                          ? "未应用（Bypass）"
+                          ? "—"
                           : h3LoraDisplayName(generatedVideoSnapshot.loraName)}
                       </dd>
                       <dt>LoRA 强度</dt>
@@ -6590,7 +6794,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     </div>
                     <p title={generatedVideoPrompt}>{generatedVideoPrompt || "未记录提示词"}</p>
                   </section>
-                </aside>
+                </aside>,
+                document.body,
               )}
             </div>
           )}
@@ -6752,7 +6957,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <output title={isStoryboardReferenceCompiler
                 ? "由当前高亮的生成提示词决定；请在生成提示词节点中调整"
                 : undefined}
-              >{displayedVideoDuration === null ? "未设置" : `${displayedVideoDuration} 秒`}</output>
+              >{`${displayedVideoDuration ?? 0} 秒`}</output>
             </label>
             <div ref={aspectRatioControlRef} className="video-aspect-ratio-inline">
               <button
@@ -6945,12 +7150,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 }}
               />
             </label>
-            <label className="video-lora-steps" title="一采 Video Steps">
+            <label
+              className="nodrag nowheel video-lora-steps"
+              title="一采 Video Steps"
+              onPointerDown={(event) => event.stopPropagation()}
+            >
               <span>S</span>
               <CompactIntegerInput
                 value={primaryVideoSteps}
                 min={1}
-                max={primaryVideoStepsMaximum}
                 ariaLabel="一采 Video Steps"
                 onChange={(value) => {
                   onChange(id, {
@@ -7093,12 +7301,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 }}
               />
             </label>
-            <label className="video-lora-steps" title="二采基本调度 Steps">
+            <label
+              className="nodrag nowheel video-lora-steps"
+              title="二采基本调度 Steps"
+              onPointerDown={(event) => event.stopPropagation()}
+            >
               <span>S</span>
               <CompactIntegerInput
                 value={secondarySchedulerSteps}
                 min={1}
-                max={10000}
                 ariaLabel="二采基本调度 Steps"
                 onChange={(value) => {
                   onChange(id, {
@@ -8086,16 +8297,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 contentNodeType === "prompt" && activePromptVersion && (
                   <label className="expanded-editor-duration-control">
                     <span>时长</span>
-                    <input
-                      type="number"
-                      min="2"
-                      max="15"
-                      step="1"
-                      value={promptDurationSecondsFromVersion(activePromptVersion) ?? ""}
-                      onChange={(event) => changeActivePromptDuration(event.currentTarget.value)}
-                      onPointerDown={(event) => event.stopPropagation()}
-                      aria-label="当前生成提示词时长，2 到 15 秒"
-                      placeholder="未设置"
+                    <OptionalPromptDurationInput
+                      value={promptDurationSecondsFromVersion(activePromptVersion)}
+                      canClear={activePromptVersion.durationOverrideSeconds !== undefined}
+                      onChange={changeActivePromptDuration}
+                      onClear={clearActivePromptDuration}
                     />
                     <small>{activePromptVersion.durationOverrideSeconds !== undefined
                       ? "手动"
