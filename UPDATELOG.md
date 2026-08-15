@@ -26,11 +26,14 @@
 
 - `send-to-infinite-canvas.zip` 已按当前已安装版本重新打包。原地修改活跃内容版本的替换清单统一使用 `from` / `to`，提供完整清单示例并明确禁止 `old` / `new` 等别名；接口参考与发送脚本使用同一字段规则。
 - Canvas 连接、智能 H3 分镜与普通 H3 三个已安装 Skill 均通过 UTF-8 校验；智能 H3 分镜和普通 H3 的现有归档已逐文件确认与当前安装版本一致。
+- Canvas 连接 Skill 现支持仅删除一条误记的 Information 修改说明：必须按正文精确匹配且只能匹配一条，不改正文、不创建新版本。正文修改、说明规范化和说明删除三种原地更新模式只能选择一种；说明、接口参考和发送脚本已同步。
 
 ### 验证
 
 - `npm.cmd run build`
 - `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
+- `cargo test --manifest-path src-tauri/Cargo.toml --no-run`
+- `cargo test --manifest-path src-tauri/Cargo.toml`：测试二进制启动阶段返回 Windows `STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)`，未进入测试用例。
 - `git diff --check`
 - `D:\envs\general\python.exe -X utf8 ...\quick_validate.py <skill>`（三个 Skill 均返回 `Skill is valid!`）
 

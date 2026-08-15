@@ -235,6 +235,8 @@ pub struct UpdateContentVersionInput {
     #[serde(default)]
     pub reformat_notes_only: bool,
     #[serde(default)]
+    pub remove_change_note: Option<String>,
+    #[serde(default)]
     pub title: Option<String>,
     pub expected_version_count: usize,
     pub expected_active_version_id: String,

@@ -2520,14 +2520,22 @@ impl Database {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        if change_note.is_none() && !input.reformat_notes_only {
+        let remove_change_note = input
+            .remove_change_note
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let update_mode_count = usize::from(change_note.is_some())
+            + usize::from(input.reformat_notes_only)
+            + usize::from(remove_change_note.is_some());
+        if update_mode_count == 0 {
             return Err(CanvasError::Validation(
-                "change note or reformat notes only is required".to_owned(),
+                "change note, reformat notes only, or remove change note is required".to_owned(),
             ));
         }
-        if change_note.is_some() && input.reformat_notes_only {
+        if update_mode_count > 1 {
             return Err(CanvasError::Validation(
-                "reformat notes only cannot include a change note".to_owned(),
+                "only one content version update mode may be used".to_owned(),
             ));
         }
 
@@ -2585,6 +2593,12 @@ impl Database {
                 change_note,
                 &timestamp,
             )
+        } else if let Some(remove_change_note) = remove_change_note {
+            remove_timestamped_change_note(
+                &version.information,
+                &version.created_at,
+                remove_change_note,
+            )?
         } else {
             normalize_timestamped_change_notes(&version.information, &version.created_at)
                 .join("\n\n")
@@ -4804,6 +4818,30 @@ fn append_timestamped_change_note(
     entries.join("\n\n")
 }
 
+fn remove_timestamped_change_note(
+    existing_information: &str,
+    existing_version_created_at: &str,
+    change_note: &str,
+) -> CanvasResult<String> {
+    let change_note = change_note.trim();
+    let entries =
+        normalize_timestamped_change_notes(existing_information, existing_version_created_at);
+    let matched_entries = entries
+        .iter()
+        .filter(|entry| change_note_entry_body(entry) == change_note)
+        .count();
+    if matched_entries != 1 {
+        return Err(CanvasError::Validation(format!(
+            "expected exactly one matching change note to remove, found {matched_entries}"
+        )));
+    }
+    Ok(entries
+        .into_iter()
+        .filter(|entry| change_note_entry_body(entry) != change_note)
+        .collect::<Vec<_>>()
+        .join("\n\n"))
+}
+
 fn normalize_timestamped_change_notes(
     existing_information: &str,
     fallback_created_at: &str,
@@ -4841,6 +4879,13 @@ fn change_note_entry_timestamp(entry: &str) -> &str {
     entry
         .strip_prefix('【')
         .and_then(|value| value.split_once('】').map(|(timestamp, _)| timestamp))
+        .unwrap_or("")
+}
+
+fn change_note_entry_body(entry: &str) -> &str {
+    entry
+        .split_once("】\n")
+        .map(|(_, body)| body.trim())
         .unwrap_or("")
 }
 
@@ -5807,6 +5852,7 @@ mod tests {
                     text: "原地修改后的剧本".to_owned(),
                     change_note: Some("原地更新当前版本。".to_owned()),
                     reformat_notes_only: false,
+                    remove_change_note: None,
                     title: None,
                     expected_version_count: 1,
                     expected_active_version_id: "version:script-v1".to_owned(),
@@ -5831,6 +5877,21 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn removes_only_the_exact_timestamped_change_note() {
+        let information =
+            "【2026-08-15 21:49:25】\n待删除提醒。\n\n【2026-08-15 21:48:01】\n保留的实际修改。";
+
+        let updated = remove_timestamped_change_note(
+            information,
+            "2026-08-15T13:00:00+00:00",
+            "待删除提醒。",
+        )
+        .unwrap();
+
+        assert_eq!(updated, "【2026-08-15 21:48:01】\n保留的实际修改。");
     }
 
     #[test]
