@@ -22,11 +22,17 @@
 - 图片、音频、导入视频节点的右键菜单新增“下载原文件”；生成视频节点新增“下载视频”。系统会先打开原生保存对话框，再复制受支持的本地媒体到所选位置；生成视频沿用已配置的 ComfyUI 输出映射目录。
 - 生成信息浮层改为按内容自动高度显示，同时保留最大可视高度和内部滚动，较短信息不会再留下大面积空白。
 
+### Canvas 连接 Skill 同步
+
+- `send-to-infinite-canvas.zip` 已按当前已安装版本重新打包。原地修改活跃内容版本的替换清单统一使用 `from` / `to`，提供完整清单示例并明确禁止 `old` / `new` 等别名；接口参考与发送脚本使用同一字段规则。
+- Canvas 连接、智能 H3 分镜与普通 H3 三个已安装 Skill 均通过 UTF-8 校验；智能 H3 分镜和普通 H3 的现有归档已逐文件确认与当前安装版本一致。
+
 ### 验证
 
 - `npm.cmd run build`
 - `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
 - `git diff --check`
+- `D:\envs\general\python.exe -X utf8 ...\quick_validate.py <skill>`（三个 Skill 均返回 `Skill is valid!`）
 
 ## 2026-08-14
 
