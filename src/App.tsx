@@ -29,6 +29,7 @@ import {
   Copy,
   DatabaseBackup,
   Dices,
+  Download,
   Eye,
   EyeOff,
   FileText,
@@ -2291,6 +2292,92 @@ function CanvasWorkspace() {
         setNotice("映射路径无法定位，已改为打开远程视频链接");
         return;
       }
+      reportError(error);
+    }
+  }, [reportError]);
+
+  const downloadUploadedMedia = useCallback(async (nodeId: string) => {
+    const media = nodesSnapshot.current.find((node) => node.id === nodeId)?.data.record;
+    if (!media || !["image", "audio", "video"].includes(media.kind)) return;
+    const sourcePath = typeof media.content.assetPath === "string" ? media.content.assetPath.trim() : "";
+    if (!sourcePath) {
+      setNotice("当前素材缺少可下载的文件");
+      return;
+    }
+    const originalName = typeof media.content.originalName === "string"
+      ? media.content.originalName.trim()
+      : "";
+    const defaultPath = originalName || media.title || `素材.${media.kind === "image" ? "png" : media.kind === "audio" ? "mp3" : "mp4"}`;
+    const extension = defaultPath.includes(".")
+      ? defaultPath.slice(defaultPath.lastIndexOf(".") + 1).toLowerCase()
+      : "";
+    const label = media.kind === "image" ? "图片" : media.kind === "audio" ? "音频" : "视频";
+    setCanvasContextMenu(null);
+    let destinationPath: string | null;
+    try {
+      destinationPath = await saveDialog({
+        title: `下载${label}`,
+        defaultPath,
+        ...(extension ? { filters: [{ name: label, extensions: [extension] }] } : {}),
+      });
+    } catch (error) {
+      reportError(error);
+      return;
+    }
+    if (!destinationPath) return;
+    try {
+      const savedPath = await invoke<string>("export_media_asset", {
+        sourcePath,
+        destinationPath,
+      });
+      setNotice(`已下载到：${savedPath}`);
+    } catch (error) {
+      reportError(error);
+    }
+  }, [reportError]);
+
+  const downloadGeneratedVideo = useCallback(async (previewId: string) => {
+    const preview = nodesSnapshot.current.find((node) => node.id === previewId)?.data.record;
+    if (!preview || preview.kind !== "generated-video") return;
+    const currentOutputRoot = comfyOutputRootRef.current;
+    if (!currentOutputRoot.trim()) {
+      setComfyOutputRootDraft("");
+      setSettingsOpen(true);
+      setNotice("请先在设置中填写 ComfyUI 输出映射目录");
+      return;
+    }
+    const sourcePath = mappedComfyOutputPath(currentOutputRoot, preview.content);
+    if (!sourcePath) {
+      setNotice("当前视频缺少可下载的文件信息");
+      return;
+    }
+    const originalName = typeof preview.content.originalName === "string"
+      ? preview.content.originalName.trim()
+      : "";
+    const defaultPath = originalName || preview.title || "生成视频.mp4";
+    const extension = defaultPath.includes(".")
+      ? defaultPath.slice(defaultPath.lastIndexOf(".") + 1).toLowerCase()
+      : "";
+    setCanvasContextMenu(null);
+    let destinationPath: string | null;
+    try {
+      destinationPath = await saveDialog({
+        title: "下载视频",
+        defaultPath,
+        ...(extension ? { filters: [{ name: "视频", extensions: [extension] }] } : {}),
+      });
+    } catch (error) {
+      reportError(error);
+      return;
+    }
+    if (!destinationPath) return;
+    try {
+      const savedPath = await invoke<string>("export_generated_video", {
+        sourcePath,
+        destinationPath,
+      });
+      setNotice(`已下载到：${savedPath}`);
+    } catch (error) {
       reportError(error);
     }
   }, [reportError]);
@@ -6540,7 +6627,9 @@ function CanvasWorkspace() {
         : node.data.record.kind === "folder" && selectedNodeIds.length === 1
           ? 176
           : 104;
-    const menuHeight = menuBaseHeight + (hasDeletableSelectedNode ? 52 : 0);
+    const menuHeight = menuBaseHeight
+      + (["image", "audio", "video", "generated-video"].includes(node.data.record.kind) ? 52 : 0)
+      + (hasDeletableSelectedNode ? 52 : 0);
     setCanvasContextMenu({
       screenX: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
       screenY: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -9261,6 +9350,18 @@ function CanvasWorkspace() {
     && contextMenuClickedRecord.content.assetPath.trim()
       ? contextMenuClickedRecord.content.assetPath
       : null;
+  const contextMenuUploadedMedia = contextMenuClickedRecord
+    && ["image", "audio", "video"].includes(contextMenuClickedRecord.kind)
+    && typeof contextMenuClickedRecord.content.assetPath === "string"
+    && contextMenuClickedRecord.content.assetPath.trim()
+      ? contextMenuClickedRecord
+      : null;
+  const contextMenuGeneratedVideo = contextMenuClickedRecord?.kind === "generated-video"
+    && contextMenuClickedRecord.content.generationPlaceholder !== true
+    && typeof contextMenuClickedRecord.content.videoUrl === "string"
+    && contextMenuClickedRecord.content.videoUrl.trim()
+      ? contextMenuClickedRecord
+      : null;
   const contextMenuImageIsProjectPreview = Boolean(
     contextMenuImageAssetPath
     && canvasPath[0]?.previewImagePath === contextMenuImageAssetPath,
@@ -10077,6 +10178,31 @@ function CanvasWorkspace() {
           {canvasContextMenu.nodeIds ? (
             <>
               <span className="canvas-context-menu-title">整理节点</span>
+              {contextMenuGeneratedVideo && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => void downloadGeneratedVideo(contextMenuGeneratedVideo.id)}
+                >
+                  <Download size={15} />
+                  <span><strong>下载视频</strong><small>保存当前生成的视频文件</small></span>
+                </button>
+              )}
+              {contextMenuUploadedMedia && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => void downloadUploadedMedia(contextMenuUploadedMedia.id)}
+                >
+                  <Download size={15} />
+                  <span>
+                    <strong>下载原文件</strong>
+                    <small>{typeof contextMenuUploadedMedia.content.originalName === "string"
+                      ? contextMenuUploadedMedia.content.originalName
+                      : contextMenuUploadedMedia.title}</small>
+                  </span>
+                </button>
+              )}
               {contextMenuImageAssetPath && (
                 <button
                   type="button"

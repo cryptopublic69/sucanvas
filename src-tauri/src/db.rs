@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use chrono::Utc;
+use chrono::{Local, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -23,8 +23,9 @@ use crate::models::{
     PromptSceneBindingRecord, PromptSceneMutation, PromptSetScenesResult, PromptSetSummary,
     PromptVersionRecord, ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult,
     RestoreNodeReplacementInput, RestoreNodeReplacementResult, UndoCancelFolderInput,
-    UndoDeleteFolderInput, UndoFolderGroupingInput, UndoFolderMergeInput, UpdateNodeInput,
-    WorkspaceSnapshot, DEFAULT_CANVAS_ID,
+    UndoDeleteFolderInput, UndoFolderGroupingInput, UndoFolderMergeInput,
+    UpdateContentVersionInput, UpdateContentVersionResult, UpdateNodeInput, WorkspaceSnapshot,
+    DEFAULT_CANVAS_ID,
 };
 
 const FOLDER_NODE_WIDTH: f64 = 420.0;
@@ -2496,6 +2497,136 @@ impl Database {
         })
     }
 
+    pub fn update_content_version(
+        &self,
+        node_id: &str,
+        version_id: &str,
+        input: UpdateContentVersionInput,
+    ) -> CanvasResult<UpdateContentVersionResult> {
+        validate_prompt_identifier("node id", node_id, 160)?;
+        validate_prompt_identifier("version id", version_id, 160)?;
+        validate_prompt_identifier(
+            "expected active version id",
+            &input.expected_active_version_id,
+            160,
+        )?;
+        if input.expected_node_updated_at.trim().is_empty() {
+            return Err(CanvasError::Validation(
+                "expected node updated at is required".to_owned(),
+            ));
+        }
+        let change_note = input
+            .change_note
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if change_note.is_none() && !input.reformat_notes_only {
+            return Err(CanvasError::Validation(
+                "change note or reformat notes only is required".to_owned(),
+            ));
+        }
+        if change_note.is_some() && input.reformat_notes_only {
+            return Err(CanvasError::Validation(
+                "reformat notes only cannot include a change note".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut node = get_node_by_id(&transaction, node_id)?
+            .ok_or_else(|| CanvasError::NotFound(format!("content node not found: {node_id}")))?;
+        if node.kind != "text" || !is_content_iteration_node(&node.content) {
+            return Err(CanvasError::Conflict(format!(
+                "node is not a content iteration node: {}",
+                node.id
+            )));
+        }
+        if node.updated_at != input.expected_node_updated_at {
+            return Err(CanvasError::Conflict(format!(
+                "content node changed since it was read: {node_id}"
+            )));
+        }
+
+        let active_version_id = node
+            .content
+            .get("activePromptVersionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                CanvasError::Conflict(format!("content node has no active version: {}", node.id))
+            })?;
+        if active_version_id != input.expected_active_version_id || active_version_id != version_id
+        {
+            return Err(CanvasError::Conflict(format!(
+                "content version is not the current active version: {version_id}"
+            )));
+        }
+
+        let mut versions = prompt_versions_from_content(&node.content)?;
+        if versions.len() != input.expected_version_count {
+            return Err(CanvasError::Conflict(format!(
+                "version count changed for content node {node_id}: expected {}, actual {}",
+                input.expected_version_count,
+                versions.len()
+            )));
+        }
+        let version = versions
+            .iter_mut()
+            .find(|version| version.id == version_id)
+            .ok_or_else(|| {
+                CanvasError::NotFound(format!(
+                    "content version not found for node {node_id}: {version_id}"
+                ))
+            })?;
+        let timestamp = now();
+        let information = if let Some(change_note) = change_note {
+            append_timestamped_change_note(
+                &version.information,
+                &version.created_at,
+                change_note,
+                &timestamp,
+            )
+        } else {
+            normalize_timestamped_change_notes(&version.information, &version.created_at)
+                .join("\n\n")
+        };
+        validate_prompt_text(&input.text, &information)?;
+        version.text = input.text;
+        version.information = information;
+        if let Some(title) = input.title.filter(|title| !title.trim().is_empty()) {
+            version.title = title;
+        }
+        let updated_version = version.clone();
+
+        let content = node.content.as_object_mut().ok_or_else(|| {
+            CanvasError::Conflict(format!(
+                "content node payload is not an object: {}",
+                node.id
+            ))
+        })?;
+        content.insert(
+            "text".to_owned(),
+            Value::String(updated_version.text.clone()),
+        );
+        content.insert(
+            "information".to_owned(),
+            Value::String(updated_version.information.clone()),
+        );
+        content.insert(
+            "promptVersions".to_owned(),
+            serde_json::to_value(&versions)?,
+        );
+        node.updated_at = timestamp;
+        validate_node(&node)?;
+        write_node_update(&transaction, &node)?;
+        touch_canvas(&transaction, &node.canvas_id)?;
+        transaction.commit()?;
+
+        Ok(UpdateContentVersionResult {
+            node,
+            version: updated_version,
+        })
+    }
+
     pub fn delete_content_version(
         &self,
         node_id: &str,
@@ -4654,6 +4785,77 @@ fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
+fn append_timestamped_change_note(
+    existing_information: &str,
+    existing_version_created_at: &str,
+    change_note: &str,
+    changed_at: &str,
+) -> String {
+    let mut entries =
+        normalize_timestamped_change_notes(existing_information, existing_version_created_at);
+    entries.insert(
+        0,
+        format!(
+            "【{}】\n{}",
+            format_change_note_timestamp(changed_at),
+            change_note.trim()
+        ),
+    );
+    entries.join("\n\n")
+}
+
+fn normalize_timestamped_change_notes(
+    existing_information: &str,
+    fallback_created_at: &str,
+) -> Vec<String> {
+    let existing = existing_information.trim();
+    if existing.is_empty() {
+        return Vec::new();
+    }
+    let mut entries = existing
+        .split("\n【")
+        .map(|entry| {
+            let entry = entry.trim().trim_start_matches('【');
+            if let Some((timestamp, content)) = entry.split_once('】') {
+                format!(
+                    "【{}】\n{}",
+                    format_change_note_timestamp(timestamp.trim()),
+                    content.trim().trim_start_matches("本次修改：").trim()
+                )
+            } else {
+                format!(
+                    "【{}】\n{}",
+                    format_change_note_timestamp(fallback_created_at),
+                    entry.trim().trim_start_matches("本次修改：").trim()
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        change_note_entry_timestamp(right).cmp(change_note_entry_timestamp(left))
+    });
+    entries
+}
+
+fn change_note_entry_timestamp(entry: &str) -> &str {
+    entry
+        .strip_prefix('【')
+        .and_then(|value| value.split_once('】').map(|(timestamp, _)| timestamp))
+        .unwrap_or("")
+}
+
+fn format_change_note_timestamp(value: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .or_else(|_| chrono::DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S %:z"))
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|_| value.to_owned())
+}
+
 fn validate_project_name(name: &str) -> CanvasResult<&str> {
     let name = name.trim();
     if name.is_empty() {
@@ -5575,6 +5777,60 @@ mod tests {
             .unwrap();
         assert!(!retry.created);
         assert_eq!(retry.version.id, appended.version.id);
+    }
+
+    #[test]
+    fn updates_the_active_content_version_without_appending() {
+        let database = Database::in_memory().unwrap();
+        let mut input = text_node("内容迭代", "update-content-version-in-place");
+        input.content = json!({
+            "text": "初稿",
+            "information": "初始说明",
+            "contentNode": true,
+            "contentType": "script",
+            "promptVersions": [{
+                "id": "version:script-v1",
+                "label": "v1",
+                "title": "内容迭代",
+                "text": "初稿",
+                "information": "初始说明"
+            }],
+            "activePromptVersionId": "version:script-v1"
+        });
+        let node = database.create_node(input).unwrap().node;
+
+        let updated = database
+            .update_content_version(
+                &node.id,
+                "version:script-v1",
+                UpdateContentVersionInput {
+                    text: "原地修改后的剧本".to_owned(),
+                    change_note: Some("原地更新当前版本。".to_owned()),
+                    reformat_notes_only: false,
+                    title: None,
+                    expected_version_count: 1,
+                    expected_active_version_id: "version:script-v1".to_owned(),
+                    expected_node_updated_at: node.updated_at.clone(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(updated.version.id, "version:script-v1");
+        assert_eq!(updated.version.label, "v1");
+        assert_eq!(updated.version.text, "原地修改后的剧本");
+        assert_eq!(updated.node.content["text"], "原地修改后的剧本");
+        assert!(updated.node.content["information"]
+            .as_str()
+            .unwrap()
+            .starts_with('【'));
+        assert!(updated.version.information.contains("初始说明"));
+        assert!(updated.version.information.contains("原地更新当前版本。"));
+        assert_eq!(
+            prompt_versions_from_content(&updated.node.content)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

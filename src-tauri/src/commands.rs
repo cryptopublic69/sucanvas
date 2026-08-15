@@ -667,6 +667,104 @@ pub async fn import_media(
     .map_err(|error| format!("媒体导入任务失败: {error}"))?
 }
 
+#[tauri::command]
+pub async fn export_media_asset(
+    source_path: String,
+    destination_path: String,
+    state: State<'_, ApplicationState>,
+) -> Result<String, String> {
+    let assets_dir = state.assets_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        export_media_asset_blocking(source_path, destination_path, assets_dir)
+    })
+    .await
+    .map_err(|error| format!("媒体下载任务失败: {error}"))?
+}
+
+#[tauri::command]
+pub async fn export_generated_video(
+    source_path: String,
+    destination_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        export_generated_video_blocking(source_path, destination_path)
+    })
+    .await
+    .map_err(|error| format!("生成视频下载任务失败: {error}"))?
+}
+
+fn export_media_asset_blocking(
+    source_path: String,
+    destination_path: String,
+    assets_dir: PathBuf,
+) -> Result<String, String> {
+    let source_input = source_path.trim().trim_matches('"');
+    let destination_input = destination_path.trim().trim_matches('"');
+    if source_input.is_empty() || destination_input.is_empty() {
+        return Err("下载路径不能为空".to_owned());
+    }
+
+    let source = PathBuf::from(source_input)
+        .canonicalize()
+        .map_err(|error| format!("无法读取待下载媒体: {error}"))?;
+    let managed_assets_dir = assets_dir
+        .canonicalize()
+        .map_err(|error| format!("无法验证应用媒体目录: {error}"))?;
+    if !source.starts_with(&managed_assets_dir) {
+        return Err("只能下载当前画布已上传的媒体文件".to_owned());
+    }
+    let metadata = source
+        .metadata()
+        .map_err(|error| format!("无法读取待下载媒体信息: {error}"))?;
+    if !metadata.is_file() || media_format(&source).is_none() {
+        return Err("只能下载受支持的图片、音频或视频文件".to_owned());
+    }
+
+    let destination = PathBuf::from(destination_input);
+    if destination.starts_with(&managed_assets_dir) {
+        return Err("下载位置不能是应用媒体目录".to_owned());
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "下载位置无效".to_owned())?;
+    if !parent.is_dir() {
+        return Err("下载目录不存在".to_owned());
+    }
+    std::fs::copy(&source, &destination).map_err(|error| format!("保存下载文件失败: {error}"))?;
+    Ok(destination.to_string_lossy().into_owned())
+}
+
+fn export_generated_video_blocking(
+    source_path: String,
+    destination_path: String,
+) -> Result<String, String> {
+    let source_input = source_path.trim().trim_matches('"');
+    let destination_input = destination_path.trim().trim_matches('"');
+    if source_input.is_empty() || destination_input.is_empty() {
+        return Err("下载路径不能为空".to_owned());
+    }
+
+    let source = PathBuf::from(source_input)
+        .canonicalize()
+        .map_err(|error| format!("无法读取生成视频: {error}"))?;
+    let metadata = source
+        .metadata()
+        .map_err(|error| format!("无法读取生成视频信息: {error}"))?;
+    if !metadata.is_file() || media_format(&source).map(|format| format.kind) != Some("video") {
+        return Err("只能下载视频文件".to_owned());
+    }
+
+    let destination = PathBuf::from(destination_input);
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "下载位置无效".to_owned())?;
+    if !parent.is_dir() {
+        return Err("下载目录不存在".to_owned());
+    }
+    std::fs::copy(&source, &destination).map_err(|error| format!("保存下载文件失败: {error}"))?;
+    Ok(destination.to_string_lossy().into_owned())
+}
+
 fn import_media_blocking(
     path: String,
     canvas_id: String,
@@ -3018,11 +3116,11 @@ mod tests {
         comfy_queue_summary_from_value, comfy_view_url, configure_h3_diffusion_model,
         configure_h3_generation, configure_h3_ref_image_size, configure_h3_strict_prompt_tags,
         configure_h3_uploaded_media, configure_secondary_source_video, delete_video_files_blocking,
-        diffusion_models_from_object_info, hash_app_lock_password, loras_from_object_info,
-        media_format, resized_image_dimensions, resized_image_name, resolve_filename_prefix_date,
-        resolve_generation_seed, validate_new_app_lock_password, validate_workflow_media_counts,
-        verify_app_lock_hash, MediaFormat, WorkflowBindings, WorkflowInputContract,
-        AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
+        diffusion_models_from_object_info, export_media_asset_blocking, hash_app_lock_password,
+        loras_from_object_info, media_format, resized_image_dimensions, resized_image_name,
+        resolve_filename_prefix_date, resolve_generation_seed, validate_new_app_lock_password,
+        validate_workflow_media_counts, verify_app_lock_hash, MediaFormat, WorkflowBindings,
+        WorkflowInputContract, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
     use crate::{db::Database, models::CreateNodeInput};
     use serde_json::json;
@@ -3937,6 +4035,45 @@ mod tests {
             })
         );
         assert_eq!(media_format(Path::new("vector.svg")), None);
+    }
+
+    #[test]
+    fn exports_only_managed_uploaded_media_assets() {
+        let root = std::env::temp_dir().join(format!(
+            "infinite-canvas-export-media-test-{}",
+            Uuid::new_v4()
+        ));
+        let assets_dir = root.join("assets");
+        let download_dir = root.join("downloads");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::create_dir_all(&download_dir).unwrap();
+        let source = assets_dir.join("asset-voice.mp3");
+        let destination = download_dir.join("voice.mp3");
+        fs::write(&source, b"original audio bytes").unwrap();
+
+        let exported = export_media_asset_blocking(
+            source.to_string_lossy().into_owned(),
+            destination.to_string_lossy().into_owned(),
+            assets_dir.clone(),
+        )
+        .unwrap();
+        assert_eq!(Path::new(&exported), destination);
+        assert_eq!(fs::read(&destination).unwrap(), b"original audio bytes");
+
+        let outside_source = root.join("outside.mp3");
+        fs::write(&outside_source, b"outside audio bytes").unwrap();
+        assert!(export_media_asset_blocking(
+            outside_source.to_string_lossy().into_owned(),
+            download_dir
+                .join("outside.mp3")
+                .to_string_lossy()
+                .into_owned(),
+            assets_dir,
+        )
+        .unwrap_err()
+        .contains("只能下载当前画布已上传的媒体文件"));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

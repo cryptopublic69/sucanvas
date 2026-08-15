@@ -18,7 +18,8 @@ use crate::{
     db::{CanvasError, CanvasResult, Database},
     models::{
         ApiConfig, AppendPromptVersionInput, CreateEdgeInput, CreateMissingPromptScenesInput,
-        CreateNodeInput, CreateNodesBatchInput, CreateNodesBatchResult, UpdateNodeInput,
+        CreateNodeInput, CreateNodesBatchInput, CreateNodesBatchResult, UpdateContentVersionInput,
+        UpdateNodeInput,
     },
     CanvasSelectionState,
 };
@@ -106,7 +107,7 @@ fn router(state: ApiState) -> Router {
         .route("/v1/content-graph", get(get_content_graph))
         .route(
             "/v1/content-nodes/{node_id}/versions/{version_id}",
-            delete(delete_content_version),
+            delete(delete_content_version).put(update_content_version),
         )
         .route(
             "/v1/content-nodes/{node_id}/versions:append",
@@ -674,6 +675,29 @@ async fn append_content_version(
                 StatusCode::OK
             };
             (status, Json(result)).into_response()
+        }
+        Err(error) => api_error(status_for_error(&error), &error.to_string()),
+    }
+}
+
+async fn update_content_version(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path((node_id, version_id)): Path<(String, String)>,
+    Json(input): Json<UpdateContentVersionInput>,
+) -> Response {
+    if !authorized(&headers, &state.token) {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
+    }
+    match state
+        .database
+        .update_content_version(&node_id, &version_id, input)
+    {
+        Ok(result) => {
+            if let Some(app_handle) = state.app_handle.as_ref() {
+                let _ = app_handle.emit("canvas://node-updated", result.node.clone());
+            }
+            Json(result).into_response()
         }
         Err(error) => api_error(status_for_error(&error), &error.to_string()),
     }

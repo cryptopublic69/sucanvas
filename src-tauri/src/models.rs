@@ -228,6 +228,28 @@ pub struct AppendContentVersionResult {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateContentVersionInput {
+    pub text: String,
+    #[serde(default)]
+    pub change_note: Option<String>,
+    #[serde(default)]
+    pub reformat_notes_only: bool,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub expected_version_count: usize,
+    pub expected_active_version_id: String,
+    pub expected_node_updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateContentVersionResult {
+    pub node: NodeRecord,
+    pub version: PromptVersionRecord,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateNodesBatchInput {
     pub nodes: Vec<CreateNodeInput>,
 }

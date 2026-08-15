@@ -314,6 +314,8 @@ pub fn run() {
             commands::delete_project,
             commands::create_node,
             commands::import_media,
+            commands::export_media_asset,
+            commands::export_generated_video,
             commands::resize_image,
             commands::cleanup_resize_images,
             commands::update_node,
