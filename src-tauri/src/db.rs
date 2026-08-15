@@ -2549,7 +2549,7 @@ impl Database {
                 node.id
             )));
         }
-        if node.updated_at != input.expected_node_updated_at {
+        if !timestamps_refer_to_same_instant(&node.updated_at, &input.expected_node_updated_at) {
             return Err(CanvasError::Conflict(format!(
                 "content node changed since it was read: {node_id}"
             )));
@@ -4901,6 +4901,19 @@ fn format_change_note_timestamp(value: &str) -> String {
         .unwrap_or_else(|_| value.to_owned())
 }
 
+fn timestamps_refer_to_same_instant(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    match (
+        chrono::DateTime::parse_from_rfc3339(left),
+        chrono::DateTime::parse_from_rfc3339(right),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn validate_project_name(name: &str) -> CanvasResult<&str> {
     let name = name.trim();
     if name.is_empty() {
@@ -5892,6 +5905,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(updated, "【2026-08-15 21:48:01】\n保留的实际修改。");
+    }
+
+    #[test]
+    fn recognizes_equivalent_node_update_timestamps_across_timezones() {
+        assert!(timestamps_refer_to_same_instant(
+            "2026-08-15T13:53:44.574203+00:00",
+            "2026-08-15T21:53:44.574203+08:00",
+        ));
     }
 
     #[test]
