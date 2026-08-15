@@ -5669,6 +5669,7 @@ function CanvasWorkspace() {
   useEffect(() => {
     const handleNodeClipboardShortcut = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey || event.repeat) return;
+      if (document.querySelector(".expanded-editor-backdrop")) return;
       const target = event.target;
       if (
         target instanceof HTMLInputElement
