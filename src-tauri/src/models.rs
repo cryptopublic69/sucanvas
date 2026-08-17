@@ -692,6 +692,53 @@ pub struct ComfySubmitInput {
     pub secondary_source: Option<ComfyOutputFile>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComfyImageSubmitInput {
+    pub server_url: String,
+    pub workflow_module_id: String,
+    pub client_id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub negative_prompt: String,
+    pub seed_mode: String,
+    pub seed: String,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default = "default_image_generation_steps")]
+    pub steps: u32,
+    #[serde(default)]
+    pub lora_name: String,
+    #[serde(default)]
+    pub model_name: String,
+    #[serde(default)]
+    pub image_paths: Vec<String>,
+    #[serde(default)]
+    pub upscale_enabled: bool,
+    #[serde(default = "default_image_upscale_megapixels")]
+    pub upscale_megapixels: f64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComfyImageUpscaleInput {
+    pub server_url: String,
+    pub workflow_module_id: String,
+    pub client_id: String,
+    pub source: ComfyOutputFile,
+    pub megapixels: f64,
+    #[serde(default)]
+    pub model_name: String,
+}
+
+fn default_image_upscale_megapixels() -> f64 {
+    8.0
+}
+
+fn default_image_generation_steps() -> u32 {
+    8
+}
+
 fn default_lora_strength() -> f64 {
     1.0
 }
@@ -759,6 +806,8 @@ pub struct ComfySubmitResult {
     pub prompt_id: String,
     pub seed: String,
     pub outputs: Vec<ComfyOutputFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_elapsed_seconds: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

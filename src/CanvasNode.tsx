@@ -17,6 +17,7 @@ import {
   useStore,
 } from "@xyflow/react";
 import {
+  ArrowLeftRight,
   Check,
   ChevronDown,
   ChevronUp,
@@ -592,6 +593,7 @@ interface ComfySubmitResult {
   promptId: string;
   seed: string;
   outputs: ComfyOutputFile[];
+  modelName?: string | null;
   executionElapsedSeconds?: number | null;
   cleanupWarning?: string;
 }
@@ -682,6 +684,24 @@ interface GenerationSnapshot {
   referenceCandidateCount?: number;
   workflowModuleId: string;
   workflowModuleRevision: string;
+  imageRecovery?: ImageRecoverySnapshot;
+}
+
+interface ImageRecoverySnapshot {
+  kind: "generation" | "upscale";
+  prompt: string;
+  negativePrompt: string;
+  promptSourceNodeId: string;
+  sourceGeneratorId: string;
+  sourcePreviewId?: string;
+  workflowModuleId: string;
+  workflowModuleRevision: string;
+  modelName: string;
+  width: number;
+  height: number;
+  loraName: string;
+  upscaleEnabled: boolean;
+  upscaleMegapixels?: number;
 }
 
 interface VideoRegenerationRequest {
@@ -792,7 +812,7 @@ interface PersistedComfyTask {
   canvasId: string;
   snapshot: GenerationSnapshot;
   startedAt: number;
-  kind?: "generation" | "secondary";
+  kind?: "generation" | "secondary" | "image-generation" | "image-upscale";
   sourceGeneratorId?: string;
   placeholderNodeId?: string;
 }
@@ -820,6 +840,12 @@ type VideoDeletionChoice = "cancel" | "node-only" | "node-and-file";
 
 interface VideoDeletionRequest {
   videoCount: number;
+  filePaths: string[];
+  resolve: (choice: VideoDeletionChoice) => void;
+}
+
+interface ImageDeletionRequest {
+  imageCount: number;
   filePaths: string[];
   resolve: (choice: VideoDeletionChoice) => void;
 }
@@ -871,7 +897,7 @@ interface VideoGenerationDefaults {
 }
 
 type WorkflowCapability = "video-generation" | "image-generation";
-type WorkflowVariant = "reference-to-video" | "first-last-frame" | "image-to-video" | "last-frame-to-video" | "text-to-video" | "image-generation";
+type WorkflowVariant = "reference-to-video" | "first-last-frame" | "image-to-video" | "last-frame-to-video" | "text-to-video" | "image-generation" | "image-edit";
 type UiFontSize = "small" | "medium";
 type WorkflowModuleSlot = "video-generation:reference-to-video"
   | "video-generation:first-last-frame"
@@ -1404,6 +1430,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   textInputs: NodeRecord[];
   promptNodeTitle: string;
   h3LoraOptions: string[];
+  krea2LoraOptions: string[];
   workflowModules: WorkflowModuleRecord[];
   workflowModuleDefaults: Partial<Record<WorkflowModuleSlot, string>>;
   onH3LoraPreferenceChange: (preference: H3LoraPreferencePatch) => void;
@@ -1412,14 +1439,19 @@ interface CanvasNodeData extends Record<string, unknown> {
   onMarkGeneratedVideoFullyPlayed: (id: string) => void;
   onExecutionCheck: (message: string, valid: boolean) => void;
   onExecute: (id: string) => Promise<void>;
+  onExecuteImage: (id: string) => Promise<void>;
   onBatchExecute: (id: string) => Promise<void>;
   onSecondarySample: (id: string) => Promise<void>;
   onConfigureSecondarySample: (id: string) => void;
   onRegenerateVideo: (id: string) => Promise<void>;
   onConfigureRegenerateVideo: (id: string) => void;
   onLocatePrompt: (id: string, target?: "prompt" | "generator") => void;
+  onUpscaleGeneratedImage: (id: string) => Promise<void>;
+  onRegenerateGeneratedImage: (id: string) => Promise<void>;
+  onLocateGeneratedImage: (id: string, target?: "prompt" | "generator") => void;
   onCancelExecution: (id: string) => Promise<void>;
   onRevealGeneratedVideo: (id: string) => Promise<void>;
+  onRevealGeneratedImage: (id: string) => Promise<void>;
   onRemoveInput: (targetId: string, sourceId: string) => Promise<void>;
   onActivateTextInput: (targetId: string, sourceId: string) => void;
   onDeletePromptVersion: (nodeId: string, versionId: string) => Promise<void>;
@@ -1845,6 +1877,11 @@ const AUDIO_NODE_MIN_HEIGHT = 240;
 const LEGACY_VIDEO_GENERATION_NODE_WIDTH = 360;
 const VIDEO_GENERATION_NODE_WIDTH = 460;
 const VIDEO_NODE_BASE_HEIGHT = 696;
+// Image nodes use a compact baseline: all controls are visible without
+// retaining the large blank area from the former, video-sized baseline.
+const IMAGE_GENERATION_NODE_BASE_HEIGHT = 624;
+const IMAGE_GENERATION_TEXT_ROW_HEIGHT = 57;
+const IMAGE_GENERATION_SEED_CONTROL_HEIGHT = 48;
 const VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS = 10;
 const VIDEO_NODE_TEXT_ROW_HEIGHT = 67;
 const VIDEO_NODE_IMAGE_GRID_COLUMNS = 5;
@@ -1852,14 +1889,16 @@ const VIDEO_NODE_IMAGE_GRID_GAP = 6;
 const VIDEO_NODE_BODY_HORIZONTAL_PADDING = 28;
 const VIDEO_NODE_EXECUTION_AREA_HEIGHT = 72;
 const MATERIAL_NOTE_HEIGHT = 37;
-const MATERIAL_NODE_LAYOUT_VERSION = 2;
+const MATERIAL_NODE_LAYOUT_VERSION = 3;
 const MEDIA_NODE_CHROME_HEIGHT = 73 + MATERIAL_NOTE_HEIGHT;
-const IMAGE_NODE_CHROME_HEIGHT = 38 + MATERIAL_NOTE_HEIGHT;
+const IMAGE_NODE_CHROME_HEIGHT = 38;
 const IMAGE_RESIZE_DEFAULT_STORAGE_KEY = "infinite-canvas:image-resize-max-edge";
 const DEFAULT_IMAGE_RESIZE_MAX_EDGE = 2048;
 const MIN_IMAGE_RESIZE_MAX_EDGE = 32;
 const MAX_IMAGE_RESIZE_MAX_EDGE = 16_384;
 const GENERATED_VIDEO_FOOTER_HEIGHT = 38;
+const GENERATED_IMAGE_CHROME_HEIGHT = GENERATED_VIDEO_FOOTER_HEIGHT;
+const GENERATED_IMAGE_PREVIEW_LAYOUT_VERSION = 2;
 const LEGACY_GENERATED_VIDEO_PREVIEW_WIDTH = 360;
 const GENERATED_VIDEO_PREVIEW_WIDTH = 420;
 const GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH = 300;
@@ -1929,6 +1968,8 @@ const DEFAULT_H3_REFERENCE_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCan
 const DEFAULT_H3_FIRST_LAST_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3首尾帧工作流.json";
 const DEFAULT_H3_IMAGE_TO_VIDEO_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3图生视频工作流.json";
 const DEFAULT_H3_LAST_FRAME_TO_VIDEO_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3尾帧生视频工作流.json";
+export const DEFAULT_KREA2_IMAGE_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\Krea2文生图_可选放大.json";
+export const DEFAULT_KREA2_IMAGE_EDIT_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\Krea2图像编辑_单图或双图.json";
 const H3_REFERENCE_WORKFLOW_STORAGE_KEY = "infinite-canvas:h3-reference-workflow-path";
 const WORKFLOW_MODULE_DEFAULTS_STORAGE_KEY = "infinite-canvas:workflow-module-defaults";
 const WORKFLOW_PACKAGE_ENGINE = "workflow-package-v1";
@@ -1936,7 +1977,7 @@ const WORKFLOW_CAPABILITIES: Array<{ value: WorkflowCapability; label: string }>
   { value: "video-generation", label: "视频生成" },
   { value: "image-generation", label: "图片生成" },
 ];
-const WORKFLOW_VIDEO_VARIANTS: Array<{ value: Exclude<WorkflowVariant, "image-generation">; label: string }> = [
+const WORKFLOW_VIDEO_VARIANTS: Array<{ value: Exclude<WorkflowVariant, "image-generation" | "image-edit">; label: string }> = [
   { value: "reference-to-video", label: "多参生视频" },
   { value: "first-last-frame", label: "首尾帧" },
   { value: "image-to-video", label: "图生视频" },
@@ -1995,6 +2036,12 @@ function mediaNodeHeightForAspectRatio(width: number, aspectRatio: number): numb
     2400,
     Math.max(180, width / aspectRatio + MEDIA_NODE_CHROME_HEIGHT),
   );
+}
+
+function videoInputMediaKind(record: NodeRecord): "image" | "audio" | "video" | null {
+  if (record.kind === "image" || record.kind === "generated-image") return "image";
+  if (record.kind === "audio" || record.kind === "video") return record.kind;
+  return null;
 }
 
 function loadImageNaturalSize(path: string): Promise<{ width: number; height: number }> {
@@ -2220,6 +2267,23 @@ function videoGenerationAutoHeight(
   );
 }
 
+function imageGenerationAutoHeight(
+  textInputCount = 0,
+  imageEditMode = false,
+  _imageInputCount = 0,
+): number {
+  // Image edit adds a fixed two-slot image group plus its own resolution row.
+  // Count both rows explicitly so the execution controls never overlap when
+  // this variant is selected.
+  const imageEditControlsHeight = imageEditMode ? 116 : 0;
+  const contentHeight = IMAGE_GENERATION_NODE_BASE_HEIGHT
+    + IMAGE_GENERATION_SEED_CONTROL_HEIGHT
+    + Math.max(0, Math.min(VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS, textInputCount) - 1)
+      * IMAGE_GENERATION_TEXT_ROW_HEIGHT
+    + imageEditControlsHeight;
+  return Math.ceil(contentHeight / CANVAS_GRID_SIZE) * CANVAS_GRID_SIZE;
+}
+
 function generatedSeedsFromContent(content: JsonObject): string[] {
   const seeds = Array.isArray(content.generatedSeeds)
     ? content.generatedSeeds.filter((seed): seed is string => typeof seed === "string")
@@ -2312,7 +2376,14 @@ function copiedNodeContentForProject(
       return version;
     });
   }
-  for (const key of ["activeTextInputId", "sourceGeneratorId", "sourcePreviewId", "resizedFromNodeId"]) {
+  for (const key of [
+    "activeTextInputId",
+    "imagePositivePromptNodeId",
+    "imageNegativePromptNodeId",
+    "sourceGeneratorId",
+    "sourcePreviewId",
+    "resizedFromNodeId",
+  ]) {
     if (typeof copied[key] !== "string") continue;
     const remappedId = remapNodeId(copied[key]);
     if (remappedId) copied[key] = remappedId;
@@ -2375,6 +2446,8 @@ function generatedPreviewPosition(
   existingNodes: NodeRecord[],
   width: number,
   height: number,
+  previewKind: "generated-video" | "generated-image" = "generated-video",
+  continuationDirection: "below" | "right" = "below",
 ): { x: number; y: number } {
   const horizontalGap = CANVAS_GRID_SIZE * 2;
   const verticalGap = CANVAS_GRID_SIZE / 2;
@@ -2395,9 +2468,13 @@ function generatedPreviewPosition(
     return y;
   };
   const previousPreviews = existingNodes.filter((node) => (
-    node.kind === "generated-video"
+    node.kind === previewKind
     && node.content.sourceGeneratorId === generator.id
     && typeof node.content.sourcePreviewId !== "string"
+    && (
+      previewKind !== "generated-image"
+      || (node.content.generatedImageCopy !== true && node.source !== "clipboard")
+    )
   ));
   const latestPreview = previousPreviews.reduce<NodeRecord | null>((latest, node) => {
     if (!latest) return node;
@@ -2406,6 +2483,10 @@ function generatedPreviewPosition(
     return nodeCreatedAt >= latestCreatedAt ? node : latest;
   }, null);
   if (latestPreview) {
+    if (continuationDirection === "right") {
+      const x = snapCanvasCoordinate(latestPreview.x + latestPreview.width + horizontalGap);
+      return { x, y: availableYBelow(x, latestPreview.y) };
+    }
     const x = latestPreview.x;
     return {
       x,
@@ -2459,7 +2540,13 @@ function persistedComfyTasksFromStorage(): PersistedComfyTask[] {
       && typeof task.canvasId === "string"
       && typeof task.startedAt === "number"
       && task.snapshot && typeof task.snapshot === "object"
-      && (task.kind === undefined || task.kind === "generation" || task.kind === "secondary")
+      && (
+        task.kind === undefined
+        || task.kind === "generation"
+        || task.kind === "secondary"
+        || task.kind === "image-generation"
+        || task.kind === "image-upscale"
+      )
       && (task.sourceGeneratorId === undefined || typeof task.sourceGeneratorId === "string")
       && (task.placeholderNodeId === undefined || typeof task.placeholderNodeId === "string")
     )).map((task) => ({
@@ -2504,11 +2591,25 @@ function isSecondaryComfyTask(task: PersistedComfyTask): boolean {
   return task.kind === "secondary";
 }
 
+function isImageComfyTask(task: PersistedComfyTask): boolean {
+  return task.kind === "image-generation" || task.kind === "image-upscale";
+}
+
 function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot | null {
   const value = content.generationSnapshot;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const snapshot = value as JsonObject;
-  if (typeof snapshot.prompt !== "string" || !snapshot.prompt.trim()) return null;
+  const imageRecovery = snapshot.imageRecovery
+    && typeof snapshot.imageRecovery === "object"
+    && !Array.isArray(snapshot.imageRecovery)
+    && ((snapshot.imageRecovery as JsonObject).kind === "generation"
+      || (snapshot.imageRecovery as JsonObject).kind === "upscale")
+    ? snapshot.imageRecovery as ImageRecoverySnapshot
+    : undefined;
+  if (
+    typeof snapshot.prompt !== "string"
+    || (!snapshot.prompt.trim() && !imageRecovery)
+  ) return null;
   const restoredSelection = storyboardReferenceSelectionFromValue(
     snapshot.referenceSelection,
   ).selection;
@@ -2600,11 +2701,15 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
     workflowModuleRevision: typeof snapshot.workflowModuleRevision === "string"
       ? snapshot.workflowModuleRevision
       : "",
+    ...(imageRecovery ? { imageRecovery } : {}),
   };
 }
 
 function persistedComfyTaskFromPlaceholder(record: NodeRecord): PersistedComfyTask | null {
-  if (record.kind !== "generated-video" || record.content.generationPlaceholder !== true) {
+  if (
+    (record.kind !== "generated-video" && record.kind !== "generated-image")
+    || record.content.generationPlaceholder !== true
+  ) {
     return null;
   }
   const clientId = typeof record.content.placeholderClientId === "string"
@@ -2619,14 +2724,18 @@ function persistedComfyTaskFromPlaceholder(record: NodeRecord): PersistedComfyTa
   const snapshot = generationSnapshotFromContent(record.content);
   if (!clientId || !sourceGeneratorId || !snapshot) return null;
   const parsedStartedAt = Date.parse(record.createdAt);
+  const imageTask = record.kind === "generated-image" ? snapshot.imageRecovery : undefined;
+  if (record.kind === "generated-image" && !imageTask) return null;
   return {
     clientId,
     nodeId: sourcePreviewId || sourceGeneratorId,
     canvasId: record.canvasId,
     snapshot,
     startedAt: Number.isFinite(parsedStartedAt) ? parsedStartedAt : Date.now(),
-    kind: sourcePreviewId ? "secondary" : "generation",
-    ...(sourcePreviewId ? { sourceGeneratorId } : {}),
+    kind: imageTask
+      ? imageTask.kind === "upscale" ? "image-upscale" : "image-generation"
+      : sourcePreviewId ? "secondary" : "generation",
+    ...((sourcePreviewId || imageTask) ? { sourceGeneratorId } : {}),
     placeholderNodeId: record.id,
   };
 }
@@ -2635,7 +2744,9 @@ function comfyOutputFromContent(content: JsonObject): ComfyOutputFile | null {
   const filename = typeof content.filename === "string" ? content.filename : "";
   const subfolder = typeof content.subfolder === "string" ? content.subfolder : "";
   const fileType = typeof content.fileType === "string" ? content.fileType : "output";
-  const url = typeof content.videoUrl === "string" ? content.videoUrl : "";
+  const url = typeof content.videoUrl === "string"
+    ? content.videoUrl
+    : typeof content.imageUrl === "string" ? content.imageUrl : "";
   return filename && url ? { filename, subfolder, fileType, url } : null;
 }
 
@@ -2688,7 +2799,9 @@ function workflowSlotForModule(module: Pick<WorkflowModuleRecord, "capability" |
 }
 
 function workflowVariantLabel(module: Pick<WorkflowModuleRecord, "capability" | "variant">): string {
-  if (module.capability === "image-generation") return "图片生成";
+  if (module.capability === "image-generation") {
+    return module.variant === "image-edit" ? "图像编辑" : "图片生成";
+  }
   return WORKFLOW_VIDEO_VARIANTS.find((variant) => variant.value === module.variant)?.label ?? module.variant;
 }
 
@@ -2914,7 +3027,9 @@ function h3LoraStrengthFromContent(content: JsonObject): number {
 }
 
 function h3LoraBypassedFromContent(content: JsonObject): boolean {
-  return content.generationLoraBypassed === true || content.loraBypassed === true;
+  return content.generationLoraBypassed === true
+    || content.loraBypassed === true
+    || !h3LoraNameFromContent(content);
 }
 
 function h3SecondaryLoraNameFromContent(content: JsonObject): string {
@@ -2973,6 +3088,8 @@ function seedModeFromContent(content: JsonObject): SeedMode {
 function fixedSeedFromContent(content: JsonObject): string {
   return typeof content.generationSeed === "string"
     ? content.generationSeed
+    : typeof content.seed === "string"
+      ? content.seed
     : DEFAULT_GENERATION_SEED;
 }
 
@@ -3070,39 +3187,37 @@ function VideoGenerationLoraDefaultsFields({
   secondary?: boolean;
   onChange: (patch: Partial<VideoGenerationDefaults>) => void;
 }) {
-  const selectedLoraAvailable = !loraName
+  const effectiveLoraBypassed = loraBypassed || !loraName;
+  const selectedLoraAvailable = effectiveLoraBypassed
     || h3LoraOptions.some((option) => sameH3LoraName(option, loraName));
   const prefix = secondary ? "二采" : "一采";
   return (
-    <div className={`video-defaults-lora-fields ${secondary ? "is-secondary" : ""} ${loraBypassed ? "is-bypassed" : ""}`}>
+    <div className={`video-defaults-lora-fields ${secondary ? "is-secondary" : ""} ${effectiveLoraBypassed ? "is-bypassed" : ""}`}>
       <div className="video-defaults-lora-model-row">
         <span>{label}</span>
         <SettingsSelect
-          value={loraName}
-          disabled={(!secondary && loraBypassed) || !h3LoraOptions.length}
+          value={effectiveLoraBypassed ? "" : loraName}
           ariaLabel={`默认${prefix} LoRA`}
-          placeholder={selectedLoraAvailable ? "未选择 LoRA" : "未找到 LoRA"}
-          title={loraName || undefined}
-          options={h3LoraOptions.map((lora) => ({
-            value: lora,
-            label: h3LoraDisplayName(lora),
-            title: lora,
-          }))}
+          placeholder={selectedLoraAvailable ? "不使用 LoRA" : "未找到 LoRA"}
+          title={effectiveLoraBypassed ? "不使用 LoRA" : loraName || undefined}
+          options={[
+            { value: "", label: "不使用 LoRA" },
+            ...h3LoraOptions.map((lora) => ({
+              value: lora,
+              label: h3LoraDisplayName(lora),
+              title: lora,
+            })),
+          ]}
           onChange={(nextLoraName) => onChange(secondary
-            ? { generationSecondaryLoraName: nextLoraName }
-            : { generationLoraName: nextLoraName })}
+            ? {
+                generationSecondaryLoraName: nextLoraName,
+                generationSecondaryLoraBypassed: !nextLoraName,
+              }
+            : {
+                generationLoraName: nextLoraName,
+                generationLoraBypassed: !nextLoraName,
+              })}
         />
-        <button
-          type="button"
-          className="video-lora-bypass-switch video-defaults-lora-toggle"
-          role="switch"
-          aria-checked={!loraBypassed}
-          aria-label={`启用默认${prefix} LoRA`}
-          title={loraBypassed ? `启用${prefix} LoRA` : `关闭${prefix} LoRA`}
-          onClick={() => onChange(secondary
-            ? { generationSecondaryLoraBypassed: !loraBypassed }
-            : { generationLoraBypassed: !loraBypassed })}
-        ><span aria-hidden="true" /></button>
       </div>
       <div className="video-defaults-lora-controls-row">
         <span>权重</span>
@@ -3110,7 +3225,7 @@ function VideoGenerationLoraDefaultsFields({
           className="video-parameter-range"
           type="range"
           style={{ "--video-range-progress": `${(loraStrength / 2) * 100}%` } as CSSProperties}
-          disabled={loraBypassed}
+          disabled={effectiveLoraBypassed}
           min="0"
           max="2"
           step="0.05"
@@ -3124,7 +3239,7 @@ function VideoGenerationLoraDefaultsFields({
           value={loraStrength}
           min={0}
           max={2}
-          disabled={loraBypassed}
+          disabled={effectiveLoraBypassed}
           ariaLabel={`手动输入默认${prefix} LoRA 权重`}
           onChange={(nextStrength) => onChange(secondary
             ? { generationSecondaryLoraStrength: nextStrength }
@@ -3536,13 +3651,13 @@ function resolveStoryboardReferenceSelection(
         error: `${asset.label} 对应的候选素材已断开或不存在：${asset.sourceId}`,
       };
     }
-    if (candidate.kind !== asset.kind) {
+    if (videoInputMediaKind(candidate) !== asset.kind) {
       return {
         selection: parsed.selection,
         selectedMedia: [],
         mappings: [],
         skippedCount: mediaInputs.length,
-        error: `${asset.label} 的实际素材类型是 ${candidate.kind}，与内部选择的 ${asset.kind} 不一致`,
+        error: `${asset.label} 的实际素材类型是 ${videoInputMediaKind(candidate) ?? candidate.kind}，与内部选择的 ${asset.kind} 不一致`,
       };
     }
     const assetPath = typeof candidate.content.assetPath === "string"
@@ -3615,7 +3730,7 @@ function storyboardReferenceCandidateCatalog(
     generatorId,
     assets: mediaInputs.map((record, index) => ({
       sourceId: record.id,
-      kind: record.kind,
+      kind: videoInputMediaKind(record) ?? record.kind,
       globalOrder: index + 1,
       title: record.title || record.id,
       semanticDescription: materialNoteFromContent(record.content).trim(),
@@ -3641,7 +3756,8 @@ function h3ReferenceAssetCatalog(
   const assetCounts = { images: 0, audios: 0, videos: 0 };
 
   const assets = mediaInputs.map((record, index) => {
-    const kind = record.kind as "image" | "audio" | "video";
+    const kind = videoInputMediaKind(record);
+    if (!kind) return null;
     referenceCounts[kind] += 1;
     if (kind === "image") assetCounts.images += 1;
     if (kind === "audio") assetCounts.audios += 1;
@@ -3655,7 +3771,7 @@ function h3ReferenceAssetCatalog(
       semanticDescription: materialNoteFromContent(record.content).trim(),
       required: true,
     };
-  });
+  }).filter((asset): asset is NonNullable<typeof asset> => asset !== null);
 
   return JSON.stringify({
     schema: "infinite-canvas-h3-reference-assets/v1",
@@ -3677,9 +3793,9 @@ function validateVideoExecution(
   mediaInputs: NodeRecord[],
   textInputs: NodeRecord[],
 ): { valid: boolean; message: string } {
-  const images = mediaInputs.filter((input) => input.kind === "image");
-  const audios = mediaInputs.filter((input) => input.kind === "audio");
-  const videos = mediaInputs.filter((input) => input.kind === "video");
+  const images = mediaInputs.filter((input) => videoInputMediaKind(input) === "image");
+  const audios = mediaInputs.filter((input) => videoInputMediaKind(input) === "audio");
+  const videos = mediaInputs.filter((input) => videoInputMediaKind(input) === "video");
   const activeTextInput = activeTextInputFromContent(content, textInputs);
 
   if (content.storyboardReferenceCompiler === true) {
@@ -4007,6 +4123,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     textInputs,
     promptNodeTitle,
     h3LoraOptions,
+    krea2LoraOptions,
     workflowModules,
     onH3LoraPreferenceChange,
     onChange,
@@ -4014,14 +4131,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onMarkGeneratedVideoFullyPlayed,
     onExecutionCheck,
     onExecute,
+    onExecuteImage,
     onBatchExecute,
     onSecondarySample,
     onConfigureSecondarySample,
     onRegenerateVideo,
     onConfigureRegenerateVideo,
     onLocatePrompt,
+    onUpscaleGeneratedImage,
+    onRegenerateGeneratedImage,
+    onLocateGeneratedImage,
     onCancelExecution,
     onRevealGeneratedVideo,
+    onRevealGeneratedImage,
     onRemoveInput,
     onActivateTextInput,
     onDeletePromptVersion,
@@ -4211,8 +4333,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const isImage = record.kind === "image";
   const isAudioAsset = record.kind === "audio";
   const isVideoAsset = record.kind === "video";
-  const isReferenceAsset = isImage || isAudioAsset || isVideoAsset;
   const isVideoGeneration = record.kind === "video-generation";
+  const isImageGeneration = record.kind === "image-generation";
+  const isGeneratedImage = record.kind === "generated-image";
   const isStoryboardReferenceCompiler = isVideoGeneration
     && record.content.storyboardReferenceCompiler === true;
   const isGeneratedVideo = record.kind === "generated-video";
@@ -4227,9 +4350,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const isSecondaryPreview = isGeneratedVideo
     && typeof record.content.sourcePreviewId === "string";
   const supportsPreviewColor = isText || isNote || (
-    isGeneratedVideo
-    && typeof record.content.videoUrl === "string"
-    && Boolean(record.content.videoUrl)
+    (isGeneratedVideo && typeof record.content.videoUrl === "string" && Boolean(record.content.videoUrl))
+    || (isGeneratedImage && typeof record.content.imageUrl === "string" && Boolean(record.content.imageUrl))
   );
   const storedPreviewThemeColor = previewThemeColorFromContent(record.content);
   const previewThemeColor = isNote && storedPreviewThemeColor === VIDEO_PREVIEW_DEFAULT_COLOR
@@ -4276,24 +4398,39 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       && module.capability === "video-generation"
       && (!isStoryboardReferenceCompiler || module.variant === "reference-to-video"),
   );
+  const availableImageWorkflowModules = workflowModules.filter((module) => !module.deletedAt && module.capability === "image-generation");
   const configuredWorkflowModuleId = typeof record.content.workflowModuleId === "string"
     ? record.content.workflowModuleId
     : "";
   const selectedNodeWorkflowModule = availableWorkflowModules.find(
     (module) => module.id === configuredWorkflowModuleId,
   ) ?? null;
+  const selectedImageWorkflowModule = availableImageWorkflowModules.find(
+    (module) => module.id === configuredWorkflowModuleId,
+  ) ?? null;
+  const isKrea2ImageEdit = isImageGeneration
+    && selectedImageWorkflowModule?.variant === "image-edit";
+  const imageEditInputs = isKrea2ImageEdit
+    ? mediaInputs.filter((input) => videoInputMediaKind(input) === "image")
+    : [];
   const videoDuration = videoDurationFromContent(record.content);
   const videoAspectRatio = videoAspectRatioFromContent(record.content);
   const refImageSize = refImageSizeFromContent(record.content);
   const videoGenerationFullHeight = isVideoGeneration
     ? videoGenerationAutoHeight(
-        mediaInputs.map((input) => input.kind),
+        mediaInputs.map((input) => videoInputMediaKind(input) ?? input.kind),
         textInputs.length,
         record.width,
         isStoryboardReferenceCompiler,
       )
     : record.height;
   const activeTextInputId = activeTextInputFromContent(record.content, textInputs)?.id ?? "";
+  const imagePositivePromptInput = isImageGeneration
+    ? activeTextInputFromContent(record.content, textInputs)
+    : null;
+  const imagePromptText = (input: NodeRecord | null) => input
+    ? storyboardPromptFields(input).prompt.trim().replace(/\s+/g, " ")
+    : "";
   const primaryVideoResolution = primaryVideoResolutionFromContent(record.content);
   const secondaryVideoResolution = secondaryVideoResolutionFromContent(record.content);
   const primaryVideoSteps = primaryVideoStepsFromContent(
@@ -4316,6 +4453,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     (lora) => sameH3LoraName(lora, h3SecondaryLoraName),
   );
   const selectableH3Loras = h3LoraOptions;
+  const imageLoraName = typeof record.content.imageLoraName === "string"
+    ? record.content.imageLoraName.trim()
+    : "";
+  const availableImageLoraName = krea2LoraOptions.find(
+    (lora) => sameH3LoraName(lora, imageLoraName),
+  );
   const seedMode = seedModeFromContent(record.content);
   const fixedSeed = fixedSeedFromContent(record.content);
   const validationStatus = record.content.status === "ready"
@@ -4354,13 +4497,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     : null;
   const videoChromeHeight = isGeneratedVideo
     ? GENERATED_VIDEO_FOOTER_HEIGHT
+    : isGeneratedImage
+      ? GENERATED_IMAGE_CHROME_HEIGHT
     : isImage
       ? IMAGE_NODE_CHROME_HEIGHT
       : MEDIA_NODE_CHROME_HEIGHT;
   const generatedVideoUrl = cacheBustedGeneratedVideoUrl(record.content);
-  const isGenerationPlaceholder = isGeneratedVideo
-    && record.content.generationPlaceholder === true
-    && !generatedVideoUrl;
+  const generatedImageUrl = isGeneratedImage && typeof record.content.imageUrl === "string"
+    ? record.content.imageUrl
+    : "";
+  const isGenerationPlaceholder = (isGeneratedVideo || isGeneratedImage)
+    && record.content.generationPlaceholder === true;
   const placeholderActive = record.content.status === "running"
     || record.content.status === "cancelling";
   const generatedVideoSeed = typeof record.content.seed === "string"
@@ -4385,6 +4532,37 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const generatedVideoPromptTitle = generatedVideoSnapshot?.promptVersionLabel
     ? `${generatedVideoPromptBaseTitle || "提示词"} · ${generatedVideoSnapshot.promptVersionLabel}`
     : generatedVideoPromptBaseTitle;
+  const generatedImageSeed = isGeneratedImage && typeof record.content.seed === "string"
+    ? record.content.seed
+    : "";
+  const generatedImagePrompt = isGeneratedImage && typeof record.content.generationPrompt === "string"
+    ? record.content.generationPrompt
+    : "";
+  const generatedImageNegativePrompt = isGeneratedImage
+    && typeof record.content.generationNegativePrompt === "string"
+    ? record.content.generationNegativePrompt
+    : "";
+  const generatedImageWidth = Number(record.content.generationWidth);
+  const generatedImageHeight = Number(record.content.generationHeight);
+  const generatedImageMegapixels = Number(record.content.generationUpscaleMegapixels);
+  const generatedImageWorkflowModuleId = isGeneratedImage
+    && typeof record.content.generationWorkflowModuleId === "string"
+    ? record.content.generationWorkflowModuleId
+    : "";
+  const generatedImageWorkflowModule = generatedImageWorkflowModuleId
+    ? workflowModules.find((module) => module.id === generatedImageWorkflowModuleId) ?? null
+    : null;
+  const generatedImageWorkflowLabel = generatedImageWorkflowModule
+    ? `${generatedImageWorkflowModule.name} · ${typeof record.content.generationWorkflowModuleRevision === "string" && record.content.generationWorkflowModuleRevision
+      ? record.content.generationWorkflowModuleRevision
+      : generatedImageWorkflowModule.revision}`
+    : generatedImageWorkflowModuleId ? "方案已缺失" : "未记录";
+  const generatedImageLoraName = isGeneratedImage && typeof record.content.generationLoraName === "string"
+    ? record.content.generationLoraName
+    : "";
+  const generatedImageModelName = isGeneratedImage && typeof record.content.generationModelName === "string"
+    ? record.content.generationModelName
+    : "";
   const isUnplayedGeneratedVideo = isGeneratedVideo
     && Boolean(generatedVideoUrl)
     && record.content.hasBeenPlayed === false;
@@ -4399,15 +4577,24 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     : `${formattedGenerationElapsed(record.content)}${generatedVideoSnapshot
       ? ` / ${generatedVideoSnapshot.durationSeconds}秒`
       : ""}`;
-  const preservesGeneratedVideoToolbarCtrlClick = (target: EventTarget | null) => (
-    isGeneratedVideo
+  const isImageUpscalePreview = isGeneratedImage
+    && typeof record.content.sourcePreviewId === "string";
+  const generatedImageWasUpscaled = isGeneratedImage
+    && (isImageUpscalePreview || record.content.upscaleEnabled === true);
+  const generatedImageFooterStatus = isGenerationPlaceholder
+    ? placeholderActive ? "处理中" : "未完成"
+    : executionRunning
+      ? validationMessage || "正在放大图片…"
+      : `${formattedGenerationElapsed(record.content)}${isImageUpscalePreview ? " / 放大图" : ""}`;
+  const preservesGeneratedToolbarCtrlClick = (target: EventTarget | null) => (
+    (isGeneratedVideo || isGeneratedImage)
     && target instanceof Element
     && Boolean(target.closest(".generated-video-footer button"))
   );
   const mediaInputGroups = [
-    { kind: "image", label: "图片", inputs: mediaInputs.filter((input) => input.kind === "image") },
-    { kind: "audio", label: "音频", inputs: mediaInputs.filter((input) => input.kind === "audio") },
-    { kind: "video", label: "视频", inputs: mediaInputs.filter((input) => input.kind === "video") },
+    { kind: "image", label: "图片", inputs: mediaInputs.filter((input) => videoInputMediaKind(input) === "image") },
+    { kind: "audio", label: "音频", inputs: mediaInputs.filter((input) => videoInputMediaKind(input) === "audio") },
+    { kind: "video", label: "视频", inputs: mediaInputs.filter((input) => videoInputMediaKind(input) === "video") },
   ].filter((group) => group.inputs.length > 0);
   const activeStoryboardPrompt = isStoryboardReferenceCompiler
     ? activeTextInputFromContent(record.content, textInputs)
@@ -4489,6 +4676,25 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       },
     });
   }, [id, isGeneratedVideo, onChange, record.content, record.width, savedAspectRatio]);
+
+  useEffect(() => {
+    if (
+      !isGeneratedImage
+      || !savedAspectRatio
+      || record.content.generatedImagePreviewLayoutVersion === GENERATED_IMAGE_PREVIEW_LAYOUT_VERSION
+    ) return;
+    const fittedHeight = Math.min(
+      2400,
+      Math.max(180, record.width / savedAspectRatio + GENERATED_IMAGE_CHROME_HEIGHT),
+    );
+    onChange(id, {
+      height: fittedHeight,
+      content: {
+        ...record.content,
+        generatedImagePreviewLayoutVersion: GENERATED_IMAGE_PREVIEW_LAYOUT_VERSION,
+      },
+    });
+  }, [id, isGeneratedImage, onChange, record.content, record.width, savedAspectRatio]);
 
   useEffect(() => {
     if ((!isImage && !isVideoAsset) || !savedAspectRatio || record.content.materialNodeLayoutVersion === MATERIAL_NODE_LAYOUT_VERSION) return;
@@ -5417,15 +5623,21 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         2400,
         Math.max(180, fittedWidth / aspectRatio + GENERATED_VIDEO_FOOTER_HEIGHT),
       )
+      : isGeneratedImage
+        ? Math.min(
+          2400,
+          Math.max(180, fittedWidth / aspectRatio + GENERATED_IMAGE_CHROME_HEIGHT),
+        )
       : isImage
         ? Math.min(2400, fittedWidth / aspectRatio + IMAGE_NODE_CHROME_HEIGHT)
-      : mediaNodeHeightForAspectRatio(fittedWidth, aspectRatio);
+        : mediaNodeHeightForAspectRatio(fittedWidth, aspectRatio);
     onChange(id, {
       content: {
         ...record.content,
         aspectRatio,
         naturalWidth,
         naturalHeight,
+        ...(isGeneratedImage ? { generatedImagePreviewLayoutVersion: GENERATED_IMAGE_PREVIEW_LAYOUT_VERSION } : {}),
         ...((isImage || isVideoAsset) ? { materialNodeLayoutVersion: MATERIAL_NODE_LAYOUT_VERSION } : {}),
       },
       width: fittedWidth,
@@ -5447,7 +5659,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       ?? base.width / Math.max(1, base.height - videoChromeHeight);
     let width: number;
     let height: number;
-    const minimumHeight = isImage ? IMAGE_NODE_CHROME_HEIGHT + 1 : 180;
+    const minimumHeight = isImage
+      ? IMAGE_NODE_CHROME_HEIGHT + 1
+      : isGeneratedImage ? GENERATED_IMAGE_CHROME_HEIGHT + 1 : 180;
     if (direction[0] !== 0) {
       width = Math.max(260, params.width);
       height = width / aspectRatio + videoChromeHeight;
@@ -5598,7 +5812,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   };
 
   const setFrameRole = (sourceId: string, role: FrameRole) => {
-    const imageInputs = mediaInputs.filter((input) => input.kind === "image");
+    const imageInputs = mediaInputs.filter((input) => videoInputMediaKind(input) === "image");
     const nextRoles: Record<string, FrameRole> = {};
     imageInputs.forEach((image, index) => {
       nextRoles[image.id] = frameRoleFromContent(record.content, image.id, index);
@@ -5650,6 +5864,31 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onExecutionCheck(result.message, result.valid);
     if (!result.valid) return;
     await onExecute(id);
+  };
+
+  const checkAndExecuteImage = async () => {
+    const selectedModuleId = typeof record.content.workflowModuleId === "string"
+      ? record.content.workflowModuleId
+      : "";
+    const positivePrompt = imagePromptText(imagePositivePromptInput);
+    const message = !selectedModuleId
+      ? "请先选择图片生成方案"
+      : !imagePositivePromptInput
+        ? "请通过连线接入正向提示词文本节点"
+        : !positivePrompt
+          ? "当前正向提示词节点内容为空，请先填写"
+          : "图片生成条件检查通过";
+    const valid = message === "图片生成条件检查通过";
+    onChange(id, {
+      content: {
+        ...record.content,
+        status: valid ? "ready" : "invalid",
+        validationMessage: message,
+      },
+    });
+    onExecutionCheck(message, valid);
+    if (!valid) return;
+    await onExecuteImage(id);
   };
 
   const checkAndExecuteBatch = async () => {
@@ -5825,7 +6064,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       className={`canvas-node kind-${record.kind} ${isStoryboardReferenceCompiler ? "is-storyboard-reference-compiler" : ""} ${selected ? "is-selected" : ""} ${isContentIterationNode ? `is-content-iteration-node content-type-${contentNodeType}` : ""} ${usesSecondaryGreenTheme ? "is-secondary-preview" : ""} ${usesCustomPreviewTheme ? "has-custom-preview-color" : ""} ${relationHighlighted ? "is-relation-highlighted" : ""} ${matched ? "" : "is-dimmed"}`}
       style={previewThemeStyle}
       onPointerDownCapture={(event) => {
-        if (preservesGeneratedVideoToolbarCtrlClick(event.target)) {
+        if (preservesGeneratedToolbarCtrlClick(event.target)) {
           ctrlSelectionPointerId.current = null;
           return;
         }
@@ -5857,7 +6096,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         ctrlSelectionPointerId.current = null;
       }}
       onClickCapture={(event) => {
-        if (preservesGeneratedVideoToolbarCtrlClick(event.target)) {
+        if (preservesGeneratedToolbarCtrlClick(event.target)) {
           ctrlSelectionPointerId.current = null;
           return;
         }
@@ -5867,7 +6106,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         ctrlSelectionPointerId.current = null;
       }}
       onDoubleClickCapture={(event) => {
-        if (preservesGeneratedVideoToolbarCtrlClick(event.target)) return;
+        if (preservesGeneratedToolbarCtrlClick(event.target)) return;
         if (!event.ctrlKey) return;
         event.preventDefault();
         event.stopPropagation();
@@ -5875,9 +6114,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     >
       <NodeResizer
         minWidth={260}
-        minHeight={isAudioAsset ? AUDIO_NODE_MIN_HEIGHT : 180}
+        minHeight={isAudioAsset
+          ? AUDIO_NODE_MIN_HEIGHT
+          : isImageGeneration ? IMAGE_GENERATION_NODE_BASE_HEIGHT : 180}
         autoScale={false}
-        isVisible={selected && !isImage && !isVideoAsset && !isGeneratedVideo && !isVideoGeneration && !isFolder}
+        isVisible={selected && !isImage && !isVideoAsset && !isGeneratedVideo && !isVideoGeneration && !isImageGeneration && !isFolder}
         lineClassName="node-resize-line"
         handleClassName="node-resize-handle"
         onResizeEnd={(_, params) => {
@@ -5908,7 +6149,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           }}
         />
       )}
-      {selected && (isImage || isVideoAsset || isGeneratedVideo) && VIDEO_RESIZE_CONTROLS.map((control) => (
+      {selected && (isImage || isGeneratedImage || isVideoAsset || isGeneratedVideo) && VIDEO_RESIZE_CONTROLS.map((control) => (
         <div
           key={control.position}
           className={`nodrag video-ratio-resizer is-${control.position}`}
@@ -5920,7 +6161,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           onLostPointerCapture={finishVideoResize}
         />
       ))}
-      {(isVideoGeneration || isGeneratedVideo || isContentIterationNode) && (
+      {(isVideoGeneration || isImageGeneration || isGeneratedImage || isGeneratedVideo || isContentIterationNode) && (
         <Handle
           type="target"
           position={Position.Left}
@@ -5928,7 +6169,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           title={isContentIterationNode ? "连接上游创作内容" : undefined}
         />
       )}
-      {!isGeneratedVideo && !isImage && !isAudioAsset && (
+      {!isGeneratedVideo && !isGeneratedImage && !isImage && !isAudioAsset && (
       <header className="node-header">
         <span className="node-kind-icon">
           {isImage
@@ -6383,15 +6624,63 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           <small>{typeof record.content.nodeCount === "number" ? `${record.content.nodeCount} 个节点` : "打开目录"}</small>
         </button>
       )}
-      {(isImage || isAudioAsset || isVideoAsset || isGeneratedVideo) && (
+      {(isImage || isGeneratedImage || isAudioAsset || isVideoAsset || isGeneratedVideo) && (
         <div
           className={isVideoAsset ? "nodrag media-node-body" : "media-node-body"}
           onMouseEnter={isVideoAsset || isGeneratedVideo ? playMediaVideoOnHover : undefined}
           onMouseLeave={isVideoAsset || isGeneratedVideo ? pauseMediaVideoOnLeave : undefined}
         >
-          {assetPath && isImage ? (
+          {isGenerationPlaceholder ? (
+            <div className={`generated-video-placeholder ${placeholderActive ? "is-active" : "is-stopped"}`}>
+              <div className="generated-video-placeholder-flow" aria-hidden="true">
+                <span
+                  className="generated-video-placeholder-blob blob-blue"
+                  style={generatedPlaceholderPositionStyle(id, 0)}
+                />
+                <span
+                  className="generated-video-placeholder-blob blob-mist"
+                  style={generatedPlaceholderPositionStyle(id, 1)}
+                />
+                <span
+                  className="generated-video-placeholder-blob blob-sky"
+                  style={generatedPlaceholderPositionStyle(id, 2)}
+                />
+                <span
+                  className="generated-video-placeholder-blob blob-shadow"
+                  style={generatedPlaceholderPositionStyle(id, 3)}
+                />
+              </div>
+              <div className="generated-video-placeholder-status">
+                <span className="generated-video-placeholder-message" title={validationMessage}>
+                  {validationMessage || (placeholderActive
+                    ? `正在等待 ComfyUI 返回${isGeneratedImage ? "图片" : "视频"}…`
+                    : "生成任务未完成")}
+                </span>
+                {placeholderActive && (
+                  <output className="generated-video-placeholder-percent">
+                    {executionProgress === null ? "处理中" : `${Math.round(executionProgress)}%`}
+                  </output>
+                )}
+              </div>
+              <div
+                className={`video-execution-progress ${placeholderActive && executionProgress === null ? "is-indeterminate" : ""} ${placeholderActive ? "" : "is-stopped"}`}
+                role="progressbar"
+                aria-label={isGeneratedImage
+                  ? "图片生成进度"
+                  : isSecondaryPreview ? "二次采样生成进度" : "视频生成进度"}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={executionProgress ?? undefined}
+              >
+                <span style={executionProgress === null
+                  ? placeholderActive ? undefined : { width: "0%" }
+                  : { width: `${executionProgress}%`}}
+                />
+              </div>
+            </div>
+          ) : (assetPath && isImage) || (isGeneratedImage && typeof record.content.imageUrl === "string") ? (
             <img
-              src={convertFileSrc(assetPath)}
+              src={isGeneratedImage ? String(record.content.imageUrl) : convertFileSrc(assetPath)}
               alt={originalName}
               draggable={false}
               onLoad={(event) => applyNaturalMediaRatio(
@@ -6462,55 +6751,24 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 </div>
               )}
             </>
-          ) : isGenerationPlaceholder ? (
-            <div className={`generated-video-placeholder ${placeholderActive ? "is-active" : "is-stopped"}`}>
-              <div className="generated-video-placeholder-flow" aria-hidden="true">
-                <span
-                  className="generated-video-placeholder-blob blob-blue"
-                  style={generatedPlaceholderPositionStyle(id, 0)}
-                />
-                <span
-                  className="generated-video-placeholder-blob blob-mist"
-                  style={generatedPlaceholderPositionStyle(id, 1)}
-                />
-                <span
-                  className="generated-video-placeholder-blob blob-sky"
-                  style={generatedPlaceholderPositionStyle(id, 2)}
-                />
-                <span
-                  className="generated-video-placeholder-blob blob-shadow"
-                  style={generatedPlaceholderPositionStyle(id, 3)}
-                />
-              </div>
-              <div className="generated-video-placeholder-status">
-                <span className="generated-video-placeholder-message" title={validationMessage}>
-                  {validationMessage || (placeholderActive ? "正在等待 ComfyUI 返回视频…" : "生成任务未完成")}
-                </span>
-                {placeholderActive && (
-                  <output className="generated-video-placeholder-percent">
-                    {executionProgress === null ? "处理中" : `${Math.round(executionProgress)}%`}
-                  </output>
-                )}
-              </div>
-              {placeholderActive && (
-                <div
-                  className={`video-execution-progress ${executionProgress === null ? "is-indeterminate" : ""}`}
-                  role="progressbar"
-                  aria-label={isSecondaryPreview ? "二次采样生成进度" : "视频生成进度"}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={executionProgress ?? undefined}
-                >
-                  <span style={executionProgress === null ? undefined : { width: `${executionProgress}%` }} />
-                </div>
-              )}
-            </div>
           ) : (
             <div className="asset-error">媒体资源不可用</div>
           )}
+          {isGeneratedImage && !isGenerationPlaceholder && executionRunning && (
+            <div
+              className={`video-execution-progress generated-image-media-progress ${executionProgress === null ? "is-indeterminate" : ""}`}
+              role="progressbar"
+              aria-label="图片放大进度"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={executionProgress ?? undefined}
+            >
+              <span style={executionProgress === null ? undefined : { width: `${executionProgress}%` }} />
+            </div>
+          )}
         </div>
       )}
-      {isReferenceAsset && (
+      {(isAudioAsset || isVideoAsset) && (
         <div className="nodrag material-note-field">
           <label>
             <span>素材备注</span>
@@ -6885,6 +7143,298 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           </div>
         </footer>
       )}
+      {isGeneratedImage && (
+        <footer className="generated-video-footer generated-image-footer">
+          <div className="generated-video-footer-status">
+            <span className={`source-dot ${isImageUpscalePreview ? "is-secondary" : ""}`} />
+            <span title={generatedImageFooterStatus}>{generatedImageFooterStatus}</span>
+          </div>
+          <span className="generated-video-footer-spacer" />
+          <div className="generated-video-actions" aria-label="图片预览操作">
+            {generatedImageUrl && (
+              <button
+                type="button"
+                className={`nodrag node-action generated-video-secondary-action ${executionRunning ? "is-cancel" : ""}`}
+                disabled={executionCancelling}
+                onClick={() => {
+                  if (executionRunning) void onCancelExecution(id);
+                  else void onUpscaleGeneratedImage(id);
+                }}
+                title={executionRunning ? "取消这次图片放大" : "独立放大当前图片"}
+                aria-label={executionRunning ? "取消图片放大" : "放大当前图片"}
+              >
+                {executionRunning
+                  ? <Square size={11} fill="currentColor" />
+                  : <Sparkles size={12} />}
+              </button>
+            )}
+            {generatedImageUrl && !isImageUpscalePreview && (
+              <button
+                type="button"
+                className="nodrag node-action generated-video-regenerate-action"
+                onClick={() => void onRegenerateGeneratedImage(id)}
+                title="重新生成该图片"
+                aria-label="重新生成该图片"
+              >
+                <RotateCcw size={12} />
+              </button>
+            )}
+            {generatedImageUrl && (
+              <button
+                type="button"
+                className="nodrag node-action generated-video-locate-prompt-action"
+                onClick={(event) => onLocateGeneratedImage(id, event.ctrlKey ? "generator" : "prompt")}
+                title="点击定位提示词；Ctrl+点击定位关联的图片生成节点"
+                aria-label="定位提示词或图片生成节点"
+              >
+                <LocateFixed size={12} />
+              </button>
+            )}
+            {supportsPreviewColor && (
+              <div
+                ref={previewColorControlRef}
+                className="nodrag node-preview-color-control"
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  className="node-preview-color-picker"
+                  onClick={() => setPreviewColorMenuOpen((open) => !open)}
+                  title="选择图片预览颜色"
+                  aria-label="选择图片预览颜色"
+                  aria-expanded={previewColorMenuOpen}
+                >
+                  <Palette size={13} />
+                </button>
+                {previewColorMenuOpen && (
+                  <div className="node-preview-color-presets" role="menu" aria-label="图片预览颜色预设">
+                    {previewColorPresets.map((preset) => (
+                      <button
+                        key={preset.value}
+                        type="button"
+                        role="menuitem"
+                        className={previewDisplayColor === preset.value ? "is-active" : ""}
+                        style={{ "--preview-preset-color": preset.value } as CSSProperties}
+                        onClick={() => {
+                          onChange(id, {
+                            content: { ...record.content, previewThemeColor: preset.value },
+                          });
+                          setPreviewColorMenuOpen(false);
+                        }}
+                        title={preset.label}
+                        aria-label={preset.label}
+                      >
+                        <span
+                          className={preset.value === VIDEO_PREVIEW_DEFAULT_COLOR ? "is-default" : ""}
+                          aria-hidden="true"
+                        />
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {generatedImageUrl && (
+              <button
+                type="button"
+                className="nodrag node-action"
+                onClick={() => void onRevealGeneratedImage(id)}
+                title="在 Windows 资源管理器中定位图片"
+                aria-label="在 Windows 资源管理器中定位图片"
+              >
+                <FolderOpen size={13} />
+              </button>
+            )}
+            {generatedImageUrl && (
+              <div ref={generatedInfoRef} className="nodrag generated-video-info-control">
+                <button
+                  type="button"
+                  className={`node-action generated-video-info-button ${generatedInfoOpen ? "is-active" : ""}`}
+                  onClick={() => {
+                    setPreviewColorMenuOpen(false);
+                    setGeneratedInfoOpen((open) => !open);
+                  }}
+                  title="查看图片生成信息"
+                  aria-label="查看图片生成信息"
+                  aria-expanded={generatedInfoOpen}
+                >
+                  <Info size={13} />
+                </button>
+                {generatedInfoOpen && createPortal(
+                  <aside
+                    ref={generatedInfoPanelRef}
+                    className={`generated-video-info-panel ${generatedInfoPanning ? "is-middle-panning" : ""}`}
+                    aria-label="图片生成信息"
+                    style={generatedInfoPosition}
+                    onPointerDown={beginGeneratedInfoMiddlePan}
+                    onPointerMove={moveGeneratedInfoMiddlePan}
+                    onPointerUp={endGeneratedInfoMiddlePan}
+                    onPointerCancel={endGeneratedInfoMiddlePan}
+                    onWheelCapture={zoomCanvasFromGeneratedInfoWheel}
+                  >
+                    <header>
+                      <div>
+                        <strong>图片生成信息</strong>
+                        <span>{isImageUpscalePreview ? "独立放大预览" : "图片预览"}</span>
+                      </div>
+                    </header>
+                    <section className="generated-video-info-summary">
+                      <div className="generated-image-material-note">
+                        <span>素材备注</span>
+                        <input
+                          className="nodrag nowheel"
+                          value={materialNoteDraft}
+                          placeholder="添加备注，供后续视频生成读取"
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onFocus={() => setMaterialNoteFocused(true)}
+                          onChange={(event) => setMaterialNoteDraft(event.currentTarget.value)}
+                          onBlur={finishMaterialNoteEdit}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              event.currentTarget.blur();
+                            } else if (event.key === "Escape") {
+                              event.preventDefault();
+                              setMaterialNoteDraft(materialNoteFromContent(record.content));
+                              event.currentTarget.blur();
+                            }
+                          }}
+                          aria-label="图片素材备注"
+                          spellCheck={false}
+                        />
+                      </div>
+                      <div><span>Seed</span><strong title={generatedImageSeed || "未记录"}>{generatedImageSeed || "未记录"}</strong></div>
+                      <div>
+                        <span>尺寸</span>
+                        <strong>{Number.isFinite(generatedImageWidth) && Number.isFinite(generatedImageHeight)
+                          ? `${generatedImageWidth} × ${generatedImageHeight}`
+                          : "未记录"}</strong>
+                      </div>
+                      <div><span>耗时</span><strong>{formattedGenerationElapsed(record.content)}</strong></div>
+                      <div>
+                        <span>模型</span>
+                        <strong title={generatedImageModelName || "未记录"}>{generatedImageModelName || "未记录"}</strong>
+                      </div>
+                      <div>
+                        <span>生成方案</span>
+                        <strong title={generatedImageWorkflowModuleId || "未记录"}>{generatedImageWorkflowLabel}</strong>
+                      </div>
+                    </section>
+                    <section className="generated-video-stage-info">
+                      <h4>{isImageUpscalePreview ? "图片放大" : "图片生成"}</h4>
+                      <dl>
+                        {generatedImageWasUpscaled && (
+                          <>
+                            <dt>目标像素</dt>
+                            <dd>{Number.isFinite(generatedImageMegapixels) ? `${generatedImageMegapixels.toFixed(1)} MP` : "未记录"}</dd>
+                          </>
+                        )}
+                        <dt>LoRA</dt><dd title={generatedImageLoraName || "—"}>{generatedImageLoraName || "—"}</dd>
+                        <dt>负向提示词</dt><dd title={generatedImageNegativePrompt || "—"}>{generatedImageNegativePrompt || "—"}</dd>
+                      </dl>
+                    </section>
+                    <section className="generated-video-prompt-info">
+                      <div>
+                        <h4>正向提示词</h4>
+                        <button
+                          type="button"
+                          disabled={!generatedImagePrompt && !generatedImageNegativePrompt}
+                          onClick={() => {
+                            setGeneratedInfoOpen(false);
+                            setGeneratedPromptDialogOpen(true);
+                          }}
+                          title="在大窗中查看正向与负向提示词"
+                          aria-label="在大窗中查看正向与负向提示词"
+                        >
+                          <Maximize2 size={12} />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!generatedImagePrompt}
+                          onClick={() => {
+                            if (!generatedImagePrompt) return;
+                            onCopy(generatedImagePrompt);
+                            setPromptCopied(true);
+                            window.setTimeout(() => setPromptCopied(false), 1200);
+                          }}
+                          title={promptCopied ? "提示词已复制" : "复制提示词"}
+                          aria-label={promptCopied ? "提示词已复制" : "复制提示词"}
+                        >
+                          {promptCopied ? <Check size={12} /> : <Copy size={12} />}
+                        </button>
+                      </div>
+                      <p title={generatedImagePrompt}>{generatedImagePrompt || "未记录提示词"}</p>
+                    </section>
+                  </aside>,
+                  document.body,
+                )}
+              </div>
+            )}
+            {generatedPromptDialogOpen && createPortal(
+              <div
+                className="expanded-editor-backdrop"
+                onMouseDown={() => setGeneratedPromptDialogOpen(false)}
+              >
+                <section
+                  className="expanded-editor-dialog is-prompt-version is-readonly"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="图片生成提示词"
+                  onMouseDown={(event) => event.stopPropagation()}
+                >
+                  <header className="expanded-editor-header">
+                    <span className="node-kind-icon"><FileText size={15} /></span>
+                    <div>
+                      <strong>图片生成提示词</strong>
+                      <span>生成时快照 · 只读</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setGeneratedPromptDialogOpen(false)}
+                      title="关闭"
+                      aria-label="关闭提示词查看窗口"
+                    >
+                      <X size={17} />
+                    </button>
+                  </header>
+                  <div className="expanded-prompt-layout">
+                    <section className="expanded-prompt-pane is-prompt">
+                      <header>
+                        <strong>正向提示词</strong>
+                        <span>{generatedImagePrompt.length.toLocaleString()} 字符</span>
+                      </header>
+                      <textarea
+                        className="expanded-text-editor"
+                        value={generatedImagePrompt}
+                        readOnly
+                        spellCheck={false}
+                        placeholder="未记录提示词"
+                        aria-label="图片生成正向提示词，只读"
+                      />
+                    </section>
+                    <section className="expanded-prompt-pane is-information">
+                      <header>
+                        <strong>负向提示词</strong>
+                        <span>{generatedImageNegativePrompt.length.toLocaleString()} 字符</span>
+                      </header>
+                      <textarea
+                        className="expanded-text-editor"
+                        value={generatedImageNegativePrompt}
+                        readOnly
+                        spellCheck={false}
+                        placeholder="—"
+                        aria-label="图片生成负向提示词，只读"
+                      />
+                    </section>
+                  </div>
+                </section>
+              </div>,
+              document.body,
+            )}
+          </div>
+        </footer>
+      )}
       {isVideoGeneration && (
         <div className="nodrag video-node-body has-media">
           <div className="video-workflow-module-select">
@@ -7079,7 +7629,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <button
                 type="button"
                 className="nodrag nowheel video-lora-select-toggle"
-                disabled={h3LoraBypassed || !selectableH3Loras.length}
+              disabled={!selectableH3Loras.length}
                 aria-haspopup="menu"
                 aria-expanded={loraMenuOpen}
                 title={availableH3LoraName ?? (h3LoraName
@@ -7093,27 +7643,51 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 }}
                 onPointerDown={(event) => event.stopPropagation()}
               >
-                <span>{availableH3LoraName
-                  ? h3LoraDisplayName(availableH3LoraName)
-                  : h3LoraName ? "未找到 LoRA" : "未选择 LoRA"}</span>
+                <span>{h3LoraBypassed
+                  ? "不使用 LoRA"
+                  : availableH3LoraName
+                    ? h3LoraDisplayName(availableH3LoraName)
+                    : h3LoraName ? "未找到 LoRA" : "未选择 LoRA"}</span>
                 <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
               </button>
-              {loraMenuOpen && !h3LoraBypassed && (
+              {loraMenuOpen && (
                 <div className="video-lora-select-menu" role="menu" aria-label="MiniMax H3 LoRA">
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={h3LoraBypassed}
+                    className={h3LoraBypassed ? "is-active" : ""}
+                    onClick={() => {
+                      onH3LoraPreferenceChange({ loraName: "", loraBypassed: true });
+                      onChange(id, {
+                        content: {
+                          ...record.content,
+                          generationLoraName: "",
+                          generationLoraBypassed: true,
+                          status: "idle",
+                          validationMessage: "",
+                        },
+                      });
+                      setLoraMenuOpen(false);
+                    }}
+                  >
+                    不使用 LoRA
+                  </button>
                   {selectableH3Loras.map((lora) => (
                     <button
                       key={lora}
                       type="button"
                       role="menuitemradio"
-                      aria-checked={sameH3LoraName(h3LoraName, lora)}
-                      className={sameH3LoraName(h3LoraName, lora) ? "is-active" : ""}
+                      aria-checked={!h3LoraBypassed && sameH3LoraName(h3LoraName, lora)}
+                      className={!h3LoraBypassed && sameH3LoraName(h3LoraName, lora) ? "is-active" : ""}
                       title={lora}
                       onClick={() => {
-                        onH3LoraPreferenceChange({ loraName: lora, loraStrength: h3LoraStrength });
+                        onH3LoraPreferenceChange({ loraName: lora, loraStrength: h3LoraStrength, loraBypassed: false });
                         onChange(id, {
                           content: {
                             ...record.content,
                             generationLoraName: lora,
+                            generationLoraBypassed: false,
                             status: "idle",
                             validationMessage: "",
                           },
@@ -7194,29 +7768,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 }}
               />
             </label>
-            <button
-              type="button"
-              className="video-lora-bypass-switch"
-              role="switch"
-              aria-checked={!h3LoraBypassed}
-              aria-label="启用一采 LoRA"
-              title={h3LoraBypassed ? "LoRA 已关闭，点击启用" : "LoRA 已启用，点击关闭"}
-              onClick={() => {
-                setLoraMenuOpen(false);
-                onH3LoraPreferenceChange({ loraBypassed: !h3LoraBypassed });
-                onChange(id, {
-                  content: {
-                    ...record.content,
-                    generationLoraBypassed: !h3LoraBypassed,
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                });
-              }}
-              onPointerDown={(event) => event.stopPropagation()}
-            >
-              <span aria-hidden="true" />
-            </button>
           </div>
           <div className={`video-lora-control is-secondary ${h3SecondaryLoraBypassed ? "is-bypassed" : ""} ${secondaryLoraMenuOpen ? "is-menu-open" : ""}`}>
             <span>2采 LoRA</span>
@@ -7238,20 +7789,43 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 }}
                 onPointerDown={(event) => event.stopPropagation()}
               >
-                <span>{availableH3SecondaryLoraName
-                  ? h3LoraDisplayName(availableH3SecondaryLoraName)
-                  : h3SecondaryLoraName ? "未找到 LoRA" : "未选择 LoRA"}</span>
+                <span>{h3SecondaryLoraBypassed
+                  ? "不使用 LoRA"
+                  : availableH3SecondaryLoraName
+                    ? h3LoraDisplayName(availableH3SecondaryLoraName)
+                    : h3SecondaryLoraName ? "未找到 LoRA" : "未选择 LoRA"}</span>
                 <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
               </button>
               {secondaryLoraMenuOpen && (
                 <div className="video-lora-select-menu" role="menu" aria-label="MiniMax H3 二采 LoRA">
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={h3SecondaryLoraBypassed}
+                    className={h3SecondaryLoraBypassed ? "is-active" : ""}
+                    onClick={() => {
+                      onH3LoraPreferenceChange({ secondaryLoraName: "", secondaryLoraBypassed: true });
+                      onChange(id, {
+                        content: {
+                          ...record.content,
+                          generationSecondaryLoraName: "",
+                          generationSecondaryLoraBypassed: true,
+                          status: "idle",
+                          validationMessage: "",
+                        },
+                      });
+                      setSecondaryLoraMenuOpen(false);
+                    }}
+                  >
+                    不使用 LoRA
+                  </button>
                   {selectableH3Loras.map((lora) => (
                     <button
                       key={lora}
                       type="button"
                       role="menuitemradio"
-                      aria-checked={sameH3LoraName(h3SecondaryLoraName, lora)}
-                      className={sameH3LoraName(h3SecondaryLoraName, lora) ? "is-active" : ""}
+                      aria-checked={!h3SecondaryLoraBypassed && sameH3LoraName(h3SecondaryLoraName, lora)}
+                      className={!h3SecondaryLoraBypassed && sameH3LoraName(h3SecondaryLoraName, lora) ? "is-active" : ""}
                       title={lora}
                       onClick={() => {
                         onH3LoraPreferenceChange({
@@ -7345,33 +7919,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 }}
               />
             </label>
-            <button
-              type="button"
-              className="video-lora-bypass-switch"
-              role="switch"
-              aria-checked={!h3SecondaryLoraBypassed}
-              aria-label="启用二采 LoRA"
-              title={h3SecondaryLoraBypassed
-                ? "二采 LoRA 已关闭，点击启用"
-                : "二采 LoRA 已启用，点击关闭"}
-              onClick={() => {
-                setSecondaryLoraMenuOpen(false);
-                onH3LoraPreferenceChange({
-                  secondaryLoraBypassed: !h3SecondaryLoraBypassed,
-                });
-                onChange(id, {
-                  content: {
-                    ...record.content,
-                    generationSecondaryLoraBypassed: !h3SecondaryLoraBypassed,
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                });
-              }}
-              onPointerDown={(event) => event.stopPropagation()}
-            >
-              <span aria-hidden="true" />
-            </button>
           </div>
           <div className="video-seed-control">
             <span>生成种子</span>
@@ -7774,9 +8321,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       aria-label={`${group.label}输入顺序`}
                     >
                       {group.inputs.map((input, index) => {
+                        const inputKind = videoInputMediaKind(input);
                         const inputAssetPath = typeof input.content.assetPath === "string"
                           ? input.content.assetPath
                           : "";
+                        const inputPreviewUrl = input.kind === "generated-image"
+                          && typeof input.content.imageUrl === "string"
+                          ? input.content.imageUrl
+                          : inputAssetPath ? convertFileSrc(inputAssetPath) : "";
                         const inputName = typeof input.content.originalName === "string"
                           ? input.content.originalName
                           : input.title;
@@ -7784,12 +8336,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                           <li
                             key={input.id}
                             data-media-input-id={input.id}
-                            className={`video-input-item ${input.kind === "image" ? "is-image-tile nodrag" : ""} ${input.kind === "audio" ? "is-audio-tile" : ""} ${draggedMediaId === input.id ? "is-dragging" : ""} ${dragOverMediaId === input.id ? "is-drop-target" : ""}`}
-                            title={input.kind === "image" || input.kind === "audio" ? inputName : undefined}
-                            tabIndex={input.kind === "image" ? 0 : undefined}
-                            aria-label={input.kind === "image" ? `图片 ${index + 1}：${inputName}` : undefined}
+                            className={`video-input-item ${inputKind === "image" ? "is-image-tile nodrag" : ""} ${inputKind === "audio" ? "is-audio-tile" : ""} ${draggedMediaId === input.id ? "is-dragging" : ""} ${dragOverMediaId === input.id ? "is-drop-target" : ""}`}
+                            title={inputKind === "image" || inputKind === "audio" ? inputName : undefined}
+                            tabIndex={inputKind === "image" ? 0 : undefined}
+                            aria-label={inputKind === "image" ? `图片 ${index + 1}：${inputName}` : undefined}
                             onPointerDown={(event) => {
-                              if (input.kind !== "image" || event.button !== 0) return;
+                              if (inputKind !== "image" || event.button !== 0) return;
                               event.preventDefault();
                               event.stopPropagation();
                               event.currentTarget.setPointerCapture(event.pointerId);
@@ -7798,7 +8350,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                             }}
                             onPointerMove={(event) => {
                               if (
-                                input.kind !== "image"
+                                inputKind !== "image"
                                 || !event.currentTarget.hasPointerCapture(event.pointerId)
                               ) return;
                               event.preventDefault();
@@ -7807,7 +8359,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                               const target = mediaInputs.find((candidate) => candidate.id === targetId);
                               const reorderTarget = target
                                 && target.id !== input.id
-                                && target.kind === input.kind
+                                && videoInputMediaKind(target) === inputKind
                                 ? target
                                 : null;
                               setDragOverMediaId(reorderTarget?.id ?? null);
@@ -7815,7 +8367,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                             }}
                             onPointerUp={(event) => {
                               if (
-                                input.kind !== "image"
+                                inputKind !== "image"
                                 || !event.currentTarget.hasPointerCapture(event.pointerId)
                               ) return;
                               event.preventDefault();
@@ -7829,7 +8381,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                               setDragOverMediaId(null);
                             }}
                             onPointerCancel={(event) => {
-                              if (input.kind !== "image") return;
+                              if (inputKind !== "image") return;
                               if (event.currentTarget.hasPointerCapture(event.pointerId)) {
                                 event.currentTarget.releasePointerCapture(event.pointerId);
                               }
@@ -7837,12 +8389,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                               setDragOverMediaId(null);
                             }}
                             onLostPointerCapture={() => {
-                              if (input.kind !== "image") return;
+                              if (inputKind !== "image") return;
                               setDraggedMediaId(null);
                               setDragOverMediaId(null);
                             }}
                             onKeyDown={(event) => {
-                              if (input.kind !== "image" || event.target !== event.currentTarget) return;
+                              if (inputKind !== "image" || event.target !== event.currentTarget) return;
                               if (event.key === "ArrowLeft" && index > 0) {
                                 event.preventDefault();
                                 moveMediaInputTo(input.id, group.inputs[index - 1].id);
@@ -7853,7 +8405,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                             }}
                           >
                             <span className="video-input-index">{index + 1}</span>
-                            {input.kind === "audio" ? (
+                            {inputKind === "audio" ? (
                               <>
                                 <button
                                   type="button"
@@ -7887,10 +8439,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                                   />
                                 )}
                               </>
-                            ) : <span className={`video-input-preview is-${input.kind}`}>
-                              {inputAssetPath && input.kind === "image" ? (
-                                <img src={convertFileSrc(inputAssetPath)} alt="" draggable={false} />
-                              ) : inputAssetPath && input.kind === "video" ? (
+                            ) : <span className={`video-input-preview is-${inputKind ?? input.kind}`}>
+                              {inputPreviewUrl && inputKind === "image" ? (
+                                <img src={inputPreviewUrl} alt="" draggable={false} />
+                              ) : inputAssetPath && inputKind === "video" ? (
                                 <video
                                   src={convertFileSrc(inputAssetPath)}
                                   muted
@@ -7900,21 +8452,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                                   onMouseEnter={(event) => void event.currentTarget.play().catch(() => {})}
                                   onMouseLeave={(event) => event.currentTarget.pause()}
                                 />
-                              ) : input.kind === "image" ? (
+                              ) : inputKind === "image" ? (
                                 <ImageIcon size={16} />
-                              ) : input.kind === "audio" ? (
-                                <Music size={16} />
                               ) : (
                                 <Film size={16} />
                               )}
                             </span>}
-                            {input.kind !== "image" && (
+                            {inputKind !== "image" && (
                               <span className="video-input-copy">
                                 <strong title={inputName}>{inputName}</strong>
-                                {input.kind !== "audio" && <span>{group.label}</span>}
+                                <span>{group.label}</span>
                               </span>
                             )}
-                            {videoGenerationMode === "first-last-frame" && input.kind === "image" && (
+                            {videoGenerationMode === "first-last-frame" && inputKind === "image" && (
                               <select
                                 className="nodrag frame-role-select is-image-tile-role"
                                 value={frameRoleFromContent(record.content, input.id, index)}
@@ -7940,7 +8490,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                             >
                               <Trash2 size={13} aria-hidden="true" />
                             </button>
-                            {input.kind !== "image" && (
+                            {inputKind !== "image" && (
                             <button
                               type="button"
                               className="nodrag video-input-drag"
@@ -7961,7 +8511,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                                 const targetId = mediaInputIdAtPoint(event.clientX, event.clientY);
                                 const target = mediaInputs.find((candidate) => candidate.id === targetId);
                                 setDragOverMediaId(
-                                  target && target.id !== input.id && target.kind === input.kind
+                                  target && target.id !== input.id && videoInputMediaKind(target) === inputKind
                                     ? target.id
                                     : null,
                                 );
@@ -8141,7 +8691,514 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           </div>
         </div>
       )}
-      {!isGeneratedVideo && (
+      {isImageGeneration && (
+        <div className="nodrag video-node-body has-media image-generation-node-body">
+          <label className="video-workflow-module-select image-generation-workflow-select">
+            <span>生成方案</span>
+            <select
+              className="image-generation-select"
+              value={typeof record.content.workflowModuleId === "string" ? record.content.workflowModuleId : ""}
+              onChange={(event) => {
+              const module = availableImageWorkflowModules.find((candidate) => candidate.id === event.currentTarget.value);
+              if (!module) return;
+              onChange(id, {
+                content: {
+                  ...record.content,
+                  workflowModuleId: module.id,
+                  workflowModuleRevision: module.revision,
+                  imageEditLayout: module.variant === "image-edit",
+                  imageLoraName: module.variant === "image-edit" ? "" : imageLoraName,
+                  upscaleEnabled: module.variant === "image-edit" ? false : record.content.upscaleEnabled,
+                  status: "idle",
+                  validationMessage: "",
+                },
+              });
+              }}
+            >
+              <option value="">请选择方案</option>
+              {availableImageWorkflowModules.map((module) => <option key={module.id} value={module.id}>{module.name} · {module.revision}</option>)}
+            </select>
+          </label>
+          <div className={`video-seed-control image-generation-seed-control ${isKrea2ImageEdit ? "is-image-edit-seed" : ""}`}>
+            <div className="image-generation-seed-primary">
+              <span>生成种子</span>
+              <div className="video-seed-mode" aria-label="图片种子模式">
+                {(["random", "fixed"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={seedMode === mode ? "is-active" : ""}
+                    aria-pressed={seedMode === mode}
+                    onClick={() => onChange(id, {
+                      content: {
+                        ...record.content,
+                        seedMode: mode,
+                        status: "idle",
+                        validationMessage: "",
+                      },
+                    })}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    {mode === "random" ? "随机" : "固定"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {seedMode === "fixed" ? (
+              <div className="video-seed-fixed">
+                <input
+                  className="video-seed-input"
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={20}
+                  value={fixedSeed}
+                  onChange={(event) => onChange(id, {
+                    content: {
+                      ...record.content,
+                      seed: event.currentTarget.value.replace(/\D/g, ""),
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  })}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  aria-label="图片固定种子"
+                  spellCheck={false}
+                />
+                <button
+                  type="button"
+                  className="video-seed-randomize"
+                  title="随机生成固定种子"
+                  aria-label="随机生成图片固定种子"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={() => onChange(id, {
+                    content: {
+                      ...record.content,
+                      seed: randomFixedSeed(),
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  })}
+                >
+                  <Dices size={14} />
+                </button>
+              </div>
+            ) : <span className="video-seed-hint">每次生成自动更换</span>}
+          </div>
+          {isKrea2ImageEdit && (
+            <div className="video-resolution-pair image-generation-size-row is-image-edit-size">
+              <label className="video-resolution-inline">
+                <span>宽度</span>
+                <input className="image-generation-number" type="number" min="64" max="4096" step="64" value={typeof record.content.width === "number" ? record.content.width : 1280} onChange={(event) => onChange(id, { content: { ...record.content, width: Number(event.currentTarget.value), status: "idle", validationMessage: "" } })} />
+                <output>px</output>
+              </label>
+              <button
+                type="button"
+                className="image-generation-swap-size"
+                title="互换宽度和高度（等同于旋转 90°）"
+                aria-label="互换宽度和高度（等同于旋转 90°）"
+                onClick={() => onChange(id, {
+                  content: {
+                    ...record.content,
+                    width: typeof record.content.height === "number" ? record.content.height : 720,
+                    height: typeof record.content.width === "number" ? record.content.width : 1280,
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                })}
+              >
+                <ArrowLeftRight size={16} aria-hidden="true" />
+              </button>
+              <label className="video-resolution-inline">
+                <span>高度</span>
+                <input className="image-generation-number" type="number" min="64" max="4096" step="64" value={typeof record.content.height === "number" ? record.content.height : 720} onChange={(event) => onChange(id, { content: { ...record.content, height: Number(event.currentTarget.value), status: "idle", validationMessage: "" } })} />
+                <output>px</output>
+              </label>
+            </div>
+          )}
+          {isKrea2ImageEdit && (
+            <section className="video-input-group is-image image-edit-input-group">
+              <div className="video-input-group-heading">
+                <ImageIcon size={13} />
+                <strong>编辑图片</strong>
+                <span>{imageEditInputs.length}/2</span>
+              </div>
+              <ol className="video-input-list image-edit-input-list" aria-label="Krea2 图像编辑输入图片">
+                {[0, 1].map((index) => {
+                  const input = imageEditInputs[index];
+                  const inputAssetPath = typeof input?.content.assetPath === "string"
+                    ? input.content.assetPath
+                    : "";
+                  const inputPreviewUrl = input?.kind === "generated-image"
+                    && typeof input.content.imageUrl === "string"
+                    ? input.content.imageUrl
+                    : inputAssetPath ? convertFileSrc(inputAssetPath) : "";
+                  const inputName = typeof input?.content.originalName === "string"
+                    ? input.content.originalName
+                    : input?.title || "未连接";
+                  return (
+                    <li
+                      key={input?.id ?? `empty-${index}`}
+                      data-media-input-id={input?.id}
+                      className={`video-input-item image-edit-input-item ${input ? "is-text-input" : "is-empty"} ${draggedMediaId === input?.id ? "is-dragging" : ""} ${dragOverMediaId === input?.id ? "is-drop-target" : ""}`}
+                      tabIndex={input ? 0 : undefined}
+                      aria-label={input ? `图像编辑图片 ${index + 1}：${inputName}` : undefined}
+                      onPointerDown={(event) => {
+                        if (!input || event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        setDraggedMediaId(input.id);
+                        setDragOverMediaId(null);
+                      }}
+                      onPointerMove={(event) => {
+                        if (!input || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const targetId = mediaInputIdAtPoint(event.clientX, event.clientY);
+                        const reorderTarget = imageEditInputs.find((candidate) => (
+                          candidate.id === targetId && candidate.id !== input.id
+                        ));
+                        setDragOverMediaId(reorderTarget?.id ?? null);
+                        if (reorderTarget) moveMediaInputTo(input.id, reorderTarget.id);
+                      }}
+                      onPointerUp={(event) => {
+                        if (!input || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const targetId = mediaInputIdAtPoint(event.clientX, event.clientY);
+                        const reorderTarget = imageEditInputs.find((candidate) => candidate.id === targetId);
+                        moveMediaInputTo(input.id, reorderTarget?.id ?? null);
+                        event.currentTarget.releasePointerCapture(event.pointerId);
+                        setDraggedMediaId(null);
+                        setDragOverMediaId(null);
+                      }}
+                      onPointerCancel={(event) => {
+                        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                          event.currentTarget.releasePointerCapture(event.pointerId);
+                        }
+                        setDraggedMediaId(null);
+                        setDragOverMediaId(null);
+                      }}
+                      onLostPointerCapture={() => {
+                        setDraggedMediaId(null);
+                        setDragOverMediaId(null);
+                      }}
+                      onKeyDown={(event) => {
+                        if (!input || event.target !== event.currentTarget) return;
+                        if (event.key === "ArrowLeft" && index > 0) {
+                          event.preventDefault();
+                          moveMediaInputTo(input.id, imageEditInputs[index - 1].id);
+                        } else if (event.key === "ArrowRight" && index < imageEditInputs.length - 1) {
+                          event.preventDefault();
+                          moveMediaInputTo(input.id, imageEditInputs[index + 1].id);
+                        }
+                      }}
+                    >
+                      <span className="video-input-index">{index + 1}</span>
+                      <span className="video-input-preview is-image">
+                        {inputPreviewUrl ? <img src={inputPreviewUrl} alt="" draggable={false} /> : <ImageIcon size={16} />}
+                      </span>
+                      <span className="video-input-copy">
+                        <strong>{input ? inputName : index === 0 ? "图 1（必填）" : "图 2（可选）"}</strong>
+                        <span>{input ? "已接入" : index === 0 ? "请连接要编辑的图片" : "可连接第二张参考图"}</span>
+                      </span>
+                      {input && (
+                        <button
+                          type="button"
+                          className="nodrag video-input-remove"
+                          disabled={removingMediaId === input.id}
+                          aria-label={`从图像编辑节点移除${inputName}`}
+                          title="从当前图像编辑节点移除，不删除原图片"
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void removeConnectedInput(input.id);
+                          }}
+                        >
+                          <Trash2 size={13} aria-hidden="true" />
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ol>
+            </section>
+          )}
+          {!isKrea2ImageEdit && (
+          <label className="video-workflow-module-select image-generation-lora-select">
+            <span>LoRA</span>
+            <select
+              className="image-generation-select"
+              value={availableImageLoraName ?? imageLoraName}
+              onChange={(event) => onChange(id, {
+                content: {
+                  ...record.content,
+                  imageLoraName: event.currentTarget.value,
+                  status: "idle",
+                  validationMessage: "",
+                },
+              })}
+            >
+              <option value="">不使用 LoRA</option>
+              {krea2LoraOptions.map((lora) => (
+                <option key={lora} value={lora}>{h3LoraDisplayName(lora)}</option>
+              ))}
+            </select>
+          </label>
+          )}
+          <section className="video-input-group is-text image-prompt-input-group">
+            <div className={`video-input-group-heading ${textInputs.length ? "has-text-clear" : ""}`}>
+              <FileText size={13} />
+              <strong>正向提示词</strong>
+              <span>{textInputs.length}</span>
+              {textInputs.length > 0 && (
+                <button
+                  type="button"
+                  className="nodrag video-text-clear-button"
+                  disabled={clearingTexts}
+                  title="清除当前图片生成节点的全部正向提示词连接"
+                  aria-label={`清除全部 ${textInputs.length} 个正向提示词连接`}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setTextIdsPendingClear(textInputs.map((input) => input.id));
+                  }}
+                >
+                  <Trash2 size={12} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+            <ol className="video-input-list image-prompt-input-list" role="listbox" aria-label="正向提示词输入">
+              {textInputs.length ? textInputs.map((input, index) => (
+                <li
+                  key={input.id}
+                  className={`video-input-item is-text-input ${activeTextInputId === input.id ? "is-active-text" : ""}`}
+                  role="option"
+                  aria-selected={activeTextInputId === input.id}
+                  tabIndex={0}
+                  title={activeTextInputId === input.id ? "当前正向提示词" : "点击设为当前正向提示词"}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onActivateTextInput(id, input.id);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onActivateTextInput(id, input.id);
+                  }}
+                >
+                  <span className="video-input-index">{index + 1}</span>
+                  <span className="video-input-preview is-text"><FileText size={16} /></span>
+                  <span className="video-input-copy">
+                    <strong title={input.title}>
+                      {input.title || "未命名文本"}{activePromptVersionLabelFromContent(input.content) ? ` · ${activePromptVersionLabelFromContent(input.content)}` : ""}
+                    </strong>
+                    <span className="video-text-input-preview" title={imagePromptText(input)}>{imagePromptText(input) || "空文本"}</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="nodrag video-input-expand"
+                    aria-label={`放大查看正向提示词：${input.title || "未命名文本"}`}
+                    title="放大查看和编辑提示词"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openConnectedTextEditor(input);
+                    }}
+                  >
+                    <Maximize2 size={13} aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="nodrag video-input-remove"
+                    disabled={removingMediaId === input.id}
+                    aria-label={`从图片生成节点移除正向提示词：${input.title || "未命名文本"}`}
+                    title="从当前图片生成节点移除，不删除原文本节点"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void removeConnectedInput(input.id);
+                    }}
+                  >
+                    <Trash2 size={13} aria-hidden="true" />
+                  </button>
+                </li>
+              )) : (
+                <li className="video-input-item is-empty">
+                  <span className="video-input-index">—</span>
+                  <span className="video-input-preview is-text"><FileText size={16} /></span>
+                  <span className="video-input-copy"><strong>无</strong><span className="video-text-input-preview">请连接文本或提示词迭代节点</span></span>
+                </li>
+              )}
+            </ol>
+          </section>
+          <label className="image-generation-negative-field">
+            <span>负向提示词</span>
+            <textarea
+              value={typeof record.content.negativePrompt === "string" ? record.content.negativePrompt : ""}
+              placeholder="可选：直接输入不希望出现的内容"
+              spellCheck={false}
+              onChange={(event) => onChange(id, {
+                content: {
+                  ...record.content,
+                  negativePrompt: event.currentTarget.value,
+                  status: "idle",
+                  validationMessage: "",
+                },
+              })}
+            />
+          </label>
+          {!isKrea2ImageEdit && (
+          <div className="video-resolution-pair image-generation-size-row">
+            <label className="video-resolution-inline">
+              <span>宽度</span>
+              <input className="image-generation-number" type="number" min="64" max="4096" step="64" value={typeof record.content.width === "number" ? record.content.width : 1280} onChange={(event) => onChange(id, { content: { ...record.content, width: Number(event.currentTarget.value), status: "idle", validationMessage: "" } })} />
+              <output>px</output>
+            </label>
+            <button
+              type="button"
+              className="image-generation-swap-size"
+              title="互换宽度和高度（等同于旋转 90°）"
+              aria-label="互换宽度和高度（等同于旋转 90°）"
+              onClick={() => onChange(id, {
+                content: {
+                  ...record.content,
+                  width: typeof record.content.height === "number" ? record.content.height : 720,
+                  height: typeof record.content.width === "number" ? record.content.width : 1280,
+                  status: "idle",
+                  validationMessage: "",
+                },
+              })}
+            >
+              <ArrowLeftRight size={16} aria-hidden="true" />
+            </button>
+            <label className="video-resolution-inline">
+              <span>高度</span>
+              <input className="image-generation-number" type="number" min="64" max="4096" step="64" value={typeof record.content.height === "number" ? record.content.height : 720} onChange={(event) => onChange(id, { content: { ...record.content, height: Number(event.currentTarget.value), status: "idle", validationMessage: "" } })} />
+              <output>px</output>
+            </label>
+          </div>
+          )}
+          <div className={`image-generation-sampling-row ${isKrea2ImageEdit ? "is-single" : ""}`}>
+            <label className="image-generation-steps" title="基础文生图 K 采样器的采样步数">
+              <span>生图步数</span>
+              <input
+                className="image-generation-number"
+                type="number"
+                min="1"
+                max="1000"
+                step="1"
+                value={typeof record.content.steps === "number" ? record.content.steps : 8}
+                aria-label="生图步数"
+                onChange={(event) => onChange(id, {
+                  content: {
+                    ...record.content,
+                    steps: Number(event.currentTarget.value),
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                })}
+              />
+            </label>
+            {!isKrea2ImageEdit && (
+            <div className="image-generation-upscale">
+              <span>输出放大</span>
+              <label className="image-generation-upscale-megapixels" title="放大后的目标像素数（MP）">
+                <input
+                  className="image-generation-number"
+                  type="number"
+                  min="0.1"
+                  max="64"
+                  step="0.1"
+                  value={typeof record.content.upscaleMegapixels === "number" ? record.content.upscaleMegapixels : 8}
+                  aria-label="输出放大像素数（MP）"
+                  onChange={(event) => onChange(id, {
+                    content: {
+                      ...record.content,
+                      upscaleMegapixels: Number(event.currentTarget.value),
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  })}
+                />
+                <span>MP</span>
+              </label>
+              <button
+                type="button"
+                className="video-lora-bypass-switch"
+                role="switch"
+                aria-checked={record.content.upscaleEnabled === true}
+                aria-label="启用输出放大"
+                title={record.content.upscaleEnabled === true ? "已启用输出放大" : "未启用输出放大"}
+                onClick={() => onChange(id, {
+                  content: {
+                    ...record.content,
+                    upscaleEnabled: record.content.upscaleEnabled !== true,
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                })}
+              >
+                <span />
+              </button>
+            </div>
+            )}
+          </div>
+          <div className="video-execution-row image-generation-execution-row">
+            <div className="video-execution-slot">
+              {validationMessage ? (
+                <div className={`video-validation-message is-${validationStatus ?? "idle"}`}>
+                  <span title={validationMessage}>{validationMessage}</span>
+                  {executionRunning && (
+                    <div className={`video-execution-progress ${executionProgress === null ? "is-indeterminate" : ""}`} role="progressbar" aria-label="图片生成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={executionProgress ?? undefined}>
+                      <span style={executionProgress === null ? undefined : { width: `${executionProgress}%` }} />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="video-validation-message is-idle"><span>等待提示词输入</span></div>
+              )}
+            </div>
+            <div className="video-execution-actions">
+              {executionRunning && (
+                <button
+                  type="button"
+                  className="video-cancel-button"
+                  disabled={executionCancelling || activeTaskCount === 0}
+                  onClick={() => void onCancelExecution(id)}
+                  title={activeTaskCount === 0
+                    ? "正在提交首个图片任务，暂时无法取消"
+                    : `取消最早提交的图片任务；当前共有 ${activeTaskCount} 个任务`}
+                  aria-label={activeTaskCount === 0
+                    ? "正在提交首个图片任务，暂时无法取消"
+                    : `取消最早提交的图片任务；当前共有 ${activeTaskCount} 个任务`}
+                >
+                  <X size={13} />
+                  {activeTaskCount || null}
+                </button>
+              )}
+              <button
+                type="button"
+                className="video-execute-button"
+                disabled={executionCancelling || (seedMode === "fixed" && executionRunning)}
+                title={seedMode === "fixed" && executionRunning
+                  ? "固定种子已有任务正在执行，不能重复排队"
+                  : executionRunning ? "将当前图片任务加入队列" : "开始生成图片"}
+                aria-label={seedMode === "fixed" && executionRunning
+                  ? "固定种子已有任务正在执行，不能重复排队"
+                  : executionRunning ? "将当前图片任务加入队列" : "开始生成图片"}
+                onClick={() => void checkAndExecuteImage()}
+              >
+                <Play size={15} fill="currentColor" />
+              </button>
+            </div>
+          </div>
+          <div className={`input-badge ${(textInputs.length && (!isKrea2ImageEdit || imageEditInputs.length)) ? "has-input" : ""}`}>{textInputs.length ? `${isKrea2ImageEdit ? `已接入 ${imageEditInputs.length}/2 张编辑图片 · ` : ""}已接入 ${textInputs.length} 个文本 · 正向${imagePositivePromptInput ? "已选" : "未选"}` : "等待接入正向文本或提示词迭代节点"}</div>
+        </div>
+      )}
+      {!isGeneratedVideo && !isGeneratedImage && (
         <footer className="node-footer">
           <span className={`source-dot ${record.source === "manual" ? "manual" : "external"}`} />
           <span>{sourceLabel}</span>
@@ -8191,9 +9248,80 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <Scaling size={14} />
             </button>
           )}
+          {isImage && (
+            <div className="generated-video-actions" aria-label="图片信息操作">
+              <div ref={generatedInfoRef} className="nodrag generated-video-info-control">
+                <button
+                  type="button"
+                  className={`node-action generated-video-info-button ${generatedInfoOpen ? "is-active" : ""}`}
+                  onClick={() => setGeneratedInfoOpen((open) => !open)}
+                  title="查看图片信息"
+                  aria-label="查看图片信息"
+                  aria-expanded={generatedInfoOpen}
+                >
+                  <Info size={13} />
+                </button>
+                {generatedInfoOpen && createPortal(
+                <aside
+                  ref={generatedInfoPanelRef}
+                  className={`generated-video-info-panel ${generatedInfoPanning ? "is-middle-panning" : ""}`}
+                  aria-label="图片信息"
+                  style={generatedInfoPosition}
+                  onPointerDown={beginGeneratedInfoMiddlePan}
+                  onPointerMove={moveGeneratedInfoMiddlePan}
+                  onPointerUp={endGeneratedInfoMiddlePan}
+                  onPointerCancel={endGeneratedInfoMiddlePan}
+                  onWheelCapture={zoomCanvasFromGeneratedInfoWheel}
+                >
+                  <header>
+                    <div>
+                      <strong>图片信息</strong>
+                      <span>本地图片</span>
+                    </div>
+                  </header>
+                  <section className="generated-video-info-summary">
+                    <div className="generated-image-material-note">
+                      <span>素材备注</span>
+                      <input
+                        className="nodrag nowheel"
+                        value={materialNoteDraft}
+                        placeholder="添加备注，供后续视频生成读取"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onFocus={() => setMaterialNoteFocused(true)}
+                        onChange={(event) => setMaterialNoteDraft(event.currentTarget.value)}
+                        onBlur={finishMaterialNoteEdit}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            event.currentTarget.blur();
+                          } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            setMaterialNoteDraft(materialNoteFromContent(record.content));
+                            event.currentTarget.blur();
+                          }
+                        }}
+                        aria-label="图片素材备注"
+                        spellCheck={false}
+                      />
+                    </div>
+                    <div>
+                      <span>文件名</span>
+                      <strong title={originalName}>{originalName || "未记录"}</strong>
+                    </div>
+                    <div>
+                      <span>尺寸</span>
+                      <strong>{imageDimensionLabel}</strong>
+                    </div>
+                  </section>
+                </aside>,
+                document.body,
+                )}
+              </div>
+            </div>
+          )}
         </footer>
       )}
-      {(isText || isImage || isAudioAsset || isVideoAsset || isVideoGeneration || isGeneratedVideo) && !isFolder && (
+      {(isText || isImage || isGeneratedImage || isAudioAsset || isVideoAsset || isVideoGeneration || isImageGeneration || isGeneratedVideo) && !isFolder && (
         <Handle
           type="source"
           position={Position.Right}
@@ -8811,7 +9939,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             <div>
               <h2 id={`clear-texts-title-${id}`}>确认清除全部文本连接？</h2>
               <p id={`clear-texts-description-${id}`}>
-                将从当前视频生成节点断开全部 {textIdsPendingClear.length} 个文本连接。原始文字节点不会被删除，图片、音频和视频连接不受影响。
+                将从当前{isImageGeneration ? "图片" : "视频"}生成节点断开全部 {textIdsPendingClear.length} 个文本连接。原始文字节点不会被删除，其他连接不受影响。
               </p>
             </div>
             <div className="project-dialog-actions">
@@ -8864,11 +9992,13 @@ export {
   DEFAULT_H3_LORA_NAME,
   DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
   EMPTY_NODE_RECORDS,
+  GENERATED_IMAGE_CHROME_HEIGHT,
   GENERATED_VIDEO_FOOTER_HEIGHT,
   GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH,
   H3_LORA_PREFERENCE_STORAGE_KEY,
   H3_MODEL_PARAMETERS_STORAGE_KEY,
   H3_REFERENCE_WORKFLOW_STORAGE_KEY,
+  IMAGE_GENERATION_NODE_BASE_HEIGHT,
   IMAGE_NODE_CHROME_HEIGHT,
   ModelParameterNumberInput,
   NODE_HANDLE_BASE_SIZE_PX,
@@ -8926,6 +10056,8 @@ export {
   h3SecondaryLoraStrengthFromContent,
   incomingNodePosition,
   informationFromContent,
+  imageGenerationAutoHeight,
+  isImageComfyTask,
   isContentIterationContent,
   isSecondaryComfyTask,
   loadImageNaturalSize,
@@ -9016,6 +10148,8 @@ export type {
   VideoAspectRatio,
   VideoDeletionChoice,
   VideoDeletionRequest,
+  ImageDeletionRequest,
+  ImageRecoverySnapshot,
   VideoExecutionOptions,
   VideoGenerationMode,
   VideoRegenerationDraft,

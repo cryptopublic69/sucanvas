@@ -77,10 +77,13 @@ import {
   DEFAULT_H3_FIRST_LAST_WORKFLOW_PATH,
   DEFAULT_H3_IMAGE_TO_VIDEO_WORKFLOW_PATH,
   DEFAULT_H3_LAST_FRAME_TO_VIDEO_WORKFLOW_PATH,
+  DEFAULT_KREA2_IMAGE_EDIT_WORKFLOW_PATH,
+  DEFAULT_KREA2_IMAGE_WORKFLOW_PATH,
   DEFAULT_H3_LORA_NAME,
   DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
   DEFAULT_COMFYUI_SERVER_URL,
   EMPTY_NODE_RECORDS,
+  GENERATED_IMAGE_CHROME_HEIGHT,
   GENERATED_VIDEO_FOOTER_HEIGHT,
   GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH,
   H3_LORA_PREFERENCE_STORAGE_KEY,
@@ -143,6 +146,8 @@ import {
   h3SecondaryLoraStrengthFromContent,
   incomingNodePosition,
   informationFromContent,
+  imageGenerationAutoHeight,
+  isImageComfyTask,
   isContentIterationContent,
   isSecondaryComfyTask,
   loadImageNaturalSize,
@@ -211,6 +216,8 @@ import type {
   GenerationSnapshot,
   GroupNodesIntoFolderResult,
   H3LoraPreferencePatch,
+  ImageDeletionRequest,
+  ImageRecoverySnapshot,
   JsonObject,
   MergeFoldersResult,
   NodeClipboard,
@@ -253,6 +260,17 @@ function nodePreviewColor(kind: string): string {
   if (kind === "generated-video") return "#6fb5df";
   if (kind === "video-generation") return "#e48a65";
   return "#8b7cf6";
+}
+
+function videoInputMediaKind(record: NodeRecord): "image" | "audio" | "video" | null {
+  if (record.kind === "image" || record.kind === "generated-image") return "image";
+  if (record.kind === "audio" || record.kind === "video") return record.kind;
+  return null;
+}
+
+function isKrea2DiffusionModelName(value: string): boolean {
+  const normalized = value.trim().replace(/\//g, "\\");
+  return normalized.startsWith("Krea2\\") || normalized.startsWith("Kera2\\");
 }
 
 function ProjectThumbnail({ project }: { project: WorkspaceSnapshot }) {
@@ -354,7 +372,7 @@ function CanvasWorkspace() {
   const [canvasPath, setCanvasPath] = useState<CanvasRecord[]>([]);
   const [canvasBackground, setCanvasBackground] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [activeSettingsSection, setActiveSettingsSection] = useState<"general" | "workflows" | "video-defaults" | "model" | "backup" | "privacy" | "security">("general");
+  const [activeSettingsSection, setActiveSettingsSection] = useState<"general" | "workflows" | "video-defaults" | "video-model" | "image-model" | "backup" | "privacy" | "security">("general");
   const [appBackupBusy, setAppBackupBusy] = useState(false);
   const [appBackupMessage, setAppBackupMessage] = useState("");
   const [appBackupMessageKind, setAppBackupMessageKind] = useState<"success" | "error">("success");
@@ -442,11 +460,16 @@ function CanvasWorkspace() {
     totalCount: 0,
   });
   const [h3LoraOptions, setH3LoraOptions] = useState<string[]>([]);
+  const [krea2LoraOptions, setKrea2LoraOptions] = useState<string[]>([]);
   const [h3LoraCatalogLoaded, setH3LoraCatalogLoaded] = useState(false);
   const [h3LoraPreference, setH3LoraPreference] = useState(h3LoraPreferenceFromStorage);
   const [h3DiffusionModelOptions, setH3DiffusionModelOptions] = useState<string[]>([DEFAULT_H3_DIFFUSION_MODEL_NAME]);
   const [h3DiffusionModelCatalogLoaded, setH3DiffusionModelCatalogLoaded] = useState(false);
   const [h3DiffusionModelName, setH3DiffusionModelName] = useState(DEFAULT_H3_DIFFUSION_MODEL_NAME);
+  const [krea2DiffusionModelOptions, setKrea2DiffusionModelOptions] = useState<string[]>([]);
+  const [krea2DiffusionModelCatalogLoaded, setKrea2DiffusionModelCatalogLoaded] = useState(false);
+  const [selectedImageWorkflowModuleId, setSelectedImageWorkflowModuleId] = useState("");
+  const [krea2DiffusionModelName, setKrea2DiffusionModelName] = useState("");
   const [h3ModelParameters, setH3ModelParameters] = useState(h3ModelParametersFromStorage);
   const [h3ModelParametersDraft, setH3ModelParametersDraft] = useState(h3ModelParameters);
   const [videoGenerationDefaults, setVideoGenerationDefaults] = useState(videoGenerationDefaultsFromStorage);
@@ -480,6 +503,7 @@ function CanvasWorkspace() {
   const [canvasContextMenu, setCanvasContextMenu] = useState<CanvasContextMenuState | null>(null);
   const [folderGroupingBusy, setFolderGroupingBusy] = useState(false);
   const [videoDeletionRequest, setVideoDeletionRequest] = useState<VideoDeletionRequest | null>(null);
+  const [imageDeletionRequest, setImageDeletionRequest] = useState<ImageDeletionRequest | null>(null);
   const [videoRegenerationDraft, setVideoRegenerationDraft] = useState<VideoRegenerationDraft | null>(null);
   const [videoRegenerationInformationOpen, setVideoRegenerationInformationOpen] = useState(false);
   const [secondarySampleDraft, setSecondarySampleDraft] = useState<SecondarySampleDraft | null>(null);
@@ -512,6 +536,9 @@ function CanvasWorkspace() {
   const comfyInputRootRef = useRef(comfyInputRoot);
   const comfyUiServerUrlRef = useRef(comfyUiServerUrl);
   const h3WorkflowPathRef = useRef(h3WorkflowPath);
+  const executeImageNodeRef = useRef<(id: string, placementSourceId?: string) => Promise<void>>(async () => {});
+  const upscaleGeneratedImageRef = useRef<(id: string) => Promise<void>>(async () => {});
+  const regenerateGeneratedImageRef = useRef<(id: string) => Promise<void>>(async () => {});
   const makeFlowNodeRef = useRef<((record: NodeRecord, matched?: boolean) => CanvasFlowNode) | null>(null);
   const openFolderRef = useRef<(nodeId: string) => void>(() => undefined);
   const activeProjectIdRef = useRef<string | null>(null);
@@ -917,6 +944,30 @@ function CanvasWorkspace() {
   useEffect(() => {
     if (!workflowModulesReady) return;
     let disposed = false;
+    const refresh = async () => {
+      try {
+        const loras = await invoke<string[]>("get_comfyui_krea2_loras", {
+          serverUrl: comfyUiServerUrl,
+        });
+        if (!disposed) {
+          setKrea2LoraOptions((current) => (
+            current.length === loras.length
+            && current.every((item, index) => sameH3LoraName(item, loras[index]))
+              ? current
+              : loras
+          ));
+        }
+      } catch {
+        if (!disposed) setKrea2LoraOptions([]);
+      }
+    };
+    void refresh();
+    return () => { disposed = true; };
+  }, [comfyUiServerUrl, workflowModulesReady]);
+
+  useEffect(() => {
+    if (!workflowModulesReady) return;
+    let disposed = false;
     setH3DiffusionModelCatalogLoaded(false);
     void invoke<string[]>("get_comfyui_h3_diffusion_models", {
       serverUrl: comfyUiServerUrl,
@@ -1094,6 +1145,32 @@ function CanvasWorkspace() {
         });
         modules = [created];
       }
+      if (!modules.some((module) => !module.deletedAt && module.capability === "image-generation")) {
+        const created = await invoke<WorkflowModuleRecord>("save_workflow_module", {
+          input: {
+            name: "Krea2 文生图（可选放大）",
+            capability: "image-generation",
+            variant: "image-generation",
+            revision: "v1",
+            adapterKind: WORKFLOW_PACKAGE_ENGINE,
+            sourceWorkflowPath: DEFAULT_KREA2_IMAGE_WORKFLOW_PATH,
+          },
+        });
+        modules = [...modules, created];
+      }
+      if (!modules.some((module) => !module.deletedAt && module.capability === "image-generation" && module.variant === "image-edit")) {
+        const created = await invoke<WorkflowModuleRecord>("save_workflow_module", {
+          input: {
+            name: "Krea2 图像编辑（单图或双图）",
+            capability: "image-generation",
+            variant: "image-edit",
+            revision: "v1",
+            adapterKind: WORKFLOW_PACKAGE_ENGINE,
+            sourceWorkflowPath: DEFAULT_KREA2_IMAGE_EDIT_WORKFLOW_PATH,
+          },
+        });
+        modules = [...modules, created];
+      }
       return modules;
     };
     const initialize = async () => {
@@ -1138,6 +1215,11 @@ function CanvasWorkspace() {
   const selectedWorkflowModule = workflowModules.find(
     (module) => module.id === selectedWorkflowModuleId,
   ) ?? null;
+  const selectedImageWorkflowModule = workflowModules.find((module) => (
+    !module.deletedAt
+    && module.capability === "image-generation"
+    && module.id === selectedImageWorkflowModuleId
+  )) ?? null;
 
   useEffect(() => {
     if (!selectedWorkflowModule) return;
@@ -1151,6 +1233,38 @@ function CanvasWorkspace() {
     setWorkflowModuleBindingsDraft(JSON.stringify(selectedWorkflowModule.bindings, null, 2));
     setH3DiffusionModelName(selectedWorkflowModule.defaults.diffusionModelName);
   }, [selectedWorkflowModule]);
+
+  useEffect(() => {
+    if (
+      !settingsOpen
+      || activeSettingsSection !== "image-model"
+      || !selectedImageWorkflowModule
+    ) return;
+    let disposed = false;
+    setKrea2DiffusionModelCatalogLoaded(false);
+    void invoke<string[]>("get_comfyui_krea2_diffusion_models", {
+      serverUrl: comfyUiServerUrl,
+      workflowModuleId: selectedImageWorkflowModule.id,
+    }).then((models) => {
+      if (disposed) return;
+      setKrea2DiffusionModelOptions(models);
+      setKrea2DiffusionModelCatalogLoaded(true);
+      const configured = selectedImageWorkflowModule.defaults.diffusionModelName;
+      setKrea2DiffusionModelName((current) => (
+        models.some((model) => sameH3DiffusionModelName(model, current))
+          ? current
+          : models.find((model) => sameH3DiffusionModelName(model, configured))
+            ?? models[0]
+            ?? ""
+      ));
+    }).catch(() => {
+      if (!disposed) {
+        setKrea2DiffusionModelOptions([]);
+        setKrea2DiffusionModelCatalogLoaded(true);
+      }
+    });
+    return () => { disposed = true; };
+  }, [activeSettingsSection, comfyUiServerUrl, selectedImageWorkflowModule, settingsOpen]);
 
   const workflowModuleUsageCount = useCallback((moduleId: string) => {
     const records = new Map<string, NodeRecord>();
@@ -1757,9 +1871,18 @@ function CanvasWorkspace() {
       .map((node) => node.data.record)
       .filter((record) => {
         const status = record.content.status;
+        const validationMessage = typeof record.content.validationMessage === "string"
+          ? record.content.validationMessage
+          : "";
+        const failedImageRecovery = record.kind === "generated-image"
+          && record.content.generationPlaceholder === true
+          && status === "invalid"
+          && /^图片(?:生成|放大)恢复失败：/.test(validationMessage);
         return status === "running"
           || status === "cancelling"
-          || (status === "invalid" && record.content.validationMessage === "生成任务已中断或未记录");
+          || (status === "invalid" && (
+            validationMessage === "生成任务已中断或未记录" || failedImageRecovery
+          ));
       })
       .map(persistedComfyTaskFromPlaceholder)
       .filter((task): task is PersistedComfyTask => Boolean(task))
@@ -1782,8 +1905,15 @@ function CanvasWorkspace() {
     contentNodes.forEach((node) => {
       const status = node.data.record.content.status;
       if (status !== "running" && status !== "cancelling") return;
-      if (persistedNodeIds.has(node.id) || runningComfyClients.current.has(node.id)) return;
       const isPlaceholder = node.data.record.content.generationPlaceholder === true;
+      const sourceGeneratorId = isPlaceholder && typeof node.data.record.content.sourceGeneratorId === "string"
+        ? node.data.record.content.sourceGeneratorId
+        : "";
+      if (
+        persistedNodeIds.has(node.id)
+        || runningComfyClients.current.has(node.id)
+        || (sourceGeneratorId && runningComfyClients.current.has(sourceGeneratorId))
+      ) return;
       changeNode(node.id, {
         content: {
           ...node.data.record.content,
@@ -1815,9 +1945,10 @@ function CanvasWorkspace() {
         ]);
         continue;
       }
-      if (!["image", "audio", "video"].includes(source.kind)) continue;
+      const mediaKind = videoInputMediaKind(source);
+      if (!mediaKind) continue;
       const kinds = mediaKindsByTarget.get(edge.target) ?? [];
-      kinds.push(source.kind);
+      kinds.push(mediaKind);
       mediaKindsByTarget.set(edge.target, kinds);
     }
 
@@ -1827,6 +1958,67 @@ function CanvasWorkspace() {
         if (record.height < AUDIO_NODE_MIN_HEIGHT) {
           changeNode(node.id, { height: AUDIO_NODE_MIN_HEIGHT });
         }
+        continue;
+      }
+      if (record.kind === "image-generation") {
+        const currentTextInputCount = textInputCountByTarget.get(node.id) ?? 0;
+        const configuredModuleId = typeof record.content.workflowModuleId === "string"
+          ? record.content.workflowModuleId
+          : workflowModuleDefaults["image-generation"] ?? "";
+        const isImageEdit = workflowModules.some((module) => (
+          !module.deletedAt
+          && module.id === configuredModuleId
+          && module.capability === "image-generation"
+          && module.variant === "image-edit"
+        ));
+        const imageInputCount = (mediaKindsByTarget.get(node.id) ?? [])
+          .filter((kind) => kind === "image")
+          .length;
+        const desiredHeight = imageGenerationAutoHeight(
+          currentTextInputCount,
+          isImageEdit,
+          imageInputCount,
+        );
+        const connectedTextRecords = (textInputIdsByTarget.get(node.id) ?? [])
+          .map((inputId) => recordsById.get(inputId))
+          .filter((input): input is NodeRecord => input?.kind === "text");
+        const connectedTextIds = orderedNodeRecordsFromContent(
+          record.content,
+          "textInputOrder",
+          connectedTextRecords,
+        ).map((input) => input.id);
+        const storedActiveTextId = typeof record.content.activeTextInputId === "string"
+          ? record.content.activeTextInputId
+          : "";
+        const activeTextInputId = connectedTextIds.includes(storedActiveTextId)
+          ? storedActiveTextId
+          : connectedTextIds[0] ?? "";
+        const storedLayoutTextInputCount = typeof record.content.layoutTextInputCount === "number"
+          && Number.isFinite(record.content.layoutTextInputCount)
+          ? Math.max(0, Math.floor(record.content.layoutTextInputCount))
+          : null;
+        const storedLayoutImageInputCount = typeof record.content.layoutImageInputCount === "number"
+          && Number.isFinite(record.content.layoutImageInputCount)
+          ? Math.max(0, Math.floor(record.content.layoutImageInputCount))
+          : null;
+        const storedImageEditLayout = record.content.imageEditLayout === true;
+        if (
+          Math.abs(record.height - desiredHeight) < 0.5
+          && storedLayoutTextInputCount === currentTextInputCount
+          && storedLayoutImageInputCount === imageInputCount
+          && storedImageEditLayout === isImageEdit
+          && storedActiveTextId === activeTextInputId
+        ) continue;
+        changeNode(node.id, {
+          height: desiredHeight,
+          content: {
+            ...record.content,
+            activeTextInputId,
+            layoutTextInputCount: currentTextInputCount,
+            layoutImageInputCount: imageInputCount,
+            imageEditLayout: isImageEdit,
+          },
+        });
         continue;
       }
       if (record.kind !== "video-generation") continue;
@@ -1922,7 +2114,7 @@ function CanvasWorkspace() {
         },
       });
     }
-  }, [changeNode, contentNodes, edges]);
+  }, [changeNode, contentNodes, edges, workflowModuleDefaults, workflowModules]);
 
   const rememberDeletedBatch = useCallback((batch: DeletedBatch) => {
     undoStack.current.push({ kind: "node-delete", batch });
@@ -2039,7 +2231,9 @@ function CanvasWorkspace() {
       setNotice("要删除的历史版本不存在");
       return;
     }
-    const remaining = versions.filter((candidate) => candidate.id !== versionId);
+    const remaining = versions
+      .filter((candidate) => candidate.id !== versionId)
+      .map((candidate, index) => ({ ...candidate, label: `v${index + 1}` }));
     const activeId = typeof record.content.activePromptVersionId === "string"
       ? record.content.activePromptVersionId
       : "";
@@ -2114,16 +2308,80 @@ function CanvasWorkspace() {
     request.resolve(choice);
   }, [videoDeletionRequest]);
 
+  const imageFilePathsForRecords = useCallback((records: NodeRecord[]) => {
+    const paths = records.flatMap((record) => {
+      if (record.kind !== "generated-image") return [];
+      const mappedPath = mappedComfyOutputPath(comfyOutputRootRef.current, record.content);
+      return mappedPath ? [mappedPath] : [];
+    });
+    return [...new Set(paths)];
+  }, []);
+
+  const isDirectGeneratedImageOutput = useCallback((record: NodeRecord) => {
+    if (
+      record.kind !== "generated-image"
+      || record.content.generationPlaceholder === true
+      || record.content.generatedImageCopy === true
+      || record.source === "clipboard"
+    ) return false;
+    return edgesSnapshot.current.some((edge) => {
+      if (edge.target !== record.id) return false;
+      const kind = (edge.data as CanvasEdgeData | undefined)?.record?.kind;
+      return kind === "output";
+    });
+  }, []);
+
+  const requestImageDeletionChoice = useCallback((records: NodeRecord[]) => {
+    const imageRecords = records.filter(
+      (record) => isDirectGeneratedImageOutput(record),
+    );
+    if (!imageRecords.length) return Promise.resolve<VideoDeletionChoice>("node-only");
+    const filePaths = imageFilePathsForRecords(imageRecords);
+    return new Promise<VideoDeletionChoice>((resolve) => {
+      setImageDeletionRequest({
+        imageCount: imageRecords.length,
+        filePaths,
+        resolve,
+      });
+    });
+  }, [imageFilePathsForRecords, isDirectGeneratedImageOutput]);
+
+  const finishImageDeletionChoice = useCallback((choice: VideoDeletionChoice) => {
+    const request = imageDeletionRequest;
+    if (!request) return;
+    setImageDeletionRequest(null);
+    request.resolve(choice);
+  }, [imageDeletionRequest]);
+
   const cancelTasksForDeletedPlaceholders = useCallback(async (records: NodeRecord[]) => {
-    const tasks = records
+    type PlaceholderTask = Pick<PersistedComfyTask, "clientId" | "nodeId" | "kind" | "placeholderNodeId">;
+    const tasks: PlaceholderTask[] = records
       .filter((record) => record.content.generationPlaceholder === true)
-      .map((record) => {
+      .flatMap<PlaceholderTask>((record) => {
         const clientId = typeof record.content.placeholderClientId === "string"
           ? record.content.placeholderClientId
           : "";
-        return persistedComfyTasks.current.find((task) => task.clientId === clientId) ?? null;
+        if (!clientId) return [];
+        const persisted = persistedComfyTasks.current.find((task) => task.clientId === clientId);
+        if (persisted) return [persisted];
+        const sourceGeneratorId = typeof record.content.sourceGeneratorId === "string"
+          ? record.content.sourceGeneratorId
+          : "";
+        const sourcePreviewId = typeof record.content.sourcePreviewId === "string"
+          ? record.content.sourcePreviewId
+          : "";
+        const nodeId = sourcePreviewId || sourceGeneratorId;
+        if (!nodeId) return [];
+        return [{
+          clientId,
+          nodeId,
+          placeholderNodeId: record.id,
+          kind: record.kind === "generated-image"
+            ? sourcePreviewId ? "image-upscale" as const : "image-generation" as const
+            : sourcePreviewId ? "secondary" as const : "generation" as const,
+        }];
       })
-      .filter((task): task is PersistedComfyTask => Boolean(task));
+      .filter((task) => Boolean(task.clientId));
     const uniqueTasks = [...new Map(tasks.map((task) => [task.clientId, task])).values()];
 
     for (const task of uniqueTasks) {
@@ -2150,7 +2408,9 @@ function CanvasWorkspace() {
             executionProgress: null,
             validationMessage: remainingTaskCount
               ? `已通过删除占位取消任务，仍有 ${remainingTaskCount} 个任务`
-              : `已通过删除占位取消 ComfyUI ${isSecondaryComfyTask(task) ? "二采" : "生成"}`,
+              : `已通过删除占位取消 ComfyUI ${(task.kind === "image-generation" || task.kind === "image-upscale")
+                ? task.kind === "image-upscale" ? "图片放大" : "图片生成"
+                : task.kind === "secondary" ? "二采" : "生成"}`,
           },
         });
       }
@@ -2183,15 +2443,38 @@ function CanvasWorkspace() {
     async (nodesToDelete: CanvasFlowNode[], deleteSourceFiles = false) => {
       if (!nodesToDelete.length || nodeDeletionInProgress.current) return;
       nodeDeletionInProgress.current = true;
-      const records = nodesToDelete.map((node) => node.data.record);
+      const initialRecords = nodesToDelete.map((node) => node.data.record);
+      const deletedOriginalImageIds = new Set(
+        initialRecords
+          .filter((record) => isDirectGeneratedImageOutput(record))
+          .map((record) => record.id),
+      );
+      const copiedImageRecords = deletedOriginalImageIds.size
+        ? nodesSnapshot.current
+          .map((node) => node.data.record)
+          .filter((record) => (
+            record.kind === "generated-image"
+            && typeof record.content.generatedImageCopyOriginId === "string"
+            && deletedOriginalImageIds.has(record.content.generatedImageCopyOriginId)
+          ))
+        : [];
+      const records = [...new Map(
+        [...initialRecords, ...copiedImageRecords].map((record) => [record.id, record]),
+      ).values()];
       try {
         const generatedVideoRecords = records.filter((record) => (
           record.content.generationPlaceholder !== true
           && record.kind === "generated-video"
         ));
-        const choice = deleteSourceFiles && generatedVideoRecords.length > 0
+        const generatedImageRecords = records.filter((record) => record.kind === "generated-image"
+          && record.content.generationPlaceholder !== true);
+        const generatedImageFileOwners = generatedImageRecords.filter(isDirectGeneratedImageOutput);
+        const deletingGeneratedImages = generatedImageRecords.length > 0 && !generatedVideoRecords.length;
+        const choice = deleteSourceFiles && (generatedVideoRecords.length > 0 || generatedImageFileOwners.length > 0)
           ? "node-and-file"
-          : await requestVideoDeletionChoice(records);
+          : deletingGeneratedImages
+            ? await requestImageDeletionChoice(records)
+            : await requestVideoDeletionChoice(records);
         if (choice === "cancel") return;
 
         const cancelledPlaceholderTaskCount = await cancelTasksForDeletedPlaceholders(records);
@@ -2203,11 +2486,17 @@ function CanvasWorkspace() {
         });
 
         if (choice === "node-and-file") {
-          const filePaths = videoFilePathsForRecords(
-            deleteSourceFiles ? generatedVideoRecords : records,
-          );
           try {
-            await invoke<number>("delete_video_files", { paths: filePaths });
+            if (generatedVideoRecords.length) {
+              const videoFilePaths = videoFilePathsForRecords(
+                deleteSourceFiles ? generatedVideoRecords : records,
+              );
+              await invoke<number>("delete_video_files", { paths: videoFilePaths });
+            }
+            if (generatedImageFileOwners.length) {
+              const imageFilePaths = imageFilePathsForRecords(generatedImageFileOwners);
+              await invoke<number>("delete_image_files", { paths: imageFilePaths });
+            }
           } catch (error) {
             await invoke<DeletedBatch>("restore_deleted_nodes", { batch });
             throw error;
@@ -2222,7 +2511,7 @@ function CanvasWorkspace() {
           (edge) => !deletedIds.has(edge.source) && !deletedIds.has(edge.target),
         ));
         setNotice(choice === "node-and-file"
-          ? `${ids.length} 个节点及其视频文件已永久删除`
+          ? `${ids.length} 个节点及其真实媒体文件已永久删除`
           : cancelledPlaceholderTaskCount
             ? `已取消 ${cancelledPlaceholderTaskCount} 个任务并删除对应占位节点`
             : `${ids.length} 个节点已删除，按 Ctrl+Z 撤销`);
@@ -2237,6 +2526,9 @@ function CanvasWorkspace() {
       cancelTasksForDeletedPlaceholders,
       rememberDeletedBatch,
       reportError,
+      imageFilePathsForRecords,
+      isDirectGeneratedImageOutput,
+      requestImageDeletionChoice,
       requestVideoDeletionChoice,
       setEdges,
       setNodes,
@@ -2290,6 +2582,37 @@ function CanvasWorkspace() {
       if (videoUrl) {
         await openUrl(videoUrl);
         setNotice("映射路径无法定位，已改为打开远程视频链接");
+        return;
+      }
+      reportError(error);
+    }
+  }, [reportError]);
+
+  const revealGeneratedImage = useCallback(async (previewId: string) => {
+    const preview = nodesSnapshot.current.find(
+      (node) => node.id === previewId && node.data.record.kind === "generated-image",
+    )?.data.record;
+    if (!preview) return;
+    const currentOutputRoot = comfyOutputRootRef.current;
+    if (!currentOutputRoot.trim()) {
+      setComfyOutputRootDraft("");
+      setSettingsOpen(true);
+      setNotice("请先在设置中填写 ComfyUI 输出映射目录");
+      return;
+    }
+    const mappedPath = mappedComfyOutputPath(currentOutputRoot, preview.content);
+    const imageUrl = typeof preview.content.imageUrl === "string" ? preview.content.imageUrl : "";
+    if (!mappedPath) {
+      setNotice("当前图片缺少可定位的文件信息");
+      return;
+    }
+    try {
+      await revealItemInDir(mappedPath);
+      setNotice(`已在资源管理器中定位：${mappedPath}`);
+    } catch (error) {
+      if (imageUrl) {
+        await openUrl(imageUrl);
+        setNotice("映射路径无法定位，已改为打开远程图片链接");
         return;
       }
       reportError(error);
@@ -2380,6 +2703,32 @@ function CanvasWorkspace() {
     } catch (error) {
       reportError(error);
     }
+  }, [reportError]);
+
+  const downloadGeneratedImage = useCallback(async (previewId: string) => {
+    const preview = nodesSnapshot.current.find((node) => node.id === previewId)?.data.record;
+    if (!preview || preview.kind !== "generated-image") return;
+    const currentOutputRoot = comfyOutputRootRef.current;
+    if (!currentOutputRoot.trim()) {
+      setComfyOutputRootDraft("");
+      setSettingsOpen(true);
+      setNotice("请先在设置中填写 ComfyUI 输出映射目录");
+      return;
+    }
+    const sourcePath = mappedComfyOutputPath(currentOutputRoot, preview.content);
+    if (!sourcePath) { setNotice("当前图片缺少可下载的文件信息"); return; }
+    const originalName = typeof preview.content.originalName === "string" ? preview.content.originalName.trim() : "";
+    const defaultPath = originalName || preview.title || "生成图片.png";
+    const extension = defaultPath.includes(".") ? defaultPath.slice(defaultPath.lastIndexOf(".") + 1).toLowerCase() : "";
+    setCanvasContextMenu(null);
+    let destinationPath: string | null;
+    try { destinationPath = await saveDialog({ title: "下载图片", defaultPath, ...(extension ? { filters: [{ name: "图片", extensions: [extension] }] } : {}) }); }
+    catch (error) { reportError(error); return; }
+    if (!destinationPath) return;
+    try {
+      const savedPath = await invoke<string>("export_generated_image", { sourcePath, destinationPath });
+      setNotice(`已下载到：${savedPath}`);
+    } catch (error) { reportError(error); }
   }, [reportError]);
 
   const saveComfySettings = useCallback(() => {
@@ -2511,6 +2860,61 @@ function CanvasWorkspace() {
     );
     showGlobalNotice("模型参数已保存");
   }, [h3DiffusionModelName, h3LoraPreference, h3ModelParametersDraft, refreshWorkflowModules, reportError, selectedWorkflowModule, showGlobalNotice, workflowModuleDefaults, workflowModules]);
+
+  const saveKrea2ModelParameters = useCallback(async () => {
+    const module = selectedImageWorkflowModule
+      ?? workflowModules.find((candidate) => (
+        !candidate.deletedAt
+        && candidate.id === workflowModuleDefaults["image-generation"]
+      ))
+      ?? workflowModules.find((candidate) => (
+        !candidate.deletedAt && candidate.capability === "image-generation"
+      ));
+    if (!module) {
+      showGlobalNotice("没有可保存模型参数的图片生成方案");
+      return;
+    }
+    if (!isKrea2DiffusionModelName(krea2DiffusionModelName)) {
+      showGlobalNotice("请先选择 Krea2 基础模型");
+      return;
+    }
+    if (
+      krea2DiffusionModelCatalogLoaded
+      && !krea2DiffusionModelOptions.some((model) => (
+        sameH3DiffusionModelName(model, krea2DiffusionModelName)
+      ))
+    ) {
+      showGlobalNotice("所选 Krea2 基础模型已不在 ComfyUI 模型目录中，请重新选择");
+      return;
+    }
+    setWorkflowModulesBusy(true);
+    try {
+      await invoke<WorkflowModuleRecord>("save_workflow_module", {
+        input: {
+          id: module.id,
+          name: module.name,
+          capability: module.capability,
+          variant: module.variant,
+          revision: module.revision,
+          adapterKind: module.adapterKind,
+          sourceWorkflowPath: module.workflowPath,
+          bindings: module.bindings,
+          adapter: module.adapter,
+          uiSchema: module.uiSchema,
+          defaults: {
+            ...module.defaults,
+            diffusionModelName: krea2DiffusionModelName,
+          },
+        },
+      });
+      await refreshWorkflowModules(true);
+      showGlobalNotice("图片模型参数已保存");
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setWorkflowModulesBusy(false);
+    }
+  }, [krea2DiffusionModelCatalogLoaded, krea2DiffusionModelName, krea2DiffusionModelOptions, refreshWorkflowModules, reportError, selectedImageWorkflowModule, showGlobalNotice, workflowModuleDefaults, workflowModules]);
 
   const saveVideoGenerationDefaults = useCallback(() => {
     if (!Number.isInteger(videoGenerationDefaultsDraft.generationDuration)
@@ -2647,9 +3051,7 @@ function CanvasWorkspace() {
       .map((edge) => recordsById.get(edge.source))
       .filter((record): record is NodeRecord => Boolean(record));
     const textInputs = inputRecords.filter((record) => record.kind === "text");
-    const mediaInputs = inputRecords.filter(
-      (record) => record.kind === "image" || record.kind === "audio" || record.kind === "video",
-    );
+    const mediaInputs = inputRecords.filter((record) => videoInputMediaKind(record) !== null);
     const savedOrder = Array.isArray(generator.content.mediaInputOrder)
       ? generator.content.mediaInputOrder.filter(
         (inputId): inputId is string => typeof inputId === "string",
@@ -2714,14 +3116,22 @@ function CanvasWorkspace() {
     const submittedMedia = referenceCompilerMode
       ? referenceSelection?.selectedMedia ?? []
       : orderedMedia;
+    const imagePathForRecord = (record: NodeRecord) => {
+      const assetPath = typeof record.content.assetPath === "string"
+        ? record.content.assetPath.trim()
+        : "";
+      return assetPath || (record.kind === "generated-image"
+        ? mappedComfyOutputPath(comfyOutputRootRef.current, record.content) ?? ""
+        : "");
+    };
     const assetPaths = (kind: string) => submittedMedia
-      .filter((record) => record.kind === kind)
+      .filter((record) => videoInputMediaKind(record) === kind)
       .map((record) => typeof record.content.assetPath === "string" ? record.content.assetPath : "")
       .filter(Boolean);
     const imageAssets = submittedMedia
-      .filter((record) => record.kind === "image")
+      .filter((record) => videoInputMediaKind(record) === "image")
       .map((record, index) => ({
-        path: typeof record.content.assetPath === "string" ? record.content.assetPath : "",
+        path: imagePathForRecord(record),
         role: frameRoleFromContent(generator.content, record.id, index),
       }))
       .filter((asset) => Boolean(asset.path));
@@ -2911,6 +3321,170 @@ function CanvasWorkspace() {
       }, 0);
     }
   }, [generatedPreviewHeightForAspectRatio, setEdges, setNodes]);
+
+  const createImageGenerationPlaceholder = useCallback(async ({
+    source,
+    clientId,
+    width,
+    height,
+    upscaleEnabled,
+    snapshot,
+    title = "图片预览（生成中）",
+    sourceGeneratorId = source.id,
+    sourcePreviewId,
+    placeBelowSource = false,
+  }: {
+    source: NodeRecord;
+    clientId: string;
+    width: number;
+    height: number;
+    upscaleEnabled: boolean;
+    snapshot: GenerationSnapshot;
+    title?: string;
+    sourceGeneratorId?: string;
+    sourcePreviewId?: string;
+    placeBelowSource?: boolean;
+  }) => {
+    const previewWidth = 420;
+    const previewHeight = Math.min(
+      1200,
+      Math.max(180, Math.round(previewWidth * height / width) + GENERATED_IMAGE_CHROME_HEIGHT),
+    );
+    const placementRecords = [
+      ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
+      ...incomingPlacementReservations.current,
+    ];
+    const position = placeBelowSource
+      ? generatedPreviewPositionBelow(source, placementRecords, previewWidth, previewHeight)
+      : generatedPreviewPosition(
+        source,
+        placementRecords,
+        previewWidth,
+        previewHeight,
+        "generated-image",
+        "right",
+      );
+    const reservationId = `image-generation-placeholder:${clientId}`;
+    const placeholderContent: JsonObject = {
+      generationPlaceholder: true,
+      placeholderClientId: clientId,
+      status: "running",
+      executionProgress: null,
+      validationMessage: "正在连接 ComfyUI…",
+      sourceGeneratorId,
+      ...(sourcePreviewId ? { sourcePreviewId, imageUpscale: true } : {}),
+      imageGeneration: true,
+      expectedAspectRatio: width / height,
+      upscaleEnabled,
+      generationSnapshot: snapshot,
+    };
+    const reservation: NodeRecord = {
+      ...source,
+      id: reservationId,
+      kind: "generated-image",
+      title,
+      content: placeholderContent,
+      source: "comfyui-placeholder",
+      requestId: reservationId,
+      x: position.x,
+      y: position.y,
+      width: previewWidth,
+      height: previewHeight,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    incomingPlacementReservations.current.push(reservation);
+    let createdNodeId = "";
+    try {
+      const result = await invoke<CreateNodeResult>("create_node", {
+        input: {
+          canvasId: source.canvasId,
+          kind: "generated-image",
+          title: reservation.title,
+          content: placeholderContent,
+          source: reservation.source,
+          requestId: reservation.requestId,
+          x: position.x,
+          y: position.y,
+          width: previewWidth,
+          height: previewHeight,
+        },
+      });
+      createdNodeId = result.node.id;
+      completedGenerationPlaceholders.current.delete(result.node.id);
+      incomingPlacementReservations.current = incomingPlacementReservations.current
+        .map((candidate) => candidate.id === reservationId ? result.node : candidate);
+      const edgeRecord = await invoke<EdgeRecord>("create_edge", {
+        input: {
+          canvasId: source.canvasId,
+          sourceNodeId: source.id,
+          targetNodeId: result.node.id,
+          kind: "output",
+          metadata: { placeholder: true, clientId, imageGeneration: true },
+        },
+      });
+      const flowNode = makeFlowNodeRef.current?.(result.node);
+      if (flowNode) setNodes((current) => appendUniqueById(current, [flowNode]));
+      setEdges((current) => appendUniqueById(current, [toFlowEdge(edgeRecord)]));
+      return result.node;
+    } catch (error) {
+      if (createdNodeId) {
+        try {
+          await invoke<DeletedBatch>("delete_nodes_undoable", {
+            input: { ids: [createdNodeId] },
+          });
+        } catch {
+          // Preserve the original placeholder creation error.
+        }
+      }
+      throw error;
+    } finally {
+      window.setTimeout(() => {
+        incomingPlacementReservations.current = incomingPlacementReservations.current
+          .filter((candidate) => candidate.id !== reservationId && candidate.id !== createdNodeId);
+      }, 0);
+    }
+  }, [setEdges, setNodes]);
+
+  const imageRecoveryGenerationSnapshot = useCallback((
+    imageRecovery: ImageRecoverySnapshot,
+  ): GenerationSnapshot => ({
+    prompt: imageRecovery.prompt,
+    promptInformation: "",
+    promptNodeId: imageRecovery.promptSourceNodeId,
+    promptNodeTitle: "",
+    promptNodeIdSource: "",
+    promptVersionId: "",
+    promptVersionLabel: "",
+    durationSeconds: 15,
+    aspectRatio: "16:9",
+    primaryResolutionMegapixels: 0.4,
+    secondaryResolutionMegapixels: 0.5,
+    primaryVideoSteps: 8,
+    primaryAudioSteps: 8,
+    secondarySchedulerSteps: 8,
+    primaryBrightness: 1,
+    primaryContrast: 1,
+    primarySaturation: 1,
+    secondaryBrightness: 1,
+    secondaryContrast: 1,
+    secondarySaturation: 1,
+    diffusionModelName: "",
+    loraName: "",
+    loraStrength: 1,
+    loraBypassed: true,
+    secondaryLoraName: "",
+    secondaryLoraStrength: 1,
+    secondaryLoraBypassed: true,
+    refImageSize: "match",
+    imagePaths: [],
+    imageRoles: [],
+    audioPaths: [],
+    videoPaths: [],
+    workflowModuleId: imageRecovery.workflowModuleId,
+    workflowModuleRevision: imageRecovery.workflowModuleRevision,
+    imageRecovery,
+  }), []);
 
   const updateGenerationPlaceholder = useCallback((
     placeholderNodeId: string | undefined,
@@ -4650,7 +5224,9 @@ function CanvasWorkspace() {
     const persistedTask = persistedComfyTasks.current.find(
       (task) => task.clientId === clientId,
     );
-    const taskLabel = persistedTask && isSecondaryComfyTask(persistedTask) ? "二采" : "生成";
+    const taskLabel = persistedTask && isImageComfyTask(persistedTask)
+      ? persistedTask.kind === "image-upscale" ? "图片放大" : "图片生成"
+      : persistedTask && isSecondaryComfyTask(persistedTask) ? "二采" : "生成";
     cancelledComfyClients.current.add(clientId);
     changeNode(targetId, {
       content: {
@@ -4755,7 +5331,7 @@ function CanvasWorkspace() {
       const target = nodesSnapshot.current.find(
         (node) => node.id === inputEdge.target,
       )?.data.record;
-      if (target?.kind === "video-generation") {
+      if (target?.kind === "video-generation" || target?.kind === "image-generation") {
         const mediaInputOrder = Array.isArray(target.content.mediaInputOrder)
           ? target.content.mediaInputOrder.filter((inputId) => inputId !== inputEdge.source)
           : [];
@@ -4774,6 +5350,11 @@ function CanvasWorkspace() {
             mediaInputOrder,
             textInputOrder,
             frameRoles,
+            ...(target.kind === "image-generation" ? {
+              activeTextInputId: target.content.activeTextInputId === inputEdge.source
+                ? ""
+                : target.content.activeTextInputId,
+            } : {}),
             status: "idle",
             validationMessage: "",
           },
@@ -4802,7 +5383,7 @@ function CanvasWorkspace() {
     const isConnected = edgesSnapshot.current.some(
       (edge) => edge.source === sourceId && edge.target === targetId,
     );
-    if (target?.kind !== "video-generation" || source?.kind !== "text" || !isConnected) return;
+    if ((target?.kind !== "video-generation" && target?.kind !== "image-generation") || source?.kind !== "text" || !isConnected) return;
     setRelationAnchorId(sourceId);
     if (target.content.activeTextInputId === sourceId) return;
     changeNode(targetId, {
@@ -4813,7 +5394,7 @@ function CanvasWorkspace() {
         validationMessage: "",
       },
     });
-    setNotice(`已切换当前文本：${source.title || "未命名文本"}`);
+    setNotice(`已切换当前${target.kind === "image-generation" ? "正向提示词" : "文本"}：${source.title || "未命名文本"}`);
   }, [changeNode]);
 
   const locateGeneratedVideoPrompt = useCallback((
@@ -4895,6 +5476,67 @@ function CanvasWorkspace() {
       promptNode.position.y + height / 2,
       { zoom: 1, duration: 350 },
     );
+    setNotice(`已定位提示词：${promptNode.data.record.title || "未命名文本"}`);
+  }, [setCenter, setNodes]);
+
+  const locateGeneratedImageOrigin = useCallback((
+    previewId: string,
+    target: "prompt" | "generator" = "prompt",
+  ) => {
+    const previewNode = nodesSnapshot.current.find(
+      (node) => node.id === previewId && node.data.record.kind === "generated-image",
+    );
+    const preview = previewNode?.data.record;
+    if (!preview) {
+      setNotice("无法定位：找不到当前图片预览节点");
+      return;
+    }
+    const sourceGeneratorId = typeof preview.content.sourceGeneratorId === "string"
+      ? preview.content.sourceGeneratorId
+      : "";
+    if (target === "generator") {
+      const generator = sourceGeneratorId
+        ? nodesSnapshot.current.find((node) => (
+          node.id === sourceGeneratorId && node.data.record.kind === "image-generation"
+        ))
+        : undefined;
+      if (!generator) {
+        setNotice(sourceGeneratorId
+          ? "无法定位：关联的图片生成节点已被删除"
+          : "无法定位：该图片没有记录关联的图片生成节点");
+        return;
+      }
+      const width = generator.width ?? generator.data.record.width ?? 420;
+      const height = generator.height ?? generator.data.record.height ?? 624;
+      setRelationAnchorId(null);
+      setNodes((current) => current.map((node) => ({ ...node, selected: node.id === generator.id })));
+      void setCenter(generator.position.x + width / 2, generator.position.y + height / 2, {
+        zoom: 1,
+        duration: 350,
+      });
+      setNotice(`已定位图片生成节点：${generator.data.record.title || "图片生成"}`);
+      return;
+    }
+    const promptSourceNodeId = typeof preview.content.promptSourceNodeId === "string"
+      ? preview.content.promptSourceNodeId
+      : "";
+    const promptNode = promptSourceNodeId
+      ? nodesSnapshot.current.find((node) => node.id === promptSourceNodeId && node.data.record.kind === "text")
+      : undefined;
+    if (!promptNode) {
+      setNotice(promptSourceNodeId
+        ? "无法定位：该图片使用的提示词文本节点已被删除"
+        : "无法定位：该图片没有记录提示词文本节点");
+      return;
+    }
+    const width = promptNode.width ?? promptNode.data.record.width ?? 320;
+    const height = promptNode.height ?? promptNode.data.record.height ?? 240;
+    setRelationAnchorId(promptNode.id);
+    setNodes((current) => current.map((node) => ({ ...node, selected: node.id === promptNode.id })));
+    void setCenter(promptNode.position.x + width / 2, promptNode.position.y + height / 2, {
+      zoom: 1,
+      duration: 350,
+    });
     setNotice(`已定位提示词：${promptNode.data.record.title || "未命名文本"}`);
   }, [setCenter, setNodes]);
 
@@ -5018,6 +5660,7 @@ function CanvasWorkspace() {
         textInputs: [],
         promptNodeTitle: "",
         h3LoraOptions,
+        krea2LoraOptions,
         workflowModules,
         workflowModuleDefaults,
         onH3LoraPreferenceChange: rememberH3LoraPreference,
@@ -5026,14 +5669,19 @@ function CanvasWorkspace() {
         onMarkGeneratedVideoFullyPlayed: markGeneratedVideoFullyPlayed,
         onExecutionCheck: reportExecutionCheck,
         onExecute: executeVideoNode,
+        onExecuteImage: (nodeId: string) => executeImageNodeRef.current(nodeId),
         onBatchExecute: executeVideoNodeBatch,
         onSecondarySample: executeSecondarySample,
         onConfigureSecondarySample: configureSecondarySample,
         onRegenerateVideo: regenerateGeneratedVideo,
         onConfigureRegenerateVideo: configureGeneratedVideoRegeneration,
         onLocatePrompt: locateGeneratedVideoPrompt,
+        onUpscaleGeneratedImage: (nodeId: string) => upscaleGeneratedImageRef.current(nodeId),
+        onRegenerateGeneratedImage: (nodeId: string) => regenerateGeneratedImageRef.current(nodeId),
+        onLocateGeneratedImage: locateGeneratedImageOrigin,
         onCancelExecution: cancelVideoExecution,
         onRevealGeneratedVideo: revealGeneratedVideo,
+        onRevealGeneratedImage: revealGeneratedImage,
         onRemoveInput: removeInputFromVideoNode,
         onActivateTextInput: activateTextInput,
         onDeletePromptVersion: deletePromptVersionFromNode,
@@ -5042,7 +5690,7 @@ function CanvasWorkspace() {
         onCopy: copyText,
       },
     }),
-    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3LoraOptions, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedVideo, saveTextNodeImmediately, workflowModuleDefaults, workflowModules],
+    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, workflowModuleDefaults, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -5091,10 +5739,208 @@ function CanvasWorkspace() {
     contentGraphSyncTimer.current = window.setTimeout(() => void reconcile(), 260);
   }, [makeFlowNode, reportError, setEdges, setNodes]);
 
+  const restoreCompletedImageComfyTask = useCallback(async (
+    task: PersistedComfyTask,
+    recovered: ComfyClientTaskStatus,
+  ) => {
+    const imageRecovery = task.snapshot.imageRecovery;
+    const sourceNode = nodesSnapshot.current.find((node) => node.id === task.nodeId);
+    if (!imageRecovery || !sourceNode || recovered.status !== "success" || !recovered.promptId) {
+      return null;
+    }
+    const alreadyRestored = nodesSnapshot.current.find((node) => (
+      node.data.record.kind === "generated-image"
+      && node.data.record.content.comfyPromptId === recovered.promptId
+    ));
+    if (alreadyRestored) {
+      if (task.placeholderNodeId && task.placeholderNodeId !== alreadyRestored.id) {
+        await flushNodePatches([task.placeholderNodeId]);
+        try {
+          await invoke("delete_node", { id: task.placeholderNodeId });
+        } catch (error) {
+          if (!String(error).includes("node not found")) throw error;
+        }
+        completedGenerationPlaceholders.current.add(task.placeholderNodeId);
+        setNodes((current) => current.filter((node) => node.id !== task.placeholderNodeId));
+        setEdges((current) => current.filter((edge) => (
+          edge.source !== task.placeholderNodeId && edge.target !== task.placeholderNodeId
+        )));
+      }
+      return sourceNode.data.record.content;
+    }
+
+    const source = recordAtCurrentFlowPosition(sourceNode);
+    const sourceGeneratorId = imageRecovery.sourceGeneratorId || task.sourceGeneratorId || "";
+    const imageUpscale = imageRecovery.kind === "upscale";
+    const previewWidth = 420;
+    const previewHeight = Math.min(
+      1200,
+      Math.max(180, Math.round(previewWidth * imageRecovery.height / imageRecovery.width) + GENERATED_IMAGE_CHROME_HEIGHT),
+    );
+    const placementRecords = [
+      ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
+      ...incomingPlacementReservations.current,
+    ];
+    const createdNodes: CanvasFlowNode[] = [];
+    const createdEdges: Edge[] = [];
+    const reservationIds = new Set<string>();
+    const generationElapsedSeconds = validExecutionElapsedSeconds(recovered.executionElapsedSeconds);
+    const imageContent = (output: ComfyClientTaskStatus["outputs"][number], outputIndex: number): JsonObject => {
+      const assetPath = mappedComfyOutputPath(comfyOutputRootRef.current, {
+        filename: output.filename,
+        subfolder: output.subfolder,
+        fileType: output.fileType,
+      });
+      return {
+        imageUrl: output.url,
+        ...(assetPath ? { assetPath } : {}),
+        originalName: output.filename,
+        filename: output.filename,
+        subfolder: output.subfolder,
+        fileType: output.fileType,
+        seed: recovered.seed ?? "",
+        comfyPromptId: recovered.promptId,
+        comfyServerUrl: comfyUiServerUrlRef.current,
+        sourceGeneratorId,
+        ...(imageRecovery.sourcePreviewId ? { sourcePreviewId: imageRecovery.sourcePreviewId } : {}),
+        outputIndex,
+        promptSourceNodeId: imageRecovery.promptSourceNodeId,
+        generationPrompt: imageRecovery.prompt,
+        generationNegativePrompt: imageRecovery.negativePrompt,
+        generationWorkflowModuleId: imageRecovery.workflowModuleId,
+        generationWorkflowModuleRevision: imageRecovery.workflowModuleRevision,
+        generationModelName: imageRecovery.modelName,
+        generationWidth: imageRecovery.width,
+        generationHeight: imageRecovery.height,
+        ...(imageRecovery.upscaleMegapixels === undefined
+          ? {}
+          : { generationUpscaleMegapixels: imageRecovery.upscaleMegapixels }),
+        generationLoraName: imageRecovery.loraName,
+        imageUpscale,
+        upscaleEnabled: imageRecovery.upscaleEnabled,
+        ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
+      };
+    };
+    try {
+      for (const [index, output] of recovered.outputs.entries()) {
+        const title = imageUpscale
+          ? recovered.outputs.length > 1 ? `图片放大预览 ${index + 1}` : "图片放大预览"
+          : recovered.outputs.length > 1 ? `图片预览 ${index + 1}` : "图片预览";
+        const outputContent = imageContent(output, index);
+        if (index === 0) {
+          const completedPlaceholder = await completeGenerationPlaceholder(
+            task.placeholderNodeId,
+            title,
+            outputContent,
+          );
+          if (completedPlaceholder) {
+            placementRecords.push(completedPlaceholder);
+            continue;
+          }
+        }
+        const position = generatedPreviewPosition(
+          source,
+          placementRecords,
+          previewWidth,
+          previewHeight,
+          "generated-image",
+          "right",
+        );
+        const reservationId = `recovered-image-preview:${task.clientId}:${index}`;
+        const reservation: NodeRecord = {
+          ...source,
+          id: reservationId,
+          kind: "generated-image",
+          content: { sourceGeneratorId },
+          x: position.x,
+          y: position.y,
+          width: previewWidth,
+          height: previewHeight,
+          createdAt: new Date().toISOString(),
+        };
+        reservationIds.add(reservationId);
+        incomingPlacementReservations.current.push(reservation);
+        const previewResult = await invoke<CreateNodeResult>("create_node", {
+          input: {
+            canvasId: task.canvasId,
+            kind: "generated-image",
+            title,
+            content: outputContent,
+            source: "comfyui-recovery",
+            requestId: comfyPreviewRequestId(
+              task.canvasId,
+              task.nodeId,
+              recovered.promptId,
+              index,
+            ),
+            x: position.x,
+            y: position.y,
+            width: previewWidth,
+            height: previewHeight,
+          },
+        });
+        incomingPlacementReservations.current = incomingPlacementReservations.current
+          .map((candidate) => candidate.id === reservationId ? previewResult.node : candidate);
+        reservationIds.delete(reservationId);
+        reservationIds.add(previewResult.node.id);
+        placementRecords.push(previewResult.node);
+        const flowNode = makeFlowNodeRef.current?.(previewResult.node);
+        if (flowNode) createdNodes.push(flowNode);
+        const edgeRecord = await invoke<EdgeRecord>("create_edge", {
+          input: {
+            canvasId: task.canvasId,
+            sourceNodeId: task.nodeId,
+            targetNodeId: previewResult.node.id,
+            kind: imageUpscale ? "secondary-output" : "output",
+            metadata: {
+              seed: recovered.seed ?? "",
+              promptId: recovered.promptId,
+              outputIndex: index,
+              recovered: true,
+              ...(imageUpscale ? { imageUpscale: true, megapixels: imageRecovery.upscaleMegapixels } : {}),
+            },
+          },
+        });
+        createdEdges.push(toFlowEdge(edgeRecord));
+      }
+    } catch (error) {
+      incomingPlacementReservations.current = incomingPlacementReservations.current
+        .filter((candidate) => !reservationIds.has(candidate.id));
+      throw error;
+    }
+    if (createdNodes.length) setNodes((current) => appendUniqueById(current, createdNodes));
+    if (createdEdges.length) setEdges((current) => appendUniqueById(current, createdEdges));
+    window.setTimeout(() => {
+      incomingPlacementReservations.current = incomingPlacementReservations.current
+        .filter((candidate) => !reservationIds.has(candidate.id));
+    }, 0);
+
+    const latest = nodesSnapshot.current.find((node) => node.id === task.nodeId)?.data.record ?? source;
+    const remainingTaskCount = Math.max(
+      0,
+      (runningComfyClients.current.get(task.nodeId)?.size ?? 1) - 1,
+    );
+    const restoredContent: JsonObject = {
+      ...latest.content,
+      status: remainingTaskCount ? "running" : "succeeded",
+      executionProgress: remainingTaskCount ? null : 100,
+      validationMessage: remainingTaskCount
+        ? `已恢复一个完成图片任务，仍有 ${remainingTaskCount} 个任务正在执行或排队`
+        : imageUpscale
+          ? "已恢复完成图片放大"
+          : `已恢复完成任务并创建 ${recovered.outputs.length} 个图片预览`,
+    };
+    changeNode(task.nodeId, { content: restoredContent });
+    return restoredContent;
+  }, [changeNode, completeGenerationPlaceholder, flushNodePatches, setEdges, setNodes]);
+
   const restoreCompletedComfyTask = useCallback(async (
     task: PersistedComfyTask,
     recovered: ComfyClientTaskStatus,
   ) => {
+    if (isImageComfyTask(task)) {
+      return restoreCompletedImageComfyTask(task, recovered);
+    }
     const sourceNode = nodesSnapshot.current.find((node) => node.id === task.nodeId);
     if (!sourceNode || recovered.status !== "success" || !recovered.promptId) return null;
     const alreadyRestored = nodesSnapshot.current.find((node) => (
@@ -5288,7 +6134,7 @@ function CanvasWorkspace() {
     };
     changeNode(task.nodeId, { content: restoredContent });
     return restoredContent;
-  }, [changeNode, completeGenerationPlaceholder, flushNodePatches, generatedPreviewHeightForAspectRatio, setEdges, setNodes]);
+  }, [changeNode, completeGenerationPlaceholder, flushNodePatches, generatedPreviewHeightForAspectRatio, restoreCompletedImageComfyTask, setEdges, setNodes]);
 
   useEffect(() => {
     if (!activeProjectId) return;
@@ -5323,23 +6169,23 @@ function CanvasWorkspace() {
           const node = nodesSnapshot.current.find((candidate) => candidate.id === task.nodeId);
           if (!node) return;
           const secondaryTask = isSecondaryComfyTask(task);
+          const imageTask = isImageComfyTask(task);
+          const taskLabel = imageTask
+            ? task.kind === "image-upscale" ? "放大图片" : "生成图片"
+            : secondaryTask ? "二采" : "生成";
           recoveredNodeActiveKeys.current.set(task.nodeId, `${task.clientId}:running`);
           changeNode(task.nodeId, {
             content: {
               ...node.data.record.content,
               status: "running",
               executionProgress: update.progress,
-              validationMessage: secondaryTask
-                ? `ComfyUI 正在二采：当前步骤 ${update.value}/${update.maximum}`
-                : `ComfyUI 正在生成：当前步骤 ${update.value}/${update.maximum}`,
+              validationMessage: `ComfyUI 正在${taskLabel}：当前步骤 ${update.value}/${update.maximum}`,
             },
           });
           updateGenerationPlaceholder(task.placeholderNodeId, {
             status: "running",
             executionProgress: update.progress,
-            validationMessage: secondaryTask
-              ? `ComfyUI 正在二采：当前步骤 ${update.value}/${update.maximum}`
-              : `ComfyUI 正在生成：当前步骤 ${update.value}/${update.maximum}`,
+            validationMessage: `ComfyUI 正在${taskLabel}：当前步骤 ${update.value}/${update.maximum}`,
           });
         });
         socket.addEventListener("close", () => {
@@ -5365,7 +6211,13 @@ function CanvasWorkspace() {
         try {
           const statuses = await invoke<ComfyClientTaskStatus[]>(
             "get_comfyui_client_task_statuses",
-            { serverUrl: comfyUiServerUrlRef.current, clientIds: tasks.map((task) => task.clientId) },
+            {
+              serverUrl: comfyUiServerUrlRef.current,
+              clientIds: tasks.map((task) => task.clientId),
+              imageClientIds: tasks
+                .filter(isImageComfyTask)
+                .map((task) => task.clientId),
+            },
           );
           const updatedNodeContents = new Map<string, JsonObject>();
           for (const recovered of statuses) {
@@ -5390,9 +6242,13 @@ function CanvasWorkspace() {
                 if (restoredContent) updatedNodeContents.set(task.nodeId, restoredContent);
                 forgetComfyTask(task.clientId);
                 unregisterComfyTask(task.nodeId, task.clientId);
-                setNotice(isSecondaryComfyTask(task)
-                  ? "已恢复 ComfyUI 完成二采及二采预览"
-                  : "已恢复 ComfyUI 完成任务及视频预览");
+                setNotice(isImageComfyTask(task)
+                  ? task.kind === "image-upscale"
+                    ? "已恢复 ComfyUI 完成图片放大"
+                    : "已恢复 ComfyUI 完成任务及图片预览"
+                  : isSecondaryComfyTask(task)
+                    ? "已恢复 ComfyUI 完成二采及二采预览"
+                    : "已恢复 ComfyUI 完成任务及视频预览");
               } finally {
                 recoveringComfyClients.current.delete(task.clientId);
               }
@@ -5413,14 +6269,21 @@ function CanvasWorkspace() {
               const node = nodesSnapshot.current.find((candidate) => candidate.id === task.nodeId);
               if (node) {
                 const secondaryTask = isSecondaryComfyTask(task);
-                const recoveryLabel = secondaryTask ? "二采恢复" : "恢复";
+                const imageTask = isImageComfyTask(task);
+                const recoveryLabel = imageTask
+                  ? task.kind === "image-upscale" ? "图片放大恢复" : "图片生成恢复"
+                  : secondaryTask ? "二采恢复" : "恢复";
                 const validationMessage = recovered.status === "missing"
                   ? `${recoveryLabel}失败：任务不在 ComfyUI 队列或最近历史记录中`
                   : recovered.status === "success"
-                    ? `${recoveryLabel}失败：ComfyUI 历史记录中没有视频输出`
-                    : recovered.status === "cancelled"
-                      ? `已取消恢复的 ComfyUI ${secondaryTask ? "二采" : "任务"}`
-                      : `恢复的 ComfyUI ${secondaryTask ? "二采" : "任务"}执行失败`;
+                    ? `${recoveryLabel}失败：ComfyUI 历史记录中没有${imageTask ? "图片" : "视频"}输出`
+                  : recovered.status === "cancelled"
+                      ? `已取消恢复的 ComfyUI ${imageTask
+                        ? task.kind === "image-upscale" ? "图片放大" : "图片任务"
+                        : secondaryTask ? "二采" : "任务"}`
+                      : `恢复的 ComfyUI ${imageTask
+                        ? task.kind === "image-upscale" ? "图片放大" : "图片任务"
+                        : secondaryTask ? "二采" : "任务"}执行失败`;
                 changeNode(task.nodeId, {
                   content: {
                     ...node.data.record.content,
@@ -5469,30 +6332,26 @@ function CanvasWorkspace() {
             const node = nodesSnapshot.current.find((candidate) => candidate.id === nodeId);
             if (!node) continue;
             const secondaryTask = isSecondaryComfyTask(active.task);
+            const imageTask = isImageComfyTask(active.task);
+            const taskLabel = imageTask
+              ? active.task.kind === "image-upscale" ? "图片放大" : "图片任务"
+              : secondaryTask ? "二采" : "任务";
             changeNode(nodeId, {
               content: {
                 ...(updatedNodeContents.get(nodeId) ?? node.data.record.content),
                 status: "running",
                 executionProgress: null,
                 validationMessage: active.status === "running"
-                  ? secondaryTask
-                    ? "已恢复 ComfyUI 执行中的二采，正在重新接收进度…"
-                    : "已恢复 ComfyUI 执行中任务，正在重新接收进度…"
-                  : secondaryTask
-                    ? "已恢复 ComfyUI 排队中的二采"
-                  : "已恢复 ComfyUI 排队任务",
+                  ? `已恢复 ComfyUI 执行中的${taskLabel}，正在重新接收进度…`
+                  : `已恢复 ComfyUI 排队中的${taskLabel}`,
               },
             });
             updateGenerationPlaceholder(active.task.placeholderNodeId, {
               status: "running",
               executionProgress: null,
               validationMessage: active.status === "running"
-                ? secondaryTask
-                  ? "已恢复 ComfyUI 执行中的二采，正在重新接收进度…"
-                  : "已恢复 ComfyUI 执行中任务，正在重新接收进度…"
-                : secondaryTask
-                  ? "已恢复 ComfyUI 排队中的二采"
-                  : "已恢复 ComfyUI 排队任务",
+                ? `已恢复 ComfyUI 执行中的${taskLabel}，正在重新接收进度…`
+                : `已恢复 ComfyUI 排队中的${taskLabel}`,
             });
           }
         } catch (error) {
@@ -5547,9 +6406,19 @@ function CanvasWorkspace() {
       const sourceContent = sourceNode.kind === "video-generation"
         ? copiedVideoGenerationContent(sourceNode.content)
         : structuredClone(sourceNode.content);
+      const copiedContent = sourceNode.kind === "generated-image"
+        ? {
+          ...sourceContent,
+          generatedImageCopy: true,
+          generatedImageCopyOriginId: typeof sourceContent.generatedImageCopyOriginId === "string"
+            && sourceContent.generatedImageCopyOriginId
+            ? sourceContent.generatedImageCopyOriginId
+            : sourceNode.id,
+        }
+        : sourceContent;
       preparedContentByOriginalId.set(
         sourceNode.id,
-        copiedPromptVersionContent(sourceContent, versionIdMap),
+        copiedPromptVersionContent(copiedContent, versionIdMap),
       );
     });
     const existingVideoGenerationTitles = new Set(
@@ -6591,6 +7460,668 @@ function CanvasWorkspace() {
     }
   }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes, videoGenerationDefaults, workflowModuleDefaults, workflowModules]);
 
+  const addImageGenerationNode = useCallback(async (position?: { x: number; y: number }) => {
+    if (!activeProjectId) return;
+    const width = 420;
+    const module = workflowModules.find((candidate) => !candidate.deletedAt && candidate.capability === "image-generation" && candidate.id === workflowModuleDefaults["image-generation"])
+      ?? workflowModules.find((candidate) => !candidate.deletedAt && candidate.capability === "image-generation");
+    const height = imageGenerationAutoHeight(0, module?.variant === "image-edit", 0);
+    const placement = reserveNodePlacement(activeProjectId, position, width, height);
+    try {
+      const result = await invoke<CreateNodeResult>("create_node", { input: { canvasId: activeProjectId, kind: "image-generation", title: "图片生成", content: { status: "idle", workflowModuleId: module?.id ?? "", workflowModuleRevision: module?.revision ?? "", activeTextInputId: "", imageLoraName: "", imageEditLayout: module?.variant === "image-edit", width: 1280, height: 720, steps: 8, upscaleEnabled: false, upscaleMegapixels: 8, seedMode: "random", seed: "" }, source: "manual", x: placement.position.x, y: placement.position.y, width, height } });
+      finishNodePlacementReservation(placement.reservationId, [result.node]);
+      setNodes((current) => [...current, makeFlowNode(result.node)]);
+      setNotice("图片生成节点已创建");
+    } catch (error) { finishNodePlacementReservation(placement.reservationId); reportError(error); }
+  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setNodes, workflowModuleDefaults, workflowModules]);
+
+  const executeImageNode = useCallback(async (targetId: string, placementSourceId?: string) => {
+    await flushNodePatches([targetId]);
+    const flowNode = nodesSnapshot.current.find((node) => node.id === targetId);
+    if (!flowNode) return;
+    const target = recordAtCurrentFlowPosition(flowNode);
+    const placementSourceFlowNode = placementSourceId
+      ? nodesSnapshot.current.find((node) => node.id === placementSourceId)
+      : undefined;
+    const placementSource = placementSourceFlowNode
+      ? recordAtCurrentFlowPosition(placementSourceFlowNode)
+      : undefined;
+    const moduleId = typeof target.content.workflowModuleId === "string" ? target.content.workflowModuleId : workflowModuleDefaults["image-generation"] ?? "";
+    const selectedImageModule = workflowModules.find((module) => (
+      !module.deletedAt
+      && module.capability === "image-generation"
+      && module.id === moduleId
+    ));
+    const isImageEdit = selectedImageModule?.variant === "image-edit";
+    const imageModelName = selectedImageModule
+      && isKrea2DiffusionModelName(selectedImageModule.defaults.diffusionModelName)
+      ? selectedImageModule.defaults.diffusionModelName
+      : "";
+    const recordsById = new Map(
+      nodesSnapshot.current.map((node) => [node.id, node.data.record]),
+    );
+    const connectedTextInputs = edgesSnapshot.current
+      .filter((edge) => edge.target === targetId)
+      .map((edge) => recordsById.get(edge.source))
+      .filter((record): record is NodeRecord => record?.kind === "text");
+    const textInputs = orderedNodeRecordsFromContent(
+      target.content,
+      "textInputOrder",
+      connectedTextInputs,
+    );
+    const connectedImageInputs = edgesSnapshot.current
+      .filter((edge) => edge.target === targetId)
+      .map((edge) => recordsById.get(edge.source))
+      .filter((record): record is NodeRecord => (
+        Boolean(record) && videoInputMediaKind(record!) === "image"
+      ));
+    const imageInputs = orderedNodeRecordsFromContent(
+      target.content,
+      "mediaInputOrder",
+      connectedImageInputs,
+    );
+    const imagePaths = imageInputs.map((record) => {
+      if (typeof record.content.assetPath === "string" && record.content.assetPath.trim()) {
+        return record.content.assetPath.trim();
+      }
+      return mappedComfyOutputPath(comfyOutputRootRef.current, {
+        filename: typeof record.content.filename === "string" ? record.content.filename : "",
+        subfolder: typeof record.content.subfolder === "string" ? record.content.subfolder : "",
+        fileType: typeof record.content.fileType === "string" ? record.content.fileType : "",
+      }) ?? "";
+    });
+    const positiveInput = activeTextInputFromContent(target.content, textInputs);
+    const promptFromInput = (input: NodeRecord | null): string => {
+      if (!input) return "";
+      const content = isContentIterationContent(input.content)
+        ? manualSavedPromptContent(input.content) ?? input.content
+        : input.content;
+      return activePromptVersionFromContent(content)?.text ?? textFromContent(content);
+    };
+    const prompt = promptFromInput(positiveInput).trim();
+    const negativePrompt = typeof target.content.negativePrompt === "string"
+      ? target.content.negativePrompt.trim()
+      : "";
+    const imageLoraName = typeof target.content.imageLoraName === "string"
+      ? target.content.imageLoraName.trim()
+      : "";
+    if (!prompt || !moduleId || (isImageEdit && (imageInputs.length < 1 || imageInputs.length > 2)) || (isImageEdit && imagePaths.some((path) => !path))) {
+      const message = !moduleId
+        ? "请先选择图片生成方案"
+        : isImageEdit && (imageInputs.length < 1 || imageInputs.length > 2)
+          ? "Krea2 图像编辑请连接 1 张图片；第二张图片可选，最多 2 张"
+          : isImageEdit && imagePaths.some((path) => !path)
+            ? "接入图片缺少本地文件路径，无法提交到 ComfyUI"
+        : !positiveInput
+          ? "请通过连线接入正向提示词文本节点"
+          : "当前正向提示词节点内容为空，请先填写";
+      changeNode(targetId, { content: { ...target.content, status: "invalid", validationMessage: message } });
+      setNotice(message);
+      return;
+    }
+
+    const width = Number(target.content.width) || 1280;
+    const height = Number(target.content.height) || 720;
+    const steps = Number(target.content.steps) || 8;
+    const upscaleEnabled = target.content.upscaleEnabled === true;
+    const effectiveUpscaleEnabled = !isImageEdit && upscaleEnabled;
+    const upscaleMegapixels = Number(target.content.upscaleMegapixels) || 8;
+    const clientId = crypto.randomUUID();
+    const imageRecoverySnapshot = imageRecoveryGenerationSnapshot({
+      kind: "generation",
+      prompt,
+      negativePrompt,
+      promptSourceNodeId: positiveInput?.id ?? "",
+      sourceGeneratorId: targetId,
+      workflowModuleId: moduleId,
+      workflowModuleRevision: typeof target.content.workflowModuleRevision === "string"
+        ? target.content.workflowModuleRevision
+        : "",
+      modelName: imageModelName,
+      width,
+      height,
+      loraName: isImageEdit ? "" : imageLoraName,
+      upscaleEnabled: effectiveUpscaleEnabled,
+      ...(effectiveUpscaleEnabled ? { upscaleMegapixels } : {}),
+    });
+    const taskSubmittedAt = Date.now();
+    let placeholder: NodeRecord;
+    try {
+      placeholder = await createImageGenerationPlaceholder({
+        source: placementSource ?? target,
+        clientId,
+        width,
+        height,
+        upscaleEnabled: effectiveUpscaleEnabled,
+        snapshot: imageRecoverySnapshot,
+        sourceGeneratorId: targetId,
+        placeBelowSource: Boolean(placementSource),
+      });
+    } catch (error) {
+      changeNode(targetId, {
+        content: { ...target.content, status: "invalid", validationMessage: "无法创建图片预览占位节点" },
+      });
+      reportError(error);
+      return;
+    }
+
+    ownedComfyClients.current.add(clientId);
+    rememberComfyTask({
+      clientId,
+      nodeId: targetId,
+      canvasId: target.canvasId,
+      snapshot: imageRecoverySnapshot,
+      startedAt: taskSubmittedAt,
+      kind: "image-generation",
+      placeholderNodeId: placeholder.id,
+    });
+    cancelledComfyClients.current.delete(clientId);
+    registerComfyTask(targetId, clientId);
+    const queuedTaskCount = runningComfyClients.current.get(targetId)?.size ?? 1;
+    changeNode(targetId, {
+      content: {
+        ...target.content,
+        status: "running",
+        executionProgress: null,
+        validationMessage: queuedTaskCount > 1
+          ? `已提交第 ${queuedTaskCount} 个图片任务，正在等待 ComfyUI 执行…`
+          : "正在提交 ComfyUI 图片任务…",
+      },
+    });
+    setNotice(queuedTaskCount > 1
+      ? `已为当前图片生成节点排队 ${queuedTaskCount} 个任务`
+      : "正在提交 ComfyUI 图片任务…");
+    let progressSocket: WebSocket | null = null;
+    let preserveComfyTaskRecord = false;
+    try {
+      progressSocket = await openComfyProgressSocket(clientId, comfyUiServerUrlRef.current);
+      if (cancelledComfyClients.current.has(clientId)) {
+        throw new Error("ComfyUI 图片生成已取消");
+      }
+      progressSocket?.addEventListener("message", (event) => {
+        if (cancelledComfyClients.current.has(clientId)) return;
+        const update = comfyProgressFromSocketData(event.data);
+        if (!update) return;
+        const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
+        const validationMessage = `ComfyUI 正在生成图片：当前步骤 ${update.value}/${update.maximum}`;
+        changeNode(targetId, {
+          content: {
+            ...latest.content,
+            status: "running",
+            executionProgress: update.progress,
+            validationMessage,
+          },
+        });
+        updateGenerationPlaceholder(placeholder.id, {
+          status: "running",
+          executionProgress: update.progress,
+          validationMessage,
+        });
+      });
+      updateGenerationPlaceholder(placeholder.id, {
+        validationMessage: "正在提交到远程 ComfyUI…",
+      });
+      if (cancelledComfyClients.current.has(clientId)) {
+        throw new Error("ComfyUI 图片生成已取消");
+      }
+      const result = await invoke<ComfySubmitResult>("submit_comfyui_image_workflow", {
+        input: {
+          serverUrl: comfyUiServerUrlRef.current,
+          workflowModuleId: moduleId,
+          clientId,
+          prompt,
+          negativePrompt,
+          seedMode: target.content.seedMode === "fixed" ? "fixed" : "random",
+          seed: typeof target.content.seed === "string" ? target.content.seed : "",
+          width,
+          height,
+          steps,
+          loraName: imageLoraName,
+          modelName: imageModelName,
+          imagePaths,
+          upscaleEnabled: effectiveUpscaleEnabled,
+          upscaleMegapixels,
+        },
+      });
+      const [firstOutput, ...additionalOutputs] = result.outputs;
+      if (!firstOutput) throw new Error("ComfyUI 没有返回图片输出");
+      const generationElapsedSeconds = validExecutionElapsedSeconds(result.executionElapsedSeconds);
+
+      const imageContent = (output: typeof firstOutput): JsonObject => {
+        const assetPath = mappedComfyOutputPath(comfyOutputRootRef.current, {
+          filename: output.filename,
+          subfolder: output.subfolder,
+          fileType: output.fileType,
+        });
+        return {
+        imageUrl: output.url,
+        ...(assetPath ? { assetPath } : {}),
+        originalName: output.filename,
+        filename: output.filename,
+        subfolder: output.subfolder,
+        fileType: output.fileType,
+        seed: result.seed,
+        comfyPromptId: result.promptId,
+        comfyServerUrl: comfyUiServerUrlRef.current,
+        sourceGeneratorId: targetId,
+        promptSourceNodeId: positiveInput?.id ?? "",
+        generationPrompt: prompt,
+        generationNegativePrompt: negativePrompt,
+        generationWorkflowModuleId: moduleId,
+        generationWorkflowModuleRevision: typeof target.content.workflowModuleRevision === "string"
+          ? target.content.workflowModuleRevision
+          : "",
+        generationModelName: typeof result.modelName === "string" ? result.modelName : "",
+        generationWidth: width,
+        generationHeight: height,
+        ...(effectiveUpscaleEnabled ? { generationUpscaleMegapixels: upscaleMegapixels } : {}),
+        generationLoraName: isImageEdit ? "" : imageLoraName,
+        upscaleEnabled: effectiveUpscaleEnabled,
+        ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
+        };
+      };
+      await completeGenerationPlaceholder(
+        placeholder.id,
+        result.outputs.length > 1 ? "图片预览 1" : "图片预览",
+        imageContent(firstOutput),
+      );
+
+      const createdNodes: CanvasFlowNode[] = [];
+      const createdEdges: Edge[] = [];
+      for (const [index, output] of additionalOutputs.entries()) {
+        const preview = await invoke<CreateNodeResult>("create_node", {
+          input: {
+            canvasId: target.canvasId,
+            kind: "generated-image",
+            title: `图片预览 ${index + 2}`,
+            content: imageContent(output),
+            source: "comfyui",
+            x: target.x + target.width + 116 + index * 36,
+            y: target.y + 36 + index * 36,
+            width: 420,
+            height: Math.min(
+              1200,
+              Math.max(180, Math.round(420 * height / width) + GENERATED_IMAGE_CHROME_HEIGHT),
+            ),
+          },
+        });
+        const edgeResult = await invoke<EdgeRecord>("create_edge", {
+          input: {
+            canvasId: target.canvasId,
+            sourceNodeId: targetId,
+            targetNodeId: preview.node.id,
+            kind: "output",
+            metadata: {},
+          },
+        });
+        createdNodes.push(makeFlowNode(preview.node));
+        createdEdges.push(toFlowEdge(edgeResult));
+      }
+      if (createdNodes.length) {
+        setNodes((current) => [...current, ...createdNodes]);
+        setEdges((current) => [...current, ...createdEdges]);
+      }
+      const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
+      changeNode(targetId, {
+        content: {
+          ...latest.content,
+          status: "succeeded",
+          executionProgress: 100,
+          validationMessage: effectiveUpscaleEnabled ? "已生成放大图" : isImageEdit ? "图像编辑完成" : "已生成原始分辨率图片",
+        },
+      });
+      setNotice(effectiveUpscaleEnabled ? "图片生成与放大完成" : isImageEdit ? "图像编辑完成" : "图片生成完成");
+    } catch (error) {
+      if (cancelledComfyClients.current.has(clientId)) return;
+      const message = error instanceof Error ? error.message : String(error);
+      try {
+        await finalizeGenerationPlaceholder(placeholder, {
+          status: "invalid",
+          executionProgress: null,
+          validationMessage: `图片生成失败：${message}`,
+        });
+      } catch {
+        // Keep the original ComfyUI error visible on the source node.
+        preserveComfyTaskRecord = true;
+      }
+      const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
+      changeNode(targetId, {
+        content: { ...latest.content, status: "invalid", executionProgress: null, validationMessage: message },
+      });
+      reportError(error);
+    } finally {
+      progressSocket?.close();
+      cancelledComfyClients.current.delete(clientId);
+      ownedComfyClients.current.delete(clientId);
+      if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
+      unregisterComfyTask(targetId, clientId);
+    }
+  }, [changeNode, completeGenerationPlaceholder, createImageGenerationPlaceholder, finalizeGenerationPlaceholder, flushNodePatches, forgetComfyTask, imageRecoveryGenerationSnapshot, makeFlowNode, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
+  executeImageNodeRef.current = executeImageNode;
+
+  const upscaleGeneratedImage = useCallback(async (previewId: string) => {
+    const previewNode = nodesSnapshot.current.find(
+      (node) => node.id === previewId && node.data.record.kind === "generated-image",
+    );
+    if (!previewNode) {
+      setNotice("无法放大：找不到图片预览节点");
+      return;
+    }
+    const preview = recordAtCurrentFlowPosition(previewNode);
+    if (preview.content.generationPlaceholder === true) {
+      setNotice("当前图片仍在生成中");
+      return;
+    }
+    const source = comfyOutputFromContent(preview.content);
+    if (!source) {
+      setNotice("无法放大：当前图片缺少 ComfyUI 输出文件信息");
+      return;
+    }
+    const sourceGeneratorId = typeof preview.content.sourceGeneratorId === "string"
+      ? preview.content.sourceGeneratorId
+      : "";
+    const sourceGenerator = sourceGeneratorId
+      ? nodesSnapshot.current.find((node) => node.id === sourceGeneratorId)?.data.record
+      : undefined;
+    const defaultImageModuleId = workflowModuleDefaults["image-generation"] ?? "";
+    const imageUpscaleModule = workflowModules.find((module) => (
+      !module.deletedAt
+      && module.id === defaultImageModuleId
+      && module.capability === "image-generation"
+      && module.variant === "image-generation"
+    ))
+      ?? workflowModules.find((module) => (
+        !module.deletedAt
+        && module.capability === "image-generation"
+        && module.variant === "image-generation"
+      ));
+    const moduleId = imageUpscaleModule?.id ?? "";
+    const imageModelName = imageUpscaleModule
+      && isKrea2DiffusionModelName(imageUpscaleModule.defaults.diffusionModelName)
+      ? imageUpscaleModule.defaults.diffusionModelName
+      : "";
+    if (!moduleId) {
+      setNotice("无法放大：请先配置 Krea2 文生图生成方案");
+      return;
+    }
+    const megapixels = Number(
+      preview.content.generationUpscaleMegapixels
+      ?? sourceGenerator?.content.upscaleMegapixels
+      ?? 8,
+    );
+    if (!Number.isFinite(megapixels) || megapixels < 0.1 || megapixels > 64) {
+      setNotice("无法放大：目标像素数必须在 0.1–64 MP 之间");
+      return;
+    }
+    const sourceWidth = Number(preview.content.generationWidth)
+      || Number(sourceGenerator?.content.width)
+      || 1280;
+    const sourceHeight = Number(preview.content.generationHeight)
+      || Number(sourceGenerator?.content.height)
+      || 720;
+    const aspectRatio = sourceWidth / sourceHeight;
+    const outputHeight = Math.max(64, Math.round(Math.sqrt((megapixels * 1_000_000) / aspectRatio)));
+    const outputWidth = Math.max(64, Math.round(outputHeight * aspectRatio));
+    const clientId = crypto.randomUUID();
+    const imageRecoverySnapshot = imageRecoveryGenerationSnapshot({
+      kind: "upscale",
+      prompt: typeof preview.content.generationPrompt === "string"
+        ? preview.content.generationPrompt
+        : "",
+      negativePrompt: typeof preview.content.generationNegativePrompt === "string"
+        ? preview.content.generationNegativePrompt
+        : "",
+      promptSourceNodeId: typeof preview.content.promptSourceNodeId === "string"
+        ? preview.content.promptSourceNodeId
+        : "",
+      sourceGeneratorId,
+      sourcePreviewId: previewId,
+      workflowModuleId: moduleId,
+      workflowModuleRevision: typeof preview.content.generationWorkflowModuleRevision === "string"
+        ? preview.content.generationWorkflowModuleRevision
+        : "",
+      modelName: imageModelName || (typeof preview.content.generationModelName === "string"
+        ? preview.content.generationModelName
+        : ""),
+      width: outputWidth,
+      height: outputHeight,
+      loraName: typeof preview.content.generationLoraName === "string"
+        ? preview.content.generationLoraName
+        : "",
+      upscaleEnabled: true,
+      upscaleMegapixels: megapixels,
+    });
+    const taskSubmittedAt = Date.now();
+    let placeholder: NodeRecord;
+    try {
+      placeholder = await createImageGenerationPlaceholder({
+        source: preview,
+        clientId,
+        width: outputWidth,
+        height: outputHeight,
+        upscaleEnabled: true,
+        snapshot: imageRecoverySnapshot,
+        title: "图片放大预览（生成中）",
+        sourceGeneratorId,
+        sourcePreviewId: previewId,
+      });
+    } catch (error) {
+      reportError(error);
+      return;
+    }
+    ownedComfyClients.current.add(clientId);
+    rememberComfyTask({
+      clientId,
+      nodeId: previewId,
+      canvasId: preview.canvasId,
+      snapshot: imageRecoverySnapshot,
+      startedAt: taskSubmittedAt,
+      kind: "image-upscale",
+      sourceGeneratorId,
+      placeholderNodeId: placeholder.id,
+    });
+    cancelledComfyClients.current.delete(clientId);
+    registerComfyTask(previewId, clientId);
+    changeNode(previewId, {
+      content: {
+        ...preview.content,
+        status: "running",
+        executionProgress: null,
+        validationMessage: `正在放大图片（${megapixels.toFixed(1)} MP）…`,
+      },
+    });
+    let progressSocket: WebSocket | null = null;
+    let preserveComfyTaskRecord = false;
+    try {
+      progressSocket = await openComfyProgressSocket(clientId, comfyUiServerUrlRef.current);
+      if (cancelledComfyClients.current.has(clientId)) {
+        throw new Error("ComfyUI 图片放大已取消");
+      }
+      progressSocket?.addEventListener("message", (event) => {
+        if (cancelledComfyClients.current.has(clientId)) return;
+        const update = comfyProgressFromSocketData(event.data);
+        if (!update) return;
+        const validationMessage = `ComfyUI 正在放大图片：当前步骤 ${update.value}/${update.maximum}`;
+        const latest = nodesSnapshot.current.find((node) => node.id === previewId)?.data.record ?? preview;
+        changeNode(previewId, {
+          content: {
+            ...latest.content,
+            status: "running",
+            executionProgress: update.progress,
+            validationMessage,
+          },
+        });
+        updateGenerationPlaceholder(placeholder.id, {
+          status: "running",
+          executionProgress: update.progress,
+          validationMessage,
+        });
+      });
+      const result = await invoke<ComfySubmitResult>("submit_comfyui_image_upscale", {
+        input: {
+          serverUrl: comfyUiServerUrlRef.current,
+          workflowModuleId: moduleId,
+          clientId,
+          source,
+          megapixels,
+          modelName: imageModelName,
+        },
+      });
+      const [firstOutput, ...additionalOutputs] = result.outputs;
+      if (!firstOutput) throw new Error("ComfyUI 没有返回放大后的图片");
+      const imageContent = (output: typeof firstOutput): JsonObject => {
+        const assetPath = mappedComfyOutputPath(comfyOutputRootRef.current, {
+          filename: output.filename,
+          subfolder: output.subfolder,
+          fileType: output.fileType,
+        });
+        return {
+        imageUrl: output.url,
+        ...(assetPath ? { assetPath } : {}),
+        originalName: output.filename,
+        filename: output.filename,
+        subfolder: output.subfolder,
+        fileType: output.fileType,
+        seed: typeof preview.content.seed === "string" ? preview.content.seed : "",
+        comfyPromptId: result.promptId,
+        comfyServerUrl: comfyUiServerUrlRef.current,
+        sourceGeneratorId,
+        sourcePreviewId: previewId,
+        promptSourceNodeId: typeof preview.content.promptSourceNodeId === "string"
+          ? preview.content.promptSourceNodeId
+          : "",
+        generationPrompt: typeof preview.content.generationPrompt === "string"
+          ? preview.content.generationPrompt
+          : "",
+        generationNegativePrompt: typeof preview.content.generationNegativePrompt === "string"
+          ? preview.content.generationNegativePrompt
+          : "",
+        generationWorkflowModuleId: moduleId,
+        generationWorkflowModuleRevision: typeof preview.content.generationWorkflowModuleRevision === "string"
+          ? preview.content.generationWorkflowModuleRevision
+          : "",
+        generationModelName: typeof result.modelName === "string"
+          ? result.modelName
+          : typeof preview.content.generationModelName === "string"
+            ? preview.content.generationModelName
+            : "",
+        generationWidth: outputWidth,
+        generationHeight: outputHeight,
+        generationUpscaleMegapixels: megapixels,
+        generationLoraName: typeof preview.content.generationLoraName === "string"
+          ? preview.content.generationLoraName
+          : "",
+        imageUpscale: true,
+        upscaleEnabled: true,
+        ...(validExecutionElapsedSeconds(result.executionElapsedSeconds) === null
+          ? {}
+          : { generationElapsedSeconds: validExecutionElapsedSeconds(result.executionElapsedSeconds) }),
+        };
+      };
+      await completeGenerationPlaceholder(
+        placeholder.id,
+        result.outputs.length > 1 ? "图片放大预览 1" : "图片放大预览",
+        imageContent(firstOutput),
+      );
+      const createdNodes: CanvasFlowNode[] = [];
+      const createdEdges: Edge[] = [];
+      for (const [index, output] of additionalOutputs.entries()) {
+        const previewResult = await invoke<CreateNodeResult>("create_node", {
+          input: {
+            canvasId: preview.canvasId,
+            kind: "generated-image",
+            title: `图片放大预览 ${index + 2}`,
+            content: imageContent(output),
+            source: "comfyui",
+            x: preview.x + preview.width + 116 + index * 36,
+            y: preview.y + 36 + index * 36,
+            width: 420,
+            height: Math.min(
+              1200,
+              Math.max(180, Math.round(420 * outputHeight / outputWidth) + GENERATED_IMAGE_CHROME_HEIGHT),
+            ),
+          },
+        });
+        const edgeResult = await invoke<EdgeRecord>("create_edge", {
+          input: {
+            canvasId: preview.canvasId,
+            sourceNodeId: previewId,
+            targetNodeId: previewResult.node.id,
+            kind: "secondary-output",
+            metadata: { imageUpscale: true, megapixels },
+          },
+        });
+        createdNodes.push(makeFlowNode(previewResult.node));
+        createdEdges.push(toFlowEdge(edgeResult));
+      }
+      if (createdNodes.length) setNodes((current) => appendUniqueById(current, createdNodes));
+      if (createdEdges.length) setEdges((current) => appendUniqueById(current, createdEdges));
+      const latest = nodesSnapshot.current.find((node) => node.id === previewId)?.data.record ?? preview;
+      changeNode(previewId, {
+        content: {
+          ...latest.content,
+          status: "succeeded",
+          executionProgress: 100,
+          validationMessage: "图片放大完成",
+        },
+      });
+      setNotice("图片放大完成");
+    } catch (error) {
+      if (cancelledComfyClients.current.has(clientId)) return;
+      const message = error instanceof Error ? error.message : String(error);
+      try {
+        await finalizeGenerationPlaceholder(placeholder, {
+          status: "invalid",
+          executionProgress: null,
+          validationMessage: `图片放大失败：${message}`,
+        });
+      } catch {
+        // Preserve the original error on the source preview.
+        preserveComfyTaskRecord = true;
+      }
+      const latest = nodesSnapshot.current.find((node) => node.id === previewId)?.data.record ?? preview;
+      changeNode(previewId, {
+        content: { ...latest.content, status: "invalid", executionProgress: null, validationMessage: message },
+      });
+      reportError(error);
+    } finally {
+      progressSocket?.close();
+      cancelledComfyClients.current.delete(clientId);
+      ownedComfyClients.current.delete(clientId);
+      if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
+      unregisterComfyTask(previewId, clientId);
+    }
+  }, [changeNode, completeGenerationPlaceholder, createImageGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, imageRecoveryGenerationSnapshot, makeFlowNode, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
+  upscaleGeneratedImageRef.current = upscaleGeneratedImage;
+
+  const regenerateGeneratedImage = useCallback(async (previewId: string) => {
+    const preview = nodesSnapshot.current.find(
+      (node) => node.id === previewId && node.data.record.kind === "generated-image",
+    )?.data.record;
+    if (!preview) {
+      setNotice("无法重新生成：找不到图片预览节点");
+      return;
+    }
+    if (typeof preview.content.sourcePreviewId === "string") {
+      setNotice("图片放大预览不支持重新生成，请回到原始图片重新操作");
+      return;
+    }
+    const sourceGeneratorId = typeof preview.content.sourceGeneratorId === "string"
+      ? preview.content.sourceGeneratorId
+      : "";
+    const generator = sourceGeneratorId
+      ? nodesSnapshot.current.find((node) => (
+        node.id === sourceGeneratorId && node.data.record.kind === "image-generation"
+      ))
+      : undefined;
+    if (!generator) {
+      setNotice("无法重新生成：关联的图片生成节点已被删除");
+      return;
+    }
+    await executeImageNodeRef.current(generator.id, preview.id);
+  }, []);
+  regenerateGeneratedImageRef.current = regenerateGeneratedImage;
+
   const openCanvasContextMenu = useCallback((event: MouseEvent | ReactMouseEvent) => {
     event.preventDefault();
     const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
@@ -6906,7 +8437,7 @@ function CanvasWorkspace() {
     }
   }, [activeComfyTaskCounts, activeProjectId, folderGroupingBusy, flushPendingPatches, loadFolderContentNodes, makeFlowNode, rememberUndoEntry, reportError, setEdges, setNodes]);
 
-  const createNodeFromContextMenu = useCallback((kind: "folder" | "text" | "prompt-version" | "note" | "video-generation" | "storyboard-video-generation") => {
+  const createNodeFromContextMenu = useCallback((kind: "folder" | "text" | "prompt-version" | "note" | "video-generation" | "image-generation" | "storyboard-video-generation") => {
     if (!canvasContextMenu) return;
     const position = { x: canvasContextMenu.flowX, y: canvasContextMenu.flowY };
     setCanvasContextMenu(null);
@@ -6914,8 +8445,9 @@ function CanvasWorkspace() {
     else if (kind === "text") void addTextNode(position);
     else if (kind === "prompt-version") void addPromptVersionNode(position);
     else if (kind === "note") void addNoteNode(position);
+    else if (kind === "image-generation") void addImageGenerationNode(position);
     else void addVideoNode(position, kind === "storyboard-video-generation");
-  }, [addEmptyFolder, addNoteNode, addPromptVersionNode, addTextNode, addVideoNode, canvasContextMenu]);
+  }, [addEmptyFolder, addImageGenerationNode, addNoteNode, addPromptVersionNode, addTextNode, addVideoNode, canvasContextMenu]);
 
   useEffect(() => {
     if (!canvasContextMenu) return;
@@ -7112,10 +8644,31 @@ function CanvasWorkspace() {
       if (targetIsContent) {
         return "内容迭代节点的左侧只能连接另一个内容迭代节点";
       }
-      if (sourceIsContent && target.kind !== "video-generation") {
-        return "内容迭代节点只能连接下游内容或视频生成节点";
+      if (sourceIsContent && target.kind !== "video-generation" && target.kind !== "image-generation") {
+        return "内容迭代节点只能连接下游内容、视频生成或图片生成节点";
       }
-      if (!(["text", "image", "audio", "video"].includes(source.kind) && target.kind === "video-generation")) {
+      if (target.kind === "image-generation") {
+        if (source.kind === "text") return null;
+        const imageModuleId = typeof target.content.workflowModuleId === "string"
+          ? target.content.workflowModuleId
+          : workflowModuleDefaults["image-generation"] ?? "";
+        const imageModule = workflowModules.find((module) => (
+          !module.deletedAt
+          && module.id === imageModuleId
+          && module.capability === "image-generation"
+        ));
+        if (imageModule?.variant !== "image-edit" || videoInputMediaKind(source) !== "image") {
+          return "当前图片方案只允许连接文本或提示词迭代节点";
+        }
+        const imageCount = validationEdges
+          .filter((edge) => edge.target === target.id)
+          .map((edge) => contentNodes.find((node) => node.id === edge.source)?.data.record)
+          .filter((record): record is NodeRecord => Boolean(record) && videoInputMediaKind(record!) === "image")
+          .length;
+        return imageCount >= 2 ? "Krea2 图像编辑最多只能连接两张图片" : null;
+      }
+      const sourceMediaKind = videoInputMediaKind(source);
+      if (!(source.kind === "text" || sourceMediaKind) || target.kind !== "video-generation") {
         return "只能连接到视频生成节点";
       }
 
@@ -7124,40 +8677,40 @@ function CanvasWorkspace() {
         return "文生视频只允许连接文字节点";
       }
       if (mode === "first-last-frame") {
-        if (source.kind === "audio" || source.kind === "video") {
+        if (sourceMediaKind === "audio" || sourceMediaKind === "video") {
           return "首尾帧模式不能连接音频或视频";
         }
-        if (source.kind === "image") {
+        if (sourceMediaKind === "image") {
           const imageCount = validationEdges
             .filter((edge) => edge.target === target.id)
             .map((edge) => contentNodes.find((node) => node.id === edge.source)?.data.record)
-            .filter((record) => record?.kind === "image")
+            .filter((record): record is NodeRecord => Boolean(record) && videoInputMediaKind(record!) === "image")
             .length;
           if (imageCount >= 2) return "首尾帧模式最多只能连接两张图片";
         }
       }
       if (mode === "image-to-video") {
-        if (source.kind === "audio" || source.kind === "video") {
+        if (sourceMediaKind === "audio" || sourceMediaKind === "video") {
           return "图生视频模式不能连接音频或视频参考";
         }
-        if (source.kind === "image") {
+        if (sourceMediaKind === "image") {
           const imageCount = validationEdges
             .filter((edge) => edge.target === target.id)
             .map((edge) => contentNodes.find((node) => node.id === edge.source)?.data.record)
-            .filter((record) => record?.kind === "image")
+            .filter((record): record is NodeRecord => Boolean(record) && videoInputMediaKind(record!) === "image")
             .length;
           if (imageCount >= 1) return "图生视频模式只能连接一张首帧图片";
         }
       }
       if (mode === "last-frame-to-video") {
-        if (source.kind === "audio" || source.kind === "video") {
+        if (sourceMediaKind === "audio" || sourceMediaKind === "video") {
           return "尾帧生视频模式不能连接音频或视频参考";
         }
-        if (source.kind === "image") {
+        if (sourceMediaKind === "image") {
           const imageCount = validationEdges
             .filter((edge) => edge.target === target.id)
             .map((edge) => contentNodes.find((node) => node.id === edge.source)?.data.record)
-            .filter((record) => record?.kind === "image")
+            .filter((record): record is NodeRecord => Boolean(record) && videoInputMediaKind(record!) === "image")
             .length;
           if (imageCount >= 1) return "尾帧生视频模式只能连接一张尾帧图片";
         }
@@ -7165,7 +8718,7 @@ function CanvasWorkspace() {
 
       return null;
     },
-    [contentNodes, edges],
+    [contentNodes, edges, workflowModuleDefaults, workflowModules],
   );
 
   const isValidConnection = useCallback(
@@ -7176,12 +8729,12 @@ function CanvasWorkspace() {
         return false;
       }
       const targetNode = contentNodes.find((node) => node.id === connection.target);
-      if (targetNode?.data.record.kind !== "video-generation") return false;
+      if (targetNode?.data.record.kind !== "video-generation" && targetNode?.data.record.kind !== "image-generation") return false;
       const sourceNode = contentNodes.find((node) => node.id === connection.source);
       if (!sourceNode?.selected) return false;
       return contentNodes.some((node) => (
         node.selected
-        && ["text", "image", "audio", "video"].includes(node.data.record.kind)
+        && (node.data.record.kind === "text" || videoInputMediaKind(node.data.record) !== null)
         && !edges.some((edge) => (
           edge.source === node.id && edge.target === connection.target
         ))
@@ -7369,6 +8922,34 @@ function CanvasWorkspace() {
           });
         }
 
+        if (createdSourceIds.length && targetNode.data.record.kind === "image-generation") {
+          const connectedTextRecords = edgesSnapshot.current
+            .filter((edge) => edge.target === targetNode.id)
+            .map((edge) => nodesSnapshot.current.find((node) => node.id === edge.source)?.data.record)
+            .filter((record): record is NodeRecord => record?.kind === "text");
+          const existingTextOrder = orderedNodeRecordsFromContent(
+            targetNode.data.record.content,
+            "textInputOrder",
+            connectedTextRecords,
+          ).map((record) => record.id);
+          const createdTextSourceIds = createdSourceIds.filter((sourceId) => (
+            nodesSnapshot.current.find((node) => node.id === sourceId)?.data.record.kind === "text"
+          ));
+          const nextTextInputOrder = [...existingTextOrder, ...createdTextSourceIds];
+          const configuredActiveTextId = typeof targetNode.data.record.content.activeTextInputId === "string"
+            ? targetNode.data.record.content.activeTextInputId
+            : "";
+          changeNode(targetNode.id, {
+            content: {
+              ...targetNode.data.record.content,
+              textInputOrder: nextTextInputOrder,
+              activeTextInputId: nextTextInputOrder.includes(configuredActiveTextId)
+                ? configuredActiveTextId
+                : nextTextInputOrder[0] ?? "",
+            },
+          });
+        }
+
         if (!createdEdges.length) {
           setNotice(`输入素材连接失败：${failures[0] ?? "没有可连接的节点"}`);
         } else if (batchSources.length > 1) {
@@ -7396,12 +8977,12 @@ function CanvasWorkspace() {
     const selectedNodes = nodesSnapshot.current.filter((node) => node.selected);
     if (selectedNodes.length) {
       if (deleteSourceFiles) {
-        const generatedVideos = selectedNodes.filter((node) => (
-          node.data.record.kind === "generated-video"
+        const generatedMedia = selectedNodes.filter((node) => (
+          (node.data.record.kind === "generated-video" || node.data.record.kind === "generated-image")
           && node.data.record.content.generationPlaceholder !== true
         ));
-        if (generatedVideos.length) {
-          await deleteCanvasNodes(generatedVideos, true);
+        if (generatedMedia.length) {
+          await deleteCanvasNodes(generatedMedia, true);
           return;
         }
       }
@@ -7672,12 +9253,10 @@ function CanvasWorkspace() {
       const nextCache = new Map<string, VisibleNodeCacheEntry>();
       const results = nodes.map((node) => {
         const previous = previousCache.get(node.id);
-        const inputRecords = node.data.record.kind === "video-generation"
+        const inputRecords = (node.data.record.kind === "video-generation" || node.data.record.kind === "image-generation")
           ? inputRecordsByTarget.get(node.id) ?? EMPTY_NODE_RECORDS
           : EMPTY_NODE_RECORDS;
-        const connectedMedia = inputRecords.filter(
-          (record) => record.kind === "image" || record.kind === "audio" || record.kind === "video",
-        );
+        const connectedMedia = inputRecords.filter((record) => videoInputMediaKind(record) !== null);
         const connectedText = inputRecords.filter((record) => record.kind === "text");
         const orderedText = orderedNodeRecordsFromContent(
           node.data.record.content,
@@ -7738,6 +9317,7 @@ function CanvasWorkspace() {
           && previousData.textInputs === textInputs
           && previousData.promptNodeTitle === promptNodeTitle
           && previousData.h3LoraOptions === h3LoraOptions
+          && previousData.krea2LoraOptions === krea2LoraOptions
           && previousData.workflowModules === workflowModules
           && previousData.workflowModuleDefaults === workflowModuleDefaults,
         );
@@ -7757,6 +9337,7 @@ function CanvasWorkspace() {
               textInputs,
               promptNodeTitle,
               h3LoraOptions,
+              krea2LoraOptions,
               workflowModules,
               workflowModuleDefaults,
             };
@@ -7769,7 +9350,7 @@ function CanvasWorkspace() {
       visibleNodeCache.current = nextCache;
       return results;
     },
-    [activeComfyTaskCounts, contentNodes, edges, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, workflowModuleDefaults, workflowModules],
+    [activeComfyTaskCounts, contentNodes, edges, h3LoraOptions, krea2LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, workflowModuleDefaults, workflowModules],
   );
 
   const updateGuideOverlays = useCallback((nextAlignment: AlignmentGuide[], nextSpacing: SpacingGuide[]) => {
@@ -8120,7 +9701,8 @@ function CanvasWorkspace() {
           event.preventDefault();
           if (activeSettingsSection === "general") saveComfySettings();
           if (activeSettingsSection === "video-defaults") saveVideoGenerationDefaults();
-          if (activeSettingsSection === "model") void saveH3ModelParameters();
+          if (activeSettingsSection === "video-model") void saveH3ModelParameters();
+          if (activeSettingsSection === "image-model") void saveKrea2ModelParameters();
         }}
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -8164,11 +9746,11 @@ function CanvasWorkspace() {
               onClick={() => setActiveSettingsSection("video-defaults")}
             >
               <SlidersHorizontal size={16} />
-              <span><strong>视频生成参数</strong><small>新节点的生成参数</small></span>
+              <span><strong>视频默认参数</strong><small>新节点的生成参数</small></span>
             </button>
             <button
               type="button"
-              className={activeSettingsSection === "model" ? "is-active" : ""}
+              className={activeSettingsSection === "video-model" ? "is-active" : ""}
               onClick={() => {
                 const module = workflowModules.find((candidate) => (
                   !candidate.deletedAt
@@ -8189,11 +9771,35 @@ function CanvasWorkspace() {
                     secondarySaturation: module.defaults.secondarySaturation,
                   });
                 }
-                setActiveSettingsSection("model");
+                setActiveSettingsSection("video-model");
               }}
             >
               <SlidersHorizontal size={16} />
-              <span><strong>模型参数</strong><small>模型、音频与画面</small></span>
+              <span><strong>视频模型参数</strong><small>模型、音频与画面</small></span>
+            </button>
+            <button
+              type="button"
+              className={activeSettingsSection === "image-model" ? "is-active" : ""}
+              onClick={() => {
+                const module = workflowModules.find((candidate) => (
+                  !candidate.deletedAt
+                  && candidate.id === workflowModuleDefaults["image-generation"]
+                )) ?? workflowModules.find((candidate) => (
+                  !candidate.deletedAt && candidate.capability === "image-generation"
+                ));
+                if (module) {
+                  setSelectedImageWorkflowModuleId(module.id);
+                  setKrea2DiffusionModelName(
+                    isKrea2DiffusionModelName(module.defaults.diffusionModelName)
+                      ? module.defaults.diffusionModelName
+                      : "",
+                  );
+                }
+                setActiveSettingsSection("image-model");
+              }}
+            >
+              <ImageIcon size={16} />
+              <span><strong>图片模型参数</strong><small>按图片方案选择基础模型</small></span>
             </button>
             <button
               type="button"
@@ -8452,8 +10058,7 @@ function CanvasWorkspace() {
                           ariaLabel="工作流功能类型"
                           options={WORKFLOW_CAPABILITIES.map((capability) => ({
                             value: capability.value,
-                            label: `${capability.label}${capability.value === "video-generation" ? "" : "（等待对应适配器）"}`,
-                            disabled: capability.value !== "video-generation",
+                            label: capability.label,
                           }))}
                         />
                       </div>
@@ -8604,7 +10209,7 @@ function CanvasWorkspace() {
               <section className="settings-pane video-defaults-settings-pane" aria-labelledby="video-defaults-settings-title">
                 <div className="settings-pane-heading">
                   <div>
-                    <h3 id="video-defaults-settings-title">视频生成参数</h3>
+                    <h3 id="video-defaults-settings-title">视频默认参数</h3>
                     <p>这里的参数会套用到之后新建的视频生成节点；已在画布上的节点不会被改动。</p>
                   </div>
                 </div>
@@ -8616,10 +10221,10 @@ function CanvasWorkspace() {
                 />
               </section>
             )}
-            {activeSettingsSection === "model" && (
+            {activeSettingsSection === "video-model" && (
               <section className="settings-pane model-settings-pane" aria-labelledby="model-settings-title">
                 <div className="settings-pane-heading">
-                  <h3 id="model-settings-title">模型参数</h3>
+                  <h3 id="model-settings-title">视频模型参数</h3>
                   <p>参数独立保存在所选工作流方案中，不会影响其他并存方案。</p>
                 </div>
                 <div className="model-workflow-module-select">
@@ -8708,6 +10313,57 @@ function CanvasWorkspace() {
                     </div>
                   ))}
                 </section>
+              </section>
+            )}
+            {activeSettingsSection === "image-model" && (
+              <section className="settings-pane model-settings-pane" aria-labelledby="image-model-settings-title">
+                <div className="settings-pane-heading">
+                  <h3 id="image-model-settings-title">图片模型参数</h3>
+                  <p>每个图片生成方案独立保存基础模型；当前支持 Krea2 文生图与图像编辑。</p>
+                </div>
+                <div className="model-workflow-module-select">
+                  <span>编辑方案</span>
+                  <SettingsSelect
+                    value={selectedImageWorkflowModule?.id ?? ""}
+                    onChange={(value) => {
+                      const module = workflowModules.find((candidate) => (
+                        !candidate.deletedAt
+                        && candidate.capability === "image-generation"
+                        && candidate.id === value
+                      ));
+                      if (!module) return;
+                      setSelectedImageWorkflowModuleId(module.id);
+                      setKrea2DiffusionModelName(
+                        isKrea2DiffusionModelName(module.defaults.diffusionModelName)
+                          ? module.defaults.diffusionModelName
+                          : "",
+                      );
+                    }}
+                    ariaLabel="图片模型参数编辑方案"
+                    placeholder="没有可用图片方案"
+                    options={workflowModules.filter((module) => (
+                      !module.deletedAt && module.capability === "image-generation"
+                    )).map((module) => ({
+                      value: module.id,
+                      label: `${module.name} · ${module.revision}`,
+                    }))}
+                  />
+                </div>
+                <div className="model-workflow-module-select model-diffusion-model-select">
+                  <span>Krea2 基础模型</span>
+                  <SettingsSelect
+                    value={krea2DiffusionModelName}
+                    onChange={setKrea2DiffusionModelName}
+                    ariaLabel="Krea2 基础模型"
+                    placeholder={krea2DiffusionModelCatalogLoaded ? "Krea2 目录中没有可用模型" : "正在读取 ComfyUI 模型…"}
+                    disabled={!selectedImageWorkflowModule || !krea2DiffusionModelOptions.length}
+                    options={krea2DiffusionModelOptions.map((model) => ({
+                      value: model,
+                      label: h3DiffusionModelDisplayName(model),
+                    }))}
+                  />
+                  <small>仅显示 ComfyUI 中 Krea2 目录的 UNET 基础模型；保存后应用于当前图片方案、图像编辑及图片放大。</small>
+                </div>
               </section>
             )}
             {activeSettingsSection === "backup" && (
@@ -8957,7 +10613,8 @@ function CanvasWorkspace() {
         </div>
         {(activeSettingsSection === "general"
           || activeSettingsSection === "video-defaults"
-          || activeSettingsSection === "model") && (
+          || activeSettingsSection === "video-model"
+          || activeSettingsSection === "image-model") && (
           <div className="project-dialog-actions">
             {activeSettingsSection === "general" && (
               <button type="submit" className="primary-button">
@@ -8969,9 +10626,14 @@ function CanvasWorkspace() {
                 保存为默认值
               </button>
             )}
-            {activeSettingsSection === "model" && (
+            {activeSettingsSection === "video-model" && (
               <button type="submit" className="primary-button">
-                保存模型参数
+                保存视频模型参数
+              </button>
+            )}
+            {activeSettingsSection === "image-model" && (
+              <button type="submit" className="primary-button">
+                保存图片模型参数
               </button>
             )}
           </div>
@@ -9363,6 +11025,11 @@ function CanvasWorkspace() {
     && contextMenuClickedRecord.content.videoUrl.trim()
       ? contextMenuClickedRecord
       : null;
+  const contextMenuGeneratedImage = contextMenuClickedRecord?.kind === "generated-image"
+    && typeof contextMenuClickedRecord.content.imageUrl === "string"
+    && contextMenuClickedRecord.content.imageUrl.trim()
+      ? contextMenuClickedRecord
+      : null;
   const contextMenuImageIsProjectPreview = Boolean(
     contextMenuImageAssetPath
     && canvasPath[0]?.previewImagePath === contextMenuImageAssetPath,
@@ -9680,6 +11347,65 @@ function CanvasWorkspace() {
                   type="button"
                   className="dialog-danger"
                   onClick={() => finishVideoDeletionChoice("node-and-file")}
+                >
+                  <Trash2 size={14} />
+                  同时删除文件
+                </button>
+              )}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+      {imageDeletionRequest && createPortal(
+        <div
+          className="project-dialog-backdrop"
+          onMouseDown={() => finishImageDeletionChoice("cancel")}
+        >
+          <div
+            className="project-dialog project-delete-dialog video-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-image-title"
+            aria-describedby="delete-image-description"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><Trash2 size={22} /></div>
+            <div>
+              <h2 id="delete-image-title">删除图片节点？</h2>
+              <p id="delete-image-description">
+                即将删除 {imageDeletionRequest.imageCount} 个图片节点。
+                {imageDeletionRequest.filePaths.length
+                  ? ` 检测到 ${imageDeletionRequest.filePaths.length} 个本地图片文件，可选择一并永久删除。`
+                  : " 当前没有可定位的本地图片文件，只能删除节点。"}
+              </p>
+              {imageDeletionRequest.filePaths.length > 0 && (
+                <p className="video-delete-warning">
+                  同时删除文件后无法撤销，Ctrl+Z 也不能恢复真实图片文件。
+                </p>
+              )}
+            </div>
+            <div className="project-dialog-actions">
+              <button
+                type="button"
+                className="dialog-cancel"
+                autoFocus
+                onClick={() => finishImageDeletionChoice("cancel")}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="dialog-cancel video-delete-node-only"
+                onClick={() => finishImageDeletionChoice("node-only")}
+              >
+                仅删除节点
+              </button>
+              {imageDeletionRequest.filePaths.length > 0 && (
+                <button
+                  type="button"
+                  className="dialog-danger"
+                  onClick={() => finishImageDeletionChoice("node-and-file")}
                 >
                   <Trash2 size={14} />
                   同时删除文件
@@ -10189,6 +11915,12 @@ function CanvasWorkspace() {
                   <span><strong>下载视频</strong><small>保存当前生成的视频文件</small></span>
                 </button>
               )}
+              {contextMenuGeneratedImage && (
+                <button type="button" role="menuitem" onClick={() => void downloadGeneratedImage(contextMenuGeneratedImage.id)}>
+                  <Download size={15} />
+                  <span><strong>下载图片</strong><small>保存当前生成的图片文件</small></span>
+                </button>
+              )}
               {contextMenuUploadedMedia && (
                 <button
                   type="button"
@@ -10313,6 +12045,10 @@ function CanvasWorkspace() {
               <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("video-generation")}>
                 <Clapperboard size={15} />
                 <span><strong>视频生成节点</strong><small>连接素材并提交生成</small></span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("image-generation")}>
+                <ImageIcon size={15} />
+                <span><strong>图片生成节点</strong><small>文生图，可独立启用放大</small></span>
               </button>
               <button type="button" role="menuitem" onClick={() => createNodeFromContextMenu("storyboard-video-generation")}>
                 <Sparkles size={15} />

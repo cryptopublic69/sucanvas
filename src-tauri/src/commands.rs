@@ -23,17 +23,17 @@ use uuid::Uuid;
 use crate::{
     app_backup::{self, BackupSummary, RestoreSummary},
     models::{
-        AppLockStatus, CancelFolderResult, ComfyClientTaskStatus, ComfyOutputFile,
-        ComfyQueueSummary, ComfySubmitInput, ComfySubmitResult, CreateEdgeInput,
-        CreateEmptyFolderInput, CreateEmptyFolderResult, CreateNodeInput, CreateNodeResult,
-        CreateProjectInput, DeleteFolderResult, DeleteNodesInput, DeletedBatch, EdgeRecord,
-        FolderActionInput, GroupNodesIntoFolderInput, GroupNodesIntoFolderResult,
-        GroupRelatedNodesIntoFolderInput, MergeFoldersInput, MergeFoldersResult, NodeRecord,
-        ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult, ResizeImageResult,
-        RestoreNodeReplacementInput, RestoreNodeReplacementResult, RuntimeInfo, SetAppLockInput,
-        SetProjectPreviewImageInput, SetProjectPrivacyInput, UndoCancelFolderInput,
-        UndoDeleteFolderInput, UndoFolderGroupingInput, UndoFolderMergeInput, UpdateNodeInput,
-        UpdateProjectInput, WorkspaceSnapshot,
+        AppLockStatus, CancelFolderResult, ComfyClientTaskStatus, ComfyImageSubmitInput,
+        ComfyImageUpscaleInput, ComfyOutputFile, ComfyQueueSummary, ComfySubmitInput,
+        ComfySubmitResult, CreateEdgeInput, CreateEmptyFolderInput, CreateEmptyFolderResult,
+        CreateNodeInput, CreateNodeResult, CreateProjectInput, DeleteFolderResult,
+        DeleteNodesInput, DeletedBatch, EdgeRecord, FolderActionInput, GroupNodesIntoFolderInput,
+        GroupNodesIntoFolderResult, GroupRelatedNodesIntoFolderInput, MergeFoldersInput,
+        MergeFoldersResult, NodeRecord, ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult,
+        ResizeImageResult, RestoreNodeReplacementInput, RestoreNodeReplacementResult, RuntimeInfo,
+        SetAppLockInput, SetProjectPreviewImageInput, SetProjectPrivacyInput,
+        UndoCancelFolderInput, UndoDeleteFolderInput, UndoFolderGroupingInput,
+        UndoFolderMergeInput, UpdateNodeInput, UpdateProjectInput, WorkspaceSnapshot,
     },
     workflow_modules::{
         self, SaveWorkflowModuleInput, WorkflowBindings, WorkflowInputContract,
@@ -693,6 +693,18 @@ pub async fn export_generated_video(
     .map_err(|error| format!("生成视频下载任务失败: {error}"))?
 }
 
+#[tauri::command]
+pub async fn export_generated_image(
+    source_path: String,
+    destination_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        export_generated_image_blocking(source_path, destination_path)
+    })
+    .await
+    .map_err(|error| format!("生成图片下载任务失败: {error}"))?
+}
+
 fn export_media_asset_blocking(
     source_path: String,
     destination_path: String,
@@ -754,6 +766,35 @@ fn export_generated_video_blocking(
         return Err("只能下载视频文件".to_owned());
     }
 
+    let destination = PathBuf::from(destination_input);
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "下载位置无效".to_owned())?;
+    if !parent.is_dir() {
+        return Err("下载目录不存在".to_owned());
+    }
+    std::fs::copy(&source, &destination).map_err(|error| format!("保存下载文件失败: {error}"))?;
+    Ok(destination.to_string_lossy().into_owned())
+}
+
+fn export_generated_image_blocking(
+    source_path: String,
+    destination_path: String,
+) -> Result<String, String> {
+    let source_input = source_path.trim().trim_matches('"');
+    let destination_input = destination_path.trim().trim_matches('"');
+    if source_input.is_empty() || destination_input.is_empty() {
+        return Err("下载路径不能为空".to_owned());
+    }
+    let source = PathBuf::from(source_input)
+        .canonicalize()
+        .map_err(|error| format!("无法读取生成图片: {error}"))?;
+    let metadata = source
+        .metadata()
+        .map_err(|error| format!("无法读取生成图片信息: {error}"))?;
+    if !metadata.is_file() || media_format(&source).map(|format| format.kind) != Some("image") {
+        return Err("只能下载图片文件".to_owned());
+    }
     let destination = PathBuf::from(destination_input);
     let parent = destination
         .parent()
@@ -1055,7 +1096,11 @@ pub fn delete_node(id: String, state: State<'_, ApplicationState>) -> Result<(),
         .map_err(|error| error.to_string())
 }
 
-fn delete_video_files_blocking(paths: Vec<String>) -> Result<usize, String> {
+fn delete_media_files_blocking(
+    paths: Vec<String>,
+    expected_kind: &str,
+    media_label: &str,
+) -> Result<usize, String> {
     if paths.is_empty() {
         return Ok(0);
     }
@@ -1064,18 +1109,25 @@ fn delete_video_files_blocking(paths: Vec<String>) -> Result<usize, String> {
     let mut resolved_paths = Vec::new();
     for path in paths {
         let candidate = PathBuf::from(&path);
-        let is_video = media_format(&candidate).is_some_and(|format| format.kind == "video");
-        if !is_video {
-            return Err(format!("拒绝删除非视频文件：{}", candidate.display()));
+        let is_expected_media =
+            media_format(&candidate).is_some_and(|format| format.kind == expected_kind);
+        if !is_expected_media {
+            return Err(format!(
+                "拒绝删除非{media_label}文件：{}",
+                candidate.display()
+            ));
         }
         let resolved = match candidate.canonicalize() {
             Ok(resolved) => resolved,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("无法定位视频文件 {path}: {error}")),
+            Err(error) => return Err(format!("无法定位{media_label}文件 {path}: {error}")),
         };
-        let metadata = resolved
-            .metadata()
-            .map_err(|error| format!("无法读取视频文件信息 {}: {error}", resolved.display()))?;
+        let metadata = resolved.metadata().map_err(|error| {
+            format!(
+                "无法读取{media_label}文件信息 {}: {error}",
+                resolved.display()
+            )
+        })?;
         if !metadata.is_file() {
             return Err(format!("目标不是文件：{}", resolved.display()));
         }
@@ -1089,10 +1141,23 @@ fn delete_video_files_blocking(paths: Vec<String>) -> Result<usize, String> {
         match std::fs::remove_file(path) {
             Ok(()) => deleted_count += 1,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("删除视频文件失败 {}: {error}", path.display())),
+            Err(error) => {
+                return Err(format!(
+                    "删除{media_label}文件失败 {}: {error}",
+                    path.display()
+                ))
+            }
         }
     }
     Ok(deleted_count)
+}
+
+fn delete_video_files_blocking(paths: Vec<String>) -> Result<usize, String> {
+    delete_media_files_blocking(paths, "video", "视频")
+}
+
+fn delete_image_files_blocking(paths: Vec<String>) -> Result<usize, String> {
+    delete_media_files_blocking(paths, "image", "图片")
 }
 
 #[tauri::command]
@@ -1100,6 +1165,13 @@ pub async fn delete_video_files(paths: Vec<String>) -> Result<usize, String> {
     tauri::async_runtime::spawn_blocking(move || delete_video_files_blocking(paths))
         .await
         .map_err(|error| format!("视频文件删除任务失败: {error}"))?
+}
+
+#[tauri::command]
+pub async fn delete_image_files(paths: Vec<String>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_image_files_blocking(paths))
+        .await
+        .map_err(|error| format!("图片文件删除任务失败: {error}"))?
 }
 
 #[tauri::command]
@@ -1273,6 +1345,16 @@ fn is_model_name_in_directory(value: &str, expected_directory: &str) -> bool {
         })
 }
 
+fn is_krea2_diffusion_model_name(value: &str) -> bool {
+    let normalized = value.trim().replace('/', "\\");
+    normalized
+        .split_once('\\')
+        .is_some_and(|(directory, filename)| {
+            (directory.eq_ignore_ascii_case("Krea2") || directory.eq_ignore_ascii_case("Kera2"))
+                && !filename.trim().is_empty()
+        })
+}
+
 fn diffusion_models_from_object_info(
     value: &Value,
     class_type: &str,
@@ -1293,6 +1375,52 @@ fn diffusion_models_from_object_info(
     models
 }
 
+#[tauri::command]
+pub async fn get_comfyui_krea2_diffusion_models(
+    server_url: String,
+    workflow_module_id: String,
+    state: State<'_, ApplicationState>,
+) -> Result<Vec<String>, String> {
+    let module = workflow_modules::get(&state.workflow_modules_dir, &workflow_module_id)?;
+    if module.adapter.capability != "image-generation" {
+        return Err("所选方案不是图片生成方案".to_owned());
+    }
+    let parsed_server =
+        Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let server_url = server_url.trim().trim_end_matches('/');
+    let class_type = &module.adapter.bindings.diffusion_model_class_type;
+    let value = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?
+        .get(format!("{server_url}/object_info/{class_type}"))
+        .send()
+        .await
+        .map_err(|error| format!("读取 Krea2 大模型列表失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("读取 Krea2 大模型列表失败：{error}"))?
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("解析 Krea2 大模型列表失败：{error}"))?;
+    let pointer = format!("/{class_type}/input/required/unet_name/0");
+    let mut models = value
+        .pointer(&pointer)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|name| is_krea2_diffusion_model_name(name))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    models.sort_by_key(|name| name.to_ascii_lowercase());
+    models.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    Ok(models)
+}
+
 fn loras_from_object_info(value: &Value, class_type: &str, directory: &str) -> Vec<String> {
     let pointer = format!("/{class_type}/input/required/lora_name/0");
     let mut loras = value
@@ -1304,6 +1432,35 @@ fn loras_from_object_info(value: &Value, class_type: &str, directory: &str) -> V
         .filter(|name| is_model_name_in_directory(name, directory))
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    loras.sort_by_key(|name| name.to_ascii_lowercase());
+    loras.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    loras
+}
+
+fn power_loras_from_object_info(value: &Value, directory: &str) -> Vec<String> {
+    fn collect(value: &Value, directory: &str, output: &mut Vec<String>) {
+        match value {
+            Value::String(name) if is_model_name_in_directory(name, directory) => {
+                output.push(name.to_owned());
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect(item, directory, output);
+                }
+            }
+            Value::Object(fields) => {
+                for value in fields.values() {
+                    collect(value, directory, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut loras = Vec::new();
+    if let Some(power_lora_info) = value.get("Power Lora Loader (rgthree)") {
+        collect(power_lora_info, directory, &mut loras);
+    }
     loras.sort_by_key(|name| name.to_ascii_lowercase());
     loras.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
     loras
@@ -1338,6 +1495,44 @@ pub async fn get_comfyui_h3_loras(server_url: String) -> Result<Vec<String>, Str
         LORA_CLASS_TYPE,
         LORA_DIRECTORY,
     ))
+}
+
+#[tauri::command]
+pub async fn get_comfyui_krea2_loras(server_url: String) -> Result<Vec<String>, String> {
+    const LORA_DIRECTORY: &str = "Krea2";
+    let parsed_server =
+        Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let server_url = server_url.trim().trim_end_matches('/');
+    let value = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?
+        .get(format!("{server_url}/object_info"))
+        .send()
+        .await
+        .map_err(|error| format!("读取 Krea2 LoRA 列表失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("读取 Krea2 LoRA 列表失败：{error}"))?
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("解析 Krea2 LoRA 列表失败：{error}"))?;
+    // rgthree's loader exposes its available values differently between
+    // versions. Merge its own metadata with ComfyUI's standard LoRA loaders,
+    // then keep only files in the Krea2 directory.
+    let mut loras = power_loras_from_object_info(&value, LORA_DIRECTORY);
+    loras.extend(loras_from_object_info(&value, "LoraLoader", LORA_DIRECTORY));
+    loras.extend(loras_from_object_info(
+        &value,
+        "LoraLoaderModelOnly",
+        LORA_DIRECTORY,
+    ));
+    loras.sort_by_key(|name| name.to_ascii_lowercase());
+    loras.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    Ok(loras)
 }
 
 #[tauri::command]
@@ -1986,9 +2181,10 @@ async fn upload_comfy_output_as_input(
     server_url: &str,
     output: &ComfyOutputFile,
     subfolder: &str,
+    source_label: &str,
 ) -> Result<String, String> {
     if output.filename.trim().is_empty() {
-        return Err("二采源视频缺少文件名".to_owned());
+        return Err(format!("{source_label}缺少文件名"));
     }
     let source_url = comfy_view_url(
         server_url,
@@ -2001,10 +2197,10 @@ async fn upload_comfy_output_as_input(
         .get(source_url)
         .send()
         .await
-        .map_err(|error| format!("读取二采源视频失败：{error}"))?;
+        .map_err(|error| format!("读取{source_label}失败：{error}"))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("读取二采源视频失败（HTTP {status}）"));
+        return Err(format!("读取{source_label}失败（HTTP {status}）"));
     }
     let part = multipart::Part::stream(reqwest::Body::wrap_stream(response.bytes_stream()))
         .file_name(output.filename.clone());
@@ -2018,21 +2214,21 @@ async fn upload_comfy_output_as_input(
         .multipart(form)
         .send()
         .await
-        .map_err(|error| format!("上传二采源视频失败：{error}"))?;
+        .map_err(|error| format!("上传{source_label}失败：{error}"))?;
     let status = response.status();
     let body: Value = response
         .json()
         .await
-        .map_err(|error| format!("解析二采源视频上传响应失败（HTTP {status}）：{error}"))?;
+        .map_err(|error| format!("解析{source_label}上传响应失败（HTTP {status}）：{error}"))?;
     if !status.is_success() {
         return Err(format!(
-            "ComfyUI 拒绝二采源视频上传（HTTP {status}）：{body}"
+            "ComfyUI 拒绝{source_label}上传（HTTP {status}）：{body}"
         ));
     }
     let name = body
         .get("name")
         .and_then(Value::as_str)
-        .ok_or_else(|| "ComfyUI 二采源视频上传响应缺少文件名".to_owned())?;
+        .ok_or_else(|| format!("ComfyUI {source_label}上传响应缺少文件名"))?;
     let returned_subfolder = body.get("subfolder").and_then(Value::as_str).unwrap_or("");
     Ok(if returned_subfolder.is_empty() {
         name.to_owned()
@@ -2183,6 +2379,782 @@ fn collect_video_files(value: &Value, files: &mut Vec<(String, String, String)>)
         }
         _ => {}
     }
+}
+
+fn collect_image_files(value: &Value, files: &mut Vec<(String, String, String)>) {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| collect_image_files(item, files)),
+        Value::Object(object) => {
+            if let Some(filename) = object.get("filename").and_then(Value::as_str) {
+                let extension = Path::new(filename)
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "avif") {
+                    files.push((
+                        filename.to_owned(),
+                        object
+                            .get("subfolder")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        object
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("output")
+                            .to_owned(),
+                    ));
+                }
+            }
+            object
+                .values()
+                .for_each(|child| collect_image_files(child, files));
+        }
+        _ => {}
+    }
+}
+
+async fn submit_krea2_image_edit_workflow(
+    input: &ComfyImageSubmitInput,
+    module: &WorkflowModuleRecord,
+    server_url: &str,
+    generation_seed: u64,
+) -> Result<ComfySubmitResult, String> {
+    if !(1..=2).contains(&input.image_paths.len()) {
+        return Err("Krea2 图像编辑需要接入 1 张图片，最多 2 张图片".to_owned());
+    }
+    let bytes = tokio::fs::read(&module.workflow_path)
+        .await
+        .map_err(|error| format!("读取 Krea2 图像编辑工作流失败：{error}"))?;
+    let mut workflow: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("解析 Krea2 图像编辑工作流失败：{error}"))?;
+    let bindings = &module.adapter.bindings;
+    for (label, value) in [
+        ("单图输入", &bindings.single_image_input_node_id),
+        (
+            "双图输入 1",
+            bindings.image_node_ids.first().unwrap_or(&String::new()),
+        ),
+        ("双图输入 2", &bindings.secondary_image_input_node_id),
+        ("单图提示词", &bindings.prompt_node_id),
+        ("双图提示词", &bindings.secondary_prompt_node_id),
+        ("输出", &bindings.primary_output_node_id),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!("Krea2 图像编辑工作流缺少{label}绑定"));
+        }
+    }
+    // Use the same dated ComfyUI output layout as the existing Krea2
+    // text-to-image and video workflows. SaveImage accepts subfolders in its
+    // filename prefix.
+    let output_prefix = format!(
+        "{}/ComfyUI_krea2_image_edit",
+        Local::now().format("%Y-%m-%d")
+    );
+    set_workflow_input(
+        &mut workflow,
+        &bindings.primary_output_node_id,
+        "filename_prefix",
+        Value::String(output_prefix),
+    )?;
+    let model_name = if input.model_name.trim().is_empty() {
+        "Kera2\\pornmasterKrea2_v2TurboBF16.safetensors".to_owned()
+    } else {
+        input.model_name.trim().replace('/', "\\")
+    };
+    if !is_krea2_diffusion_model_name(&model_name) {
+        return Err("Krea2 图像编辑只能选择 Krea2 目录中的基础模型".to_owned());
+    }
+    // Keep the single-image and dual-image branches on the same selected base
+    // model, including packages saved before the settings panel existed.
+    for node_id in ["43", "18"] {
+        set_workflow_input(
+            &mut workflow,
+            node_id,
+            "unet_name",
+            Value::String(model_name.clone()),
+        )?;
+    }
+    for node_id in ["42", "17"] {
+        set_workflow_input(
+            &mut workflow,
+            node_id,
+            "lora_name",
+            Value::String("Krea2\\krea2_identity_edit_v1_2.safetensors".to_owned()),
+        )?;
+    }
+    let model_name = Some(model_name);
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(900))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?;
+    let upload_subfolder = format!("infinite-canvas-image-edit-{}", input.client_id);
+    let mut uploaded_images = Vec::with_capacity(input.image_paths.len());
+    for path in &input.image_paths {
+        uploaded_images
+            .push(upload_comfy_input(&client, server_url, path, &upload_subfolder).await?);
+    }
+    let dual_image_input = bindings
+        .image_node_ids
+        .first()
+        .ok_or_else(|| "Krea2 图像编辑工作流缺少双图输入 1 绑定".to_owned())?;
+    if uploaded_images.len() == 1 {
+        set_workflow_input(
+            &mut workflow,
+            &bindings.single_image_input_node_id,
+            "image",
+            Value::String(uploaded_images[0].clone()),
+        )?;
+        set_workflow_input(
+            &mut workflow,
+            &bindings.primary_output_node_id,
+            "images",
+            json!(["29", 0]),
+        )?;
+        set_workflow_input(
+            &mut workflow,
+            &bindings.primary_resolution_node_id,
+            "width",
+            json!(input.width),
+        )?;
+        set_workflow_input(
+            &mut workflow,
+            &bindings.primary_resolution_node_id,
+            "height",
+            json!(input.height),
+        )?;
+    } else {
+        set_workflow_input(
+            &mut workflow,
+            dual_image_input,
+            "image",
+            Value::String(uploaded_images[0].clone()),
+        )?;
+        set_workflow_input(
+            &mut workflow,
+            &bindings.secondary_image_input_node_id,
+            "image",
+            Value::String(uploaded_images[1].clone()),
+        )?;
+        set_workflow_input(
+            &mut workflow,
+            &bindings.secondary_resolution_node_id,
+            "width",
+            json!(input.width),
+        )?;
+        set_workflow_input(
+            &mut workflow,
+            &bindings.secondary_resolution_node_id,
+            "height",
+            json!(input.height),
+        )?;
+        set_workflow_input(
+            &mut workflow,
+            &bindings.primary_output_node_id,
+            "images",
+            json!(["6", 0]),
+        )?;
+    }
+    for node_id in [&bindings.prompt_node_id, &bindings.secondary_prompt_node_id] {
+        set_workflow_input(
+            &mut workflow,
+            node_id,
+            "value",
+            Value::String(input.prompt.trim().to_owned()),
+        )?;
+    }
+    for node_id in [
+        &bindings.conditioning_node_id,
+        &bindings.secondary_conditioning_node_id,
+    ] {
+        set_workflow_input(
+            &mut workflow,
+            node_id,
+            "prompt",
+            Value::String(input.negative_prompt.trim().to_owned()),
+        )?;
+    }
+    let cfg = if input.negative_prompt.trim().is_empty() {
+        1.0
+    } else {
+        1.5
+    };
+    for node_id in [&bindings.seed_node_id, &bindings.primary_sampler_node_id] {
+        set_workflow_input(&mut workflow, node_id, "seed", json!(generation_seed))?;
+        set_workflow_input(&mut workflow, node_id, "steps", json!(input.steps))?;
+        set_workflow_input(&mut workflow, node_id, "cfg", json!(cfg))?;
+    }
+    let response = client
+        .post(format!("{server_url}/prompt"))
+        .json(&json!({"prompt": workflow, "client_id": input.client_id}))
+        .send()
+        .await
+        .map_err(|error| format!("提交 ComfyUI Krea2 图像编辑工作流失败：{error}"))?;
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析 ComfyUI 响应失败（HTTP {status}）：{error}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "ComfyUI 拒绝 Krea2 图像编辑工作流（HTTP {status}）：{body}"
+        ));
+    }
+    let prompt_id = body
+        .get("prompt_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("ComfyUI 响应缺少 prompt_id：{body}"))?
+        .to_owned();
+    for _ in 0..5400 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let response = client
+            .get(format!("{server_url}/history/{prompt_id}"))
+            .send()
+            .await
+            .map_err(|error| format!("查询 ComfyUI 图像编辑任务失败：{error}"))?;
+        if !response.status().is_success() {
+            continue;
+        }
+        let history: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("解析 ComfyUI 图像编辑任务失败：{error}"))?;
+        let Some(entry) = history.get(&prompt_id) else {
+            continue;
+        };
+        match entry
+            .pointer("/status/status_str")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+        {
+            "error" => {
+                return Err(format!(
+                    "ComfyUI 图像编辑失败：{}",
+                    entry
+                        .pointer("/status/messages")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                ))
+            }
+            "success" => {
+                let mut files = Vec::new();
+                collect_image_files(entry.get("outputs").unwrap_or(&Value::Null), &mut files);
+                let mut seen = HashSet::new();
+                let outputs = files
+                    .into_iter()
+                    .filter_map(|(filename, subfolder, file_type)| {
+                        let identity = format!("{file_type}/{subfolder}/{filename}");
+                        if !seen.insert(identity) {
+                            return None;
+                        }
+                        comfy_view_url(
+                            server_url,
+                            &filename,
+                            &subfolder,
+                            &file_type,
+                            Some(&prompt_id),
+                        )
+                        .ok()
+                        .map(|url| ComfyOutputFile {
+                            filename,
+                            subfolder,
+                            file_type,
+                            url,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if outputs.is_empty() {
+                    return Err("ComfyUI 已完成，但没有找到图像编辑输出".to_owned());
+                }
+                return Ok(ComfySubmitResult {
+                    prompt_id,
+                    seed: generation_seed.to_string(),
+                    outputs,
+                    model_name,
+                    execution_elapsed_seconds: comfy_execution_elapsed_seconds(entry),
+                    cleanup_warning: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    Err(format!("等待 ComfyUI 图像编辑任务超时：{prompt_id}"))
+}
+
+#[tauri::command]
+pub async fn submit_comfyui_image_workflow(
+    input: ComfyImageSubmitInput,
+    state: State<'_, ApplicationState>,
+) -> Result<ComfySubmitResult, String> {
+    if input.prompt.trim().is_empty() {
+        return Err("提示词不能为空".to_owned());
+    }
+    if !(64..=4096).contains(&input.width) || !(64..=4096).contains(&input.height) {
+        return Err("图片宽高必须在 64–4096 像素之间".to_owned());
+    }
+    if !(1..=1000).contains(&input.steps) {
+        return Err("生图步数必须在 1–1000 之间".to_owned());
+    }
+    if !input.upscale_megapixels.is_finite() || !(0.1..=64.0).contains(&input.upscale_megapixels) {
+        return Err("输出放大像素数必须在 0.1–64 MP 之间".to_owned());
+    }
+    let server_url = input.server_url.trim().trim_end_matches('/').to_owned();
+    let parsed_server =
+        Url::parse(&server_url).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if !matches!(parsed_server.scheme(), "http" | "https") {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let module = workflow_modules::get(&state.workflow_modules_dir, &input.workflow_module_id)?;
+    if module.adapter.capability != "image-generation" {
+        return Err("所选方案不是图片生成方案".to_owned());
+    }
+    let generation_seed = resolve_generation_seed(&input.seed_mode, &input.seed)?;
+    if module.adapter.variant == "image-edit" {
+        return submit_krea2_image_edit_workflow(&input, &module, &server_url, generation_seed)
+            .await;
+    }
+    let bytes = tokio::fs::read(&module.workflow_path)
+        .await
+        .map_err(|error| format!("读取图片工作流失败：{error}"))?;
+    let mut workflow: Value =
+        serde_json::from_slice(&bytes).map_err(|error| format!("解析图片工作流失败：{error}"))?;
+    // Existing installations may have persisted the image adapter before its
+    // LoRA binding was introduced. Supply the Krea2 binding without changing
+    // any user-managed workflow module files.
+    let mut bindings = module.adapter.bindings.clone();
+    let default_image_bindings = WorkflowBindings::image_generation();
+    if bindings.primary_lora_node_id.trim().is_empty() {
+        bindings.primary_lora_node_id = default_image_bindings.primary_lora_node_id.clone();
+    }
+    if bindings.lora_class_type.trim().is_empty() {
+        bindings.lora_class_type = default_image_bindings.lora_class_type.clone();
+    }
+    if bindings.lora_directory.trim().is_empty() {
+        bindings.lora_directory = default_image_bindings.lora_directory.clone();
+    }
+    if bindings.secondary_resize_node_id.trim().is_empty() {
+        bindings.secondary_resize_node_id = default_image_bindings.secondary_resize_node_id.clone();
+    }
+    let b = &bindings;
+    let workflow_model_name = workflow
+        .get(&b.diffusion_model_node_id)
+        .and_then(|node| node.get("inputs"))
+        .and_then(|inputs| inputs.get("unet_name"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let model_name = if input.model_name.trim().is_empty() {
+        workflow_model_name
+    } else {
+        let selected = input.model_name.trim().replace('/', "\\");
+        if !is_krea2_diffusion_model_name(&selected) {
+            return Err("图片生成只能选择 Krea2 目录中的基础模型".to_owned());
+        }
+        set_workflow_input(
+            &mut workflow,
+            &b.diffusion_model_node_id,
+            "unet_name",
+            Value::String(selected.clone()),
+        )?;
+        Some(selected)
+    };
+    let lora_name = input.lora_name.trim();
+    if !lora_name.is_empty() {
+        if !is_model_name_in_directory(lora_name, &b.lora_directory) {
+            return Err(format!(
+                "图片 LoRA 只能选择 {} 目录中的模型",
+                b.lora_directory
+            ));
+        }
+        let lora_node = workflow
+            .get(&b.primary_lora_node_id)
+            .ok_or_else(|| format!("图片工作流缺少 LoRA 节点 {}", b.primary_lora_node_id))?;
+        let class_type = lora_node
+            .get("class_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if class_type != b.lora_class_type {
+            return Err(format!(
+                "图片工作流节点 {} 必须是 LoRA 加载器 {}",
+                b.primary_lora_node_id, b.lora_class_type
+            ));
+        }
+        set_workflow_input(
+            &mut workflow,
+            &b.primary_lora_node_id,
+            "lora_1",
+            json!({ "on": true, "lora": lora_name, "strength": 1.0 }),
+        )?;
+    }
+    set_workflow_input(
+        &mut workflow,
+        &b.prompt_node_id,
+        "text",
+        Value::String(input.prompt.trim().to_owned()),
+    )?;
+    set_workflow_input(
+        &mut workflow,
+        &b.conditioning_node_id,
+        "text",
+        Value::String(input.negative_prompt.trim().to_owned()),
+    )?;
+    let cfg = if input.negative_prompt.trim().is_empty() {
+        1.0
+    } else {
+        1.5
+    };
+    // Krea2 has a base text-to-image sampler and a second sampler used only
+    // when the optional upscale branch runs. Keep their CFG values aligned.
+    set_workflow_input(&mut workflow, &b.seed_node_id, "cfg", json!(cfg))?;
+    set_workflow_input(&mut workflow, &b.primary_sampler_node_id, "cfg", json!(cfg))?;
+    set_workflow_input(
+        &mut workflow,
+        &b.seed_node_id,
+        "noise_seed",
+        json!(generation_seed),
+    )?;
+    // Node 63 is the base text-to-image KSampler. The upscale branch has its
+    // own sampler (node 160), whose configured steps remain independent.
+    set_workflow_input(&mut workflow, &b.seed_node_id, "steps", json!(input.steps))?;
+    set_workflow_input(
+        &mut workflow,
+        &b.primary_resolution_node_id,
+        "width",
+        json!(input.width),
+    )?;
+    set_workflow_input(
+        &mut workflow,
+        &b.primary_resolution_node_id,
+        "height",
+        json!(input.height),
+    )?;
+    // Width/height exchange changes the empty latent's dimensions directly.
+    // Feed that latent into the base sampler so any legacy LatentRotate node is
+    // bypassed instead of rotating the latent a second time.
+    set_workflow_input(
+        &mut workflow,
+        &b.seed_node_id,
+        "latent_image",
+        json!([b.primary_resolution_node_id, 0]),
+    )?;
+    set_workflow_input(
+        &mut workflow,
+        &b.secondary_resize_node_id,
+        "megapixels",
+        json!(input.upscale_megapixels),
+    )?;
+    set_workflow_input(
+        &mut workflow,
+        &b.primary_output_node_id,
+        "images",
+        if input.upscale_enabled {
+            json!(["163", 0])
+        } else {
+            json!(["30", 0])
+        },
+    )?;
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(900))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?;
+    let response = client
+        .post(format!("{server_url}/prompt"))
+        .json(&json!({"prompt": workflow, "client_id": input.client_id}))
+        .send()
+        .await
+        .map_err(|error| format!("提交 ComfyUI 图片工作流失败：{error}"))?;
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析 ComfyUI 响应失败（HTTP {status}）：{error}"))?;
+    if !status.is_success() {
+        return Err(format!("ComfyUI 拒绝图片工作流（HTTP {status}）：{body}"));
+    }
+    let prompt_id = body
+        .get("prompt_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("ComfyUI 响应缺少 prompt_id：{body}"))?
+        .to_owned();
+    for _ in 0..5400 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let response = client
+            .get(format!("{server_url}/history/{prompt_id}"))
+            .send()
+            .await
+            .map_err(|error| format!("查询 ComfyUI 图片任务失败：{error}"))?;
+        if !response.status().is_success() {
+            continue;
+        }
+        let history: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("解析 ComfyUI 图片任务失败：{error}"))?;
+        let Some(entry) = history.get(&prompt_id) else {
+            continue;
+        };
+        match entry
+            .pointer("/status/status_str")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+        {
+            "error" => {
+                return Err(format!(
+                    "ComfyUI 图片生成失败：{}",
+                    entry
+                        .pointer("/status/messages")
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                ))
+            }
+            "success" => {
+                let mut files = Vec::new();
+                collect_image_files(entry.get("outputs").unwrap_or(&Value::Null), &mut files);
+                let mut seen = HashSet::new();
+                let outputs = files
+                    .into_iter()
+                    .filter_map(|(filename, subfolder, file_type)| {
+                        let identity = format!("{file_type}/{subfolder}/{filename}");
+                        if !seen.insert(identity) {
+                            return None;
+                        }
+                        comfy_view_url(
+                            &server_url,
+                            &filename,
+                            &subfolder,
+                            &file_type,
+                            Some(&prompt_id),
+                        )
+                        .ok()
+                        .map(|url| ComfyOutputFile {
+                            filename,
+                            subfolder,
+                            file_type,
+                            url,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if outputs.is_empty() {
+                    return Err("ComfyUI 已完成，但没有找到图片输出".to_owned());
+                }
+                return Ok(ComfySubmitResult {
+                    prompt_id,
+                    seed: generation_seed.to_string(),
+                    outputs,
+                    model_name,
+                    execution_elapsed_seconds: comfy_execution_elapsed_seconds(entry),
+                    cleanup_warning: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    Err(format!("等待 ComfyUI 图片任务超时：{prompt_id}"))
+}
+
+#[tauri::command]
+pub async fn submit_comfyui_image_upscale(
+    input: ComfyImageUpscaleInput,
+    state: State<'_, ApplicationState>,
+) -> Result<ComfySubmitResult, String> {
+    if !input.megapixels.is_finite() || !(0.1..=64.0).contains(&input.megapixels) {
+        return Err("图片放大像素数必须在 0.1–64 MP 之间".to_owned());
+    }
+    let server_url = input.server_url.trim().trim_end_matches('/').to_owned();
+    let parsed_server =
+        Url::parse(&server_url).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if !matches!(parsed_server.scheme(), "http" | "https") {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    if !matches!(
+        Path::new(&input.source.filename)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "avif")
+    ) {
+        return Err("图片放大源不是受支持的图片文件".to_owned());
+    }
+    let module = workflow_modules::get(&state.workflow_modules_dir, &input.workflow_module_id)?;
+    if module.adapter.capability != "image-generation"
+        || module.adapter.variant != "image-generation"
+    {
+        return Err("图片放大必须使用 Krea2 文生图方案".to_owned());
+    }
+    let bytes = tokio::fs::read(&module.workflow_path)
+        .await
+        .map_err(|error| format!("读取图片工作流失败：{error}"))?;
+    let mut workflow: Value =
+        serde_json::from_slice(&bytes).map_err(|error| format!("解析图片工作流失败：{error}"))?;
+    let mut bindings = module.adapter.bindings.clone();
+    let defaults = WorkflowBindings::image_generation();
+    if bindings.secondary_resize_node_id.trim().is_empty() {
+        bindings.secondary_resize_node_id = defaults.secondary_resize_node_id;
+    }
+    let workflow_model_name = workflow
+        .get(&bindings.diffusion_model_node_id)
+        .and_then(|node| node.get("inputs"))
+        .and_then(|inputs| inputs.get("unet_name"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let model_name = if input.model_name.trim().is_empty() {
+        workflow_model_name
+    } else {
+        let selected = input.model_name.trim().replace('/', "\\");
+        if !is_krea2_diffusion_model_name(&selected) {
+            return Err("图片放大只能选择 Krea2 目录中的基础模型".to_owned());
+        }
+        set_workflow_input(
+            &mut workflow,
+            &bindings.diffusion_model_node_id,
+            "unet_name",
+            Value::String(selected.clone()),
+        )?;
+        Some(selected)
+    };
+    let upload_subfolder = format!("infinite-canvas/{}", Uuid::new_v4());
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(900))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?;
+    let uploaded_source = upload_comfy_output_as_input(
+        &client,
+        &server_url,
+        &input.source,
+        &upload_subfolder,
+        "图片放大源图",
+    )
+    .await?;
+    const SOURCE_NODE_ID: &str = "infinite_canvas_image_upscale_source";
+    workflow
+        .as_object_mut()
+        .ok_or_else(|| "图片工作流必须是对象".to_owned())?
+        .insert(
+            SOURCE_NODE_ID.to_owned(),
+            json!({
+                "class_type": "LoadImage",
+                "inputs": { "image": uploaded_source },
+            }),
+        );
+    set_workflow_input(
+        &mut workflow,
+        &bindings.secondary_resize_node_id,
+        "image",
+        json!([SOURCE_NODE_ID, 0]),
+    )?;
+    set_workflow_input(
+        &mut workflow,
+        &bindings.secondary_resize_node_id,
+        "megapixels",
+        json!(input.megapixels),
+    )?;
+    // All generated-image toolbars use the Krea2 text-to-image workflow's
+    // dedicated upscale branch, regardless of the image's original generator.
+    set_workflow_input(
+        &mut workflow,
+        &bindings.primary_output_node_id,
+        "images",
+        json!([bindings.secondary_resize_node_id, 0]),
+    )?;
+    let response = client
+        .post(format!("{server_url}/prompt"))
+        .json(&json!({"prompt": workflow, "client_id": input.client_id}))
+        .send()
+        .await
+        .map_err(|error| format!("提交 ComfyUI 图片放大任务失败：{error}"))?;
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析 ComfyUI 响应失败（HTTP {status}）：{error}"))?;
+    if !status.is_success() {
+        return Err(format!("ComfyUI 拒绝图片放大任务（HTTP {status}）：{body}"));
+    }
+    let prompt_id = body
+        .get("prompt_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("ComfyUI 响应缺少 prompt_id：{body}"))?
+        .to_owned();
+    for _ in 0..5400 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let response = client
+            .get(format!("{server_url}/history/{prompt_id}"))
+            .send()
+            .await
+            .map_err(|error| format!("查询 ComfyUI 图片放大任务失败：{error}"))?;
+        if !response.status().is_success() {
+            continue;
+        }
+        let history: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("解析 ComfyUI 图片放大任务失败：{error}"))?;
+        let Some(entry) = history.get(&prompt_id) else {
+            continue;
+        };
+        match entry
+            .pointer("/status/status_str")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+        {
+            "error" => {
+                return Err(format!(
+                    "ComfyUI 图片放大失败：{}",
+                    entry
+                        .pointer("/status/messages")
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                ))
+            }
+            "success" => {
+                let mut files = Vec::new();
+                collect_image_files(entry.get("outputs").unwrap_or(&Value::Null), &mut files);
+                let mut seen = HashSet::new();
+                let outputs = files
+                    .into_iter()
+                    .filter_map(|(filename, subfolder, file_type)| {
+                        let identity = format!("{file_type}/{subfolder}/{filename}");
+                        if !seen.insert(identity) {
+                            return None;
+                        }
+                        comfy_view_url(
+                            &server_url,
+                            &filename,
+                            &subfolder,
+                            &file_type,
+                            Some(&prompt_id),
+                        )
+                        .ok()
+                        .map(|url| ComfyOutputFile {
+                            filename,
+                            subfolder,
+                            file_type,
+                            url,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if outputs.is_empty() {
+                    return Err("ComfyUI 已完成，但没有找到放大后的图片输出".to_owned());
+                }
+                return Ok(ComfySubmitResult {
+                    prompt_id,
+                    seed: String::new(),
+                    outputs,
+                    model_name,
+                    execution_elapsed_seconds: comfy_execution_elapsed_seconds(entry),
+                    cleanup_warning: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    Err(format!("等待 ComfyUI 图片放大任务超时：{prompt_id}"))
 }
 
 fn comfy_execution_elapsed_seconds(entry: &Value) -> Option<f64> {
@@ -2392,7 +3364,8 @@ async fn submit_comfyui_workflow_inner(
         }
     }
     let lora_name = input.lora_name.trim();
-    if !is_model_name_in_directory(lora_name, &bindings.lora_directory) {
+    let lora_bypassed = lora_name.is_empty() || input.lora_bypassed;
+    if !lora_bypassed && !is_model_name_in_directory(lora_name, &bindings.lora_directory) {
         return Err(format!(
             "LoRA 只能选择 {} 目录中的模型",
             bindings.lora_directory
@@ -2468,8 +3441,14 @@ async fn submit_comfyui_workflow_inner(
     let uploaded_secondary_source = if let Some(source) = input.secondary_source.as_ref() {
         ensure_comfy_task_active(&task.cancelled)?;
         Some(
-            upload_comfy_output_as_input(&client, &server_url, source, &task.upload_subfolder)
-                .await?,
+            upload_comfy_output_as_input(
+                &client,
+                &server_url,
+                source,
+                &task.upload_subfolder,
+                "二采源视频",
+            )
+            .await?,
         )
     } else {
         None
@@ -2496,7 +3475,7 @@ async fn submit_comfyui_workflow_inner(
         input.secondary_sampling_enabled || uploaded_secondary_source.is_some(),
         lora_name,
         input.lora_strength,
-        input.lora_bypassed,
+        lora_bypassed,
         secondary_lora_name,
         secondary_lora_strength,
         secondary_lora_bypassed,
@@ -2627,6 +3606,7 @@ async fn submit_comfyui_workflow_inner(
             prompt_id,
             seed: generation_seed.to_string(),
             outputs,
+            model_name: None,
             execution_elapsed_seconds: comfy_execution_elapsed_seconds(entry),
             cleanup_warning,
         });
@@ -2714,10 +3694,15 @@ fn comfy_seed_from_prompt(prompt: &Value) -> Option<String> {
 fn comfy_outputs_from_history_entry(
     server_url: &str,
     entry: &Value,
+    image_output: bool,
 ) -> Result<Vec<ComfyOutputFile>, String> {
     let prompt_id = entry.pointer("/prompt/1").and_then(Value::as_str);
     let mut raw_files = Vec::new();
-    collect_video_files(entry.get("outputs").unwrap_or(&Value::Null), &mut raw_files);
+    if image_output {
+        collect_image_files(entry.get("outputs").unwrap_or(&Value::Null), &mut raw_files);
+    } else {
+        collect_video_files(entry.get("outputs").unwrap_or(&Value::Null), &mut raw_files);
+    }
     let mut seen = HashSet::new();
     let mut outputs = Vec::new();
     for (filename, subfolder, file_type) in raw_files {
@@ -2908,6 +3893,7 @@ pub async fn get_comfyui_queue_summary(server_url: String) -> Result<ComfyQueueS
 pub async fn get_comfyui_client_task_statuses(
     server_url: String,
     client_ids: Vec<String>,
+    image_client_ids: Option<Vec<String>>,
 ) -> Result<Vec<ComfyClientTaskStatus>, String> {
     if client_ids.is_empty() {
         return Ok(Vec::new());
@@ -2965,8 +3951,13 @@ pub async fn get_comfyui_client_task_statuses(
         .cloned()
         .unwrap_or_default();
     let history_entries = history.as_object();
+    let image_client_ids = image_client_ids
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
     let mut statuses = Vec::with_capacity(client_ids.len());
     for client_id in client_ids {
+        let image_output = image_client_ids.contains(&client_id);
         let active = running
             .iter()
             .find(|item| comfy_client_id_from_queue_item(item) == Some(client_id.as_str()))
@@ -3009,7 +4000,7 @@ pub async fn get_comfyui_client_task_statuses(
                 status: status.to_owned(),
                 seed: comfy_seed_from_prompt(entry.get("prompt").unwrap_or(&Value::Null)),
                 outputs: if status == "success" {
-                    comfy_outputs_from_history_entry(&server_url, entry)?
+                    comfy_outputs_from_history_entry(&server_url, entry, image_output)?
                 } else {
                     Vec::new()
                 },
@@ -3115,12 +4106,13 @@ mod tests {
         cleanup_unreferenced_resize_images, comfy_execution_elapsed_seconds, comfy_input_task_path,
         comfy_queue_summary_from_value, comfy_view_url, configure_h3_diffusion_model,
         configure_h3_generation, configure_h3_ref_image_size, configure_h3_strict_prompt_tags,
-        configure_h3_uploaded_media, configure_secondary_source_video, delete_video_files_blocking,
-        diffusion_models_from_object_info, export_media_asset_blocking, hash_app_lock_password,
-        loras_from_object_info, media_format, resized_image_dimensions, resized_image_name,
-        resolve_filename_prefix_date, resolve_generation_seed, validate_new_app_lock_password,
-        validate_workflow_media_counts, verify_app_lock_hash, MediaFormat, WorkflowBindings,
-        WorkflowInputContract, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
+        configure_h3_uploaded_media, configure_secondary_source_video, delete_image_files_blocking,
+        delete_video_files_blocking, diffusion_models_from_object_info,
+        export_media_asset_blocking, hash_app_lock_password, loras_from_object_info, media_format,
+        resized_image_dimensions, resized_image_name, resolve_filename_prefix_date,
+        resolve_generation_seed, validate_new_app_lock_password, validate_workflow_media_counts,
+        verify_app_lock_hash, MediaFormat, WorkflowBindings, WorkflowInputContract,
+        AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
     use crate::{db::Database, models::CreateNodeInput};
     use serde_json::json;
@@ -4112,6 +5104,41 @@ mod tests {
             .into_owned()])
         .unwrap_err()
         .contains("拒绝删除非视频文件"));
+
+        fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[test]
+    fn deletes_only_supported_image_files() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "infinite-canvas-delete-image-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&test_dir).unwrap();
+        let image_path = test_dir.join("preview.png");
+        let video_path = test_dir.join("preview.mp4");
+        fs::write(&image_path, b"image").unwrap();
+        fs::write(&video_path, b"video").unwrap();
+
+        assert_eq!(delete_image_files_blocking(Vec::new()), Ok(0));
+        assert_eq!(
+            delete_image_files_blocking(vec![image_path.to_string_lossy().into_owned()]),
+            Ok(1)
+        );
+        assert!(!image_path.exists());
+        assert_eq!(
+            delete_image_files_blocking(vec![test_dir
+                .join("already-deleted.png")
+                .to_string_lossy()
+                .into_owned()]),
+            Ok(0)
+        );
+        assert!(
+            delete_image_files_blocking(vec![video_path.to_string_lossy().into_owned()])
+                .unwrap_err()
+                .contains("拒绝删除非图片文件")
+        );
+        assert!(video_path.exists());
 
         fs::remove_dir_all(test_dir).unwrap();
     }

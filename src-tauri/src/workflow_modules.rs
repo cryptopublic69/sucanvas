@@ -22,6 +22,8 @@ pub const H3_MULTI_REFERENCE_ADAPTER: &str = "minimax-h3-multi-reference-v1";
 pub const H3_FIRST_LAST_FRAME_ADAPTER: &str = "minimax-h3-first-last-frame-v1";
 pub const H3_IMAGE_TO_VIDEO_ADAPTER: &str = "minimax-h3-image-to-video-v1";
 pub const H3_LAST_FRAME_TO_VIDEO_ADAPTER: &str = "minimax-h3-last-frame-to-video-v1";
+pub const KREA2_TEXT_TO_IMAGE_ADAPTER: &str = "krea2-text-to-image-v1";
+pub const KREA2_IMAGE_EDIT_ADAPTER: &str = "krea2-image-edit-v1";
 const MAX_PACKAGE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
 fn default_diffusion_model_node_id() -> String {
@@ -82,6 +84,14 @@ pub struct WorkflowBindings {
     pub diffusion_model_directory: String,
     pub lora_class_type: String,
     pub lora_directory: String,
+    #[serde(default)]
+    pub secondary_prompt_node_id: String,
+    #[serde(default)]
+    pub secondary_conditioning_node_id: String,
+    #[serde(default)]
+    pub single_image_input_node_id: String,
+    #[serde(default)]
+    pub secondary_image_input_node_id: String,
 }
 
 impl Default for WorkflowBindings {
@@ -123,11 +133,94 @@ impl Default for WorkflowBindings {
             diffusion_model_directory: default_diffusion_model_directory(),
             lora_class_type: "LoraLoaderModelOnly".to_owned(),
             lora_directory: "MinimaxH3".to_owned(),
+            secondary_prompt_node_id: String::new(),
+            secondary_conditioning_node_id: String::new(),
+            single_image_input_node_id: String::new(),
+            secondary_image_input_node_id: String::new(),
         }
     }
 }
 
 impl WorkflowBindings {
+    pub fn image_generation() -> Self {
+        Self {
+            prompt_node_id: "90".to_owned(),
+            seed_node_id: "63".to_owned(),
+            duration_node_id: String::new(),
+            primary_resolution_node_id: "29".to_owned(),
+            secondary_resolution_node_id: String::new(),
+            primary_lora_node_id: "159".to_owned(),
+            secondary_lora_node_id: String::new(),
+            primary_sampler_node_id: "160".to_owned(),
+            secondary_scheduler_node_id: String::new(),
+            secondary_guider_node_id: String::new(),
+            primary_output_node_id: "157".to_owned(),
+            secondary_output_node_id: String::new(),
+            primary_color_node_id: String::new(),
+            secondary_color_node_id: String::new(),
+            clean_video_node_id: String::new(),
+            clean_save_node_id: String::new(),
+            secondary_video_input_node_id: String::new(),
+            conditioning_node_id: "153".to_owned(),
+            audio_node_ids: Vec::new(),
+            image_node_ids: Vec::new(),
+            primary_audio_output_node_id: String::new(),
+            primary_audio_output_index: 0,
+            secondary_audio_output_node_id: String::new(),
+            secondary_audio_output_index: 0,
+            secondary_resize_node_id: "161".to_owned(),
+            secondary_audio_encode_node_id: "162".to_owned(),
+            diffusion_model_node_id: "98".to_owned(),
+            diffusion_model_class_type: "UNETLoader".to_owned(),
+            diffusion_model_directory: "Krea2".to_owned(),
+            lora_class_type: "Power Lora Loader (rgthree)".to_owned(),
+            lora_directory: "Krea2".to_owned(),
+            secondary_prompt_node_id: String::new(),
+            secondary_conditioning_node_id: String::new(),
+            single_image_input_node_id: String::new(),
+            secondary_image_input_node_id: String::new(),
+        }
+    }
+
+    pub fn image_edit() -> Self {
+        Self {
+            prompt_node_id: "37".to_owned(),
+            seed_node_id: "30".to_owned(),
+            duration_node_id: String::new(),
+            primary_resolution_node_id: "28".to_owned(),
+            secondary_resolution_node_id: "4".to_owned(),
+            primary_lora_node_id: String::new(),
+            secondary_lora_node_id: String::new(),
+            primary_sampler_node_id: "7".to_owned(),
+            secondary_scheduler_node_id: String::new(),
+            secondary_guider_node_id: String::new(),
+            primary_output_node_id: "500".to_owned(),
+            secondary_output_node_id: String::new(),
+            primary_color_node_id: String::new(),
+            secondary_color_node_id: String::new(),
+            clean_video_node_id: String::new(),
+            clean_save_node_id: String::new(),
+            secondary_video_input_node_id: String::new(),
+            conditioning_node_id: "34".to_owned(),
+            audio_node_ids: Vec::new(),
+            image_node_ids: vec!["21".to_owned(), "9".to_owned()],
+            primary_audio_output_node_id: String::new(),
+            primary_audio_output_index: 0,
+            secondary_audio_output_node_id: String::new(),
+            secondary_audio_output_index: 0,
+            secondary_resize_node_id: String::new(),
+            secondary_audio_encode_node_id: String::new(),
+            diffusion_model_node_id: "43".to_owned(),
+            diffusion_model_class_type: "UNETLoader".to_owned(),
+            diffusion_model_directory: "Krea2".to_owned(),
+            lora_class_type: "LoraLoaderModelOnly".to_owned(),
+            lora_directory: "Krea2-功能".to_owned(),
+            secondary_prompt_node_id: "20".to_owned(),
+            secondary_conditioning_node_id: "3".to_owned(),
+            single_image_input_node_id: "45".to_owned(),
+            secondary_image_input_node_id: "9".to_owned(),
+        }
+    }
     pub fn first_last_frame() -> Self {
         Self {
             prompt_node_id: "312".to_owned(),
@@ -161,6 +254,10 @@ impl WorkflowBindings {
             diffusion_model_directory: default_diffusion_model_directory(),
             lora_class_type: "LoraLoaderModelOnly".to_owned(),
             lora_directory: "MinimaxH3".to_owned(),
+            secondary_prompt_node_id: String::new(),
+            secondary_conditioning_node_id: String::new(),
+            single_image_input_node_id: String::new(),
+            secondary_image_input_node_id: String::new(),
         }
     }
 
@@ -178,6 +275,8 @@ impl WorkflowBindings {
 
     pub fn for_variant(variant: &str) -> Self {
         match variant {
+            "image-generation" => Self::image_generation(),
+            "image-edit" => Self::image_edit(),
             "first-last-frame" => Self::first_last_frame(),
             "image-to-video" => Self::image_to_video(),
             "last-frame-to-video" => Self::last_frame_to_video(),
@@ -226,6 +325,45 @@ pub struct WorkflowAdapter {
 }
 
 impl WorkflowAdapter {
+    pub fn image_generation(bindings: WorkflowBindings) -> Self {
+        Self {
+            schema_version: WORKFLOW_PACKAGE_SCHEMA_VERSION,
+            engine_api_version: WORKFLOW_ENGINE_API_VERSION.to_owned(),
+            adapter_id: KREA2_TEXT_TO_IMAGE_ADAPTER.to_owned(),
+            capability: "image-generation".to_owned(),
+            variant: "image-generation".to_owned(),
+            input_contract: WorkflowInputContract {
+                prompt_required: true,
+                image_min: 0,
+                image_max: 0,
+                audio_min: 0,
+                audio_max: 0,
+                video_min: 0,
+                video_max: 0,
+            },
+            bindings,
+        }
+    }
+
+    pub fn image_edit(bindings: WorkflowBindings) -> Self {
+        Self {
+            schema_version: WORKFLOW_PACKAGE_SCHEMA_VERSION,
+            engine_api_version: WORKFLOW_ENGINE_API_VERSION.to_owned(),
+            adapter_id: KREA2_IMAGE_EDIT_ADAPTER.to_owned(),
+            capability: "image-generation".to_owned(),
+            variant: "image-edit".to_owned(),
+            input_contract: WorkflowInputContract {
+                prompt_required: true,
+                image_min: 1,
+                image_max: 2,
+                audio_min: 0,
+                audio_max: 0,
+                video_min: 0,
+                video_max: 0,
+            },
+            bindings,
+        }
+    }
     pub fn current_h3(bindings: WorkflowBindings) -> Self {
         Self {
             schema_version: WORKFLOW_PACKAGE_SCHEMA_VERSION,
@@ -300,6 +438,8 @@ impl WorkflowAdapter {
 
     fn for_variant(variant: &str, bindings: WorkflowBindings) -> Self {
         match variant {
+            "image-generation" => Self::image_generation(bindings),
+            "image-edit" => Self::image_edit(bindings),
             "first-last-frame" => Self::first_last_frame(bindings),
             "image-to-video" => Self::image_to_video(bindings),
             "last-frame-to-video" => Self::last_frame_to_video(bindings),
@@ -630,6 +770,29 @@ fn validate_adapter_contract(
     if adapter.adapter_id.trim().is_empty() {
         return Err("方案适配器 adapterId 不能为空".to_owned());
     }
+    if capability == "image-generation" && variant == "image-generation" {
+        if adapter.adapter_id != KREA2_TEXT_TO_IMAGE_ADAPTER {
+            return Err("图片生成方案必须使用 Krea2 文生图适配器".to_owned());
+        }
+        return Ok(());
+    }
+    if capability == "image-generation" && variant == "image-edit" {
+        if adapter.adapter_id != KREA2_IMAGE_EDIT_ADAPTER {
+            return Err("图片编辑方案必须使用 Krea2 图像编辑适配器".to_owned());
+        }
+        if !adapter.input_contract.prompt_required
+            || adapter.input_contract.image_min != 1
+            || adapter.input_contract.image_max != 2
+            || adapter.input_contract.audio_max != 0
+            || adapter.input_contract.video_max != 0
+        {
+            return Err(
+                "Krea2 图像编辑适配器必须要求提示词、支持 1–2 张图片，并禁止音频和视频输入"
+                    .to_owned(),
+            );
+        }
+        return Ok(());
+    }
     if capability != "video-generation"
         || !matches!(
             variant,
@@ -863,7 +1026,10 @@ fn normalize_classification(capability: &str, variant: &str) -> Result<(String, 
             "视频生成方案必须选择多参生视频、首尾帧、图生视频、尾帧生视频或文生视频子类型"
                 .to_owned(),
         ),
-        "image-generation" => Ok((capability.to_owned(), "image-generation".to_owned())),
+        "image-generation" if matches!(variant, "image-generation" | "image-edit") => {
+            Ok((capability.to_owned(), variant.to_owned()))
+        }
+        "image-generation" => Err("图片生成方案必须选择文生图或图像编辑子类型".to_owned()),
         _ => Err(format!("不支持的工作流方案类型：{capability}")),
     }
 }
@@ -983,6 +1149,49 @@ pub fn validate_workflow_bytes(
                 validate_input_connections(object, node_id, input_name, value, &mut issues);
             }
         }
+    }
+    if adapter.capability == "image-generation" && adapter.variant == "image-generation" {
+        for (node_id, input_name) in [
+            (&bindings.prompt_node_id, "text"),
+            (&bindings.conditioning_node_id, "text"),
+            (&bindings.seed_node_id, "noise_seed"),
+            (&bindings.primary_resolution_node_id, "width"),
+            (&bindings.primary_resolution_node_id, "height"),
+            (&bindings.primary_output_node_id, "images"),
+            (&bindings.secondary_resize_node_id, "image"),
+            (&bindings.secondary_audio_encode_node_id, "pixels"),
+            (&bindings.primary_sampler_node_id, "latent_image"),
+        ] {
+            require_input(&workflow, node_id, input_name, &mut issues);
+        }
+        return WorkflowModuleValidation {
+            compatible: issues.is_empty(),
+            issues,
+        };
+    }
+    if adapter.capability == "image-generation" && adapter.variant == "image-edit" {
+        for (node_id, input_name) in [
+            (&bindings.prompt_node_id, "value"),
+            (&bindings.secondary_prompt_node_id, "value"),
+            (&bindings.single_image_input_node_id, "image"),
+            (&bindings.image_node_ids[0], "image"),
+            (&bindings.secondary_image_input_node_id, "image"),
+            (&bindings.conditioning_node_id, "prompt"),
+            (&bindings.secondary_conditioning_node_id, "prompt"),
+            (&bindings.seed_node_id, "noise_seed"),
+            (&bindings.primary_sampler_node_id, "noise_seed"),
+            (&bindings.primary_resolution_node_id, "width"),
+            (&bindings.primary_resolution_node_id, "height"),
+            (&bindings.secondary_resolution_node_id, "width"),
+            (&bindings.secondary_resolution_node_id, "height"),
+            (&bindings.primary_output_node_id, "images"),
+        ] {
+            require_input(&workflow, node_id, input_name, &mut issues);
+        }
+        return WorkflowModuleValidation {
+            compatible: issues.is_empty(),
+            issues,
+        };
     }
     for (node_id, input_name) in [
         (&bindings.prompt_node_id, "value"),
