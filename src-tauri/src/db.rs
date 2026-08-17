@@ -882,7 +882,7 @@ impl Database {
                 }
                 if is_protected_generation_edge(&transaction, &edge)? {
                     return Err(CanvasError::Conflict(
-                        "generated video ownership links cannot cross folder boundaries".to_owned(),
+                        "generated media ownership links cannot cross folder boundaries".to_owned(),
                     ));
                 }
                 transaction.execute("DELETE FROM edges WHERE id = ?1", [edge.id])?;
@@ -890,7 +890,7 @@ impl Database {
             } else if source_moved || target_moved {
                 if is_protected_generation_edge(&transaction, &edge)? {
                     return Err(CanvasError::Conflict(
-                        "generated video ownership links cannot cross folder boundaries".to_owned(),
+                        "generated media ownership links cannot cross folder boundaries".to_owned(),
                     ));
                 }
                 transaction.execute("DELETE FROM edges WHERE id = ?1", [edge.id])?;
@@ -3371,7 +3371,7 @@ impl Database {
             .ok_or_else(|| CanvasError::Validation(format!("edge not found: {id}")))?;
         if is_protected_generation_edge(&connection, &edge)? {
             return Err(CanvasError::Conflict(
-                "generated video ownership links cannot be disconnected".to_owned(),
+                "generated media ownership links cannot be disconnected".to_owned(),
             ));
         }
         let changed = connection.execute("DELETE FROM edges WHERE id = ?1", [id])?;
@@ -5232,7 +5232,8 @@ fn is_protected_generation_edge(connection: &Connection, edge: &EdgeRecord) -> C
     Ok(matches!(
         kinds,
         Some((source_kind, target_kind))
-            if source_kind == "video-generation" && target_kind == "generated-video"
+            if (source_kind == "video-generation" && target_kind == "generated-video")
+                || (source_kind == "image-generation" && target_kind == "generated-image")
     ))
 }
 
@@ -7060,6 +7061,48 @@ mod tests {
             .unwrap();
         assert_eq!(grouped.child.nodes.len(), 2);
         assert_eq!(grouped.child.edges.len(), 1);
+    }
+
+    #[test]
+    fn protects_generated_image_ownership_edges_from_deletion_and_folder_splitting() {
+        let database = Database::in_memory().unwrap();
+        let generator = database
+            .create_node(node_with_kind(
+                "image-generation",
+                "Image generator",
+                "protected-image-generator",
+            ))
+            .unwrap()
+            .node;
+        let preview = database
+            .create_node(node_with_kind(
+                "generated-image",
+                "Image preview",
+                "protected-image-preview",
+            ))
+            .unwrap()
+            .node;
+        let edge = database
+            .create_edge(CreateEdgeInput {
+                canvas_id: None,
+                source_node_id: generator.id.clone(),
+                target_node_id: preview.id.clone(),
+                kind: Some("output".to_owned()),
+                metadata: json!({}),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            database.delete_edge(&edge.id),
+            Err(CanvasError::Conflict(_))
+        ));
+        assert!(matches!(
+            database.group_nodes_into_folder(GroupNodesIntoFolderInput {
+                canvas_id: DEFAULT_CANVAS_ID.to_owned(),
+                node_ids: vec![generator.id],
+            }),
+            Err(CanvasError::Conflict(_))
+        ));
     }
 
     #[test]

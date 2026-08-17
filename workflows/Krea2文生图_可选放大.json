@@ -1,0 +1,17 @@
+{
+  "29": { "class_type": "EmptyLatentImage", "inputs": { "width": 1280, "height": 720, "batch_size": 1 } },
+  "30": { "class_type": "VAEDecode", "inputs": { "samples": ["63", 0], "vae": ["100", 0] } },
+  "63": { "class_type": "KSamplerAdvanced", "inputs": { "add_noise": "enable", "noise_seed": 0, "steps": 8, "cfg": 1.5, "sampler_name": "euler_ancestral", "scheduler": "simple", "start_at_step": 0, "end_at_step": 10000, "return_with_leftover_noise": "disable", "model": ["159", 0], "positive": ["90", 0], "negative": ["153", 0], "latent_image": ["29", 0] } },
+  "90": { "class_type": "CLIPTextEncode", "inputs": { "text": "", "clip": ["159", 1] } },
+  "98": { "class_type": "UNETLoader", "inputs": { "unet_name": "Kera2\\pornmasterKrea2_v2TurboBF16.safetensors", "weight_dtype": "default" } },
+  "99": { "class_type": "CLIPLoader", "inputs": { "clip_name": "qwen3vl_4b_fp8_scaled.safetensors", "type": "krea2", "device": "default" } },
+  "100": { "class_type": "VAELoader", "inputs": { "vae_name": "qwen_image_vae.safetensors" } },
+  "153": { "class_type": "CLIPTextEncode", "inputs": { "text": "", "clip": ["159", 1] } },
+  "157": { "class_type": "Image Save", "inputs": { "output_path": "[time(%Y-%m-%d)]", "filename_prefix": "ComfyUI", "filename_delimiter": "_krea2_", "filename_number_padding": 4, "filename_number_start": "false", "extension": "png", "dpi": 300, "quality": 100, "optimize_image": "true", "lossless_webp": "false", "overwrite_mode": "false", "show_history": "false", "show_history_by_prefix": "true", "embed_workflow": "true", "show_previews": "true", "images": ["163", 0] } },
+  "158": { "class_type": "LatentRotate", "inputs": { "rotation": "none", "samples": ["29", 0] } },
+  "159": { "class_type": "Power Lora Loader (rgthree)", "inputs": { "PowerLoraLoaderHeaderWidget": { "type": "PowerLoraLoaderHeaderWidget" }, "lora_1": { "on": false, "lora": "Krea2\\PornMaster_Krea2_Realism_slider_V1.safetensors", "strength": 1 }, "➕ Add Lora": "", "model": ["98", 0], "clip": ["99", 0] } },
+  "160": { "class_type": "KSampler", "inputs": { "seed": 0, "steps": 8, "cfg": 1, "sampler_name": "euler_ancestral", "scheduler": "simple", "denoise": 0.4, "model": ["159", 0], "positive": ["90", 0], "negative": ["153", 0], "latent_image": ["162", 0] } },
+  "161": { "class_type": "ImageScaleToTotalPixels", "inputs": { "upscale_method": "lanczos", "megapixels": 8, "resolution_steps": 1, "image": ["30", 0] } },
+  "162": { "class_type": "VAEEncode", "inputs": { "pixels": ["161", 0], "vae": ["100", 0] } },
+  "163": { "class_type": "VAEDecode", "inputs": { "samples": ["160", 0], "vae": ["100", 0] } }
+}
