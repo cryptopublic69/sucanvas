@@ -213,6 +213,21 @@
       "title": "LoRA加载器（仅模型）"
     }
   },
+  "9200": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1,
+      "model": [
+        "141",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA（一采引导）"
+    }
+  },
+  "9201": { "inputs": { "lora_name": "", "strength_model": 1, "model": ["141", 0] }, "class_type": "LoraLoaderModelOnly", "_meta": { "title": "风格 LoRA（二段引导）" } },
   "149": {
     "inputs": {
       "shift_video": 12,
@@ -459,7 +474,7 @@
     "inputs": {
       "frame_rate": 8,
       "loop_count": 0,
-      "filename_prefix": "AnimateDiff",
+      "filename_prefix": "%date:yyyy-MM-dd%/Minimax_H3",
       "format": "image/gif",
       "pingpong": false,
       "save_output": true,
@@ -487,7 +502,7 @@
     },
     "class_type": "ComfyMathExpression",
     "_meta": {
-      "title": "二采 I2V 宽度（匹配 latent 放大）"
+      "title": "二段 I2V 宽度（匹配 latent 放大）"
     }
   },
   "277": {
@@ -504,7 +519,7 @@
     },
     "class_type": "ComfyMathExpression",
     "_meta": {
-      "title": "二采 I2V 高度（匹配 latent 放大）"
+      "title": "二段 I2V 高度（匹配 latent 放大）"
     }
   },
   "278": {
@@ -544,7 +559,7 @@
     },
     "class_type": "MiniMaxH3ImageToVideo",
     "_meta": {
-      "title": "MiniMax H3 Image to Video（二采尺寸条件）"
+      "title": "MiniMax H3 Image to Video（二段尺寸条件）"
     }
   },
   "279": {
@@ -560,7 +575,7 @@
     },
     "class_type": "BasicGuider",
     "_meta": {
-      "title": "基本引导器（二采放大尺寸）"
+      "title": "基本引导器（二段放大尺寸）"
     }
   },
   "280": {
@@ -569,7 +584,7 @@
     },
     "class_type": "PrimitiveFloat",
     "_meta": {
-      "title": "二采 latent 放大倍率"
+      "title": "二段 latent 放大倍率"
     }
   },
   "281": {

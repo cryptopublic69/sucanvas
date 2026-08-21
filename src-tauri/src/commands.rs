@@ -1759,6 +1759,140 @@ fn configure_h3_loras(
     let primary_upstream = read_lora_upstream(&bindings.primary_lora_node_id)?;
     let secondary_upstream = read_lora_upstream(&bindings.secondary_lora_node_id)?;
 
+    // I2V/尾帧/首尾帧 V3 的一采和二段共用原始 Sigma/latent 流程。风格 LoRA
+    // 只能接在各自引导器之前：若把二段改接成 Fla 的独立模型/调度链，会破坏 V3
+    // 的 `208 -> 209 -> 210` 连续二段流程。这里仅切换 126 和 279 的模型输入。
+    let uses_v3_stage_local_style = bindings.primary_lora_node_id
+        == bindings.secondary_lora_node_id
+        && bindings.primary_sol_attn_node_id.trim().is_empty()
+        && bindings.secondary_sol_attn_node_id.trim().is_empty()
+        && bindings.primary_model_target_node_id == "142"
+        && !bindings.live_preview_node_id.trim().is_empty()
+        && !bindings.primary_style_lora_node_id.trim().is_empty()
+        && !bindings.secondary_style_lora_node_id.trim().is_empty();
+    if uses_v3_stage_local_style {
+        if !primary_lora_bypassed {
+            set_workflow_input(
+                workflow,
+                &bindings.primary_lora_node_id,
+                "lora_name",
+                Value::String(primary_lora_name.to_owned()),
+            )?;
+            set_workflow_input(
+                workflow,
+                &bindings.primary_lora_node_id,
+                "strength_model",
+                json!(primary_lora_strength),
+            )?;
+        }
+        if !secondary_lora_bypassed {
+            set_workflow_input(
+                workflow,
+                &bindings.secondary_lora_node_id,
+                "lora_name",
+                Value::String(secondary_lora_name.to_owned()),
+            )?;
+            set_workflow_input(
+                workflow,
+                &bindings.secondary_lora_node_id,
+                "strength_model",
+                json!(secondary_lora_strength),
+            )?;
+        }
+        let shared_model = if primary_lora_bypassed && secondary_lora_bypassed {
+            primary_upstream
+        } else {
+            json!([bindings.primary_lora_node_id, 0])
+        };
+        set_workflow_input(
+            workflow,
+            &bindings.primary_model_target_node_id,
+            "model",
+            shared_model,
+        )?;
+        let stage_model = json!([bindings.live_preview_node_id, 0]);
+        set_workflow_input(
+            workflow,
+            &bindings.secondary_scheduler_node_id,
+            "model",
+            stage_model.clone(),
+        )?;
+        let primary_stage_model = if style_lora_bypassed {
+            stage_model.clone()
+        } else {
+            ensure_h3_style_lora_loader(
+                workflow,
+                &bindings.primary_style_lora_node_id,
+                &stage_model,
+                bindings,
+            )?;
+            set_workflow_input(
+                workflow,
+                &bindings.primary_style_lora_node_id,
+                "lora_name",
+                Value::String(style_lora_name.to_owned()),
+            )?;
+            set_workflow_input(
+                workflow,
+                &bindings.primary_style_lora_node_id,
+                "strength_model",
+                json!(style_lora_strength),
+            )?;
+            json!([bindings.primary_style_lora_node_id, 0])
+        };
+        let secondary_stage_model = if style_lora_bypassed || !style_lora_apply_to_secondary {
+            stage_model
+        } else {
+            let secondary_stage_upstream = json!([bindings.live_preview_node_id, 0]);
+            ensure_h3_style_lora_loader(
+                workflow,
+                &bindings.secondary_style_lora_node_id,
+                &secondary_stage_upstream,
+                bindings,
+            )?;
+            set_workflow_input(
+                workflow,
+                &bindings.secondary_style_lora_node_id,
+                "lora_name",
+                Value::String(style_lora_name.to_owned()),
+            )?;
+            set_workflow_input(
+                workflow,
+                &bindings.secondary_style_lora_node_id,
+                "strength_model",
+                json!(style_lora_strength),
+            )?;
+            json!([bindings.secondary_style_lora_node_id, 0])
+        };
+        let primary_guider_node_id = workflow
+            .get(&bindings.primary_sampler_node_id)
+            .and_then(|node| node.get("inputs"))
+            .and_then(|inputs| inputs.get("guider"))
+            .and_then(Value::as_array)
+            .and_then(|connection| connection.first())
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                format!(
+                    "API 工作流一采采样器 {} 缺少 guider 连接",
+                    bindings.primary_sampler_node_id
+                )
+            })?;
+        set_workflow_input(
+            workflow,
+            &primary_guider_node_id,
+            "model",
+            primary_stage_model,
+        )?;
+        set_workflow_input(
+            workflow,
+            &bindings.secondary_guider_node_id,
+            "model",
+            secondary_stage_model,
+        )?;
+        return Ok(());
+    }
+
     if !primary_lora_bypassed {
         set_workflow_input(
             workflow,
@@ -2070,6 +2204,19 @@ fn configure_h3_ref_image_size(
         "ref_image_size",
         Value::String(ref_image_size.to_owned()),
     )
+}
+
+fn ref_image_size_for_variant<'a>(
+    variant: &str,
+    ref_image_size: &'a str,
+) -> Result<Option<&'a str>, String> {
+    if variant != "reference-to-video" {
+        return Ok(None);
+    }
+    if !matches!(ref_image_size, "max" | "match") {
+        return Err("参考图片尺寸模式必须是 max 或 match".to_owned());
+    }
+    Ok(Some(ref_image_size))
 }
 
 fn configure_h3_strict_prompt_tags(
@@ -2550,6 +2697,142 @@ fn configure_secondary_source_video(
         &bindings.clean_video_node_id,
         "audio",
         json!([bindings.secondary_video_input_node_id, 2]),
+    )?;
+    Ok(())
+}
+
+fn uses_v3_native_second_stage(bindings: &WorkflowBindings) -> bool {
+    bindings.primary_lora_node_id == bindings.secondary_lora_node_id
+        && bindings.primary_model_target_node_id == "142"
+        && bindings.secondary_scheduler_node_id == "124"
+        && bindings.secondary_guider_node_id == "279"
+        && !bindings.live_preview_node_id.trim().is_empty()
+}
+
+fn configure_v3_independent_secondary_source(
+    workflow: &mut Value,
+    uploaded_video: &str,
+    aspect_ratio: &str,
+    secondary_resolution_megapixels: f64,
+    secondary_scheduler_steps: u32,
+    secondary_brightness: f64,
+    secondary_contrast: f64,
+    secondary_saturation: f64,
+    style_lora_bypassed: bool,
+    style_lora_apply_to_secondary: bool,
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    // V3 的内置二段是 125 -> 209 的连续潜空间流程；独立“二采”则按 Fla V3 的
+    // 解码视频 -> 调整尺寸 -> 编码 AV latent -> 独立采样流程构造，不能复用内置二段。
+    const VIDEO_INPUT_NODE_ID: &str = "9300";
+    const RESOLUTION_NODE_ID: &str = "9398";
+    const RESIZE_NODE_ID: &str = "9383";
+    const VIDEO_ENCODE_NODE_ID: &str = "9386";
+    const AUDIO_ENCODE_NODE_ID: &str = "9388";
+    const LATENT_NODE_ID: &str = "9390";
+    const SCHEDULER_NODE_ID: &str = "9391";
+    const GUIDER_NODE_ID: &str = "9393";
+    const SAMPLER_NODE_ID: &str = "9387";
+    const DECODE_NODE_ID: &str = "9395";
+    const COLOR_NODE_ID: &str = "9403";
+
+    let secondary_model = if style_lora_bypassed || !style_lora_apply_to_secondary {
+        json!([bindings.live_preview_node_id, 0])
+    } else {
+        json!([bindings.secondary_style_lora_node_id, 0])
+    };
+    let workflow_object = workflow
+        .as_object_mut()
+        .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
+    workflow_object.insert(
+        VIDEO_INPUT_NODE_ID.to_owned(),
+        json!({
+            "inputs": {
+                "video": uploaded_video,
+                "force_rate": 24.0,
+                "custom_width": 0,
+                "custom_height": 0,
+                "frame_load_cap": 0,
+                "skip_first_frames": 0,
+                "select_every_nth": 1
+            },
+            "class_type": "VHS_LoadVideo",
+            "_meta": { "title": "Load Selected Preview For Secondary Sampling" }
+        }),
+    );
+    workflow_object.insert(
+        RESOLUTION_NODE_ID.to_owned(),
+        json!({
+            "inputs": { "aspect_ratio": aspect_ratio, "megapixels": secondary_resolution_megapixels, "multiple": 32 },
+            "class_type": "ResolutionSelector",
+            "_meta": { "title": "独立二采尺寸" }
+        }),
+    );
+    workflow_object.insert(
+        RESIZE_NODE_ID.to_owned(),
+        json!({
+            "inputs": {
+                "image": [VIDEO_INPUT_NODE_ID, 0], "width": [RESOLUTION_NODE_ID, 0], "height": [RESOLUTION_NODE_ID, 1],
+                "upscale_method": "nvidia_rtx_vsr", "keep_proportion": "crop", "pad_color": "0, 0, 0",
+                "crop_position": "center", "divisible_by": 32, "device": "cpu"
+            },
+            "class_type": "ImageResizeKJv2",
+            "_meta": { "title": "Resize Image v2" }
+        }),
+    );
+    workflow_object.insert(
+        VIDEO_ENCODE_NODE_ID.to_owned(),
+        json!({ "inputs": { "pixels": [RESIZE_NODE_ID, 0], "vae": ["119", 0] }, "class_type": "VAEEncode" }),
+    );
+    workflow_object.insert(
+        AUDIO_ENCODE_NODE_ID.to_owned(),
+        json!({ "inputs": { "audio": [VIDEO_INPUT_NODE_ID, 2], "vae": ["120", 0] }, "class_type": "VAEEncodeAudio" }),
+    );
+    workflow_object.insert(
+        LATENT_NODE_ID.to_owned(),
+        json!({ "inputs": { "video_latent": [VIDEO_ENCODE_NODE_ID, 0], "audio_latent": [AUDIO_ENCODE_NODE_ID, 0] }, "class_type": "PT_H3ConcatAVLatent" }),
+    );
+    workflow_object.insert(
+        SCHEDULER_NODE_ID.to_owned(),
+        json!({ "inputs": { "scheduler": "simple", "steps": secondary_scheduler_steps, "denoise": 0.2, "model": secondary_model.clone() }, "class_type": "BasicScheduler" }),
+    );
+    workflow_object.insert(
+        GUIDER_NODE_ID.to_owned(),
+        json!({ "inputs": { "model": secondary_model, "conditioning": ["278", 0] }, "class_type": "BasicGuider" }),
+    );
+    workflow_object.insert(
+        SAMPLER_NODE_ID.to_owned(),
+        json!({
+            "inputs": { "noise": ["129", 0], "guider": [GUIDER_NODE_ID, 0], "sampler": ["123", 0], "sigmas": [SCHEDULER_NODE_ID, 0], "latent_image": [LATENT_NODE_ID, 0] },
+            "class_type": "SamplerCustomAdvanced"
+        }),
+    );
+    workflow_object.insert(
+        DECODE_NODE_ID.to_owned(),
+        json!({ "inputs": { "samples": [SAMPLER_NODE_ID, 0], "vae": ["119", 0] }, "class_type": "VAEDecode" }),
+    );
+    workflow_object.insert(
+        COLOR_NODE_ID.to_owned(),
+        json!({
+            "inputs": { "brightness": secondary_brightness, "contrast": secondary_contrast, "saturation": secondary_saturation, "image": [DECODE_NODE_ID, 0] },
+            "class_type": "LayerColor: BrightnessContrastV2"
+        }),
+    );
+
+    set_workflow_input(workflow, "278", "first_frame", json!([RESIZE_NODE_ID, 0]))?;
+    set_workflow_input(workflow, "278", "width", json!([RESOLUTION_NODE_ID, 0]))?;
+    set_workflow_input(workflow, "278", "height", json!([RESOLUTION_NODE_ID, 1]))?;
+    set_workflow_input(
+        workflow,
+        &bindings.clean_video_node_id,
+        "images",
+        json!([COLOR_NODE_ID, 0]),
+    )?;
+    set_workflow_input(
+        workflow,
+        &bindings.clean_video_node_id,
+        "audio",
+        json!([VIDEO_INPUT_NODE_ID, 2]),
     )?;
     Ok(())
 }
@@ -3566,10 +3849,7 @@ async fn submit_comfyui_workflow_inner(
     {
         return Err("一采放大倍率必须在1.0到2.0之间".to_owned());
     }
-    let ref_image_size = input.ref_image_size.trim();
-    if !matches!(ref_image_size, "max" | "match") {
-        return Err("参考图片尺寸模式必须是 max 或 match".to_owned());
-    }
+    let ref_image_size = ref_image_size_for_variant(&adapter_variant, input.ref_image_size.trim())?;
     for (label, value) in [
         ("一采亮度", input.primary_brightness),
         ("一采对比度", input.primary_contrast),
@@ -3721,7 +4001,9 @@ async fn submit_comfyui_workflow_inner(
         style_lora_apply_to_secondary,
         &bindings,
     )?;
-    configure_h3_ref_image_size(&mut workflow, ref_image_size, bindings)?;
+    if let Some(ref_image_size) = ref_image_size {
+        configure_h3_ref_image_size(&mut workflow, ref_image_size, bindings)?;
+    }
     if let Some(strict_prompt_tags) = input.strict_prompt_tags {
         configure_h3_strict_prompt_tags(&mut workflow, strict_prompt_tags, bindings)?;
     }
@@ -3734,7 +4016,23 @@ async fn submit_comfyui_workflow_inner(
         bindings,
     )?;
     if let Some(uploaded_video) = uploaded_secondary_source.as_deref() {
-        configure_secondary_source_video(&mut workflow, uploaded_video, &bindings)?;
+        if uses_v3_native_second_stage(&bindings) {
+            configure_v3_independent_secondary_source(
+                &mut workflow,
+                uploaded_video,
+                aspect_ratio,
+                input.secondary_resolution_megapixels,
+                input.secondary_scheduler_steps,
+                input.secondary_brightness,
+                input.secondary_contrast,
+                input.secondary_saturation,
+                style_lora_bypassed,
+                style_lora_apply_to_secondary,
+                &bindings,
+            )?;
+        } else {
+            configure_secondary_source_video(&mut workflow, uploaded_video, &bindings)?;
+        }
     }
 
     ensure_comfy_task_active(&task.cancelled)?;
@@ -4350,10 +4648,10 @@ mod tests {
         configure_secondary_source_video, delete_image_files_blocking, delete_video_files_blocking,
         diffusion_models_from_object_info, export_media_asset_blocking, hash_app_lock_password,
         loras_from_object_info, media_format, normalize_h3_video_filename_prefix,
-        resized_image_dimensions, resized_image_name, resolve_filename_prefix_date,
-        resolve_generation_seed, validate_new_app_lock_password, validate_workflow_media_counts,
-        verify_app_lock_hash, MediaFormat, WorkflowBindings, WorkflowInputContract,
-        AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
+        ref_image_size_for_variant, resized_image_dimensions, resized_image_name,
+        resolve_filename_prefix_date, resolve_generation_seed, validate_new_app_lock_password,
+        validate_workflow_media_counts, verify_app_lock_hash, MediaFormat, WorkflowBindings,
+        WorkflowInputContract, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
     use crate::{db::Database, models::CreateNodeInput};
     use serde_json::json;
@@ -4444,6 +4742,19 @@ mod tests {
         });
         configure_h3_ref_image_size(&mut workflow, "match", &WorkflowBindings::default()).unwrap();
         assert_eq!(workflow["363"]["inputs"]["ref_image_size"], "match");
+    }
+
+    #[test]
+    fn only_reference_to_video_uses_reference_image_size() {
+        assert_eq!(
+            ref_image_size_for_variant("reference-to-video", "match").unwrap(),
+            Some("match")
+        );
+        assert!(ref_image_size_for_variant("reference-to-video", "invalid").is_err());
+        assert_eq!(
+            ref_image_size_for_variant("image-to-video", "invalid").unwrap(),
+            None
+        );
     }
 
     #[test]

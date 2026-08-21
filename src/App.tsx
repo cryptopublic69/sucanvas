@@ -5397,6 +5397,16 @@ function CanvasWorkspace() {
               "403": { progress: 95, label: "正在处理二采画面…" },
               "9000": { progress: 97, label: "正在合成二采视频…" },
               "9001": { progress: 99, label: "正在保存二采视频…" },
+              "9300": { progress: null, label: "正在读取选中的预览视频…" },
+              "9383": { progress: null, label: "正在调整二采画面尺寸…" },
+              "9386": { progress: null, label: "正在编码二采画面…" },
+              "9388": { progress: null, label: "正在编码视频音频…" },
+              "9390": { progress: null, label: "正在组合二采视频与音频…" },
+              "9391": { progress: 8, label: "正在准备二采采样参数…" },
+              "9393": { progress: 8, label: "正在准备二采引导条件…" },
+              "9387": { progress: 10, label: "正在加载二采模型并准备采样…" },
+              "9395": { progress: 92, label: "采样完成，正在解码视频…" },
+              "9403": { progress: 95, label: "正在处理二采画面…" },
             };
             const stage = stages[executingNodeId];
             if (stage) updateProgress(stage.progress, stage.label);
@@ -5404,7 +5414,7 @@ function CanvasWorkspace() {
           }
           if (message.type !== "progress") return;
           const progressNodeId = typeof data.node === "string" ? data.node : executingNodeId;
-          if (progressNodeId !== "387") return;
+          if (progressNodeId !== "387" && progressNodeId !== "9387") return;
           const value = typeof data.value === "number" ? data.value : null;
           const maximum = typeof data.max === "number" ? data.max : null;
           if (value === null || maximum === null || maximum <= 0) return;

@@ -863,7 +863,7 @@
     },
     "class_type": "ResolutionSelector",
     "_meta": {
-      "title": "二采尺寸"
+      "title": "二段尺寸"
     }
   },
   "401": {
@@ -906,7 +906,7 @@
     },
     "class_type": "LoraLoaderModelOnly",
     "_meta": {
-      "title": "风格 LoRA（二采）"
+      "title": "风格 LoRA（二段）"
     }
   },
   "9202": {
@@ -930,7 +930,7 @@
     },
     "class_type": "SolAttnMiniMax",
     "_meta": {
-      "title": "Patch Sol-Attn（二采）"
+      "title": "Patch Sol-Attn（二段）"
     }
   }
 }
