@@ -42,8 +42,28 @@ fn default_diffusion_model_name() -> String {
     r"MinimaxH3\minimax_h3_fl2va_pruned_int8_convrot.safetensors".to_owned()
 }
 
+fn default_primary_upscale_factor() -> f64 {
+    1.0
+}
+
 fn default_secondary_guider_node_id() -> String {
     "393".to_owned()
+}
+
+fn default_primary_video_steps_input_name() -> String {
+    "video_steps".to_owned()
+}
+
+fn default_primary_audio_steps_input_name() -> String {
+    "audio_steps".to_owned()
+}
+
+fn default_primary_style_lora_node_id() -> String {
+    "9200".to_owned()
+}
+
+fn default_secondary_style_lora_node_id() -> String {
+    "9201".to_owned()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,7 +76,27 @@ pub struct WorkflowBindings {
     pub secondary_resolution_node_id: String,
     pub primary_lora_node_id: String,
     pub secondary_lora_node_id: String,
+    #[serde(default = "default_primary_style_lora_node_id")]
+    pub primary_style_lora_node_id: String,
+    #[serde(default = "default_secondary_style_lora_node_id")]
+    pub secondary_style_lora_node_id: String,
+    #[serde(default)]
+    pub primary_sol_attn_node_id: String,
+    #[serde(default)]
+    pub secondary_sol_attn_node_id: String,
     pub primary_sampler_node_id: String,
+    #[serde(default)]
+    pub primary_model_target_node_id: String,
+    #[serde(default)]
+    pub primary_steps_node_id: String,
+    #[serde(default = "default_primary_video_steps_input_name")]
+    pub primary_video_steps_input_name: String,
+    #[serde(default = "default_primary_audio_steps_input_name")]
+    pub primary_audio_steps_input_name: String,
+    #[serde(default)]
+    pub primary_upscale_node_id: String,
+    #[serde(default)]
+    pub live_preview_node_id: String,
     pub secondary_scheduler_node_id: String,
     #[serde(default = "default_secondary_guider_node_id")]
     pub secondary_guider_node_id: String,
@@ -82,6 +122,8 @@ pub struct WorkflowBindings {
     pub diffusion_model_class_type: String,
     #[serde(default = "default_diffusion_model_directory")]
     pub diffusion_model_directory: String,
+    #[serde(default)]
+    pub secondary_diffusion_model_node_id: String,
     pub lora_class_type: String,
     pub lora_directory: String,
     #[serde(default)]
@@ -104,7 +146,17 @@ impl Default for WorkflowBindings {
             secondary_resolution_node_id: "398".to_owned(),
             primary_lora_node_id: "354".to_owned(),
             secondary_lora_node_id: "401".to_owned(),
+            primary_style_lora_node_id: default_primary_style_lora_node_id(),
+            secondary_style_lora_node_id: default_secondary_style_lora_node_id(),
+            primary_sol_attn_node_id: "417".to_owned(),
+            secondary_sol_attn_node_id: "9202".to_owned(),
             primary_sampler_node_id: "357".to_owned(),
+            primary_model_target_node_id: String::new(),
+            primary_steps_node_id: String::new(),
+            primary_video_steps_input_name: default_primary_video_steps_input_name(),
+            primary_audio_steps_input_name: default_primary_audio_steps_input_name(),
+            primary_upscale_node_id: String::new(),
+            live_preview_node_id: String::new(),
             secondary_scheduler_node_id: "391".to_owned(),
             secondary_guider_node_id: default_secondary_guider_node_id(),
             primary_output_node_id: "360".to_owned(),
@@ -131,6 +183,7 @@ impl Default for WorkflowBindings {
             diffusion_model_node_id: default_diffusion_model_node_id(),
             diffusion_model_class_type: default_diffusion_model_class_type(),
             diffusion_model_directory: default_diffusion_model_directory(),
+            secondary_diffusion_model_node_id: String::new(),
             lora_class_type: "LoraLoaderModelOnly".to_owned(),
             lora_directory: "MinimaxH3".to_owned(),
             secondary_prompt_node_id: String::new(),
@@ -151,7 +204,17 @@ impl WorkflowBindings {
             secondary_resolution_node_id: String::new(),
             primary_lora_node_id: "159".to_owned(),
             secondary_lora_node_id: String::new(),
+            primary_style_lora_node_id: String::new(),
+            secondary_style_lora_node_id: String::new(),
+            primary_sol_attn_node_id: String::new(),
+            secondary_sol_attn_node_id: String::new(),
             primary_sampler_node_id: "160".to_owned(),
+            primary_model_target_node_id: String::new(),
+            primary_steps_node_id: String::new(),
+            primary_video_steps_input_name: default_primary_video_steps_input_name(),
+            primary_audio_steps_input_name: default_primary_audio_steps_input_name(),
+            primary_upscale_node_id: String::new(),
+            live_preview_node_id: String::new(),
             secondary_scheduler_node_id: String::new(),
             secondary_guider_node_id: String::new(),
             primary_output_node_id: "157".to_owned(),
@@ -173,6 +236,7 @@ impl WorkflowBindings {
             diffusion_model_node_id: "98".to_owned(),
             diffusion_model_class_type: "UNETLoader".to_owned(),
             diffusion_model_directory: "Krea2".to_owned(),
+            secondary_diffusion_model_node_id: String::new(),
             lora_class_type: "Power Lora Loader (rgthree)".to_owned(),
             lora_directory: "Krea2".to_owned(),
             secondary_prompt_node_id: String::new(),
@@ -191,7 +255,17 @@ impl WorkflowBindings {
             secondary_resolution_node_id: "4".to_owned(),
             primary_lora_node_id: String::new(),
             secondary_lora_node_id: String::new(),
+            primary_style_lora_node_id: String::new(),
+            secondary_style_lora_node_id: String::new(),
+            primary_sol_attn_node_id: String::new(),
+            secondary_sol_attn_node_id: String::new(),
             primary_sampler_node_id: "7".to_owned(),
+            primary_model_target_node_id: String::new(),
+            primary_steps_node_id: String::new(),
+            primary_video_steps_input_name: default_primary_video_steps_input_name(),
+            primary_audio_steps_input_name: default_primary_audio_steps_input_name(),
+            primary_upscale_node_id: String::new(),
+            live_preview_node_id: String::new(),
             secondary_scheduler_node_id: String::new(),
             secondary_guider_node_id: String::new(),
             primary_output_node_id: "500".to_owned(),
@@ -213,6 +287,7 @@ impl WorkflowBindings {
             diffusion_model_node_id: "43".to_owned(),
             diffusion_model_class_type: "UNETLoader".to_owned(),
             diffusion_model_directory: "Krea2".to_owned(),
+            secondary_diffusion_model_node_id: String::new(),
             lora_class_type: "LoraLoaderModelOnly".to_owned(),
             lora_directory: "Krea2-功能".to_owned(),
             secondary_prompt_node_id: "20".to_owned(),
@@ -230,7 +305,17 @@ impl WorkflowBindings {
             secondary_resolution_node_id: "398".to_owned(),
             primary_lora_node_id: "327".to_owned(),
             secondary_lora_node_id: "401".to_owned(),
+            primary_style_lora_node_id: default_primary_style_lora_node_id(),
+            secondary_style_lora_node_id: default_secondary_style_lora_node_id(),
+            primary_sol_attn_node_id: "418".to_owned(),
+            secondary_sol_attn_node_id: "9202".to_owned(),
             primary_sampler_node_id: "331".to_owned(),
+            primary_model_target_node_id: String::new(),
+            primary_steps_node_id: String::new(),
+            primary_video_steps_input_name: default_primary_video_steps_input_name(),
+            primary_audio_steps_input_name: default_primary_audio_steps_input_name(),
+            primary_upscale_node_id: String::new(),
+            live_preview_node_id: String::new(),
             secondary_scheduler_node_id: "391".to_owned(),
             secondary_guider_node_id: "393".to_owned(),
             primary_output_node_id: "328".to_owned(),
@@ -252,6 +337,7 @@ impl WorkflowBindings {
             diffusion_model_node_id: "332".to_owned(),
             diffusion_model_class_type: default_diffusion_model_class_type(),
             diffusion_model_directory: default_diffusion_model_directory(),
+            secondary_diffusion_model_node_id: String::new(),
             lora_class_type: "LoraLoaderModelOnly".to_owned(),
             lora_directory: "MinimaxH3".to_owned(),
             secondary_prompt_node_id: String::new(),
@@ -264,6 +350,7 @@ impl WorkflowBindings {
     pub fn image_to_video() -> Self {
         let mut bindings = Self::first_last_frame();
         bindings.image_node_ids = vec!["335".to_owned()];
+        bindings.primary_sol_attn_node_id = "417".to_owned();
         bindings
     }
 
@@ -561,6 +648,8 @@ pub struct WorkflowModuleDefaults {
     pub primary_video_steps: u32,
     pub primary_audio_steps: u32,
     pub secondary_scheduler_steps: u32,
+    #[serde(default = "default_primary_upscale_factor")]
+    pub primary_upscale_factor: f64,
     pub primary_brightness: f64,
     pub primary_contrast: f64,
     pub primary_saturation: f64,
@@ -579,6 +668,7 @@ impl Default for WorkflowModuleDefaults {
             primary_video_steps: 6,
             primary_audio_steps: 8,
             secondary_scheduler_steps: 4,
+            primary_upscale_factor: default_primary_upscale_factor(),
             primary_brightness: 1.0,
             primary_contrast: 0.9,
             primary_saturation: 0.9,
@@ -615,6 +705,8 @@ pub struct WorkflowModuleManifest {
     pub updated_at: String,
     #[serde(default)]
     pub deleted_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgraded_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "bindings")]
     pub legacy_bindings: Option<WorkflowBindings>,
     #[serde(default)]
@@ -856,6 +948,7 @@ fn validate_ui_schema(schema: &WorkflowUiSchema) -> Result<(), String> {
         "primaryVideoSteps",
         "primaryAudioSteps",
         "secondarySchedulerSteps",
+        "primaryUpscaleFactor",
         "primaryBrightness",
         "primaryContrast",
         "primarySaturation",
@@ -1201,8 +1294,6 @@ pub fn validate_workflow_bytes(
         (&bindings.primary_resolution_node_id, "megapixels"),
         (&bindings.secondary_resolution_node_id, "aspect_ratio"),
         (&bindings.secondary_resolution_node_id, "megapixels"),
-        (&bindings.primary_sampler_node_id, "video_steps"),
-        (&bindings.primary_sampler_node_id, "audio_steps"),
         (&bindings.secondary_scheduler_node_id, "steps"),
         (&bindings.secondary_guider_node_id, "model"),
         (&bindings.primary_color_node_id, "brightness"),
@@ -1214,6 +1305,46 @@ pub fn validate_workflow_bytes(
         (&bindings.diffusion_model_node_id, "unet_name"),
     ] {
         require_input(&workflow, node_id, input_name, &mut issues);
+    }
+    let primary_steps_node_id = if bindings.primary_steps_node_id.trim().is_empty() {
+        &bindings.primary_sampler_node_id
+    } else {
+        &bindings.primary_steps_node_id
+    };
+    require_input(
+        &workflow,
+        primary_steps_node_id,
+        &bindings.primary_video_steps_input_name,
+        &mut issues,
+    );
+    if !bindings.primary_audio_steps_input_name.trim().is_empty() {
+        require_input(
+            &workflow,
+            primary_steps_node_id,
+            &bindings.primary_audio_steps_input_name,
+            &mut issues,
+        );
+    }
+    if !bindings.primary_upscale_node_id.trim().is_empty() {
+        let has_scale_input = workflow
+            .get(&bindings.primary_upscale_node_id)
+            .and_then(|node| node.get("inputs"))
+            .and_then(Value::as_object)
+            .is_some_and(|inputs| inputs.contains_key("scale") || inputs.contains_key("value"));
+        if !has_scale_input {
+            issues.push(format!(
+                "节点 {} 缺少 inputs.scale 或 inputs.value",
+                bindings.primary_upscale_node_id
+            ));
+        }
+    }
+    if !bindings.live_preview_node_id.trim().is_empty() {
+        require_input(
+            &workflow,
+            &bindings.live_preview_node_id,
+            "model",
+            &mut issues,
+        );
     }
     let diffusion_model_class_type = workflow
         .get(&bindings.diffusion_model_node_id)
@@ -1231,6 +1362,31 @@ pub fn validate_workflow_bytes(
                 diffusion_model_class_type
             }
         ));
+    }
+    if !bindings.secondary_diffusion_model_node_id.trim().is_empty() {
+        require_input(
+            &workflow,
+            &bindings.secondary_diffusion_model_node_id,
+            "unet_name",
+            &mut issues,
+        );
+        let secondary_class_type = workflow
+            .get(&bindings.secondary_diffusion_model_node_id)
+            .and_then(|node| node.get("class_type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if secondary_class_type != bindings.diffusion_model_class_type {
+            issues.push(format!(
+                "节点 {} 类型应为 {}，实际为 {}",
+                bindings.secondary_diffusion_model_node_id,
+                bindings.diffusion_model_class_type,
+                if secondary_class_type.is_empty() {
+                    "<缺失>"
+                } else {
+                    secondary_class_type
+                }
+            ));
+        }
     }
     for node_id in [
         &bindings.primary_lora_node_id,
@@ -1278,15 +1434,20 @@ pub fn validate_workflow_bytes(
             "last_frame",
             &mut issues,
         );
+        let conditioning_class_type = workflow
+            .get(&bindings.conditioning_node_id)
+            .and_then(|node| node.get("class_type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let task_type = workflow
             .get(&bindings.conditioning_node_id)
             .and_then(|node| node.get("inputs"))
             .and_then(|inputs| inputs.get("task_type"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if task_type != "FL2VA" {
+        if conditioning_class_type != "MiniMaxH3ImageToVideo" && task_type != "FL2VA" {
             issues.push(format!(
-                "节点 {} 的 inputs.task_type 必须是 FL2VA",
+                "节点 {} 必须是 MiniMaxH3ImageToVideo，或其 inputs.task_type 必须是 FL2VA",
                 bindings.conditioning_node_id
             ));
         }
@@ -1298,15 +1459,20 @@ pub fn validate_workflow_bytes(
             "first_frame",
             &mut issues,
         );
+        let conditioning_class_type = workflow
+            .get(&bindings.conditioning_node_id)
+            .and_then(|node| node.get("class_type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let task_type = workflow
             .get(&bindings.conditioning_node_id)
             .and_then(|node| node.get("inputs"))
             .and_then(|inputs| inputs.get("task_type"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if task_type != "I2VA" {
+        if conditioning_class_type != "MiniMaxH3ImageToVideo" && task_type != "I2VA" {
             issues.push(format!(
-                "节点 {} 的 inputs.task_type 必须是 I2VA",
+                "节点 {} 必须是 MiniMaxH3ImageToVideo，或其 inputs.task_type 必须是 I2VA",
                 bindings.conditioning_node_id
             ));
         }
@@ -1318,15 +1484,20 @@ pub fn validate_workflow_bytes(
             "last_frame",
             &mut issues,
         );
+        let conditioning_class_type = workflow
+            .get(&bindings.conditioning_node_id)
+            .and_then(|node| node.get("class_type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let task_type = workflow
             .get(&bindings.conditioning_node_id)
             .and_then(|node| node.get("inputs"))
             .and_then(|inputs| inputs.get("task_type"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if task_type != "L2VA" {
+        if conditioning_class_type != "MiniMaxH3ImageToVideo" && task_type != "L2VA" {
             issues.push(format!(
-                "节点 {} 的 inputs.task_type 必须是 L2VA",
+                "节点 {} 必须是 MiniMaxH3ImageToVideo，或其 inputs.task_type 必须是 L2VA",
                 bindings.conditioning_node_id
             ));
         }
@@ -1400,14 +1571,15 @@ pub fn save(root: &Path, input: SaveWorkflowModuleInput) -> Result<WorkflowModul
     }
 
     let timestamp = now();
-    let (id, created_at) = if let Some(id) = input.id.as_deref() {
+    let (id, created_at, upgraded_from) = if let Some(id) = input.id.as_deref() {
         let previous = read_manifest(root, id)?;
         backup_current(root, id)?;
-        (id.to_owned(), previous.created_at)
+        (id.to_owned(), previous.created_at, previous.upgraded_from)
     } else {
         (
             format!("workflow-module-{}", Uuid::new_v4()),
             timestamp.clone(),
+            None,
         )
     };
     let manifest = WorkflowModuleManifest {
@@ -1429,6 +1601,7 @@ pub fn save(root: &Path, input: SaveWorkflowModuleInput) -> Result<WorkflowModul
         created_at,
         updated_at: timestamp,
         deleted_at: None,
+        upgraded_from,
         legacy_bindings: None,
         defaults,
     };
@@ -1958,6 +2131,27 @@ mod tests {
         )
         .unwrap();
         assert!(validation.compatible, "{}", validation.issues.join("; "));
+    }
+
+    #[test]
+    fn listing_h3_modules_does_not_create_or_modify_versions() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("h3-v1.json");
+        fs::write(
+            &source,
+            serde_json::to_vec_pretty(&test_workflow()).unwrap(),
+        )
+        .unwrap();
+        let saved = save(&root, save_input(&source)).unwrap();
+
+        let modules = list(&root, false).unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].manifest.id, saved.manifest.id);
+        assert_eq!(modules[0].manifest.revision, "v1");
+        assert_eq!(modules[0].backup_count, 0);
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

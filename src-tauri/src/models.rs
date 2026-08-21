@@ -650,6 +650,8 @@ pub struct ComfySubmitInput {
     pub primary_audio_steps: u32,
     #[serde(default = "default_secondary_scheduler_steps")]
     pub secondary_scheduler_steps: u32,
+    #[serde(default = "default_primary_upscale_factor")]
+    pub primary_upscale_factor: f64,
     #[serde(default = "default_primary_brightness")]
     pub primary_brightness: f64,
     #[serde(default = "default_primary_contrast")]
@@ -676,6 +678,14 @@ pub struct ComfySubmitInput {
     pub secondary_lora_strength: Option<f64>,
     #[serde(default)]
     pub secondary_lora_bypassed: Option<bool>,
+    #[serde(default)]
+    pub style_lora_name: Option<String>,
+    #[serde(default)]
+    pub style_lora_strength: Option<f64>,
+    #[serde(default)]
+    pub style_lora_bypassed: Option<bool>,
+    #[serde(default)]
+    pub style_lora_apply_to_secondary: Option<bool>,
     #[serde(default = "default_ref_image_size")]
     pub ref_image_size: String,
     #[serde(default)]
@@ -761,6 +771,10 @@ fn default_primary_audio_steps() -> u32 {
 
 fn default_secondary_scheduler_steps() -> u32 {
     4
+}
+
+fn default_primary_upscale_factor() -> f64 {
+    1.0
 }
 
 fn default_primary_brightness() -> f64 {

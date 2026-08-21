@@ -15,6 +15,7 @@ import {
   getBezierPath,
   useReactFlow,
   useStore,
+  useUpdateNodeInternals,
 } from "@xyflow/react";
 import {
   ArrowLeftRight,
@@ -68,6 +69,31 @@ import {
 } from "react";
 
 type JsonObject = Record<string, unknown>;
+
+export const LIVE_COMFY_PREVIEW_EVENT = "infinite-canvas:live-comfy-preview";
+const GENERATED_VIDEO_PLAYBACK_EVENT = "infinite-canvas:generated-video-playback";
+const activeGeneratedVideoPlaybackIds = new Set<string>();
+
+type LiveComfyPreviewEventDetail = {
+  nodeId: string;
+  url?: string;
+  mimeType?: string;
+};
+
+type GeneratedVideoPlaybackEventDetail = {
+  active: boolean;
+};
+
+function setGeneratedVideoPlaybackActive(nodeId: string, playing: boolean): void {
+  const wasActive = activeGeneratedVideoPlaybackIds.size > 0;
+  if (playing) activeGeneratedVideoPlaybackIds.add(nodeId);
+  else activeGeneratedVideoPlaybackIds.delete(nodeId);
+  const active = activeGeneratedVideoPlaybackIds.size > 0;
+  if (active === wasActive) return;
+  window.dispatchEvent(new CustomEvent(GENERATED_VIDEO_PLAYBACK_EVENT, {
+    detail: { active } satisfies GeneratedVideoPlaybackEventDetail,
+  }));
+}
 
 function markdownInline(source: string): ReactNode[] {
   const tokens = source.split(/(`[^`]*`|\*\*[^*]+\*\*|__[^_]+__|\[[^\]]+\]\([^)]+\)|\*[^*]+\*|_[^_]+_)/g);
@@ -655,6 +681,7 @@ interface GenerationSnapshot {
   primaryVideoSteps: number;
   primaryAudioSteps: number;
   secondarySchedulerSteps: number;
+  primaryUpscaleFactor: number;
   primaryBrightness: number;
   primaryContrast: number;
   primarySaturation: number;
@@ -670,6 +697,11 @@ interface GenerationSnapshot {
   secondaryLoraStrength: number;
   secondaryLoraStrengthRecorded?: boolean;
   secondaryLoraBypassed: boolean;
+  styleLoraName: string;
+  styleLoraStrength: number;
+  styleLoraStrengthRecorded?: boolean;
+  styleLoraBypassed: boolean;
+  styleLoraApplyToSecondary: boolean;
   refImageSize: RefImageSize;
   refImageSizeRecorded?: boolean;
   strictPromptTags?: boolean;
@@ -763,7 +795,7 @@ const VIDEO_REGENERATION_NUMBER_CONFIG: Record<
 > = {
   primaryResolutionMegapixels: { min: 0.2, max: 2, step: 0.1 },
   durationSeconds: { min: 2, max: 15, step: 1 },
-  loraStrength: { min: 0, max: 2, step: 0.05 },
+  loraStrength: { min: 0, max: 10, step: 0.01 },
   primaryVideoSteps: { min: 1, max: 1000, step: 1 },
   primaryAudioSteps: { min: 1, max: 1000, step: 1 },
   primaryBrightness: { min: 0, max: 3, step: 0.05 },
@@ -799,7 +831,7 @@ const SECONDARY_SAMPLE_NUMBER_CONFIG: Record<
   { min: number; max: number; step: number }
 > = {
   secondaryResolutionMegapixels: { min: 0.2, max: 2, step: 0.1 },
-  secondaryLoraStrength: { min: 0, max: 2, step: 0.05 },
+  secondaryLoraStrength: { min: 0, max: 10, step: 0.01 },
   secondarySchedulerSteps: { min: 1, max: 10000, step: 1 },
   secondaryBrightness: { min: 0, max: 3, step: 0.05 },
   secondaryContrast: { min: 0, max: 3, step: 0.05 },
@@ -857,6 +889,10 @@ interface H3LoraPreference {
   secondaryLoraName: string;
   secondaryLoraStrength: number;
   secondaryLoraBypassed: boolean;
+  styleLoraName: string;
+  styleLoraStrength: number;
+  styleLoraBypassed: boolean;
+  styleLoraApplyToSecondary: boolean;
 }
 
 type H3LoraPreferencePatch = Partial<H3LoraPreference>;
@@ -865,6 +901,7 @@ interface H3ModelParameters {
   primaryVideoSteps: number;
   primaryAudioSteps: number;
   secondarySchedulerSteps: number;
+  primaryUpscaleFactor: number;
   primaryBrightness: number;
   primaryContrast: number;
   primarySaturation: number;
@@ -888,8 +925,13 @@ interface VideoGenerationDefaults {
   generationSecondaryLoraName: string;
   generationSecondaryLoraStrength: number;
   generationSecondaryLoraBypassed: boolean;
+  generationStyleLoraName: string;
+  generationStyleLoraStrength: number;
+  generationStyleLoraBypassed: boolean;
+  generationStyleLoraApplyToSecondary: boolean;
   generationPrimaryVideoSteps: number;
   generationSecondarySchedulerSteps: number;
+  generationPrimaryUpscaleFactor: number;
   seedMode: SeedMode;
   generationSeed: string;
   generationStrictPromptTags: boolean;
@@ -905,6 +947,7 @@ type WorkflowModuleSlot = "video-generation:reference-to-video"
   | "video-generation:last-frame-to-video"
   | "video-generation:text-to-video"
   | "image-generation";
+type WorkflowModuleDefaultMap = Partial<Record<string, string>>;
 
 interface WorkflowModuleDefaults extends H3ModelParameters {
   diffusionModelName: string;
@@ -920,7 +963,17 @@ interface WorkflowBindings {
   secondaryResolutionNodeId: string;
   primaryLoraNodeId: string;
   secondaryLoraNodeId: string;
+  primaryStyleLoraNodeId: string;
+  secondaryStyleLoraNodeId: string;
+  primarySolAttnNodeId: string;
+  secondarySolAttnNodeId: string;
   primarySamplerNodeId: string;
+  primaryModelTargetNodeId: string;
+  primaryStepsNodeId: string;
+  primaryVideoStepsInputName: string;
+  primaryAudioStepsInputName: string;
+  primaryUpscaleNodeId: string;
+  livePreviewNodeId: string;
   secondarySchedulerNodeId: string;
   secondaryGuiderNodeId: string;
   primaryOutputNodeId: string;
@@ -942,6 +995,7 @@ interface WorkflowBindings {
   diffusionModelNodeId: string;
   diffusionModelClassType: string;
   diffusionModelDirectory: string;
+  secondaryDiffusionModelNodeId: string;
   loraClassType: string;
   loraDirectory: string;
 }
@@ -1242,6 +1296,7 @@ function CompactDecimalInput({
   min,
   max,
   disabled = false,
+  displayDecimals,
   ariaLabel,
   onChange,
 }: {
@@ -1249,15 +1304,19 @@ function CompactDecimalInput({
   min: number;
   max: number;
   disabled?: boolean;
+  displayDecimals?: number;
   ariaLabel: string;
   onChange: (value: number) => void;
 }) {
-  const [draft, setDraft] = useState(String(value));
+  const formatValue = (number: number) => displayDecimals === undefined
+    ? String(number)
+    : number.toFixed(displayDecimals);
+  const [draft, setDraft] = useState(formatValue(value));
   const [focused, setFocused] = useState(false);
 
   useEffect(() => {
-    if (!focused) setDraft(String(value));
-  }, [focused, value]);
+    if (!focused) setDraft(formatValue(value));
+  }, [displayDecimals, focused, value]);
 
   const parsedDraftValue = (text: string) => {
     if (text === "" || text === "." || !/^\d*(?:\.\d*)?$/.test(text)) return null;
@@ -1267,12 +1326,12 @@ function CompactDecimalInput({
   const commitDraft = () => {
     const parsed = parsedDraftValue(draft);
     if (parsed === null) {
-      setDraft(String(value));
+      setDraft(formatValue(value));
       return;
     }
     const normalized = Math.min(max, Math.max(min, parsed));
     onChange(normalized);
-    setDraft(String(normalized));
+    setDraft(formatValue(normalized));
   };
 
   return (
@@ -1304,7 +1363,7 @@ function CompactDecimalInput({
         }
         if (event.key === "Escape") {
           event.preventDefault();
-          setDraft(String(value));
+          setDraft(formatValue(value));
           event.currentTarget.blur();
         }
       }}
@@ -1432,7 +1491,10 @@ interface CanvasNodeData extends Record<string, unknown> {
   h3LoraOptions: string[];
   krea2LoraOptions: string[];
   workflowModules: WorkflowModuleRecord[];
-  workflowModuleDefaults: Partial<Record<WorkflowModuleSlot, string>>;
+  workflowModuleDefaults: WorkflowModuleDefaultMap;
+  workflowModuleVisibleIds: string[];
+  liveComfyPreviewUrl?: string;
+  liveComfyPreviewMimeType?: string;
   onH3LoraPreferenceChange: (preference: H3LoraPreferencePatch) => void;
   onChange: (id: string, patch: NodePatch) => void;
   onSaveNode: (id: string) => Promise<void>;
@@ -1887,7 +1949,9 @@ const VIDEO_NODE_TEXT_ROW_HEIGHT = 67;
 const VIDEO_NODE_IMAGE_GRID_COLUMNS = 5;
 const VIDEO_NODE_IMAGE_GRID_GAP = 6;
 const VIDEO_NODE_BODY_HORIZONTAL_PADDING = 28;
-const VIDEO_NODE_EXECUTION_AREA_HEIGHT = 72;
+// Execution row + gap + the media/text input badge below it. Reserve one
+// additional canvas grid row so the badge cannot be clipped by the footer.
+const VIDEO_NODE_EXECUTION_AREA_HEIGHT = 96;
 const MATERIAL_NOTE_HEIGHT = 37;
 const MATERIAL_NODE_LAYOUT_VERSION = 3;
 const MEDIA_NODE_CHROME_HEIGHT = 73 + MATERIAL_NOTE_HEIGHT;
@@ -1916,6 +1980,7 @@ const DEFAULT_H3_MODEL_PARAMETERS: H3ModelParameters = {
   primaryVideoSteps: 6,
   primaryAudioSteps: 8,
   secondarySchedulerSteps: 4,
+  primaryUpscaleFactor: 1,
   primaryBrightness: 1,
   primaryContrast: 0.9,
   primarySaturation: 0.9,
@@ -1964,7 +2029,9 @@ function generatedPlaceholderPositionStyle(nodeId: string, blobIndex: number): C
 }
 const H3_MODEL_PARAMETERS_STORAGE_KEY = "infinite-canvas:h3-model-parameters";
 const VIDEO_GENERATION_DEFAULTS_STORAGE_KEY = "infinite-canvas:video-generation-defaults";
+const VIDEO_GENERATION_DEFAULTS_BY_WORKFLOW_STORAGE_KEY = "infinite-canvas:video-generation-defaults-by-workflow";
 const DEFAULT_H3_REFERENCE_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3全能参考工作流.json";
+const DEFAULT_H3_FLA_REFERENCE_V3_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3+Fla全能参考V3.json";
 const DEFAULT_H3_FIRST_LAST_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3首尾帧工作流.json";
 const DEFAULT_H3_IMAGE_TO_VIDEO_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3图生视频工作流.json";
 const DEFAULT_H3_LAST_FRAME_TO_VIDEO_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\MiniMax+H3尾帧生视频工作流.json";
@@ -1972,6 +2039,7 @@ export const DEFAULT_KREA2_IMAGE_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\Infin
 export const DEFAULT_KREA2_IMAGE_EDIT_WORKFLOW_PATH = "D:\\Data\\CodexProjects\\InfiniteCanvas\\workflows\\Krea2图像编辑_单图或双图.json";
 const H3_REFERENCE_WORKFLOW_STORAGE_KEY = "infinite-canvas:h3-reference-workflow-path";
 const WORKFLOW_MODULE_DEFAULTS_STORAGE_KEY = "infinite-canvas:workflow-module-defaults";
+const WORKFLOW_MODULE_VISIBLE_IDS_STORAGE_KEY = "infinite-canvas:workflow-module-visible-ids";
 const WORKFLOW_PACKAGE_ENGINE = "workflow-package-v1";
 const WORKFLOW_CAPABILITIES: Array<{ value: WorkflowCapability; label: string }> = [
   { value: "video-generation", label: "视频生成" },
@@ -2092,6 +2160,7 @@ function openComfyProgressSocket(
 ): Promise<WebSocket | null> {
   return new Promise((resolve) => {
     const socket = new WebSocket(comfyWebSocketUrl(serverUrl, clientId));
+    socket.binaryType = "arraybuffer";
     let settled = false;
     const finish = (result: WebSocket | null) => {
       if (settled) return;
@@ -2130,6 +2199,64 @@ function comfyProgressFromSocketData(data: unknown): {
     // ComfyUI also sends binary previews; they are intentionally ignored here.
     return null;
   }
+}
+
+function blobFromBase64(base64: string, mimeType: string): Blob | null {
+  try {
+    const decoded = window.atob(base64);
+    const bytes = new Uint8Array(decoded.length);
+    for (let index = 0; index < decoded.length; index += 1) {
+      bytes[index] = decoded.charCodeAt(index);
+    }
+    return new Blob([bytes], { type: mimeType });
+  } catch {
+    return null;
+  }
+}
+
+async function comfyPreviewImageBlobFromSocketData(
+  data: unknown,
+  expectedNodeId = "",
+): Promise<Blob | null> {
+  if (typeof data === "string") {
+    try {
+      const message = JSON.parse(data) as JsonObject;
+      if (message.type !== "kj_preview_override" || !message.data || typeof message.data !== "object") {
+        return null;
+      }
+      const previewData = message.data as JsonObject;
+      const rawNodeId = previewData.node_id ?? previewData.node;
+      const nodeId = typeof rawNodeId === "string" || typeof rawNodeId === "number"
+        ? String(rawNodeId)
+        : "";
+      // ModelPreviewOverrideKJ versions differ on whether they include an ID,
+      // whether it is numeric, and whether it is named `node` or `node_id`.
+      // The socket is already scoped to the active ComfyUI client, so a preview
+      // event without an ID remains safe to display for this generation.
+      if (expectedNodeId && nodeId && nodeId !== expectedNodeId) return null;
+      const base64 = typeof previewData.image === "string" ? previewData.image : "";
+      const mimeType = typeof previewData.mime === "string"
+        ? previewData.mime.toLowerCase()
+        : "image/jpeg";
+      if (!base64 || !["image/jpeg", "image/png", "image/webp", "video/mp4"].includes(mimeType)) {
+        return null;
+      }
+      return blobFromBase64(base64, mimeType);
+    } catch {
+      return null;
+    }
+  }
+  const buffer = data instanceof ArrayBuffer
+    ? data
+    : data instanceof Blob
+      ? await data.arrayBuffer()
+      : null;
+  if (!buffer || buffer.byteLength <= 8) return null;
+  const header = new DataView(buffer, 0, 8);
+  if (header.getUint32(0, false) !== 1) return null;
+  const imageType = header.getUint32(4, false);
+  const mimeType = imageType === 2 ? "image/png" : "image/jpeg";
+  return new Blob([buffer.slice(8)], { type: mimeType });
 }
 
 function comfyPreviewRequestId(
@@ -2228,6 +2355,7 @@ function videoGenerationAutoHeight(
   textInputCount = 0,
   nodeWidth = 360,
   storyboardReferenceCompiler = false,
+  supportsPrimaryUpscaleFactor = false,
 ): number {
   const groupCount = new Set(mediaKinds).size;
   const imageCount = mediaKinds.filter((kind) => kind === "image").length;
@@ -2256,6 +2384,7 @@ function videoGenerationAutoHeight(
     + groupCount * 36
     + textRows * VIDEO_NODE_TEXT_ROW_HEIGHT
     + (storyboardReferenceCompiler ? 190 : 0)
+    + (supportsPrimaryUpscaleFactor ? 48 : 0)
     + VIDEO_NODE_EXECUTION_AREA_HEIGHT
     + imageRows * Math.ceil(imageTileWidth);
   return Math.min(
@@ -2677,6 +2806,12 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
     secondaryLoraStrengthRecorded: typeof snapshot.generationSecondaryLoraStrength === "number"
       || typeof snapshot.secondaryLoraStrength === "number",
     secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(snapshot),
+    styleLoraName: h3StyleLoraNameFromContent(snapshot),
+    styleLoraStrength: h3StyleLoraStrengthFromContent(snapshot),
+    styleLoraStrengthRecorded: typeof snapshot.generationStyleLoraStrength === "number"
+      || typeof snapshot.styleLoraStrength === "number",
+    styleLoraBypassed: h3StyleLoraBypassedFromContent(snapshot),
+    styleLoraApplyToSecondary: h3StyleLoraApplyToSecondaryFromContent(snapshot),
     refImageSize: refImageSizeFromContent(snapshot),
     refImageSizeRecorded: typeof snapshot.refImageSize === "string"
       || typeof snapshot.generationRefImageSize === "string",
@@ -2763,6 +2898,56 @@ function cacheBustedGeneratedVideoUrl(content: JsonObject): string {
   }
 }
 
+function LiveComfyVideoPreview({ src, paused }: { src: string; paused: boolean }) {
+  const previewRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    const preview = previewRef.current;
+    if (!preview) return;
+    let disposed = false;
+    let resumeFrame: number | null = null;
+    const startPlayback = () => {
+      if (disposed || paused || preview.ended || !preview.paused) return;
+      void preview.play().catch(() => {});
+    };
+    const keepPreviewPlaying = () => {
+      if (disposed || paused || preview.ended || resumeFrame !== null) return;
+      resumeFrame = window.requestAnimationFrame(() => {
+        resumeFrame = null;
+        startPlayback();
+      });
+    };
+
+    preview.addEventListener("loadeddata", startPlayback);
+    preview.addEventListener("canplay", startPlayback);
+    preview.addEventListener("pause", keepPreviewPlaying);
+    if (paused) preview.pause();
+    else if (preview.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) startPlayback();
+
+    return () => {
+      disposed = true;
+      if (resumeFrame !== null) window.cancelAnimationFrame(resumeFrame);
+      preview.removeEventListener("loadeddata", startPlayback);
+      preview.removeEventListener("canplay", startPlayback);
+      preview.removeEventListener("pause", keepPreviewPlaying);
+    };
+  }, [paused, src]);
+
+  return (
+    <video
+      ref={previewRef}
+      className="generated-video-placeholder-live-preview"
+      src={src}
+      autoPlay={!paused}
+      loop
+      muted
+      playsInline
+      preload="auto"
+      aria-label="V3 实时生成预览"
+    />
+  );
+}
+
 function mappedComfyOutputPath(root: string, content: JsonObject): string | null {
   const filenameValue = typeof content.filename === "string" ? content.filename : "";
   const filenameParts = filenameValue.split(/[\\/]/).filter(Boolean);
@@ -2798,6 +2983,10 @@ function workflowSlotForModule(module: Pick<WorkflowModuleRecord, "capability" |
     : `video-generation:${module.variant as VideoGenerationMode}`;
 }
 
+function workflowModuleFamilyKey(module: Pick<WorkflowModuleRecord, "capability" | "variant" | "name">): string {
+  return `${module.capability}:${module.variant}:${module.name.trim().toLocaleLowerCase()}`;
+}
+
 function workflowVariantLabel(module: Pick<WorkflowModuleRecord, "capability" | "variant">): string {
   if (module.capability === "image-generation") {
     return module.variant === "image-edit" ? "图像编辑" : "图片生成";
@@ -2805,7 +2994,7 @@ function workflowVariantLabel(module: Pick<WorkflowModuleRecord, "capability" | 
   return WORKFLOW_VIDEO_VARIANTS.find((variant) => variant.value === module.variant)?.label ?? module.variant;
 }
 
-function workflowModuleDefaultsFromStorage(): Partial<Record<WorkflowModuleSlot, string>> {
+function workflowModuleDefaultsFromStorage(): WorkflowModuleDefaultMap {
   try {
     const raw = window.localStorage.getItem(WORKFLOW_MODULE_DEFAULTS_STORAGE_KEY);
     if (!raw) return {};
@@ -2813,20 +3002,29 @@ function workflowModuleDefaultsFromStorage(): Partial<Record<WorkflowModuleSlot,
     const legacyReferenceDefault = typeof parsed["multi-reference-video"] === "string"
       ? parsed["multi-reference-video"]
       : "";
-    return Object.fromEntries(
-      WORKFLOW_MODULE_SLOTS
-        .map((slot) => [
-          slot,
-          typeof parsed[slot] === "string"
-            ? parsed[slot]
-            : slot === "video-generation:reference-to-video"
-              ? legacyReferenceDefault
-              : "",
-        ] as const)
-        .filter(([, moduleId]) => moduleId),
-    );
+    const defaults = Object.fromEntries(
+      Object.entries(parsed).filter(([, moduleId]) => typeof moduleId === "string"),
+    ) as WorkflowModuleDefaultMap;
+    if (!defaults["video-generation:reference-to-video"] && legacyReferenceDefault) {
+      defaults["video-generation:reference-to-video"] = legacyReferenceDefault;
+    }
+    return defaults;
   } catch {
     return {};
+  }
+}
+
+function workflowModuleVisibleIdsFromStorage(): string[] | null {
+  try {
+    const raw = window.localStorage.getItem(WORKFLOW_MODULE_VISIBLE_IDS_STORAGE_KEY);
+    if (raw === null) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return Array.from(new Set(parsed.filter((moduleId): moduleId is string => (
+      typeof moduleId === "string" && Boolean(moduleId.trim())
+    ))));
+  } catch {
+    return null;
   }
 }
 
@@ -2898,6 +3096,15 @@ function validH3ColorAdjustment(value: unknown, fallback: number): number {
     : fallback;
 }
 
+function validPrimaryUpscaleFactor(value: unknown, fallback = 1): number {
+  return typeof value === "number"
+    && Number.isFinite(value)
+    && value >= 1
+    && value <= 2
+    ? Math.round(value * 10) / 10
+    : fallback;
+}
+
 function h3ModelParametersFromContent(content: JsonObject): H3ModelParameters {
   const primaryVideoSteps = validH3Step(
     content.primaryVideoSteps,
@@ -2919,6 +3126,10 @@ function h3ModelParametersFromContent(content: JsonObject): H3ModelParameters {
       content.secondarySchedulerSteps,
       DEFAULT_H3_MODEL_PARAMETERS.secondarySchedulerSteps,
       10000,
+    ),
+    primaryUpscaleFactor: validPrimaryUpscaleFactor(
+      content.primaryUpscaleFactor,
+      DEFAULT_H3_MODEL_PARAMETERS.primaryUpscaleFactor,
     ),
     primaryBrightness: validH3ColorAdjustment(
       content.primaryBrightness,
@@ -2984,6 +3195,13 @@ function secondarySchedulerStepsFromContent(content: JsonObject, fallback: numbe
   );
 }
 
+function primaryUpscaleFactorFromContent(content: JsonObject, fallback = 1): number {
+  return validPrimaryUpscaleFactor(
+    content.generationPrimaryUpscaleFactor ?? content.primaryUpscaleFactor,
+    fallback,
+  );
+}
+
 function isMinimaxH3AssetName(value: string): boolean {
   const [directory, ...filenameParts] = value.trim().replace(/\//g, "\\").split("\\");
   return directory.toLocaleLowerCase() === "minimaxh3" && filenameParts.join("\\").trim().length > 0;
@@ -3021,8 +3239,8 @@ function h3LoraNameFromContent(content: JsonObject): string {
 
 function h3LoraStrengthFromContent(content: JsonObject): number {
   const value = content.generationLoraStrength ?? content.loraStrength;
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 2
-    ? Math.round(value * 20) / 20
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 10
+    ? Math.round(value * 100) / 100
     : 1;
 }
 
@@ -3041,14 +3259,38 @@ function h3SecondaryLoraNameFromContent(content: JsonObject): string {
 
 function h3SecondaryLoraStrengthFromContent(content: JsonObject): number {
   const value = content.generationSecondaryLoraStrength ?? content.secondaryLoraStrength;
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 2
-    ? Math.round(value * 20) / 20
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 10
+    ? Math.round(value * 100) / 100
     : 1;
 }
 
 function h3SecondaryLoraBypassedFromContent(content: JsonObject): boolean {
   const value = content.generationSecondaryLoraBypassed ?? content.secondaryLoraBypassed;
   return typeof value === "boolean" ? value : !h3SecondaryLoraNameFromContent(content);
+}
+
+function h3StyleLoraNameFromContent(content: JsonObject): string {
+  const value = content.generationStyleLoraName ?? content.styleLoraName;
+  return typeof value === "string" && isMinimaxH3AssetName(value)
+    ? value
+    : "";
+}
+
+function h3StyleLoraStrengthFromContent(content: JsonObject): number {
+  const value = content.generationStyleLoraStrength ?? content.styleLoraStrength;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 10
+    ? Math.round(value * 100) / 100
+    : 1;
+}
+
+function h3StyleLoraBypassedFromContent(content: JsonObject): boolean {
+  const value = content.generationStyleLoraBypassed ?? content.styleLoraBypassed;
+  return typeof value === "boolean" ? value : !h3StyleLoraNameFromContent(content);
+}
+
+function h3StyleLoraApplyToSecondaryFromContent(content: JsonObject): boolean {
+  const value = content.generationStyleLoraApplyToSecondary ?? content.styleLoraApplyToSecondary;
+  return value === true;
 }
 
 function h3LoraDisplayName(value: string): string {
@@ -3068,6 +3310,10 @@ function h3LoraPreferenceFromStorage(): H3LoraPreference {
       secondaryLoraName: h3SecondaryLoraNameFromContent(content),
       secondaryLoraStrength: h3SecondaryLoraStrengthFromContent(content),
       secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(content),
+      styleLoraName: h3StyleLoraNameFromContent(content),
+      styleLoraStrength: h3StyleLoraStrengthFromContent(content),
+      styleLoraBypassed: h3StyleLoraBypassedFromContent(content),
+      styleLoraApplyToSecondary: h3StyleLoraApplyToSecondaryFromContent(content),
     };
   } catch {
     return {
@@ -3077,6 +3323,10 @@ function h3LoraPreferenceFromStorage(): H3LoraPreference {
       secondaryLoraName: "",
       secondaryLoraStrength: 1,
       secondaryLoraBypassed: true,
+      styleLoraName: "",
+      styleLoraStrength: 1,
+      styleLoraBypassed: true,
+      styleLoraApplyToSecondary: false,
     };
   }
 }
@@ -3119,12 +3369,56 @@ function defaultVideoGenerationDefaults(): VideoGenerationDefaults {
     generationSecondaryLoraName: "",
     generationSecondaryLoraStrength: 1,
     generationSecondaryLoraBypassed: false,
+    generationStyleLoraName: "",
+    generationStyleLoraStrength: 1,
+    generationStyleLoraBypassed: true,
+    generationStyleLoraApplyToSecondary: false,
     generationPrimaryVideoSteps: 8,
     generationSecondarySchedulerSteps: 8,
+    generationPrimaryUpscaleFactor: 1,
     seedMode: "random",
     generationSeed: DEFAULT_GENERATION_SEED,
     generationStrictPromptTags: true,
     generationRefImageSize: "match",
+  };
+}
+
+function videoGenerationDefaultsFromContent(content: JsonObject): VideoGenerationDefaults {
+  const fallback = defaultVideoGenerationDefaults();
+  return {
+    generationMode: videoGenerationModeFromContent(content),
+    workflowModuleId: typeof content.workflowModuleId === "string" ? content.workflowModuleId : fallback.workflowModuleId,
+    workflowModuleRevision: typeof content.workflowModuleRevision === "string"
+      ? content.workflowModuleRevision
+      : fallback.workflowModuleRevision,
+    generationDiffusionModelName: h3DiffusionModelNameFromContent(content),
+    generationDuration: videoDurationFromContent(content),
+    generationAspectRatio: videoAspectRatioFromContent(content),
+    generationPrimaryResolution: primaryVideoResolutionFromContent(content),
+    generationSecondaryResolution: secondaryVideoResolutionFromContent(content),
+    generationLoraName: h3LoraNameFromContent(content),
+    generationLoraStrength: h3LoraStrengthFromContent(content),
+    generationLoraBypassed: h3LoraBypassedFromContent(content),
+    generationSecondaryLoraName: h3SecondaryLoraNameFromContent(content),
+    generationSecondaryLoraStrength: h3SecondaryLoraStrengthFromContent(content),
+    generationSecondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(content),
+    generationStyleLoraName: h3StyleLoraNameFromContent(content),
+    generationStyleLoraStrength: h3StyleLoraStrengthFromContent(content),
+    generationStyleLoraBypassed: h3StyleLoraBypassedFromContent(content),
+    generationStyleLoraApplyToSecondary: h3StyleLoraApplyToSecondaryFromContent(content),
+    generationPrimaryVideoSteps: primaryVideoStepsFromContent(content, fallback.generationPrimaryVideoSteps),
+    generationSecondarySchedulerSteps: secondarySchedulerStepsFromContent(
+      content,
+      fallback.generationSecondarySchedulerSteps,
+    ),
+    generationPrimaryUpscaleFactor: primaryUpscaleFactorFromContent(
+      content,
+      fallback.generationPrimaryUpscaleFactor,
+    ),
+    seedMode: seedModeFromContent(content),
+    generationSeed: fixedSeedFromContent(content),
+    generationStrictPromptTags: strictPromptTagsFromContent(content) ?? fallback.generationStrictPromptTags,
+    generationRefImageSize: refImageSizeFromContent(content),
   };
 }
 
@@ -3133,36 +3427,30 @@ function videoGenerationDefaultsFromStorage(): VideoGenerationDefaults {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(VIDEO_GENERATION_DEFAULTS_STORAGE_KEY) ?? "null");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
-    const content = parsed as JsonObject;
-    return {
-      generationMode: videoGenerationModeFromContent(content),
-      workflowModuleId: typeof content.workflowModuleId === "string" ? content.workflowModuleId : fallback.workflowModuleId,
-      workflowModuleRevision: typeof content.workflowModuleRevision === "string"
-        ? content.workflowModuleRevision
-        : fallback.workflowModuleRevision,
-      generationDiffusionModelName: h3DiffusionModelNameFromContent(content),
-      generationDuration: videoDurationFromContent(content),
-      generationAspectRatio: videoAspectRatioFromContent(content),
-      generationPrimaryResolution: primaryVideoResolutionFromContent(content),
-      generationSecondaryResolution: secondaryVideoResolutionFromContent(content),
-      generationLoraName: h3LoraNameFromContent(content),
-      generationLoraStrength: h3LoraStrengthFromContent(content),
-      generationLoraBypassed: h3LoraBypassedFromContent(content),
-      generationSecondaryLoraName: h3SecondaryLoraNameFromContent(content),
-      generationSecondaryLoraStrength: h3SecondaryLoraStrengthFromContent(content),
-      generationSecondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(content),
-      generationPrimaryVideoSteps: primaryVideoStepsFromContent(content, fallback.generationPrimaryVideoSteps),
-      generationSecondarySchedulerSteps: secondarySchedulerStepsFromContent(
-        content,
-        fallback.generationSecondarySchedulerSteps,
-      ),
-      seedMode: seedModeFromContent(content),
-      generationSeed: fixedSeedFromContent(content),
-      generationStrictPromptTags: strictPromptTagsFromContent(content) ?? fallback.generationStrictPromptTags,
-      generationRefImageSize: refImageSizeFromContent(content),
-    };
+    return videoGenerationDefaultsFromContent(parsed as JsonObject);
   } catch {
     return fallback;
+  }
+}
+
+function videoGenerationDefaultsByWorkflowFromStorage(): Record<string, VideoGenerationDefaults> {
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(VIDEO_GENERATION_DEFAULTS_BY_WORKFLOW_STORAGE_KEY) ?? "null",
+    );
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    const defaultsByWorkflow: Record<string, VideoGenerationDefaults> = {};
+    for (const [moduleId, value] of Object.entries(parsed)) {
+      if (!moduleId.trim() || !value || typeof value !== "object" || Array.isArray(value)) continue;
+      const content = value as JsonObject;
+      defaultsByWorkflow[moduleId] = {
+        ...videoGenerationDefaultsFromContent(content),
+        workflowModuleId: moduleId,
+      };
+    }
+    return defaultsByWorkflow;
+  } catch {
+    return {};
   }
 }
 
@@ -3224,11 +3512,11 @@ function VideoGenerationLoraDefaultsFields({
         <input
           className="video-parameter-range"
           type="range"
-          style={{ "--video-range-progress": `${(loraStrength / 2) * 100}%` } as CSSProperties}
+          style={{ "--video-range-progress": `${(loraStrength / 10) * 100}%` } as CSSProperties}
           disabled={effectiveLoraBypassed}
           min="0"
-          max="2"
-          step="0.05"
+          max="10"
+          step="0.01"
           value={loraStrength}
           onChange={(event) => onChange(secondary
             ? { generationSecondaryLoraStrength: Number(event.currentTarget.value) }
@@ -3238,8 +3526,9 @@ function VideoGenerationLoraDefaultsFields({
         <CompactDecimalInput
           value={loraStrength}
           min={0}
-          max={2}
+          max={10}
           disabled={effectiveLoraBypassed}
+          displayDecimals={2}
           ariaLabel={`手动输入默认${prefix} LoRA 权重`}
           onChange={(nextStrength) => onChange(secondary
             ? { generationSecondaryLoraStrength: nextStrength }
@@ -3263,17 +3552,23 @@ function VideoGenerationLoraDefaultsFields({
 function VideoGenerationDefaultsEditor({
   value,
   workflowModules,
+  workflowDefaultsByModule,
   h3LoraOptions,
   onChange,
 }: {
   value: VideoGenerationDefaults;
   workflowModules: WorkflowModuleRecord[];
+  workflowDefaultsByModule: Record<string, VideoGenerationDefaults>;
   h3LoraOptions: string[];
   onChange: (patch: Partial<VideoGenerationDefaults>) => void;
 }) {
   const availableModules = workflowModules.filter((module) => (
     !module.deletedAt && module.capability === "video-generation"
   ));
+  const selectedWorkflowModule = availableModules.find((module) => module.id === value.workflowModuleId);
+  const supportsPrimaryUpscaleFactor = Boolean(
+    selectedWorkflowModule?.bindings.primaryUpscaleNodeId?.trim(),
+  );
   return (
     <div className="video-node-body has-media video-defaults-editor">
       <section className="video-defaults-card video-defaults-basic-card">
@@ -3290,6 +3585,11 @@ function VideoGenerationDefaultsEditor({
           onChange={(moduleId) => {
             const module = availableModules.find((candidate) => candidate.id === moduleId);
             if (!module) return;
+            const savedDefaults = workflowDefaultsByModule[module.id];
+            if (savedDefaults) {
+              onChange(savedDefaults);
+              return;
+            }
             onChange({
               workflowModuleId: module.id,
               workflowModuleRevision: module.revision,
@@ -3299,6 +3599,7 @@ function VideoGenerationDefaultsEditor({
               generationLoraStrength: module.defaults.loraStrength,
               generationPrimaryVideoSteps: module.defaults.primaryVideoSteps,
               generationSecondarySchedulerSteps: module.defaults.secondarySchedulerSteps,
+              generationPrimaryUpscaleFactor: module.defaults.primaryUpscaleFactor,
             });
           }}
         />
@@ -3332,26 +3633,59 @@ function VideoGenerationDefaultsEditor({
         </label>
       </div>
       <div className="video-resolution-pair" aria-label="默认一采和二采分辨率">
-        {([
-          ["一采大小", "generationPrimaryResolution", value.generationPrimaryResolution],
-          ["二采大小", "generationSecondaryResolution", value.generationSecondaryResolution],
-        ] as const).map(([label, key, resolution]) => (
-          <label className="video-resolution-inline" key={key}>
-            <span>{label}</span>
+        <div className="video-resolution-column">
+          <label className="video-resolution-inline">
+            <span>一采大小</span>
             <input
               className="video-parameter-range"
               type="range"
-              style={{ "--video-range-progress": `${((resolution - 0.2) / 1.8) * 100}%` } as CSSProperties}
+              style={{ "--video-range-progress": `${((value.generationPrimaryResolution - 0.2) / 1.8) * 100}%` } as CSSProperties}
               min="0.2"
               max="2.0"
               step="0.1"
-              value={resolution}
-              onChange={(event) => onChange({ [key]: Number(event.currentTarget.value) })}
-              aria-label={`默认${label}分辨率`}
+              value={value.generationPrimaryResolution}
+              onChange={(event) => onChange({ generationPrimaryResolution: Number(event.currentTarget.value) })}
+              aria-label="默认一采大小分辨率"
             />
-            <output>{resolution.toFixed(1)} MP</output>
+            <output>{value.generationPrimaryResolution.toFixed(1)} MP</output>
           </label>
-        ))}
+          {supportsPrimaryUpscaleFactor && (
+            <label className="video-primary-upscale-control" title={`二采 latent 放大倍率：${value.generationPrimaryUpscaleFactor.toFixed(1)}×`}>
+              <span>放大</span>
+              <input
+                className="video-parameter-range"
+                type="range"
+                min="1"
+                max="2"
+                step="0.1"
+                value={value.generationPrimaryUpscaleFactor}
+                style={{
+                  "--video-range-progress": `${(value.generationPrimaryUpscaleFactor - 1) * 100}%`,
+                } as CSSProperties}
+                aria-label="默认二采 latent 放大倍率"
+                onChange={(event) => onChange({
+                  generationPrimaryUpscaleFactor: Number(event.currentTarget.value),
+                })}
+              />
+              <output>{value.generationPrimaryUpscaleFactor.toFixed(1)}×</output>
+            </label>
+          )}
+        </div>
+        <label className="video-resolution-inline">
+          <span>二采大小</span>
+          <input
+            className="video-parameter-range"
+            type="range"
+            style={{ "--video-range-progress": `${((value.generationSecondaryResolution - 0.2) / 1.8) * 100}%` } as CSSProperties}
+            min="0.2"
+            max="2.0"
+            step="0.1"
+            value={value.generationSecondaryResolution}
+            onChange={(event) => onChange({ generationSecondaryResolution: Number(event.currentTarget.value) })}
+            aria-label="默认二采大小分辨率"
+          />
+          <output>{value.generationSecondaryResolution.toFixed(1)} MP</output>
+        </label>
       </div>
       </section>
       <section className="video-defaults-card video-defaults-sampling-card is-primary">
@@ -4107,6 +4441,7 @@ const edgeTypes = { canvasEdge: CanvasEdge };
 
 function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const { getViewport, getZoom, setNodes, setViewport } = useReactFlow<CanvasFlowNode, Edge>();
+  const updateNodeInternals = useUpdateNodeInternals();
   const viewportTransform = useStore((state) => state.transform);
   const ctrlSelectionPointerId = useRef<number | null>(null);
   const {
@@ -4125,6 +4460,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     h3LoraOptions,
     krea2LoraOptions,
     workflowModules,
+    workflowModuleVisibleIds,
+    liveComfyPreviewUrl,
+    liveComfyPreviewMimeType,
     onH3LoraPreferenceChange,
     onChange,
     onSaveNode,
@@ -4151,6 +4489,39 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onOpenFolder,
     onCopy,
   } = data;
+  const mediaInputLayoutKey = mediaInputs
+    .map((input) => `${input.id}:${videoInputMediaKind(input) ?? input.kind}`)
+    .join("|");
+  const textInputLayoutKey = textInputs.map((input) => input.id).join("|");
+
+  useEffect(() => {
+    // React Flow caches handle bounds. Imported media and newly connected
+    // inputs can change a node's outer dimensions after its first measure,
+    // while a project remount can retain the provider's previous cache.
+    // Force one measurement after commit and another on the following frame
+    // so both the temporary connection line and persisted edges get fresh
+    // handle coordinates even if ResizeObserver misses the transition.
+    updateNodeInternals(id);
+    const frame = window.requestAnimationFrame(() => updateNodeInternals(id));
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    id,
+    mediaInputLayoutKey,
+    record.height,
+    record.width,
+    textInputLayoutKey,
+    updateNodeInternals,
+  ]);
+
+  const [liveComfyPreview, setLiveComfyPreview] = useState(() => ({
+    url: liveComfyPreviewUrl,
+    mimeType: liveComfyPreviewMimeType,
+  }));
+  const liveComfyPreviewPendingRef = useRef(liveComfyPreview);
+  const generatedVideoPlaybackActiveRef = useRef(activeGeneratedVideoPlaybackIds.size > 0);
+  const [liveComfyPreviewPaused, setLiveComfyPreviewPaused] = useState(
+    activeGeneratedVideoPlaybackIds.size > 0,
+  );
   const [copied, setCopied] = useState(false);
   const [copiedMarkdownTarget, setCopiedMarkdownTarget] = useState<string | null>(null);
   const [promptCopied, setPromptCopied] = useState(false);
@@ -4168,6 +4539,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [workflowModuleMenuOpen, setWorkflowModuleMenuOpen] = useState(false);
   const [loraMenuOpen, setLoraMenuOpen] = useState(false);
   const [secondaryLoraMenuOpen, setSecondaryLoraMenuOpen] = useState(false);
+  const [styleLoraMenuOpen, setStyleLoraMenuOpen] = useState(false);
   const [promptVersionMenuOpen, setPromptVersionMenuOpen] = useState(false);
   const [contentTypeMenuOpen, setContentTypeMenuOpen] = useState(false);
   const [editingPromptVersionTitleId, setEditingPromptVersionTitleId] = useState<string | null>(null);
@@ -4248,6 +4620,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const workflowModuleControlRef = useRef<HTMLDivElement>(null);
   const loraControlRef = useRef<HTMLDivElement>(null);
   const secondaryLoraControlRef = useRef<HTMLDivElement>(null);
+  const styleLoraControlRef = useRef<HTMLDivElement>(null);
   const promptVersionControlRef = useRef<HTMLDivElement>(null);
   const contentTypeControlRef = useRef<HTMLDivElement>(null);
   const textInformationRef = useRef<HTMLDivElement>(null);
@@ -4393,19 +4766,32 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       } as CSSProperties
     : undefined;
   const videoGenerationMode = videoGenerationModeFromContent(record.content);
-  const availableWorkflowModules = workflowModules.filter(
+  const visibleWorkflowModuleIds = new Set(workflowModuleVisibleIds);
+  const allAvailableWorkflowModules = workflowModules.filter(
     (module) => !module.deletedAt
       && module.capability === "video-generation"
       && (!isStoryboardReferenceCompiler || module.variant === "reference-to-video"),
   );
-  const availableImageWorkflowModules = workflowModules.filter((module) => !module.deletedAt && module.capability === "image-generation");
+  const availableWorkflowModules = allAvailableWorkflowModules.filter(
+    (module) => visibleWorkflowModuleIds.has(module.id),
+  );
+  const allAvailableImageWorkflowModules = workflowModules.filter(
+    (module) => !module.deletedAt && module.capability === "image-generation",
+  );
+  const availableImageWorkflowModules = allAvailableImageWorkflowModules.filter(
+    (module) => visibleWorkflowModuleIds.has(module.id),
+  );
   const configuredWorkflowModuleId = typeof record.content.workflowModuleId === "string"
     ? record.content.workflowModuleId
     : "";
-  const selectedNodeWorkflowModule = availableWorkflowModules.find(
+  const configuredNodeWorkflowModule = allAvailableWorkflowModules.find(
     (module) => module.id === configuredWorkflowModuleId,
   ) ?? null;
-  const selectedImageWorkflowModule = availableImageWorkflowModules.find(
+  const selectedNodeWorkflowModule = configuredNodeWorkflowModule
+    ?? availableWorkflowModules.find((module) => module.variant === videoGenerationMode)
+    ?? availableWorkflowModules[0]
+    ?? null;
+  const selectedImageWorkflowModule = allAvailableImageWorkflowModules.find(
     (module) => module.id === configuredWorkflowModuleId,
   ) ?? null;
   const isKrea2ImageEdit = isImageGeneration
@@ -4416,12 +4802,16 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const videoDuration = videoDurationFromContent(record.content);
   const videoAspectRatio = videoAspectRatioFromContent(record.content);
   const refImageSize = refImageSizeFromContent(record.content);
+  const supportsPrimaryUpscaleFactor = Boolean(
+    selectedNodeWorkflowModule?.bindings.primaryUpscaleNodeId?.trim(),
+  );
   const videoGenerationFullHeight = isVideoGeneration
     ? videoGenerationAutoHeight(
         mediaInputs.map((input) => videoInputMediaKind(input) ?? input.kind),
         textInputs.length,
         record.width,
         isStoryboardReferenceCompiler,
+        supportsPrimaryUpscaleFactor,
       )
     : record.height;
   const activeTextInputId = activeTextInputFromContent(record.content, textInputs)?.id ?? "";
@@ -4442,6 +4832,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     selectedNodeWorkflowModule?.defaults.secondarySchedulerSteps
       ?? DEFAULT_H3_MODEL_PARAMETERS.secondarySchedulerSteps,
   );
+  const primaryUpscaleFactor = primaryUpscaleFactorFromContent(
+    record.content,
+    selectedNodeWorkflowModule?.defaults.primaryUpscaleFactor
+      ?? DEFAULT_H3_MODEL_PARAMETERS.primaryUpscaleFactor,
+  );
   const h3LoraName = h3LoraNameFromContent(record.content);
   const h3LoraStrength = h3LoraStrengthFromContent(record.content);
   const h3LoraBypassed = h3LoraBypassedFromContent(record.content);
@@ -4451,6 +4846,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const h3SecondaryLoraBypassed = h3SecondaryLoraBypassedFromContent(record.content);
   const availableH3SecondaryLoraName = h3LoraOptions.find(
     (lora) => sameH3LoraName(lora, h3SecondaryLoraName),
+  );
+  const h3StyleLoraName = h3StyleLoraNameFromContent(record.content);
+  const h3StyleLoraStrength = h3StyleLoraStrengthFromContent(record.content);
+  const h3StyleLoraBypassed = h3StyleLoraBypassedFromContent(record.content);
+  const h3StyleLoraApplyToSecondary = h3StyleLoraApplyToSecondaryFromContent(record.content);
+  const availableH3StyleLoraName = h3LoraOptions.find(
+    (lora) => sameH3LoraName(lora, h3StyleLoraName),
   );
   const selectableH3Loras = h3LoraOptions;
   const imageLoraName = typeof record.content.imageLoraName === "string"
@@ -4626,6 +5028,39 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   }, [editingTitle, record.title]);
 
   useEffect(() => {
+    const nextPreview = {
+      url: liveComfyPreviewUrl,
+      mimeType: liveComfyPreviewMimeType,
+    };
+    liveComfyPreviewPendingRef.current = nextPreview;
+    if (!generatedVideoPlaybackActiveRef.current) setLiveComfyPreview(nextPreview);
+  }, [liveComfyPreviewMimeType, liveComfyPreviewUrl]);
+
+  useEffect(() => {
+    const updateLivePreview = (event: Event) => {
+      const detail = (event as CustomEvent<LiveComfyPreviewEventDetail>).detail;
+      if (!detail || detail.nodeId !== id) return;
+      const nextPreview = { url: detail.url, mimeType: detail.mimeType };
+      liveComfyPreviewPendingRef.current = nextPreview;
+      if (!generatedVideoPlaybackActiveRef.current) setLiveComfyPreview(nextPreview);
+    };
+    window.addEventListener(LIVE_COMFY_PREVIEW_EVENT, updateLivePreview);
+    return () => window.removeEventListener(LIVE_COMFY_PREVIEW_EVENT, updateLivePreview);
+  }, [id]);
+
+  useEffect(() => {
+    const updateGeneratedVideoPlayback = (event: Event) => {
+      const detail = (event as CustomEvent<GeneratedVideoPlaybackEventDetail>).detail;
+      if (!detail) return;
+      generatedVideoPlaybackActiveRef.current = detail.active;
+      setLiveComfyPreviewPaused(detail.active);
+      if (!detail.active) setLiveComfyPreview(liveComfyPreviewPendingRef.current);
+    };
+    window.addEventListener(GENERATED_VIDEO_PLAYBACK_EVENT, updateGeneratedVideoPlayback);
+    return () => window.removeEventListener(GENERATED_VIDEO_PLAYBACK_EVENT, updateGeneratedVideoPlayback);
+  }, []);
+
+  useEffect(() => {
     if (!materialNoteFocused) setMaterialNoteDraft(materialNoteFromContent(record.content));
   }, [materialNoteFocused, record.content]);
 
@@ -4645,10 +5080,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     video.addEventListener("fullscreenchange", handleFullscreenChange);
     return () => {
       video.removeEventListener("fullscreenchange", handleFullscreenChange);
-      video.pause();
-      if (video.readyState > 0) video.currentTime = 0;
     };
   }, [generatedVideoUrl, isGeneratedVideo]);
+
+  useEffect(() => () => {
+    if (isGeneratedVideo) setGeneratedVideoPlaybackActive(id, false);
+  }, [id, isGeneratedVideo]);
 
   useEffect(() => {
     if (
@@ -4947,6 +5384,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
   }, [secondaryLoraMenuOpen]);
+
+  useEffect(() => {
+    if (!styleLoraMenuOpen) return;
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && styleLoraControlRef.current?.contains(target)) return;
+      setStyleLoraMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+  }, [styleLoraMenuOpen]);
 
   useEffect(() => {
     if (!promptVersionMenuOpen) return;
@@ -6015,7 +6463,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
 
   const pauseMediaVideoOnLeave = (event: ReactMouseEvent<HTMLDivElement>) => {
     const video = event.currentTarget.querySelector("video");
-    if (!video || document.fullscreenElement === video) return;
+    if (!video) return;
+    if (document.fullscreenElement === video) return;
     video.pause();
   };
 
@@ -6627,29 +7076,42 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       {(isImage || isGeneratedImage || isAudioAsset || isVideoAsset || isGeneratedVideo) && (
         <div
           className={isVideoAsset ? "nodrag media-node-body" : "media-node-body"}
-          onMouseEnter={isVideoAsset || isGeneratedVideo ? playMediaVideoOnHover : undefined}
-          onMouseLeave={isVideoAsset || isGeneratedVideo ? pauseMediaVideoOnLeave : undefined}
+          onMouseEnter={isVideoAsset || (isGeneratedVideo && !isGenerationPlaceholder) ? playMediaVideoOnHover : undefined}
+          onMouseLeave={isVideoAsset || (isGeneratedVideo && !isGenerationPlaceholder) ? pauseMediaVideoOnLeave : undefined}
         >
           {isGenerationPlaceholder ? (
             <div className={`generated-video-placeholder ${placeholderActive ? "is-active" : "is-stopped"}`}>
-              <div className="generated-video-placeholder-flow" aria-hidden="true">
-                <span
-                  className="generated-video-placeholder-blob blob-blue"
-                  style={generatedPlaceholderPositionStyle(id, 0)}
-                />
-                <span
-                  className="generated-video-placeholder-blob blob-mist"
-                  style={generatedPlaceholderPositionStyle(id, 1)}
-                />
-                <span
-                  className="generated-video-placeholder-blob blob-sky"
-                  style={generatedPlaceholderPositionStyle(id, 2)}
-                />
-                <span
-                  className="generated-video-placeholder-blob blob-shadow"
-                  style={generatedPlaceholderPositionStyle(id, 3)}
-                />
-              </div>
+              {liveComfyPreview.url ? (
+                liveComfyPreview.mimeType?.startsWith("video/") ? (
+                  <LiveComfyVideoPreview src={liveComfyPreview.url} paused={liveComfyPreviewPaused} />
+                ) : (
+                  <img
+                    className="generated-video-placeholder-live-preview"
+                    src={liveComfyPreview.url}
+                    alt="V3 实时生成预览"
+                    draggable={false}
+                  />
+                )
+              ) : (
+                <div className="generated-video-placeholder-flow" aria-hidden="true">
+                  <span
+                    className="generated-video-placeholder-blob blob-blue"
+                    style={generatedPlaceholderPositionStyle(id, 0)}
+                  />
+                  <span
+                    className="generated-video-placeholder-blob blob-mist"
+                    style={generatedPlaceholderPositionStyle(id, 1)}
+                  />
+                  <span
+                    className="generated-video-placeholder-blob blob-sky"
+                    style={generatedPlaceholderPositionStyle(id, 2)}
+                  />
+                  <span
+                    className="generated-video-placeholder-blob blob-shadow"
+                    style={generatedPlaceholderPositionStyle(id, 3)}
+                  />
+                </div>
+              )}
               <div className="generated-video-placeholder-status">
                 <span className="generated-video-placeholder-message" title={validationMessage}>
                   {validationMessage || (placeholderActive
@@ -6715,7 +7177,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 src={generatedVideoUrl}
                 preload="metadata"
                 playsInline
-                onEnded={markGeneratedVideoFullyPlayed}
+                onPlay={() => setGeneratedVideoPlaybackActive(id, true)}
+                onPause={() => setGeneratedVideoPlaybackActive(id, false)}
+                onEnded={() => {
+                  setGeneratedVideoPlaybackActive(id, false);
+                  markGeneratedVideoFullyPlayed();
+                }}
                 onTimeUpdate={(event) => markGeneratedVideoAtPlaybackEnd(event.currentTarget)}
                 onLoadedMetadata={(event) => applyNaturalMediaRatio(
                   event.currentTarget.videoWidth,
@@ -7042,6 +7509,23 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                         </dd>
                         <dt>亮度 / 对比度 / 饱和度</dt>
                         <dd>{generatedVideoSnapshot.secondaryBrightness.toFixed(2)} / {generatedVideoSnapshot.secondaryContrast.toFixed(2)} / {generatedVideoSnapshot.secondarySaturation.toFixed(2)}</dd>
+                      </dl>
+                    </section>
+                  )}
+                  {!generatedVideoSnapshot.styleLoraBypassed && generatedVideoSnapshot.styleLoraName && (
+                    <section className="generated-video-stage-info">
+                      <h4>风格化 LoRA</h4>
+                      <dl>
+                        <dt>LoRA</dt>
+                        <dd title={generatedVideoSnapshot.styleLoraName}>
+                          {h3LoraDisplayName(generatedVideoSnapshot.styleLoraName)}
+                        </dd>
+                        <dt>LoRA 强度</dt>
+                        <dd>{generatedVideoSnapshot.styleLoraStrengthRecorded === false
+                          ? "未记录"
+                          : `×${generatedVideoSnapshot.styleLoraStrength.toFixed(2)}`}</dd>
+                        <dt>作用范围</dt>
+                        <dd>{generatedVideoSnapshot.styleLoraApplyToSecondary ? "一采、二采" : "仅一采"}</dd>
                       </dl>
                     </section>
                   )}
@@ -7449,7 +7933,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 aria-label="当前节点的工作流方案"
                 title={selectedNodeWorkflowModule
                   ? `${selectedNodeWorkflowModule.name} · ${selectedNodeWorkflowModule.revision}`
-                  : availableWorkflowModules.length ? "请选择方案" : "未配置可用方案"}
+                  : availableWorkflowModules.length ? "请选择方案" : "请先在设置中勾选显示在前端"}
                 onClick={() => {
                   setAspectRatioMenuOpen(false);
                   setLoraMenuOpen(false);
@@ -7461,7 +7945,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <span>
                   {selectedNodeWorkflowModule
                     ? `${selectedNodeWorkflowModule.name} · ${selectedNodeWorkflowModule.revision}`
-                    : availableWorkflowModules.length ? "请选择方案" : "未配置可用方案"}
+                    : availableWorkflowModules.length ? "请选择方案" : "未配置前端方案"}
                 </span>
                 <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
               </button>
@@ -7487,6 +7971,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                             generationLoraStrength: module.defaults.loraStrength,
                             generationPrimaryVideoSteps: module.defaults.primaryVideoSteps,
                             generationSecondarySchedulerSteps: module.defaults.secondarySchedulerSteps,
+                            generationPrimaryUpscaleFactor: module.defaults.primaryUpscaleFactor,
                             status: "idle",
                             validationMessage: "",
                           },
@@ -7578,28 +8063,62 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </div>
           </div>
           <div className="video-resolution-pair" aria-label="一采和二采分辨率">
-            <label className="video-resolution-inline">
-              <span>一采</span>
-              <input
-                className="video-parameter-range"
-                type="range"
-                min="0.2"
-                max="2.0"
-                step="0.1"
-                value={primaryVideoResolution}
-                onChange={(event) => onChange(id, {
-                  content: {
-                    ...record.content,
-                    generationPrimaryResolution: Number(event.currentTarget.value),
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                })}
-                onPointerDown={(event) => event.stopPropagation()}
-                aria-label="一采分辨率"
-              />
-              <output>{primaryVideoResolution.toFixed(1)} MP</output>
-            </label>
+            <div className="video-resolution-column">
+              <label className="video-resolution-inline">
+                <span>一采</span>
+                <input
+                  className="video-parameter-range"
+                  type="range"
+                  min="0.2"
+                  max="2.0"
+                  step="0.1"
+                  value={primaryVideoResolution}
+                  onChange={(event) => onChange(id, {
+                    content: {
+                      ...record.content,
+                      generationPrimaryResolution: Number(event.currentTarget.value),
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  })}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  aria-label="一采分辨率"
+                />
+                <output>{primaryVideoResolution.toFixed(1)} MP</output>
+              </label>
+              {supportsPrimaryUpscaleFactor && (
+                <label
+                  className="nodrag nowheel video-primary-upscale-control"
+                  title={`一采放大倍率：${primaryUpscaleFactor.toFixed(1)}×`}
+                  onPointerDown={(event) => event.stopPropagation()}
+                >
+                  <span>放大</span>
+                  <input
+                    className="video-parameter-range"
+                    type="range"
+                    min="1"
+                    max="2"
+                    step="0.1"
+                    value={primaryUpscaleFactor}
+                    style={{
+                      "--video-range-progress": `${(primaryUpscaleFactor - 1) * 100}%`,
+                    } as CSSProperties}
+                    aria-label="一采放大倍率"
+                    onChange={(event) => {
+                      onChange(id, {
+                        content: {
+                          ...record.content,
+                          generationPrimaryUpscaleFactor: Number(event.currentTarget.value),
+                          status: "idle",
+                          validationMessage: "",
+                        },
+                      });
+                    }}
+                  />
+                  <output>{primaryUpscaleFactor.toFixed(1)}×</output>
+                </label>
+              )}
+            </div>
             <label className="video-resolution-inline">
               <span>二采</span>
               <input
@@ -7637,8 +8156,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   : "一采 LoRA 未选择")}
                 onClick={() => {
                   setAspectRatioMenuOpen(false);
-                  setWorkflowModuleMenuOpen(false);
                   setSecondaryLoraMenuOpen(false);
+                  setStyleLoraMenuOpen(false);
                   setLoraMenuOpen((open) => !open);
                 }}
                 onPointerDown={(event) => event.stopPropagation()}
@@ -7706,8 +8225,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               type="range"
               disabled={h3LoraBypassed}
               min="0"
-              max="2"
-              step="0.05"
+              max="10"
+              step="0.01"
               value={h3LoraStrength}
               title={`LoRA 权重：${h3LoraStrength.toFixed(2)}`}
               aria-label="LoRA 权重"
@@ -7725,13 +8244,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               }}
               onPointerDown={(event) => event.stopPropagation()}
             />
-            <label className="video-lora-strength" title="LoRA 权重">
-              <span aria-hidden="true">×</span>
+            <label className="video-lora-strength is-plain-value" title="LoRA 权重">
               <CompactDecimalInput
                 value={h3LoraStrength}
                 min={0}
-                max={2}
+                max={10}
                 disabled={h3LoraBypassed}
+                displayDecimals={2}
                 ariaLabel="手动输入一采 LoRA 权重"
                 onChange={(loraStrength) => {
                   onH3LoraPreferenceChange({ loraName: h3LoraName, loraStrength });
@@ -7751,7 +8270,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               title="一采 Video Steps"
               onPointerDown={(event) => event.stopPropagation()}
             >
-              <span>S</span>
+                <span>S</span>
               <CompactIntegerInput
                 value={primaryVideoSteps}
                 min={1}
@@ -7783,8 +8302,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   : "二采 LoRA 未设置")}
                 onClick={() => {
                   setAspectRatioMenuOpen(false);
-                  setWorkflowModuleMenuOpen(false);
                   setLoraMenuOpen(false);
+                  setStyleLoraMenuOpen(false);
                   setSecondaryLoraMenuOpen((open) => !open);
                 }}
                 onPointerDown={(event) => event.stopPropagation()}
@@ -7857,8 +8376,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               type="range"
               disabled={h3SecondaryLoraBypassed}
               min="0"
-              max="2"
-              step="0.05"
+              max="10"
+              step="0.01"
               value={h3SecondaryLoraStrength}
               title={`二采 LoRA 权重：${h3SecondaryLoraStrength.toFixed(2)}`}
               aria-label="二采 LoRA 权重"
@@ -7876,13 +8395,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               }}
               onPointerDown={(event) => event.stopPropagation()}
             />
-            <label className="video-lora-strength" title="二采 LoRA 权重">
-              <span aria-hidden="true">×</span>
+            <label className="video-lora-strength is-plain-value" title="二采 LoRA 权重">
               <CompactDecimalInput
                 value={h3SecondaryLoraStrength}
                 min={0}
-                max={2}
+                max={10}
                 disabled={h3SecondaryLoraBypassed}
+                displayDecimals={2}
                 ariaLabel="手动输入二采 LoRA 权重"
                 onChange={(secondaryLoraStrength) => {
                   onH3LoraPreferenceChange({ secondaryLoraStrength });
@@ -7918,6 +8437,160 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   });
                 }}
               />
+            </label>
+          </div>
+          <div className={`video-lora-control is-style ${h3StyleLoraBypassed ? "is-bypassed" : ""} ${styleLoraMenuOpen ? "is-menu-open" : ""}`}>
+            <span>风格LoRA</span>
+            <div ref={styleLoraControlRef} className="video-lora-select">
+              <button
+                type="button"
+                className="nodrag nowheel video-lora-select-toggle"
+                disabled={!selectableH3Loras.length}
+                aria-haspopup="menu"
+                aria-expanded={styleLoraMenuOpen}
+                title={availableH3StyleLoraName ?? (h3StyleLoraName
+                  ? "所选风格化 LoRA 已不在 MinimaxH3 目录中"
+                  : "风格化 LoRA 未设置")}
+                onClick={() => {
+                  setAspectRatioMenuOpen(false);
+                  setLoraMenuOpen(false);
+                  setSecondaryLoraMenuOpen(false);
+                  setStyleLoraMenuOpen((open) => !open);
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <span>{h3StyleLoraBypassed
+                  ? "不使用 LoRA"
+                  : availableH3StyleLoraName
+                    ? h3LoraDisplayName(availableH3StyleLoraName)
+                    : h3StyleLoraName ? "未找到 LoRA" : "未选择 LoRA"}</span>
+                <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
+              </button>
+              {styleLoraMenuOpen && (
+                <div className="video-lora-select-menu" role="menu" aria-label="MiniMax H3 风格化 LoRA">
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={h3StyleLoraBypassed}
+                    className={h3StyleLoraBypassed ? "is-active" : ""}
+                    onClick={() => {
+                      onH3LoraPreferenceChange({ styleLoraName: "", styleLoraBypassed: true });
+                      onChange(id, {
+                        content: {
+                          ...record.content,
+                          generationStyleLoraName: "",
+                          generationStyleLoraBypassed: true,
+                          status: "idle",
+                          validationMessage: "",
+                        },
+                      });
+                      setStyleLoraMenuOpen(false);
+                    }}
+                  >
+                    不使用 LoRA
+                  </button>
+                  {selectableH3Loras.map((lora) => (
+                    <button
+                      key={lora}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={!h3StyleLoraBypassed && sameH3LoraName(h3StyleLoraName, lora)}
+                      className={!h3StyleLoraBypassed && sameH3LoraName(h3StyleLoraName, lora) ? "is-active" : ""}
+                      title={lora}
+                      onClick={() => {
+                        onH3LoraPreferenceChange({
+                          styleLoraName: lora,
+                          styleLoraStrength: h3StyleLoraStrength,
+                          styleLoraBypassed: false,
+                        });
+                        onChange(id, {
+                          content: {
+                            ...record.content,
+                            generationStyleLoraName: lora,
+                            generationStyleLoraStrength: h3StyleLoraStrength,
+                            generationStyleLoraBypassed: false,
+                            status: "idle",
+                            validationMessage: "",
+                          },
+                        });
+                        setStyleLoraMenuOpen(false);
+                      }}
+                    >
+                      {h3LoraDisplayName(lora)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <input
+              className="video-parameter-range"
+              disabled={h3StyleLoraBypassed}
+              min="0"
+              max="10"
+              step="0.01"
+              type="range"
+              value={h3StyleLoraStrength}
+              title={`风格化 LoRA 权重：${h3StyleLoraStrength.toFixed(2)}`}
+              aria-label="风格化 LoRA 权重"
+              onChange={(event) => {
+                const styleLoraStrength = Number(event.currentTarget.value);
+                onH3LoraPreferenceChange({ styleLoraStrength });
+                onChange(id, {
+                  content: {
+                    ...record.content,
+                    generationStyleLoraStrength: styleLoraStrength,
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                });
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+            />
+            <label className="video-lora-strength is-plain-value" title="风格化 LoRA 权重">
+              <CompactDecimalInput
+                value={h3StyleLoraStrength}
+                min={0}
+                max={10}
+                disabled={h3StyleLoraBypassed}
+                displayDecimals={2}
+                ariaLabel="手动输入风格化 LoRA 权重"
+                onChange={(styleLoraStrength) => {
+                  onH3LoraPreferenceChange({ styleLoraStrength });
+                  onChange(id, {
+                    content: {
+                      ...record.content,
+                      generationStyleLoraStrength: styleLoraStrength,
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  });
+                }}
+              />
+            </label>
+            <label
+              className="nodrag nowheel video-style-lora-secondary-toggle"
+              title="选择应用于二彩"
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <input
+                type="checkbox"
+                checked={h3StyleLoraApplyToSecondary}
+                disabled={h3StyleLoraBypassed}
+                aria-label="选择应用于二彩"
+                onChange={(event) => {
+                  const styleLoraApplyToSecondary = event.currentTarget.checked;
+                  onH3LoraPreferenceChange({ styleLoraApplyToSecondary });
+                  onChange(id, {
+                    content: {
+                      ...record.content,
+                      generationStyleLoraApplyToSecondary: styleLoraApplyToSecondary,
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  });
+                }}
+              />
+              <span>二采</span>
             </label>
           </div>
           <div className="video-seed-control">
@@ -8716,6 +9389,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               }}
             >
               <option value="">请选择方案</option>
+              {selectedImageWorkflowModule && !visibleWorkflowModuleIds.has(selectedImageWorkflowModule.id) && (
+                <option value={selectedImageWorkflowModule.id} disabled>
+                  {selectedImageWorkflowModule.name} · {selectedImageWorkflowModule.revision}（当前未显示）
+                </option>
+              )}
               {availableImageWorkflowModules.map((module) => <option key={module.id} value={module.id}>{module.name} · {module.revision}</option>)}
             </select>
           </label>
@@ -9558,7 +10236,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <div className={`expanded-prompt-layout ${expandedInformationHidden ? "is-information-hidden" : ""}`}>
                 <section className="expanded-prompt-pane is-prompt">
                   <header>
-                    <strong>提示词</strong>
+                    <strong>{expandedTextMarkdownPreview ? "预览模式" : "编辑模式"}</strong>
                     <span>{textDraft.length.toLocaleString()} 字符</span>
                     <button
                       type="button"
@@ -9731,7 +10409,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             <div className={`expanded-prompt-layout ${connectedInformationHidden ? "is-information-hidden" : ""}`}>
               <section className="expanded-prompt-pane is-prompt">
                 <header>
-                  <strong>提示词</strong>
+                  <strong>{connectedTextMarkdownPreview ? "预览模式" : "编辑模式"}</strong>
                   <span>{connectedTextEditor.text.length.toLocaleString()} 字符</span>
                   <button
                     type="button"
@@ -9991,6 +10669,7 @@ export {
   DEFAULT_H3_LAST_FRAME_TO_VIDEO_WORKFLOW_PATH,
   DEFAULT_H3_LORA_NAME,
   DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
+  DEFAULT_H3_FLA_REFERENCE_V3_WORKFLOW_PATH,
   EMPTY_NODE_RECORDS,
   GENERATED_IMAGE_CHROME_HEIGHT,
   GENERATED_VIDEO_FOOTER_HEIGHT,
@@ -10010,6 +10689,7 @@ export {
   SettingsSelect,
   UI_FONT_SIZE_STORAGE_KEY,
   VIDEO_GENERATION_DEFAULTS_STORAGE_KEY,
+  VIDEO_GENERATION_DEFAULTS_BY_WORKFLOW_STORAGE_KEY,
   LEGACY_VIDEO_GENERATION_NODE_WIDTH,
   VIDEO_GENERATION_NODE_WIDTH,
   VIDEO_NODE_BASE_HEIGHT,
@@ -10017,6 +10697,7 @@ export {
   VideoGenerationDefaultsEditor,
   WORKFLOW_CAPABILITIES,
   WORKFLOW_MODULE_DEFAULTS_STORAGE_KEY,
+  WORKFLOW_MODULE_VISIBLE_IDS_STORAGE_KEY,
   WORKFLOW_MODULE_SLOTS,
   WORKFLOW_PACKAGE_ENGINE,
   WORKFLOW_VIDEO_VARIANTS,
@@ -10029,6 +10710,7 @@ export {
   canvasNodeBounds,
   comfyOutputFromContent,
   comfyPreviewRequestId,
+  comfyPreviewImageBlobFromSocketData,
   comfyProgressFromSocketData,
   copiedNodeContentForProject,
   copiedPromptVersionContent,
@@ -10054,6 +10736,10 @@ export {
   h3SecondaryLoraBypassedFromContent,
   h3SecondaryLoraNameFromContent,
   h3SecondaryLoraStrengthFromContent,
+  h3StyleLoraApplyToSecondaryFromContent,
+  h3StyleLoraBypassedFromContent,
+  h3StyleLoraNameFromContent,
+  h3StyleLoraStrengthFromContent,
   incomingNodePosition,
   informationFromContent,
   imageGenerationAutoHeight,
@@ -10071,6 +10757,7 @@ export {
   persistedComfyTasksFromStorage,
   primaryVideoResolutionFromContent,
   primaryVideoStepsFromContent,
+  primaryUpscaleFactorFromContent,
   promptDurationSecondsFromVersion,
   promptVersionsFromContent,
   randomFixedSeed,
@@ -10093,11 +10780,14 @@ export {
   videoAspectRatioValue,
   videoDurationFromContent,
   videoGenerationAutoHeight,
+  videoGenerationDefaultsByWorkflowFromStorage,
   videoGenerationDefaultsFromStorage,
   videoGenerationModeFromContent,
   workflowBindingsFromDraft,
   workflowCapabilityForVideoMode,
+  workflowModuleFamilyKey,
   workflowModuleDefaultsFromStorage,
+  workflowModuleVisibleIdsFromStorage,
   workflowSlotForModule,
   workflowSlotForVideoMode,
   workflowVariantLabel,
@@ -10158,6 +10848,7 @@ export type {
   VideoRegenerationRequest,
   VisibleNodeCacheEntry,
   WorkflowCapability,
+  WorkflowBindings,
   WorkflowModuleRecord,
   WorkflowModuleValidation,
   WorkflowVariant,

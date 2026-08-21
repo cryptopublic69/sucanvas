@@ -1640,7 +1640,87 @@ fn configure_h3_diffusion_model(
         &bindings.diffusion_model_node_id,
         "unet_name",
         Value::String(diffusion_model_name.to_owned()),
-    )
+    )?;
+    if !bindings.secondary_diffusion_model_node_id.trim().is_empty() {
+        let secondary_node = workflow
+            .get(&bindings.secondary_diffusion_model_node_id)
+            .ok_or_else(|| {
+                format!(
+                    "API 工作流缺少二采大模型加载节点 {}",
+                    bindings.secondary_diffusion_model_node_id
+                )
+            })?;
+        let secondary_class_type = secondary_node
+            .get("class_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if secondary_class_type != bindings.diffusion_model_class_type {
+            return Err(format!(
+                "节点 {} 必须是大模型加载器 {}，实际为 {}",
+                bindings.secondary_diffusion_model_node_id,
+                bindings.diffusion_model_class_type,
+                if secondary_class_type.is_empty() {
+                    "<缺失>"
+                } else {
+                    secondary_class_type
+                }
+            ));
+        }
+        set_workflow_input(
+            workflow,
+            &bindings.secondary_diffusion_model_node_id,
+            "unet_name",
+            Value::String(diffusion_model_name.to_owned()),
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_h3_style_lora_loader(
+    workflow: &mut Value,
+    node_id: &str,
+    upstream: &Value,
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    if workflow.get(node_id).is_none() {
+        return Err(format!(
+            "API 工作流缺少风格 LoRA 节点 {node_id}；请使用包含固定风格 LoRA 链路的工作流 JSON"
+        ));
+    }
+    let class_type = workflow
+        .get(node_id)
+        .and_then(|node| node.get("class_type"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if class_type != bindings.lora_class_type {
+        return Err(format!(
+            "API 工作流风格化 LoRA 节点 {node_id} 必须是 LoRA 加载器 {}",
+            bindings.lora_class_type
+        ));
+    }
+    set_workflow_input(workflow, node_id, "model", upstream.clone())
+}
+
+fn configure_h3_sol_attn_model(
+    workflow: &mut Value,
+    node_id: &str,
+    upstream: Value,
+) -> Result<Value, String> {
+    if node_id.trim().is_empty() {
+        return Ok(upstream);
+    }
+    let class_type = workflow
+        .get(node_id)
+        .and_then(|node| node.get("class_type"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if class_type != "SolAttnMiniMax" {
+        return Err(format!(
+            "API 工作流 Sol-Attn 节点 {node_id} 必须是 SolAttnMiniMax"
+        ));
+    }
+    set_workflow_input(workflow, node_id, "model", upstream)?;
+    Ok(json!([node_id, 0]))
 }
 
 fn configure_h3_loras(
@@ -1651,6 +1731,10 @@ fn configure_h3_loras(
     secondary_lora_name: &str,
     secondary_lora_strength: f64,
     secondary_lora_bypassed: bool,
+    style_lora_name: &str,
+    style_lora_strength: f64,
+    style_lora_bypassed: bool,
+    style_lora_apply_to_secondary: bool,
     bindings: &WorkflowBindings,
 ) -> Result<(), String> {
     let read_lora_upstream = |node_id: &str| -> Result<Value, String> {
@@ -1714,24 +1798,96 @@ fn configure_h3_loras(
     } else {
         json!([bindings.secondary_lora_node_id, 0])
     };
+
+    let primary_style_model = if style_lora_bypassed {
+        primary_model.clone()
+    } else {
+        ensure_h3_style_lora_loader(
+            workflow,
+            &bindings.primary_style_lora_node_id,
+            &primary_model,
+            bindings,
+        )?;
+        set_workflow_input(
+            workflow,
+            &bindings.primary_style_lora_node_id,
+            "lora_name",
+            Value::String(style_lora_name.to_owned()),
+        )?;
+        set_workflow_input(
+            workflow,
+            &bindings.primary_style_lora_node_id,
+            "strength_model",
+            json!(style_lora_strength),
+        )?;
+        json!([bindings.primary_style_lora_node_id, 0])
+    };
+    let secondary_style_model = if style_lora_bypassed || !style_lora_apply_to_secondary {
+        secondary_model.clone()
+    } else {
+        ensure_h3_style_lora_loader(
+            workflow,
+            &bindings.secondary_style_lora_node_id,
+            &secondary_model,
+            bindings,
+        )?;
+        set_workflow_input(
+            workflow,
+            &bindings.secondary_style_lora_node_id,
+            "lora_name",
+            Value::String(style_lora_name.to_owned()),
+        )?;
+        set_workflow_input(
+            workflow,
+            &bindings.secondary_style_lora_node_id,
+            "strength_model",
+            json!(style_lora_strength),
+        )?;
+        json!([bindings.secondary_style_lora_node_id, 0])
+    };
+    let primary_stage_model = configure_h3_sol_attn_model(
+        workflow,
+        &bindings.primary_sol_attn_node_id,
+        primary_style_model,
+    )?;
+    let secondary_stage_model = configure_h3_sol_attn_model(
+        workflow,
+        &bindings.secondary_sol_attn_node_id,
+        secondary_style_model,
+    )?;
+    let primary_model_target_node_id = if bindings.primary_model_target_node_id.trim().is_empty() {
+        &bindings.primary_sampler_node_id
+    } else {
+        &bindings.primary_model_target_node_id
+    };
     set_workflow_input(
         workflow,
-        &bindings.primary_sampler_node_id,
+        primary_model_target_node_id,
         "model",
-        primary_model,
+        primary_stage_model,
     )?;
-    set_workflow_input(
-        workflow,
-        &bindings.secondary_scheduler_node_id,
-        "model",
-        secondary_model.clone(),
-    )?;
-    set_workflow_input(
-        workflow,
-        &bindings.secondary_guider_node_id,
-        "model",
-        secondary_model,
-    )?;
+    // V3 I2V Sigma workflows run both passes through one complete model chain
+    // (attention patch -> Sigma shift -> Sol-Attn -> preview override).  Their
+    // second guider already points to that final chain, so replacing it with
+    // the raw secondary LoRA output would bypass required patches.
+    let reuse_existing_secondary_model = bindings.primary_lora_node_id
+        == bindings.secondary_lora_node_id
+        && bindings.primary_sol_attn_node_id.trim().is_empty()
+        && bindings.secondary_sol_attn_node_id.trim().is_empty();
+    if !reuse_existing_secondary_model {
+        set_workflow_input(
+            workflow,
+            &bindings.secondary_scheduler_node_id,
+            "model",
+            secondary_stage_model.clone(),
+        )?;
+        set_workflow_input(
+            workflow,
+            &bindings.secondary_guider_node_id,
+            "model",
+            secondary_stage_model,
+        )?;
+    }
     Ok(())
 }
 
@@ -1742,18 +1898,25 @@ fn configure_h3_steps(
     secondary_scheduler_steps: u32,
     bindings: &WorkflowBindings,
 ) -> Result<(), String> {
+    let primary_steps_node_id = if bindings.primary_steps_node_id.trim().is_empty() {
+        &bindings.primary_sampler_node_id
+    } else {
+        &bindings.primary_steps_node_id
+    };
     set_workflow_input(
         workflow,
-        &bindings.primary_sampler_node_id,
-        "video_steps",
+        primary_steps_node_id,
+        &bindings.primary_video_steps_input_name,
         json!(primary_video_steps),
     )?;
-    set_workflow_input(
-        workflow,
-        &bindings.primary_sampler_node_id,
-        "audio_steps",
-        json!(primary_audio_steps),
-    )?;
+    if !bindings.primary_audio_steps_input_name.trim().is_empty() {
+        set_workflow_input(
+            workflow,
+            primary_steps_node_id,
+            &bindings.primary_audio_steps_input_name,
+            json!(primary_audio_steps),
+        )?;
+    }
     set_workflow_input(
         workflow,
         &bindings.secondary_scheduler_node_id,
@@ -1761,6 +1924,29 @@ fn configure_h3_steps(
         json!(secondary_scheduler_steps),
     )?;
     Ok(())
+}
+
+fn configure_h3_primary_upscale(
+    workflow: &mut Value,
+    primary_upscale_factor: f64,
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    if bindings.primary_upscale_node_id.trim().is_empty() {
+        return Ok(());
+    }
+    let input_name = if workflow_inputs_mut(workflow, &bindings.primary_upscale_node_id)?
+        .contains_key("scale")
+    {
+        "scale"
+    } else {
+        "value"
+    };
+    set_workflow_input(
+        workflow,
+        &bindings.primary_upscale_node_id,
+        input_name,
+        json!(primary_upscale_factor),
+    )
 }
 
 fn configure_h3_color_adjustments(
@@ -1809,8 +1995,8 @@ fn install_clean_video_output(
         .and_then(|node| node.get("inputs"))
         .and_then(|inputs| inputs.get("filename_prefix"))
         .and_then(Value::as_str)
-        .unwrap_or("%date:yyyy-MM-dd%/Minimax_H3")
-        .to_owned();
+        .map(normalize_h3_video_filename_prefix)
+        .unwrap_or_else(|| "%date:yyyy-MM-dd%/Minimax_H3".to_owned());
     let current_date = Local::now().format("%Y-%m-%d").to_string();
     let filename_prefix = resolve_filename_prefix_date(&filename_prefix_template, &current_date);
     let (image_node_id, audio_node_id, audio_output_index) = if secondary_sampling_enabled {
@@ -1860,6 +2046,15 @@ fn install_clean_video_output(
     Ok(())
 }
 
+fn normalize_h3_video_filename_prefix(filename_prefix: &str) -> String {
+    match filename_prefix.trim().replace('\\', "/").as_str() {
+        // Early V3 packages used the SaveVideo node's generic video folder.
+        // Keep installed copies compatible with the V2 dated output layout.
+        "video/MiniMax_H3" | "video/Minimax_H3" => "%date:yyyy-MM-dd%/Minimax_H3".to_owned(),
+        _ => filename_prefix.to_owned(),
+    }
+}
+
 fn resolve_filename_prefix_date(filename_prefix: &str, current_date: &str) -> String {
     filename_prefix.replace("%date:yyyy-MM-dd%", current_date)
 }
@@ -1882,6 +2077,12 @@ fn configure_h3_strict_prompt_tags(
     strict_prompt_tags: bool,
     bindings: &WorkflowBindings,
 ) -> Result<(), String> {
+    let supports_strict_prompt_tags =
+        workflow_inputs_mut(workflow, &bindings.conditioning_node_id)?
+            .contains_key("strict_prompt_tags");
+    if !supports_strict_prompt_tags {
+        return Ok(());
+    }
     set_workflow_input(
         workflow,
         &bindings.conditioning_node_id,
@@ -2017,6 +2218,7 @@ fn configure_h3_generation(
     primary_video_steps: u32,
     primary_audio_steps: u32,
     secondary_scheduler_steps: u32,
+    primary_upscale_factor: f64,
     primary_brightness: f64,
     primary_contrast: f64,
     primary_saturation: f64,
@@ -2030,6 +2232,10 @@ fn configure_h3_generation(
     secondary_lora_name: &str,
     secondary_lora_strength: f64,
     secondary_lora_bypassed: bool,
+    style_lora_name: &str,
+    style_lora_strength: f64,
+    style_lora_bypassed: bool,
+    style_lora_apply_to_secondary: bool,
     bindings: &WorkflowBindings,
 ) -> Result<(), String> {
     set_workflow_input(
@@ -2078,6 +2284,7 @@ fn configure_h3_generation(
         secondary_scheduler_steps,
         bindings,
     )?;
+    configure_h3_primary_upscale(workflow, primary_upscale_factor, bindings)?;
     configure_h3_color_adjustments(
         workflow,
         primary_brightness,
@@ -2096,6 +2303,10 @@ fn configure_h3_generation(
         secondary_lora_name,
         secondary_lora_strength,
         secondary_lora_bypassed,
+        style_lora_name,
+        style_lora_strength,
+        style_lora_bypassed,
+        style_lora_apply_to_secondary,
         bindings,
     )?;
     install_clean_video_output(workflow, secondary_sampling_enabled, bindings)?;
@@ -3341,11 +3552,19 @@ async fn submit_comfyui_workflow_inner(
     if input.primary_video_steps < 1 {
         return Err("一采 Video Steps 必须是正整数".to_owned());
     }
-    if input.primary_audio_steps < input.primary_video_steps {
+    if !bindings.primary_audio_steps_input_name.trim().is_empty()
+        && input.primary_audio_steps < input.primary_video_steps
+    {
         return Err("一采 Audio Steps 不能小于 Video Steps".to_owned());
     }
     if input.secondary_scheduler_steps < 1 {
         return Err("二采基本调度器 Steps 必须是正整数".to_owned());
+    }
+    if !input.primary_upscale_factor.is_finite()
+        || input.primary_upscale_factor < 1.0
+        || input.primary_upscale_factor > 2.0
+    {
+        return Err("一采放大倍率必须在1.0到2.0之间".to_owned());
     }
     let ref_image_size = input.ref_image_size.trim();
     if !matches!(ref_image_size, "max" | "match") {
@@ -3371,8 +3590,8 @@ async fn submit_comfyui_workflow_inner(
             bindings.lora_directory
         ));
     }
-    if !input.lora_strength.is_finite() || input.lora_strength < 0.0 || input.lora_strength > 2.0 {
-        return Err("LoRA 权重必须在0.0到2.0之间".to_owned());
+    if !input.lora_strength.is_finite() || input.lora_strength < 0.0 || input.lora_strength > 10.0 {
+        return Err("LoRA 权重必须在0.0到10.0之间".to_owned());
     }
     let secondary_lora_name = input.secondary_lora_name.as_deref().unwrap_or("").trim();
     let secondary_lora_bypassed =
@@ -3388,9 +3607,25 @@ async fn submit_comfyui_workflow_inner(
     }
     if !secondary_lora_strength.is_finite()
         || secondary_lora_strength < 0.0
-        || secondary_lora_strength > 2.0
+        || secondary_lora_strength > 10.0
     {
-        return Err("二采 LoRA 权重必须在0.0到2.0之间".to_owned());
+        return Err("二采 LoRA 权重必须在0.0到10.0之间".to_owned());
+    }
+    let style_lora_name = input.style_lora_name.as_deref().unwrap_or("").trim();
+    let style_lora_bypassed =
+        style_lora_name.is_empty() || input.style_lora_bypassed.unwrap_or(false);
+    let style_lora_strength = input.style_lora_strength.unwrap_or(1.0);
+    let style_lora_apply_to_secondary = input.style_lora_apply_to_secondary.unwrap_or(false);
+    if !style_lora_bypassed
+        && !is_model_name_in_directory(style_lora_name, &bindings.lora_directory)
+    {
+        return Err(format!(
+            "风格化 LoRA 只能选择 {} 目录中的模型；未设置风格化 LoRA 时请开启 Bypass",
+            bindings.lora_directory
+        ));
+    }
+    if !style_lora_strength.is_finite() || style_lora_strength < 0.0 || style_lora_strength > 10.0 {
+        return Err("风格化 LoRA 权重必须在0.0到10.0之间".to_owned());
     }
     let diffusion_model_name = input.diffusion_model_name.trim();
     if !is_model_name_in_directory(diffusion_model_name, &bindings.diffusion_model_directory) {
@@ -3466,6 +3701,7 @@ async fn submit_comfyui_workflow_inner(
         input.primary_video_steps,
         input.primary_audio_steps,
         input.secondary_scheduler_steps,
+        input.primary_upscale_factor,
         input.primary_brightness,
         input.primary_contrast,
         input.primary_saturation,
@@ -3479,6 +3715,10 @@ async fn submit_comfyui_workflow_inner(
         secondary_lora_name,
         secondary_lora_strength,
         secondary_lora_bypassed,
+        style_lora_name,
+        style_lora_strength,
+        style_lora_bypassed,
+        style_lora_apply_to_secondary,
         &bindings,
     )?;
     configure_h3_ref_image_size(&mut workflow, ref_image_size, bindings)?;
@@ -4105,10 +4345,11 @@ mod tests {
     use super::{
         cleanup_unreferenced_resize_images, comfy_execution_elapsed_seconds, comfy_input_task_path,
         comfy_queue_summary_from_value, comfy_view_url, configure_h3_diffusion_model,
-        configure_h3_generation, configure_h3_ref_image_size, configure_h3_strict_prompt_tags,
-        configure_h3_uploaded_media, configure_secondary_source_video, delete_image_files_blocking,
-        delete_video_files_blocking, diffusion_models_from_object_info,
-        export_media_asset_blocking, hash_app_lock_password, loras_from_object_info, media_format,
+        configure_h3_generation, configure_h3_primary_upscale, configure_h3_ref_image_size,
+        configure_h3_steps, configure_h3_strict_prompt_tags, configure_h3_uploaded_media,
+        configure_secondary_source_video, delete_image_files_blocking, delete_video_files_blocking,
+        diffusion_models_from_object_info, export_media_asset_blocking, hash_app_lock_password,
+        loras_from_object_info, media_format, normalize_h3_video_filename_prefix,
         resized_image_dimensions, resized_image_name, resolve_filename_prefix_date,
         resolve_generation_seed, validate_new_app_lock_password, validate_workflow_media_counts,
         verify_app_lock_hash, MediaFormat, WorkflowBindings, WorkflowInputContract,
@@ -4188,6 +4429,15 @@ mod tests {
     }
 
     #[test]
+    fn migrates_early_v3_video_prefix_to_v2_output_layout() {
+        assert_eq!(
+            normalize_h3_video_filename_prefix("video/MiniMax_H3"),
+            "%date:yyyy-MM-dd%/Minimax_H3"
+        );
+        assert_eq!(normalize_h3_video_filename_prefix("custom/H3"), "custom/H3");
+    }
+
+    #[test]
     fn configures_reference_image_size_mode() {
         let mut workflow = json!({
             "363": { "inputs": { "ref_image_size": "max" } }
@@ -4204,6 +4454,39 @@ mod tests {
         configure_h3_strict_prompt_tags(&mut workflow, false, &WorkflowBindings::default())
             .unwrap();
         assert_eq!(workflow["363"]["inputs"]["strict_prompt_tags"], false);
+    }
+
+    #[test]
+    fn skips_strict_prompt_tags_when_the_conditioning_node_does_not_support_it() {
+        let mut workflow = json!({
+            "363": { "inputs": { "ref_image_size": "match" } }
+        });
+        configure_h3_strict_prompt_tags(&mut workflow, true, &WorkflowBindings::default()).unwrap();
+        assert!(workflow["363"]["inputs"]
+            .get("strict_prompt_tags")
+            .is_none());
+    }
+
+    #[test]
+    fn maps_fla_v3_steps_and_primary_upscale_to_their_dedicated_nodes() {
+        let mut workflow = json!({
+            "124": { "inputs": { "steps": 8 } },
+            "210": { "inputs": { "scale": 1.0 } },
+            "391": { "inputs": { "steps": 4 } }
+        });
+        let mut bindings = WorkflowBindings::default();
+        bindings.primary_steps_node_id = "124".to_owned();
+        bindings.primary_video_steps_input_name = "steps".to_owned();
+        bindings.primary_audio_steps_input_name = String::new();
+        bindings.primary_upscale_node_id = "210".to_owned();
+
+        configure_h3_steps(&mut workflow, 12, 999, 6, &bindings).unwrap();
+        configure_h3_primary_upscale(&mut workflow, 1.6, &bindings).unwrap();
+
+        assert_eq!(workflow["124"]["inputs"]["steps"], 12);
+        assert!(workflow["124"]["inputs"].get("audio_steps").is_none());
+        assert_eq!(workflow["210"]["inputs"]["scale"], 1.6);
+        assert_eq!(workflow["391"]["inputs"]["steps"], 6);
     }
 
     #[test]
@@ -4396,6 +4679,14 @@ mod tests {
                 },
                 "class_type": "LoraLoaderModelOnly"
             },
+            "9200": {
+                "inputs": {
+                    "lora_name": "",
+                    "strength_model": 1.0,
+                    "model": ["354", 0]
+                },
+                "class_type": "LoraLoaderModelOnly"
+            },
             "360": { "inputs": { "save_output": false, "filename_prefix": "primary/video" } },
             "383": { "inputs": { "image": ["381", 0] } },
             "388": { "inputs": { "audio": ["382", 0] } },
@@ -4432,6 +4723,22 @@ mod tests {
                     "model": ["353", 0]
                 },
                 "class_type": "LoraLoaderModelOnly"
+            },
+            "9201": {
+                "inputs": {
+                    "lora_name": "",
+                    "strength_model": 1.0,
+                    "model": ["401", 0]
+                },
+                "class_type": "LoraLoaderModelOnly"
+            },
+            "417": {
+                "inputs": { "model": ["9200", 0] },
+                "class_type": "SolAttnMiniMax"
+            },
+            "9202": {
+                "inputs": { "model": ["9201", 0] },
+                "class_type": "SolAttnMiniMax"
             },
             "358": {
                 "inputs": {
@@ -4554,6 +4861,7 @@ mod tests {
             8,
             4,
             1.0,
+            1.0,
             0.9,
             0.9,
             1.0,
@@ -4565,6 +4873,10 @@ mod tests {
             false,
             r"MinimaxH3\secondary-test.safetensors",
             0.55,
+            false,
+            "",
+            1.0,
+            true,
             false,
             &WorkflowBindings::default(),
         )
@@ -4623,6 +4935,7 @@ mod tests {
             7,
             9,
             5,
+            1.0,
             1.1,
             0.8,
             0.7,
@@ -4635,6 +4948,10 @@ mod tests {
             false,
             r"MinimaxH3\secondary-selected.safetensors",
             0.45,
+            false,
+            "",
+            1.0,
+            true,
             false,
             &WorkflowBindings::default(),
         )
@@ -4704,7 +5021,7 @@ mod tests {
         );
         assert_eq!(
             workflow.pointer("/393/inputs/model"),
-            Some(&json!(["401", 0]))
+            Some(&json!(["9202", 0]))
         );
         assert!(workflow.get("360").is_none());
         assert!(workflow.get("397").is_none());
@@ -4737,6 +5054,7 @@ mod tests {
             8,
             4,
             1.0,
+            1.0,
             0.9,
             0.9,
             1.0,
@@ -4749,6 +5067,10 @@ mod tests {
             "",
             1.0,
             true,
+            "",
+            1.0,
+            true,
+            false,
             &WorkflowBindings::default(),
         )
         .unwrap();
@@ -4855,6 +5177,7 @@ mod tests {
             8,
             4,
             1.0,
+            1.0,
             0.9,
             0.9,
             1.0,
@@ -4867,6 +5190,10 @@ mod tests {
             "",
             1.0,
             true,
+            "",
+            1.0,
+            true,
+            false,
             &WorkflowBindings::default(),
         )
         .unwrap_err();
@@ -4888,6 +5215,7 @@ mod tests {
             8,
             4,
             1.0,
+            1.0,
             0.9,
             0.9,
             1.0,
@@ -4900,20 +5228,32 @@ mod tests {
             r"MinimaxH3\secondary-selected.safetensors",
             0.6,
             true,
+            "",
+            1.0,
+            true,
+            false,
             &WorkflowBindings::default(),
         )
         .unwrap();
 
         assert_eq!(
             workflow.pointer("/357/inputs/model"),
-            Some(&json!(["353", 0]))
+            Some(&json!(["417", 0]))
         );
         assert_eq!(
             workflow.pointer("/393/inputs/model"),
-            Some(&json!(["353", 0]))
+            Some(&json!(["9202", 0]))
         );
         assert_eq!(
             workflow.pointer("/391/inputs/model"),
+            Some(&json!(["9202", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/417/inputs/model"),
+            Some(&json!(["353", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/9202/inputs/model"),
             Some(&json!(["353", 0]))
         );
         assert_eq!(
@@ -4923,6 +5263,80 @@ mod tests {
         assert_eq!(
             workflow.pointer("/401/inputs/lora_name"),
             Some(&json!(r"MinimaxH3\old-secondary.safetensors"))
+        );
+    }
+
+    #[test]
+    fn style_lora_chains_after_each_stage_when_secondary_is_enabled() {
+        let mut workflow = resolution_test_workflow();
+        configure_h3_generation(
+            &mut workflow,
+            "prompt",
+            42,
+            6.0,
+            "16:9 (Widescreen)",
+            0.4,
+            0.5,
+            6,
+            8,
+            4,
+            1.0,
+            1.0,
+            0.9,
+            0.9,
+            1.0,
+            0.9,
+            1.0,
+            true,
+            r"MinimaxH3\primary.safetensors",
+            0.8,
+            false,
+            r"MinimaxH3\secondary.safetensors",
+            0.6,
+            false,
+            r"MinimaxH3\style.safetensors",
+            0.4,
+            false,
+            true,
+            &WorkflowBindings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            workflow.pointer("/9200/inputs/model"),
+            Some(&json!(["354", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/9201/inputs/model"),
+            Some(&json!(["401", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/9200/inputs/lora_name"),
+            Some(&json!(r"MinimaxH3\style.safetensors"))
+        );
+        assert_eq!(
+            workflow.pointer("/9201/inputs/lora_name"),
+            Some(&json!(r"MinimaxH3\style.safetensors"))
+        );
+        assert_eq!(
+            workflow.pointer("/357/inputs/model"),
+            Some(&json!(["417", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/391/inputs/model"),
+            Some(&json!(["9202", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/393/inputs/model"),
+            Some(&json!(["9202", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/417/inputs/model"),
+            Some(&json!(["9200", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/9202/inputs/model"),
+            Some(&json!(["9201", 0]))
         );
     }
 
@@ -4941,6 +5355,7 @@ mod tests {
             8,
             4,
             1.0,
+            1.0,
             0.9,
             0.9,
             1.0,
@@ -4953,20 +5368,32 @@ mod tests {
             "",
             1.0,
             true,
+            "",
+            1.0,
+            true,
+            false,
             &WorkflowBindings::default(),
         )
         .unwrap();
 
         assert_eq!(
             workflow.pointer("/357/inputs/model"),
-            Some(&json!(["354", 0]))
+            Some(&json!(["417", 0]))
         );
         assert_eq!(
             workflow.pointer("/391/inputs/model"),
-            Some(&json!(["353", 0]))
+            Some(&json!(["9202", 0]))
         );
         assert_eq!(
             workflow.pointer("/393/inputs/model"),
+            Some(&json!(["9202", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/417/inputs/model"),
+            Some(&json!(["354", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/9202/inputs/model"),
             Some(&json!(["353", 0]))
         );
         assert_eq!(

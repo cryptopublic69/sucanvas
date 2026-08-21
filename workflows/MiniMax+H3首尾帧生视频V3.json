@@ -1,0 +1,584 @@
+{
+  "115": {
+    "inputs": {
+      "aspect_ratio": "9:16 (Portrait Widescreen)",
+      "megapixels": 0.4,
+      "multiple": 32
+    },
+    "class_type": "ResolutionSelector",
+    "_meta": {
+      "title": "Resolution Selector (Size)"
+    }
+  },
+  "119": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "120": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "123": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "124": {
+    "inputs": {
+      "scheduler": "beta",
+      "steps": 4,
+      "denoise": 1,
+      "model": [
+        "141",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "基本调度器"
+    }
+  },
+  "125": {
+    "inputs": {
+      "noise": [
+        "129",
+        0
+      ],
+      "guider": [
+        "126",
+        0
+      ],
+      "sampler": [
+        "123",
+        0
+      ],
+      "sigmas": [
+        "208",
+        0
+      ],
+      "latent_image": [
+        "274",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "126": {
+    "inputs": {
+      "model": [
+        "141",
+        0
+      ],
+      "conditioning": [
+        "274",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "基本引导器"
+    }
+  },
+  "127": {
+    "inputs": {
+      "unet_name": "MinimaxH3\\minimax_h3_fl2va_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "128": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "129": {
+    "inputs": {
+      "noise_seed": 3876091137456
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "131": {
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "132",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "数学表达式"
+    }
+  },
+  "132": {
+    "inputs": {
+      "value": 10
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float (Duration)"
+    }
+  },
+  "138": {
+    "inputs": {
+      "value": "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\n\nintegrated_multimodal_description: The entire video contains no visible text of any kind, including subtitles, captions, titles, logos, watermarks, brand marks, signs, interface text, symbols, icons, stickers, or text-like graphics. No subtitles are rendered at any opacity; subtitle visibility is zero. [Shot 1] Vertical 9:16 portrait framing, first-person POV from the man's eyes looking straight down. <Picture 1> is fully preserved as the actual 0.00-second frame: the naked young woman lies on her back on a table, legs spread wide and knees bent, her full, soft D-cup breasts naturally sagging and splaying outward toward her sides with nipples pointing outward, wet skin glistening under the warm dim room light, her face tilted up toward the camera with half-lidded eyes and parted lips, blinking naturally. The man's own abdomen, erect penis and hands enter from the bottom edge of the frame — he is already deeply buried inside her: his erect penis is fully embedded in her VAGINA to the base, her LABIA stretched tight and gripping around the shaft, his pelvis pressed close against her thighs. His hands grip the outsides of her hips, palms planted on her flesh, and stay there, pulling her toward him as he starts a slow, deep rhythm, withdrawing almost all the way then sinking back in to the base. Her chest rises and falls faster, her spread breasts quivering with each slow drive, and <Subject 1> (S1) gasps in a soft, breathy voice, trembling between words, <d>[Chinese] 嗯……再深一点……对……就这样……啊……</d> His face and head remain out of frame at the top edge. Camera: steady first-person downward view, slowly pushing in.\n\n[Shot 2] At 00:05.000, medium close-up first-person downward view, his thrusts quicken into a firm, fast rhythm, his hips slapping against her thighs, wet squelching sounds in time with every drive. Her pelvis jolts upward with each impact, the jolt rippling through her whole torso and driving her spread breasts into a heavy rolling sway a half-beat behind — breast flesh swinging outward and rolling back in a deep wave, nipples trembling. She moans louder, arching her spine off the table, her hands gripping the table edges, her legs trembling around his waist. His hands remain planted on her hips, pulling her to meet his thrusts, neither hand ever returning to his penis. Her eyes half-close, mouth open in rising gasps, and <Subject 1> (S1) cries out in a shaking, needier voice, panting hard between phrases, <d>[Chinese] 快点……再快点……要被你顶坏了……嗯啊……</d> Camera: angle tightens slightly toward the junction of their bodies and her heaving breasts, staying in the man's first-person downward POV.\n\n[Shot 3] At 00:10.000, close-up first-person downward view, he drives into her with deep, fast, relentless thrusts, the rhythm reaching its peak. Her whole body arches off the table, toes curling, back bowing, her breasts heaving violently in a wild rolling wave with every drive, breast flesh flinging outward and surging back; she cries out in a raw, rising moan as she climaxes, her body shuddering and clenching around him, her eyes squeezing shut, her mouth open in a silent cry, her inner thighs trembling, and <Subject 1> (S1) sobs out in a trembling, broken voice at the peak, <d>[Chinese] 我要去了……啊……去了……去了……</d> A low, guttural groan escapes the man off-frame as he thrusts deep and holds. The thrusts then slow into gentle, shallow movements as the afterglow settles, her body still trembling with each breath, sweat glistening on her skin under the same warm dim light, her moans fading into soft, exhausted breaths. Camera: holding close above her body, then pulling back slightly to release.\n\noverall_soundscape: Quiet indoor ambience with faint room reverb under warm dim lighting. Rhythmic wet squelching and soft skin slapping in exact time with each thrust, tempo and volume rising from slow and deep to fast and frantic, then easing in the afterglow. Her gasps, moans and trembling broken cries rise from soft breaths to a raw climax cry, his low off-frame groans and heavier breathing layered beneath, both synced to the rhythm of the thrusts. Her spoken lines are embedded in the scene breakdown and are not repeated here.\n\nnon_diegetic_music: N/A"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Input Text (Prompt)"
+    }
+  },
+  "139": {
+    "inputs": {
+      "image": "4cf93b7e-7a17-4b5d-866b-517e7916ddd9.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "141": {
+    "inputs": {
+      "max_resolution": 1024,
+      "jpeg_quality": 80,
+      "suppress_default_preview": true,
+      "preview_frames": [
+        "131",
+        1
+      ],
+      "preview_fps": 12,
+      "tiny_vae": "taeh3.safetensors",
+      "model": [
+        "178",
+        0
+      ]
+    },
+    "class_type": "ModelPreviewOverrideKJ",
+    "_meta": {
+      "title": "Model Preview Override"
+    }
+  },
+  "142": {
+    "inputs": {
+      "model": [
+        "147",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
+    "_meta": {
+      "title": "MiniMax H3 Mem Eff Sage Attention Patch"
+    }
+  },
+  "147": {
+    "inputs": {
+      "lora_name": "MinimaxH3\\minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "strength_model": 1,
+      "model": [
+        "127",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器（仅模型）"
+    }
+  },
+  "149": {
+    "inputs": {
+      "shift_video": 12,
+      "shift_audio": 3,
+      "model": [
+        "142",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3SigmaShift",
+    "_meta": {
+      "title": "ModelSamplingMiniMaxH3"
+    }
+  },
+  "178": {
+    "inputs": {
+      "attention": "comfy kitchen attention",
+      "model": [
+        "206",
+        0
+      ]
+    },
+    "class_type": "ModelAttentionBackend",
+    "_meta": {
+      "title": "ModelAttentionBackend"
+    }
+  },
+  "206": {
+    "inputs": {
+      "tau": 1.3,
+      "start_percent": 0.2,
+      "end_percent": 0.9,
+      "min_tokens": 12288,
+      "sink_conditioning": "exact_kv_and_rows",
+      "morton": false,
+      "morton_curve": "2d_frame",
+      "centroid_tail": true,
+      "routed_cap_percent": 0,
+      "reuse_qkv_memory": false,
+      "verbose": false,
+      "dense_blocks": "0-2,-1",
+      "model": [
+        "149",
+        0
+      ]
+    },
+    "class_type": "SolAttnMiniMax",
+    "_meta": {
+      "title": "Patch Sol-Attn (MiniMax)"
+    }
+  },
+  "208": {
+    "inputs": {
+      "step": 4,
+      "sigmas": [
+        "254",
+        0
+      ]
+    },
+    "class_type": "SplitSigmas",
+    "_meta": {
+      "title": "分离Sigma"
+    }
+  },
+  "209": {
+    "inputs": {
+      "noise": [
+        "129",
+        0
+      ],
+      "guider": [
+        "279",
+        0
+      ],
+      "sampler": [
+        "123",
+        0
+      ],
+      "sigmas": [
+        "208",
+        1
+      ],
+      "latent_image": [
+        "212",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "210": {
+    "inputs": {
+      "model_name": "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+      "scale": [
+        "280",
+        0
+      ],
+      "device": "cuda",
+      "precision": "fp16",
+      "latent": [
+        "211",
+        0
+      ]
+    },
+    "class_type": "MinimaxH3LatentUpscalerNode3D",
+    "_meta": {
+      "title": "Minimax H3 Latent Upscaler (3D)"
+    }
+  },
+  "211": {
+    "inputs": {
+      "av_latent": [
+        "125",
+        1
+      ]
+    },
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "LTXV分离音视频潜空间"
+    }
+  },
+  "212": {
+    "inputs": {
+      "video_latent": [
+        "210",
+        0
+      ],
+      "audio_latent": [
+        "211",
+        1
+      ]
+    },
+    "class_type": "LTXVConcatAVLatent",
+    "_meta": {
+      "title": "LTXVConcatAVLatent"
+    }
+  },
+  "218": {
+    "inputs": {
+      "samples": [
+        "209",
+        0
+      ],
+      "vae": [
+        "120",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAE解码（音频）"
+    }
+  },
+  "219": {
+    "inputs": {
+      "samples": [
+        "209",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "254": {
+    "inputs": {
+      "extra_steps": 1,
+      "start_at_sigma": 0.7,
+      "end_at_sigma": 0,
+      "spacing": "cosine",
+      "sigmas": [
+        "124",
+        0
+      ]
+    },
+    "class_type": "H3SigmaRefiner",
+    "_meta": {
+      "title": "H3 Sigma Refiner"
+    }
+  },
+  "259": {
+    "inputs": {
+      "brightness": 1,
+      "contrast": 0.8,
+      "saturation": 1,
+      "image": [
+        "219",
+        0
+      ]
+    },
+    "class_type": "LayerColor: BrightnessContrastV2",
+    "_meta": {
+      "title": "图层颜色：亮度对比度 V2"
+    }
+  },
+  "274": {
+    "inputs": {
+      "prompt": [
+        "138",
+        0
+      ],
+      "width": [
+        "115",
+        0
+      ],
+      "height": [
+        "115",
+        1
+      ],
+      "length": [
+        "131",
+        1
+      ],
+      "clip": [
+        "128",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ],
+      "first_frame": [
+        "139",
+        0
+      ],
+      "last_frame": [
+        "281",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ImageToVideo",
+    "_meta": {
+      "title": "MiniMax H3 Image to Video"
+    }
+  },
+  "275": {
+    "inputs": {
+      "frame_rate": 8,
+      "loop_count": 0,
+      "filename_prefix": "AnimateDiff",
+      "format": "image/gif",
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "259",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Video Combine 🎥🅥🅗🅢"
+    }
+  },
+  "276": {
+    "inputs": {
+      "expression": "(a * b + 31) // 32 * 32",
+      "values.a": [
+        "115",
+        0
+      ],
+      "values.b": [
+        "280",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "二采 I2V 宽度（匹配 latent 放大）"
+    }
+  },
+  "277": {
+    "inputs": {
+      "expression": "(a * b + 31) // 32 * 32",
+      "values.a": [
+        "115",
+        1
+      ],
+      "values.b": [
+        "280",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "二采 I2V 高度（匹配 latent 放大）"
+    }
+  },
+  "278": {
+    "inputs": {
+      "prompt": [
+        "138",
+        0
+      ],
+      "width": [
+        "276",
+        1
+      ],
+      "height": [
+        "277",
+        1
+      ],
+      "length": [
+        "131",
+        1
+      ],
+      "clip": [
+        "128",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ],
+      "first_frame": [
+        "139",
+        0
+      ],
+      "last_frame": [
+        "281",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ImageToVideo",
+    "_meta": {
+      "title": "MiniMax H3 Image to Video（二采尺寸条件）"
+    }
+  },
+  "279": {
+    "inputs": {
+      "model": [
+        "141",
+        0
+      ],
+      "conditioning": [
+        "278",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "基本引导器（二采放大尺寸）"
+    }
+  },
+  "280": {
+    "inputs": {
+      "value": 1.2
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "二采 latent 放大倍率"
+    }
+  },
+  "281": {
+    "inputs": {
+      "image": "4cf93b7e-7a17-4b5d-866b-517e7916ddd9.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "尾帧图片"
+    }
+  }
+}

@@ -202,7 +202,7 @@
       "shift_video": 12,
       "shift_audio": 3,
       "model": [
-        "327",
+        "418",
         0
       ],
       "av_latent": [
@@ -271,54 +271,6 @@
     "class_type": "MiniMaxH3AudioConditioningT8",
     "_meta": {
       "title": "MiniMax H3 Audio Conditioning (T8)"
-    }
-  },
-  "406": {
-    "inputs": {
-      "prompt": [
-        "312",
-        0
-      ],
-      "width": [
-        "398",
-        0
-      ],
-      "height": [
-        "398",
-        1
-      ],
-      "length": [
-        "324",
-        1
-      ],
-      "task_type": "L2VA",
-      "audio_mode": "native",
-      "audio_denoise_strength": 1,
-      "add_source_as_reference": false,
-      "prompt_primary_audio_ordinal": 0,
-      "strict_prompt_tags": true,
-      "ref_image_size": "max",
-      "reference_video_policy": "official_2_to_15s",
-      "clip": [
-        "316",
-        0
-      ],
-      "video_vae": [
-        "318",
-        0
-      ],
-      "audio_vae": [
-        "319",
-        0
-      ],
-      "last_frame": [
-        "417",
-        0
-      ]
-    },
-    "class_type": "MiniMaxH3AudioConditioningT8",
-    "_meta": {
-      "title": "MiniMax H3 Secondary Audio Conditioning (T8)"
     }
   },
   "381": {
@@ -470,7 +422,7 @@
       "steps": 4,
       "denoise": 0.2,
       "model": [
-        "401",
+        "9202",
         0
       ]
     },
@@ -482,7 +434,7 @@
   "393": {
     "inputs": {
       "model": [
-        "327",
+        "9202",
         0
       ],
       "conditioning": [
@@ -592,6 +544,54 @@
       "title": "图层颜色：亮度对比度 V2"
     }
   },
+  "406": {
+    "inputs": {
+      "prompt": [
+        "312",
+        0
+      ],
+      "width": [
+        "398",
+        0
+      ],
+      "height": [
+        "398",
+        1
+      ],
+      "length": [
+        "324",
+        1
+      ],
+      "task_type": "L2VA",
+      "audio_mode": "native",
+      "audio_denoise_strength": 1,
+      "add_source_as_reference": false,
+      "prompt_primary_audio_ordinal": 0,
+      "strict_prompt_tags": true,
+      "ref_image_size": "max",
+      "reference_video_policy": "official_2_to_15s",
+      "clip": [
+        "316",
+        0
+      ],
+      "video_vae": [
+        "318",
+        0
+      ],
+      "audio_vae": [
+        "319",
+        0
+      ],
+      "last_frame": [
+        "417",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3AudioConditioningT8",
+    "_meta": {
+      "title": "MiniMax H3 Secondary Audio Conditioning (T8)"
+    }
+  },
   "417": {
     "inputs": {
       "image": "809eff29-0ed8-45f7-a81c-b021624bd536.png"
@@ -599,6 +599,82 @@
     "class_type": "LoadImage",
     "_meta": {
       "title": "加载图像"
+    }
+  },
+  "418": {
+    "inputs": {
+      "tau": 1.3,
+      "start_percent": 0.2,
+      "end_percent": 0.9,
+      "min_tokens": 12288,
+      "sink_conditioning": "exact_kv_and_rows",
+      "morton": false,
+      "morton_curve": "2d_frame",
+      "centroid_tail": true,
+      "routed_cap_percent": 0,
+      "reuse_qkv_memory": false,
+      "verbose": false,
+      "dense_blocks": "0-2,-1",
+      "model": [
+        "9200",
+        0
+      ]
+    },
+    "class_type": "SolAttnMiniMax",
+    "_meta": {
+      "title": "Patch Sol-Attn (MiniMax)"
+    }
+  },
+  "9200": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1,
+      "model": [
+        "327",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA（一采）"
+    }
+  },
+  "9201": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1,
+      "model": [
+        "401",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA（二采）"
+    }
+  },
+  "9202": {
+    "inputs": {
+      "tau": 1.3,
+      "start_percent": 0.2,
+      "end_percent": 0.9,
+      "min_tokens": 12288,
+      "sink_conditioning": "exact_kv_and_rows",
+      "morton": false,
+      "morton_curve": "2d_frame",
+      "centroid_tail": true,
+      "routed_cap_percent": 0,
+      "reuse_qkv_memory": false,
+      "verbose": false,
+      "dense_blocks": "0-2,-1",
+      "model": [
+        "9201",
+        0
+      ]
+    },
+    "class_type": "SolAttnMiniMax",
+    "_meta": {
+      "title": "Patch Sol-Attn（二采）"
     }
   }
 }
