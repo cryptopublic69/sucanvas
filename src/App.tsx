@@ -1,9 +1,8 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { createPortal } from "react-dom";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Background,
   BackgroundVariant,
@@ -30,8 +29,6 @@ import {
   DatabaseBackup,
   Dices,
   Download,
-  Eye,
-  EyeOff,
   FileText,
   FolderKanban,
   FolderOpen,
@@ -43,7 +40,6 @@ import {
   Moon,
   Palette,
   Pencil,
-  Plus,
   Radio,
   RotateCcw,
   Search,
@@ -55,7 +51,7 @@ import {
   Thermometer,
   Trash2,
   Upload,
-  X,
+  X
 } from "lucide-react";
 import {
   CSSProperties,
@@ -66,24 +62,81 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import suCanvasLogo from "../src-tauri/icons/128x128@2x.png";
 import "./App.css";
+import type {
+  AlignmentGuide,
+  AppBackupSummary,
+  AppLockStatus,
+  AppRestoreSummary,
+  CancelFolderResult,
+  CanvasContextMenuState,
+  CanvasEdgeData,
+  CanvasFlowNode,
+  CanvasNodeBounds,
+  CanvasNodeData,
+  CanvasRecord,
+  CanvasUndoEntry,
+  ComfyClientTaskStatus,
+  ComfyQueueSummary,
+  ComfySubmitResult,
+  CreateEmptyFolderResult,
+  CreateNodeResult,
+  DeleteFolderResult,
+  DeletedBatch,
+  EdgeRecord,
+  GenerationSnapshot,
+  GroupNodesIntoFolderResult,
+  H3LoraPreferencePatch,
+  ImageDeletionRequest,
+  ImageRecoverySnapshot,
+  JsonObject,
+  MergeFoldersResult,
+  NodeClipboard,
+  NodeClipboardEdge,
+  NodePatch,
+  NodeRecord,
+  PersistedComfyTask,
+  ResizeImageResult,
+  RestoreNodeReplacementResult,
+  RuntimeInfo,
+  SecondarySampleDraft,
+  SecondarySampleNumericField,
+  SecondarySampleOverrides,
+  SpacingGuide,
+  StoryboardReferenceSelection,
+  UiFontSize,
+  VideoAspectRatio,
+  VideoDeletionChoice,
+  VideoDeletionRequest,
+  VideoExecutionOptions,
+  VideoGenerationMode,
+  VideoRegenerationDraft,
+  VideoRegenerationNumericField,
+  VideoRegenerationPromptOption,
+  VideoRegenerationRequest,
+  VisibleNodeCacheEntry,
+  WorkflowBindings,
+  WorkflowCapability,
+  WorkflowModuleRecord,
+  WorkflowModuleValidation,
+  WorkflowVariant,
+  WorkspaceSnapshot,
+} from "./CanvasNode";
 import {
   ALIGNMENT_SNAP_TOLERANCE_PX,
   AUDIO_NODE_MIN_HEIGHT,
   CANVAS_GRID_SIZE,
   COMFYUI_SERVER_URL_STORAGE_KEY,
   COMFY_TASK_STORAGE_KEY,
+  DEFAULT_COMFYUI_SERVER_URL,
   DEFAULT_H3_DIFFUSION_MODEL_NAME,
-  DEFAULT_H3_FIRST_LAST_WORKFLOW_PATH,
   DEFAULT_H3_FLA_REFERENCE_V3_WORKFLOW_PATH,
-  DEFAULT_H3_IMAGE_TO_VIDEO_WORKFLOW_PATH,
-  DEFAULT_H3_LAST_FRAME_TO_VIDEO_WORKFLOW_PATH,
-  DEFAULT_KREA2_IMAGE_EDIT_WORKFLOW_PATH,
-  DEFAULT_KREA2_IMAGE_WORKFLOW_PATH,
   DEFAULT_H3_LORA_NAME,
   DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
-  DEFAULT_COMFYUI_SERVER_URL,
+  DEFAULT_KREA2_IMAGE_EDIT_WORKFLOW_PATH,
+  DEFAULT_KREA2_IMAGE_WORKFLOW_PATH,
   EMPTY_NODE_RECORDS,
   GENERATED_IMAGE_CHROME_HEIGHT,
   GENERATED_VIDEO_FOOTER_HEIGHT,
@@ -92,6 +145,8 @@ import {
   H3_MODEL_PARAMETERS_STORAGE_KEY,
   H3_REFERENCE_WORKFLOW_STORAGE_KEY,
   IMAGE_NODE_CHROME_HEIGHT,
+  LEGACY_VIDEO_GENERATION_NODE_WIDTH,
+  LIVE_COMFY_PREVIEW_EVENT,
   ModelParameterNumberInput,
   NODE_HANDLE_BASE_SIZE_PX,
   NODE_HANDLE_MIN_SCREEN_SIZE_PX,
@@ -103,16 +158,12 @@ import {
   UI_FONT_SIZE_STORAGE_KEY,
   VIDEO_GENERATION_DEFAULTS_BY_WORKFLOW_STORAGE_KEY,
   VIDEO_GENERATION_DEFAULTS_STORAGE_KEY,
-  LEGACY_VIDEO_GENERATION_NODE_WIDTH,
-  LIVE_COMFY_PREVIEW_EVENT,
   VIDEO_GENERATION_NODE_WIDTH,
   VIDEO_NODE_BASE_HEIGHT,
   VIDEO_REGENERATION_NUMBER_CONFIG,
-  VideoGenerationDefaultsEditor,
-  WORKFLOW_CAPABILITIES,
   WORKFLOW_MODULE_DEFAULTS_STORAGE_KEY,
-  WORKFLOW_MODULE_VISIBLE_IDS_STORAGE_KEY,
   WORKFLOW_MODULE_SLOTS,
+  WORKFLOW_MODULE_VISIBLE_IDS_STORAGE_KEY,
   WORKFLOW_PACKAGE_ENGINE,
   WORKFLOW_VIDEO_VARIANTS,
   activePromptVersionFromContent,
@@ -123,8 +174,8 @@ import {
   canvasGridColor,
   canvasNodeBounds,
   comfyOutputFromContent,
-  comfyPreviewRequestId,
   comfyPreviewImageBlobFromSocketData,
+  comfyPreviewRequestId,
   comfyProgressFromSocketData,
   copiedNodeContentForProject,
   copiedPromptVersionContent,
@@ -140,7 +191,6 @@ import {
   generatedVideoPreviewWidthForRatio,
   generationSnapshotFromContent,
   guidesEqual,
-  h3DiffusionModelDisplayName,
   h3DiffusionModelNameFromContent,
   h3LoraBypassedFromContent,
   h3LoraNameFromContent,
@@ -154,11 +204,11 @@ import {
   h3StyleLoraBypassedFromContent,
   h3StyleLoraNameFromContent,
   h3StyleLoraStrengthFromContent,
+  imageGenerationAutoHeight,
   incomingNodePosition,
   informationFromContent,
-  imageGenerationAutoHeight,
-  isImageComfyTask,
   isContentIterationContent,
+  isImageComfyTask,
   isSecondaryComfyTask,
   loadImageNaturalSize,
   mappedComfyOutputPath,
@@ -169,22 +219,22 @@ import {
   orderedNodeRecordsFromContent,
   persistedComfyTaskFromPlaceholder,
   persistedComfyTasksFromStorage,
+  primaryUpscaleFactorFromContent,
   primaryVideoResolutionFromContent,
   primaryVideoStepsFromContent,
-  primaryUpscaleFactorFromContent,
   promptDurationSecondsFromVersion,
   promptVersionsFromContent,
   randomFixedSeed,
   recordAtCurrentFlowPosition,
   refImageSizeFromContent,
+  referenceSelectionFromContent,
+  resolveStoryboardReferenceSelection,
   sameH3DiffusionModelName,
   sameH3LoraName,
   secondarySchedulerStepsFromContent,
   secondaryVideoResolutionFromContent,
   seedModeFromContent,
   snapCanvasCoordinate,
-  referenceSelectionFromContent,
-  resolveStoryboardReferenceSelection,
   strictPromptTagsFromContent,
   textFromContent,
   toFlowEdge,
@@ -199,13 +249,22 @@ import {
   videoGenerationModeFromContent,
   workflowBindingsFromDraft,
   workflowCapabilityForVideoMode,
-  workflowModuleFamilyKey,
   workflowModuleDefaultsFromStorage,
+  workflowModuleFamilyKey,
   workflowModuleVisibleIdsFromStorage,
   workflowSlotForModule,
-  workflowSlotForVideoMode,
-  workflowVariantLabel,
+  workflowSlotForVideoMode
 } from "./CanvasNode";
+import { ProjectHome } from "./projects/ProjectHome";
+import { AppLockScreen } from "./security/AppLockScreen";
+import { BackupSettingsPanel } from "./settings/BackupSettingsPanel";
+import { GeneralSettingsPanel } from "./settings/GeneralSettingsPanel";
+import { ImageModelSettingsPanel } from "./settings/ImageModelSettingsPanel";
+import { PrivacySettingsPanel } from "./settings/PrivacySettingsPanel";
+import { SecuritySettingsPanel } from "./settings/SecuritySettingsPanel";
+import { VideoDefaultsSettingsPanel } from "./settings/VideoDefaultsSettingsPanel";
+import { VideoModelSettingsPanel } from "./settings/VideoModelSettingsPanel";
+import { WorkflowSettingsPanel } from "./settings/WorkflowSettingsPanel";
 
 const H3_FLA_REFERENCE_V3_BINDINGS: WorkflowBindings = {
   promptNodeId: "138",
@@ -251,79 +310,15 @@ const H3_FLA_REFERENCE_V3_BINDINGS: WorkflowBindings = {
   loraClassType: "LoraLoaderModelOnly",
   loraDirectory: "MinimaxH3",
 };
-import type {
-  AlignmentGuide,
-  AppBackupSummary,
-  AppLockStatus,
-  AppRestoreSummary,
-  CancelFolderResult,
-  CanvasContextMenuState,
-  CanvasEdgeData,
-  CanvasFlowNode,
-  CanvasNodeBounds,
-  CanvasNodeData,
-  CanvasRecord,
-  CanvasUndoEntry,
-  ComfyClientTaskStatus,
-  ComfyQueueSummary,
-  ComfySubmitResult,
-  CreateNodeResult,
-  CreateEmptyFolderResult,
-  DeleteFolderResult,
-  DeletedBatch,
-  EdgeRecord,
-  GenerationSnapshot,
-  GroupNodesIntoFolderResult,
-  H3LoraPreferencePatch,
-  ImageDeletionRequest,
-  ImageRecoverySnapshot,
-  JsonObject,
-  MergeFoldersResult,
-  NodeClipboard,
-  NodeClipboardEdge,
-  NodePatch,
-  NodeRecord,
-  PersistedComfyTask,
-  ResizeImageResult,
-  RestoreNodeReplacementResult,
-  RuntimeInfo,
-  SecondarySampleDraft,
-  SecondarySampleNumericField,
-  SecondarySampleOverrides,
-  SpacingGuide,
-  StoryboardReferenceSelection,
-  UiFontSize,
-  VideoAspectRatio,
-  VideoDeletionChoice,
-  VideoDeletionRequest,
-  VideoExecutionOptions,
-  VideoGenerationMode,
-  VideoRegenerationDraft,
-  VideoRegenerationNumericField,
-  VideoRegenerationPromptOption,
-  VideoRegenerationRequest,
-  VisibleNodeCacheEntry,
-  WorkflowCapability,
-  WorkflowBindings,
-  WorkflowModuleRecord,
-  WorkflowModuleValidation,
-  WorkflowVariant,
-  WorkspaceSnapshot,
-} from "./CanvasNode";
 
-function nodePreviewColor(kind: string): string {
-  if (kind === "folder") return "#8b7cf6";
-  if (kind === "image") return "#4eb9c8";
-  if (kind === "audio") return "#c77dd6";
-  if (kind === "note") return "#c8a957";
-  if (kind === "video") return "#d8ad55";
-  if (kind === "generated-video") return "#6fb5df";
-  if (kind === "video-generation") return "#e48a65";
-  return "#8b7cf6";
-}
+
 
 function livePreviewNodeIdForBindings(bindings: WorkflowBindings | undefined): string {
   return bindings?.livePreviewNodeId.trim() ?? "";
+}
+
+function workflowUsesSharedPrimarySteps(workflowModule: WorkflowModuleRecord | undefined): boolean {
+  return Boolean(workflowModule && !workflowModule.bindings.primaryAudioStepsInputName.trim());
 }
 
 function videoInputMediaKind(record: NodeRecord): "image" | "audio" | "video" | null {
@@ -365,93 +360,7 @@ function comfyGpuMonitorFromSocketData(data: unknown): ComfyGpuMonitor | null {
   }
 }
 
-function ProjectThumbnail({ project }: { project: WorkspaceSnapshot }) {
-  const preview = useMemo(() => {
-    if (!project.nodes.length) return null;
-    const minX = Math.min(...project.nodes.map((node) => node.x));
-    const minY = Math.min(...project.nodes.map((node) => node.y));
-    const maxX = Math.max(...project.nodes.map((node) => node.x + node.width));
-    const maxY = Math.max(...project.nodes.map((node) => node.y + node.height));
-    const padding = Math.max(50, Math.max(maxX - minX, maxY - minY) * 0.08);
-    return {
-      minX: minX - padding,
-      minY: minY - padding,
-      width: Math.max(1, maxX - minX + padding * 2),
-      height: Math.max(1, maxY - minY + padding * 2),
-      nodesById: new Map(project.nodes.map((node) => [node.id, node])),
-    };
-  }, [project.nodes]);
-  const automaticCover = project.nodes.find(
-    (node) => node.kind === "image" && typeof node.content.assetPath === "string",
-  );
-  const automaticCoverPath = automaticCover?.content.assetPath as string | undefined;
-  const coverPath = project.canvas.previewImagePath || automaticCoverPath;
 
-  return (
-    <div className="project-thumbnail">
-      {coverPath && (
-        <img
-          key={coverPath}
-          className="project-cover-image"
-          src={convertFileSrc(coverPath)}
-          alt=""
-          draggable={false}
-          onError={(event) => {
-            if (
-              automaticCoverPath
-              && automaticCoverPath !== coverPath
-              && event.currentTarget.dataset.fallbackApplied !== "true"
-            ) {
-              event.currentTarget.dataset.fallbackApplied = "true";
-              event.currentTarget.src = convertFileSrc(automaticCoverPath);
-            } else {
-              event.currentTarget.style.display = "none";
-            }
-          }}
-        />
-      )}
-      {preview ? (
-        <svg
-          viewBox={`${preview.minX} ${preview.minY} ${preview.width} ${preview.height}`}
-          preserveAspectRatio="xMidYMid meet"
-          aria-hidden="true"
-        >
-          {project.edges.map((edge) => {
-            const source = preview.nodesById.get(edge.sourceNodeId);
-            const target = preview.nodesById.get(edge.targetNodeId);
-            if (!source || !target) return null;
-            return (
-              <line
-                key={edge.id}
-                x1={source.x + source.width}
-                y1={source.y + source.height / 2}
-                x2={target.x}
-                y2={target.y + target.height / 2}
-              />
-            );
-          })}
-          {project.nodes.map((node) => (
-            <rect
-              key={node.id}
-              x={node.x}
-              y={node.y}
-              width={node.width}
-              height={node.height}
-              rx={12}
-              fill={nodePreviewColor(node.kind)}
-            />
-          ))}
-        </svg>
-      ) : (
-        <div className="empty-project-preview">
-          <Sparkles size={24} />
-          <span>空白画布</span>
-        </div>
-      )}
-      <span className="preview-node-count">{project.nodes.length} 个节点</span>
-    </div>
-  );
-}
 
 function CanvasWorkspace() {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasFlowNode>([]);
@@ -507,11 +416,11 @@ function CanvasWorkspace() {
   );
   const [h3WorkflowPath, setH3WorkflowPath] = useState(() =>
     window.localStorage.getItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY)
-      ?? DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
+    ?? DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
   );
   const [h3WorkflowPathDraft, setH3WorkflowPathDraft] = useState(() =>
     window.localStorage.getItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY)
-      ?? DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
+    ?? DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
   );
   const [projectHomeReady, setProjectHomeReady] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
@@ -651,9 +560,9 @@ function CanvasWorkspace() {
   const comfyInputRootRef = useRef(comfyInputRoot);
   const comfyUiServerUrlRef = useRef(comfyUiServerUrl);
   const h3WorkflowPathRef = useRef(h3WorkflowPath);
-  const executeImageNodeRef = useRef<(id: string, placementSourceId?: string) => Promise<void>>(async () => {});
-  const upscaleGeneratedImageRef = useRef<(id: string) => Promise<void>>(async () => {});
-  const regenerateGeneratedImageRef = useRef<(id: string) => Promise<void>>(async () => {});
+  const executeImageNodeRef = useRef<(id: string, placementSourceId?: string) => Promise<void>>(async () => { });
+  const upscaleGeneratedImageRef = useRef<(id: string) => Promise<void>>(async () => { });
+  const regenerateGeneratedImageRef = useRef<(id: string) => Promise<void>>(async () => { });
   const makeFlowNodeRef = useRef<((record: NodeRecord, matched?: boolean) => CanvasFlowNode) | null>(null);
   const openFolderRef = useRef<(nodeId: string) => void>(() => undefined);
   const activeProjectIdRef = useRef<string | null>(null);
@@ -1086,7 +995,7 @@ function CanvasWorkspace() {
         if (!disposed) {
           setH3LoraOptions((current) => (
             current.length === loras.length
-            && current.every((item, index) => sameH3LoraName(item, loras[index]))
+              && current.every((item, index) => sameH3LoraName(item, loras[index]))
               ? current
               : loras
           ));
@@ -1141,7 +1050,7 @@ function CanvasWorkspace() {
         if (!disposed) {
           setKrea2LoraOptions((current) => (
             current.length === loras.length
-            && current.every((item, index) => sameH3LoraName(item, loras[index]))
+              && current.every((item, index) => sameH3LoraName(item, loras[index]))
               ? current
               : loras
           ));
@@ -1170,7 +1079,7 @@ function CanvasWorkspace() {
         models.some((model) => sameH3DiffusionModelName(model, current))
           ? current
           : models.find((model) => sameH3DiffusionModelName(model, DEFAULT_H3_DIFFUSION_MODEL_NAME))
-            ?? models[0]
+          ?? models[0]
       ));
     }).catch(() => {
       // Preserve the last successful catalog while ComfyUI is temporarily offline.
@@ -1345,14 +1254,14 @@ function CanvasWorkspace() {
       if (!modules.some((module) => (
         !module.deletedAt
         && module.name === "MiniMax H3 Fla全能参考"
-        && module.revision.toLocaleLowerCase() === "v3"
+        && module.revision.toLocaleLowerCase() === "v3-highmotion"
       ))) {
         const created = await invoke<WorkflowModuleRecord>("save_workflow_module", {
           input: {
             name: "MiniMax H3 Fla全能参考",
             capability: "video-generation",
             variant: "reference-to-video",
-            revision: "V3",
+            revision: "V3-HighMotion",
             adapterKind: WORKFLOW_PACKAGE_ENGINE,
             sourceWorkflowPath: DEFAULT_H3_FLA_REFERENCE_V3_WORKFLOW_PATH,
             bindings: H3_FLA_REFERENCE_V3_BINDINGS,
@@ -1515,8 +1424,8 @@ function CanvasWorkspace() {
         models.some((model) => sameH3DiffusionModelName(model, current))
           ? current
           : models.find((model) => sameH3DiffusionModelName(model, configured))
-            ?? models[0]
-            ?? ""
+          ?? models[0]
+          ?? ""
       ));
     }).catch(() => {
       if (!disposed) {
@@ -1945,12 +1854,12 @@ function CanvasWorkspace() {
             setNodes((current) => current.map((node) => (
               node.id === id
                 ? {
-                    ...node,
-                    width: updated.width,
-                    height: updated.height,
-                    style: { ...node.style, width: updated.width, height: updated.height },
-                    data: { ...node.data, record: updated },
-                  }
+                  ...node,
+                  width: updated.width,
+                  height: updated.height,
+                  style: { ...node.style, width: updated.width, height: updated.height },
+                  data: { ...node.data, record: updated },
+                }
                 : node
             )));
           }
@@ -1980,12 +1889,12 @@ function CanvasWorkspace() {
           setNodes((current) => current.map((node) => (
             node.id === id
               ? {
-                  ...node,
-                  width: updated.width,
-                  height: updated.height,
-                  style: { ...node.style, width: updated.width, height: updated.height },
-                  data: { ...node.data, record: updated },
-                }
+                ...node,
+                width: updated.width,
+                height: updated.height,
+                style: { ...node.style, width: updated.width, height: updated.height },
+                data: { ...node.data, record: updated },
+              }
               : node
           )));
         }
@@ -2012,12 +1921,12 @@ function CanvasWorkspace() {
         && patch.content
         && !manualSavedPromptContent(currentRecord.content)
         ? {
-            ...patch,
-            content: {
-              ...patch.content,
-              manualSavedPromptContent: { ...currentRecord.content },
-            },
-          }
+          ...patch,
+          content: {
+            ...patch.content,
+            manualSavedPromptContent: { ...currentRecord.content },
+          },
+        }
         : patch;
       setNodes((current) =>
         current.map((node) => {
@@ -2049,13 +1958,13 @@ function CanvasWorkspace() {
     setNodes((current) => current.map((node) => (
       node.id === record.id
         ? {
-            ...node,
-            width: record.width,
-            height: record.height,
-            position: { x: record.x, y: record.y },
-            style: { ...node.style, width: record.width, height: record.height },
-            data: { ...node.data, record },
-          }
+          ...node,
+          width: record.width,
+          height: record.height,
+          position: { x: record.x, y: record.y },
+          style: { ...node.style, width: record.width, height: record.height },
+          data: { ...node.data, record },
+        }
         : node
     )));
   }, [setNodes]);
@@ -2350,8 +2259,8 @@ function CanvasWorkspace() {
       const configuredModuleId = typeof record.content.workflowModuleId === "string"
         ? record.content.workflowModuleId
         : workflowModuleDefaults[
-            workflowSlotForVideoMode(videoGenerationModeFromContent(record.content))
-          ] ?? "";
+        workflowSlotForVideoMode(videoGenerationModeFromContent(record.content))
+        ] ?? "";
       const supportsPrimaryUpscaleFactor = workflowModules.some((module) => (
         !module.deletedAt
         && module.id === configuredModuleId
@@ -2484,12 +2393,12 @@ function CanvasWorkspace() {
       setNodes((current) => current.map((node) => (
         node.id === nodeId
           ? {
-              ...node,
-              width: updated.width,
-              height: updated.height,
-              style: { ...node.style, width: updated.width, height: updated.height },
-              data: { ...node.data, record: updated },
-            }
+            ...node,
+            width: updated.width,
+            height: updated.height,
+            style: { ...node.style, width: updated.width, height: updated.height },
+            data: { ...node.data, record: updated },
+          }
           : node
       )));
       setNotice("已自动保存到数据库");
@@ -2511,12 +2420,12 @@ function CanvasWorkspace() {
       setNodes((current) => current.map((node) => (
         node.id === nodeId
           ? {
-              ...node,
-              width: updated.width,
-              height: updated.height,
-              style: { ...node.style, width: updated.width, height: updated.height },
-              data: { ...node.data, record: updated },
-            }
+            ...node,
+            width: updated.width,
+            height: updated.height,
+            style: { ...node.style, width: updated.width, height: updated.height },
+            data: { ...node.data, record: updated },
+          }
           : node
       )));
       setNotice("已手动保存到数据库");
@@ -2731,7 +2640,7 @@ function CanvasWorkspace() {
               ? `已通过删除占位取消任务，仍有 ${remainingTaskCount} 个任务`
               : `已通过删除占位取消 ComfyUI ${(task.kind === "image-generation" || task.kind === "image-upscale")
                 ? task.kind === "image-upscale" ? "图片放大" : "图片生成"
-                : task.kind === "secondary" ? "二采" : "生成"}`,
+                : task.kind === "secondary" ? "2采" : "生成"}`,
           },
         });
       }
@@ -3104,35 +3013,6 @@ function CanvasWorkspace() {
       secondaryContrast,
       secondarySaturation,
     } = h3ModelParametersDraft;
-    if (!Number.isInteger(primaryVideoSteps) || primaryVideoSteps < 1 || primaryVideoSteps > 1000) {
-      showGlobalNotice("一采 Video Steps 必须是 1 到 1000 的整数");
-      return;
-    }
-    if (!Number.isInteger(primaryAudioSteps) || primaryAudioSteps < primaryVideoSteps || primaryAudioSteps > 1000) {
-      showGlobalNotice("一采 Audio Steps 必须是 1 到 1000 的整数，且不能小于 Video Steps");
-      return;
-    }
-    if (!Number.isInteger(secondarySchedulerSteps) || secondarySchedulerSteps < 1 || secondarySchedulerSteps > 10000) {
-      showGlobalNotice("二采基本调度器 Steps 必须是 1 到 10000 的整数");
-      return;
-    }
-    const invalidColorAdjustment = ([
-      ["一采亮度", primaryBrightness],
-      ["一采对比度", primaryContrast],
-      ["一采饱和度", primarySaturation],
-      ["二采亮度", secondaryBrightness],
-      ["二采对比度", secondaryContrast],
-      ["二采饱和度", secondarySaturation],
-    ] as const).find(([, value]) => (
-      typeof value !== "number"
-      || !Number.isFinite(value)
-      || value < 0
-      || value > 3
-    ));
-    if (invalidColorAdjustment) {
-      showGlobalNotice(`${invalidColorAdjustment[0]}必须是 0.00 到 3.00 之间的数值`);
-      return;
-    }
     const module = selectedWorkflowModule?.capability === "video-generation"
       && selectedWorkflowModule.variant !== "text-to-video"
       && !selectedWorkflowModule.deletedAt
@@ -3145,6 +3025,42 @@ function CanvasWorkspace() {
       showGlobalNotice("没有可保存模型参数的视频生成方案");
       return;
     }
+    const savedPrimaryAudioSteps = workflowUsesSharedPrimarySteps(module)
+      ? primaryVideoSteps
+      : primaryAudioSteps;
+    if (!Number.isInteger(primaryVideoSteps) || primaryVideoSteps < 1 || primaryVideoSteps > 1000) {
+      showGlobalNotice("1采 Video Steps 必须是 1 到 1000 的整数");
+      return;
+    }
+    if (!Number.isInteger(savedPrimaryAudioSteps) || savedPrimaryAudioSteps < primaryVideoSteps || savedPrimaryAudioSteps > 1000) {
+      showGlobalNotice("1采 Audio Steps 必须是 1 到 1000 的整数，且不能小于 Video Steps");
+      return;
+    }
+    if (!Number.isInteger(secondarySchedulerSteps) || secondarySchedulerSteps < 1 || secondarySchedulerSteps > 10000) {
+      showGlobalNotice("2采基本调度器 Steps 必须是 1 到 10000 的整数");
+      return;
+    }
+    const invalidColorAdjustment = ([
+      ["1采亮度", primaryBrightness],
+      ["1采对比度", primaryContrast],
+      ["1采饱和度", primarySaturation],
+      ["2采亮度", secondaryBrightness],
+      ["2采对比度", secondaryContrast],
+      ["2采饱和度", secondarySaturation],
+    ] as const).find(([, value]) => (
+      typeof value !== "number"
+      || !Number.isFinite(value)
+      || value < 0
+      || value > 3
+    ));
+    if (invalidColorAdjustment) {
+      showGlobalNotice(`${invalidColorAdjustment[0]}必须是 0.00 到 3.00 之间的数值`);
+      return;
+    }
+    const savedModelParameters = {
+      ...h3ModelParametersDraft,
+      primaryAudioSteps: savedPrimaryAudioSteps,
+    };
     setWorkflowModulesBusy(true);
     try {
       await invoke<WorkflowModuleRecord>("save_workflow_module", {
@@ -3160,7 +3076,7 @@ function CanvasWorkspace() {
           adapter: module.adapter,
           uiSchema: module.uiSchema,
           defaults: {
-            ...h3ModelParametersDraft,
+            ...savedModelParameters,
             diffusionModelName: h3DiffusionModelName,
             loraName: h3LoraPreference.loraName,
             loraStrength: h3LoraPreference.loraStrength,
@@ -3174,10 +3090,11 @@ function CanvasWorkspace() {
     } finally {
       setWorkflowModulesBusy(false);
     }
-    setH3ModelParameters(h3ModelParametersDraft);
+    setH3ModelParametersDraft(savedModelParameters);
+    setH3ModelParameters(savedModelParameters);
     window.localStorage.setItem(
       H3_MODEL_PARAMETERS_STORAGE_KEY,
-      JSON.stringify(h3ModelParametersDraft),
+      JSON.stringify(savedModelParameters),
     );
     showGlobalNotice("模型参数已保存");
   }, [h3DiffusionModelName, h3LoraPreference, h3ModelParametersDraft, refreshWorkflowModules, reportError, selectedWorkflowModule, showGlobalNotice, workflowModuleDefaults, workflowModules]);
@@ -3472,6 +3389,9 @@ function CanvasWorkspace() {
       generator.content,
       moduleParameters.primaryVideoSteps,
     );
+    const primaryAudioSteps = workflowUsesSharedPrimarySteps(workflowModule)
+      ? primaryVideoSteps
+      : Math.max(primaryVideoSteps, moduleParameters.primaryAudioSteps);
     return {
       prompt,
       promptInformation,
@@ -3487,7 +3407,7 @@ function CanvasWorkspace() {
       primaryResolutionMegapixels: primaryVideoResolutionFromContent(generator.content),
       secondaryResolutionMegapixels: secondaryVideoResolutionFromContent(generator.content),
       primaryVideoSteps,
-      primaryAudioSteps: Math.max(primaryVideoSteps, moduleParameters.primaryAudioSteps),
+      primaryAudioSteps,
       secondarySchedulerSteps: secondarySchedulerStepsFromContent(
         generator.content,
         moduleParameters.secondarySchedulerSteps,
@@ -3544,7 +3464,7 @@ function CanvasWorkspace() {
       Math.max(
         180,
         previewWidth / videoAspectRatioValue(aspectRatio)
-          + GENERATED_VIDEO_FOOTER_HEIGHT,
+        + GENERATED_VIDEO_FOOTER_HEIGHT,
       ),
     );
   }, []);
@@ -3594,7 +3514,7 @@ function CanvasWorkspace() {
       ...source,
       id: reservationId,
       kind: "generated-video",
-      title: secondary ? "二采预览（生成中）" : "视频预览（生成中）",
+      title: secondary ? "2采预览（生成中）" : "视频预览（生成中）",
       content: placeholderContent,
       source: "comfyui-placeholder",
       requestId: reservationId,
@@ -4147,7 +4067,7 @@ function CanvasWorkspace() {
     }
 
     if (!snapshot.loraBypassed && !snapshot.loraName) {
-      const message = "请先选择一采 LoRA";
+      const message = "请先选择1采 LoRA";
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
@@ -4155,7 +4075,7 @@ function CanvasWorkspace() {
       return;
     }
     if (!snapshot.secondaryLoraBypassed && !snapshot.secondaryLoraName) {
-      const message = "请先选择二采 LoRA";
+      const message = "请先选择2采 LoRA";
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
@@ -4190,8 +4110,8 @@ function CanvasWorkspace() {
       && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.secondaryLoraName))
     ) {
       const message = h3LoraOptions.length
-        ? "所选二采 LoRA 已不在 MinimaxH3 目录中，请重新选择"
-        : "MinimaxH3 目录中没有可用二采 LoRA，请添加 LoRA 或开启二采 Bypass";
+        ? "所选2采 LoRA 已不在 MinimaxH3 目录中，请重新选择"
+        : "MinimaxH3 目录中没有可用2采 LoRA，请添加 LoRA 或开启2采 Bypass";
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
@@ -4727,7 +4647,7 @@ function CanvasWorkspace() {
     }
     const sourcePreview = recordAtCurrentFlowPosition(previewNode);
     if (typeof sourcePreview.content.sourcePreviewId === "string") {
-      setNotice("二采视频不支持重新生成");
+      setNotice("2采视频不支持重新生成");
       return;
     }
     if (sourcePreview.content.generationPlaceholder === true) {
@@ -4758,17 +4678,17 @@ function CanvasWorkspace() {
     );
     const snapshotWithCurrentMedia = currentGeneratorSnapshot
       ? {
-          ...snapshot,
-          imagePaths: currentGeneratorSnapshot.imagePaths,
-          imageRoles: currentGeneratorSnapshot.imageRoles,
-          audioPaths: currentGeneratorSnapshot.audioPaths,
-          videoPaths: currentGeneratorSnapshot.videoPaths,
-          referenceCompilerMode: currentGeneratorSnapshot.referenceCompilerMode,
-          referenceSelection: currentGeneratorSnapshot.referenceSelection,
-          referenceSelectionError: currentGeneratorSnapshot.referenceSelectionError,
-          referenceMappings: currentGeneratorSnapshot.referenceMappings,
-          referenceCandidateCount: currentGeneratorSnapshot.referenceCandidateCount,
-        }
+        ...snapshot,
+        imagePaths: currentGeneratorSnapshot.imagePaths,
+        imageRoles: currentGeneratorSnapshot.imageRoles,
+        audioPaths: currentGeneratorSnapshot.audioPaths,
+        videoPaths: currentGeneratorSnapshot.videoPaths,
+        referenceCompilerMode: currentGeneratorSnapshot.referenceCompilerMode,
+        referenceSelection: currentGeneratorSnapshot.referenceSelection,
+        referenceSelectionError: currentGeneratorSnapshot.referenceSelectionError,
+        referenceMappings: currentGeneratorSnapshot.referenceMappings,
+        referenceCandidateCount: currentGeneratorSnapshot.referenceCandidateCount,
+      }
       : snapshot;
 
     let seed = seedOverride;
@@ -4795,7 +4715,7 @@ function CanvasWorkspace() {
     }
     const preview = previewNode.data.record;
     if (typeof preview.content.sourcePreviewId === "string") {
-      setNotice("二采视频不支持重新生成");
+      setNotice("2采视频不支持重新生成");
       return;
     }
     const snapshot = generationSnapshotFromContent(preview.content);
@@ -4803,6 +4723,12 @@ function CanvasWorkspace() {
       setNotice("无法设置重新生成参数：该视频没有完整的历史参数快照");
       return;
     }
+    const workflowModule = workflowModules.find((module) => (
+      !module.deletedAt && module.id === snapshot.workflowModuleId
+    ));
+    const primaryAudioSteps = workflowUsesSharedPrimarySteps(workflowModule)
+      ? snapshot.primaryVideoSteps
+      : snapshot.primaryAudioSteps;
     const seed = typeof preview.content.seed === "string" ? preview.content.seed.trim() : "";
     if (!/^\d+$/.test(seed)) {
       setNotice("无法设置重新生成参数：该视频没有有效的历史 Seed");
@@ -4938,13 +4864,13 @@ function CanvasWorkspace() {
       primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
       loraStrength: snapshot.loraStrength,
       primaryVideoSteps: snapshot.primaryVideoSteps,
-      primaryAudioSteps: snapshot.primaryAudioSteps,
+      primaryAudioSteps,
       primaryBrightness: snapshot.primaryBrightness,
       primaryContrast: snapshot.primaryContrast,
       primarySaturation: snapshot.primarySaturation,
       refImageSize: snapshot.refImageSize,
     });
-  }, []);
+  }, [workflowModules]);
 
   const adjustVideoRegenerationNumber = useCallback((
     field: VideoRegenerationNumericField,
@@ -5006,15 +4932,15 @@ function CanvasWorkspace() {
       || draft.primaryResolutionMegapixels < 0.2
       || draft.primaryResolutionMegapixels > 2
     ) {
-      setNotice("一采分辨率必须在 0.2 到 2.0 MP 之间");
+      setNotice("1采分辨率必须在 0.2 到 2.0 MP 之间");
       return;
     }
     if (!Number.isFinite(draft.loraStrength) || draft.loraStrength < 0 || draft.loraStrength > 10) {
-      setNotice("一采 LoRA 强度必须在 0.00 到 10.00 之间");
+      setNotice("1采 LoRA 强度必须在 0.00 到 10.00 之间");
       return;
     }
     if (!Number.isInteger(draft.primaryVideoSteps) || draft.primaryVideoSteps < 1 || draft.primaryVideoSteps > 1000) {
-      setNotice("一采 Video Steps 必须是 1 到 1000 的整数");
+      setNotice("1采 Video Steps 必须是 1 到 1000 的整数");
       return;
     }
     if (
@@ -5022,7 +4948,7 @@ function CanvasWorkspace() {
       || draft.primaryAudioSteps < draft.primaryVideoSteps
       || draft.primaryAudioSteps > 1000
     ) {
-      setNotice("一采 Audio Steps 必须是整数，且不能小于 Video Steps");
+      setNotice("1采 Audio Steps 必须是整数，且不能小于 Video Steps");
       return;
     }
     const invalidColorValue = [
@@ -5049,7 +4975,11 @@ function CanvasWorkspace() {
       loraStrength: Math.round(draft.loraStrength * 100) / 100,
       loraStrengthRecorded: true,
       primaryVideoSteps: draft.primaryVideoSteps,
-      primaryAudioSteps: draft.primaryAudioSteps,
+      primaryAudioSteps: workflowUsesSharedPrimarySteps(workflowModules.find((module) => (
+        !module.deletedAt && module.id === draft.originalSnapshot.workflowModuleId
+      )))
+        ? draft.primaryVideoSteps
+        : draft.primaryAudioSteps,
       primaryBrightness: Math.round(draft.primaryBrightness * 100) / 100,
       primaryContrast: Math.round(draft.primaryContrast * 100) / 100,
       primarySaturation: Math.round(draft.primarySaturation * 100) / 100,
@@ -5058,12 +4988,12 @@ function CanvasWorkspace() {
     };
     setVideoRegenerationDraft(null);
     await regenerateGeneratedVideo(draft.previewId, snapshot, draft.seed);
-  }, [regenerateGeneratedVideo, videoRegenerationDraft]);
+  }, [regenerateGeneratedVideo, videoRegenerationDraft, workflowModules]);
 
   const configureSecondarySample = useCallback((previewId: string) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
     if (!previewNode || previewNode.data.record.kind !== "generated-video") {
-      setNotice("无法设置二采参数：找不到视频预览节点");
+      setNotice("无法设置2采参数：找不到视频预览节点");
       return;
     }
     const preview = previewNode.data.record;
@@ -5083,19 +5013,19 @@ function CanvasWorkspace() {
       : null;
     const baseSnapshot = storedSnapshot ?? fallbackSnapshot;
     if (!baseSnapshot?.prompt.trim()) {
-      setNotice("无法设置二采参数：该视频没有完整的历史参数快照");
+      setNotice("无法设置2采参数：该视频没有完整的历史参数快照");
       return;
     }
     const workflowModule = workflowModules.find((module) => (
       !module.deletedAt && module.id === baseSnapshot.workflowModuleId
     ));
     if (!workflowModule) {
-      setNotice("无法设置二采参数：该视频使用的工作流方案已缺失");
+      setNotice("无法设置2采参数：该视频使用的工作流方案已缺失");
       return;
     }
     const seed = typeof preview.content.seed === "string" ? preview.content.seed.trim() : "";
     if (!/^\d+$/.test(seed)) {
-      setNotice("无法设置二采参数：该视频没有有效的历史 Seed");
+      setNotice("无法设置2采参数：该视频没有有效的历史 Seed");
       return;
     }
     setSecondarySampleDraft({
@@ -5168,7 +5098,7 @@ function CanvasWorkspace() {
   ) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
     if (!previewNode || previewNode.data.record.kind !== "generated-video") {
-      setNotice("无法二采：找不到视频预览节点");
+      setNotice("无法2采：找不到视频预览节点");
       return;
     }
     const preview = recordAtCurrentFlowPosition(previewNode);
@@ -5187,15 +5117,15 @@ function CanvasWorkspace() {
     const previewSeed = typeof preview.content.seed === "string" ? preview.content.seed : "";
     const requestedSeed = seedOverride ?? previewSeed;
     if (!secondarySource) {
-      setNotice("无法二采：当前预览缺少远程视频文件信息");
+      setNotice("无法2采：当前预览缺少远程视频文件信息");
       return;
     }
     if (!baseSnapshot?.prompt.trim()) {
-      setNotice("无法二采：找不到该视频生成时使用的提示词与参考素材参数");
+      setNotice("无法2采：找不到该视频生成时使用的提示词与参考素材参数");
       return;
     }
     if (!requestedSeed) {
-      setNotice("无法二采：当前预览缺少生成 seed");
+      setNotice("无法2采：当前预览缺少生成 seed");
       return;
     }
     const workflowModule = workflowModules.find((module) => (
@@ -5204,11 +5134,11 @@ function CanvasWorkspace() {
     if (!workflowModule) {
       const message = baseSnapshot.workflowModuleId
         ? "该视频生成时使用的工作流方案已缺失，请先恢复方案"
-        : "该视频没有记录工作流方案，无法安全二采";
+        : "该视频没有记录工作流方案，无法安全2采";
       changeNode(previewId, {
         content: { ...preview.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法二采：${message}`);
+      setNotice(`无法2采：${message}`);
       return;
     }
     const snapshot: GenerationSnapshot = {
@@ -5253,11 +5183,11 @@ function CanvasWorkspace() {
       ...(overrides ? { refImageSizeRecorded: true } : {}),
     };
     if (!snapshot.secondaryLoraBypassed && !snapshot.secondaryLoraName) {
-      const message = "请先选择二采 LoRA";
+      const message = "请先选择2采 LoRA";
       changeNode(previewId, {
         content: { ...preview.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法二采：${message}`);
+      setNotice(`无法2采：${message}`);
       return;
     }
     if (!snapshot.styleLoraBypassed && !snapshot.styleLoraName) {
@@ -5265,7 +5195,7 @@ function CanvasWorkspace() {
       changeNode(previewId, {
         content: { ...preview.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法二采：${message}`);
+      setNotice(`无法2采：${message}`);
       return;
     }
     if (
@@ -5274,12 +5204,12 @@ function CanvasWorkspace() {
       && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.secondaryLoraName))
     ) {
       const message = h3LoraOptions.length
-        ? "二采使用的 LoRA 已不在 MinimaxH3 目录中，请重新选择"
+        ? "2采使用的 LoRA 已不在 MinimaxH3 目录中，请重新选择"
         : "MinimaxH3 目录中没有可用 LoRA，请添加 LoRA 或开启 Bypass";
       changeNode(previewId, {
         content: { ...preview.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法二采：${message}`);
+      setNotice(`无法2采：${message}`);
       return;
     }
     if (
@@ -5293,7 +5223,7 @@ function CanvasWorkspace() {
       changeNode(previewId, {
         content: { ...preview.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法二采：${message}`);
+      setNotice(`无法2采：${message}`);
       return;
     }
     if (
@@ -5303,12 +5233,12 @@ function CanvasWorkspace() {
       ))
     ) {
       const message = h3DiffusionModelOptions.length
-        ? "二采使用的基础模型已不在 diffusion_models/MinimaxH3 目录中，请重新选择"
+        ? "2采使用的基础模型已不在 diffusion_models/MinimaxH3 目录中，请重新选择"
         : "diffusion_models/MinimaxH3 目录中没有可用基础模型";
       changeNode(previewId, {
         content: { ...preview.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法二采：${message}`);
+      setNotice(`无法2采：${message}`);
       return;
     }
     const clientId = crypto.randomUUID();
@@ -5344,17 +5274,17 @@ function CanvasWorkspace() {
         ...preview.content,
         status: "running",
         executionProgress: null,
-        validationMessage: `正在准备当前视频的二采（${snapshot.secondaryResolutionMegapixels.toFixed(1)} MP）…`,
+        validationMessage: `正在准备当前视频的2采（${snapshot.secondaryResolutionMegapixels.toFixed(1)} MP）…`,
       },
     });
-    setNotice("正在上传当前预览并提交二采…");
+    setNotice("正在上传当前预览并提交2采…");
 
     let progressSocket: WebSocket | null = null;
     let preserveComfyTaskRecord = false;
     try {
       progressSocket = await openComfyProgressSocket(clientId, comfyUiServerUrlRef.current);
       if (cancelledComfyClients.current.has(clientId)) {
-        throw new Error("ComfyUI 二采已取消");
+        throw new Error("ComfyUI 2采已取消");
       }
       let executingNodeId = "";
       progressSocket?.addEventListener("message", (event) => {
@@ -5385,28 +5315,28 @@ function CanvasWorkspace() {
             executingNodeId = typeof data.node === "string" ? data.node : "";
             const stages: Record<string, { progress: number | null; label: string }> = {
               "9002": { progress: null, label: "正在读取选中的预览视频…" },
-              "383": { progress: null, label: "正在调整二采画面尺寸…" },
-              "386": { progress: null, label: "正在编码二采画面…" },
+              "383": { progress: null, label: "正在调整2采画面尺寸…" },
+              "386": { progress: null, label: "正在编码2采画面…" },
               "388": { progress: null, label: "正在编码视频音频…" },
-              "390": { progress: null, label: "正在组合二采视频与音频…" },
+              "390": { progress: null, label: "正在组合2采视频与音频…" },
               "363": { progress: null, label: "正在准备提示词与参考条件…" },
-              "391": { progress: 8, label: "正在准备二采采样参数…" },
-              "393": { progress: 8, label: "正在准备二采引导条件…" },
-              "387": { progress: 10, label: "正在加载二采模型并准备采样…" },
+              "391": { progress: 8, label: "正在准备2采采样参数…" },
+              "393": { progress: 8, label: "正在准备2采引导条件…" },
+              "387": { progress: 10, label: "正在加载2采模型并准备采样…" },
               "395": { progress: 92, label: "采样完成，正在解码视频…" },
-              "403": { progress: 95, label: "正在处理二采画面…" },
-              "9000": { progress: 97, label: "正在合成二采视频…" },
-              "9001": { progress: 99, label: "正在保存二采视频…" },
+              "403": { progress: 95, label: "正在处理2采画面…" },
+              "9000": { progress: 97, label: "正在合成2采视频…" },
+              "9001": { progress: 99, label: "正在保存2采视频…" },
               "9300": { progress: null, label: "正在读取选中的预览视频…" },
-              "9383": { progress: null, label: "正在调整二采画面尺寸…" },
-              "9386": { progress: null, label: "正在编码二采画面…" },
+              "9383": { progress: null, label: "正在调整2采画面尺寸…" },
+              "9386": { progress: null, label: "正在编码2采画面…" },
               "9388": { progress: null, label: "正在编码视频音频…" },
-              "9390": { progress: null, label: "正在组合二采视频与音频…" },
-              "9391": { progress: 8, label: "正在准备二采采样参数…" },
-              "9393": { progress: 8, label: "正在准备二采引导条件…" },
-              "9387": { progress: 10, label: "正在加载二采模型并准备采样…" },
+              "9390": { progress: null, label: "正在组合2采视频与音频…" },
+              "9391": { progress: 8, label: "正在准备2采采样参数…" },
+              "9393": { progress: 8, label: "正在准备2采引导条件…" },
+              "9387": { progress: 10, label: "正在加载2采模型并准备采样…" },
               "9395": { progress: 92, label: "采样完成，正在解码视频…" },
-              "9403": { progress: 95, label: "正在处理二采画面…" },
+              "9403": { progress: 95, label: "正在处理2采画面…" },
             };
             const stage = stages[executingNodeId];
             if (stage) updateProgress(stage.progress, stage.label);
@@ -5419,7 +5349,7 @@ function CanvasWorkspace() {
           const maximum = typeof data.max === "number" ? data.max : null;
           if (value === null || maximum === null || maximum <= 0) return;
           const progress = Math.max(10, Math.min(90, 10 + (value / maximum) * 80));
-          updateProgress(progress, `正在二采采样：${value}/${maximum}`);
+          updateProgress(progress, `正在2采采样：${value}/${maximum}`);
         } catch {
           // ComfyUI binary preview frames are intentionally ignored.
         }
@@ -5469,7 +5399,7 @@ function CanvasWorkspace() {
           secondarySource,
         },
       });
-      if (!result.outputs.length) throw new Error("ComfyUI 二采没有返回视频输出");
+      if (!result.outputs.length) throw new Error("ComfyUI 2采没有返回视频输出");
       if (cancelledComfyClients.current.has(clientId)) return;
       const generationElapsedSeconds = validExecutionElapsedSeconds(result.executionElapsedSeconds);
 
@@ -5479,7 +5409,7 @@ function CanvasWorkspace() {
       const createdNodes: CanvasFlowNode[] = [];
       const createdEdges: Edge[] = [];
       for (const [index, output] of result.outputs.entries()) {
-        const title = result.outputs.length > 1 ? `二采预览 ${index + 1}` : "二采预览";
+        const title = result.outputs.length > 1 ? `2采预览 ${index + 1}` : "2采预览";
         const outputContent: JsonObject = {
           videoUrl: output.url,
           originalName: output.filename,
@@ -5563,8 +5493,8 @@ function CanvasWorkspace() {
         },
       });
       setNotice(result.cleanupWarning
-        ? `二采完成，但输入缓存清理失败：${result.cleanupWarning}`
-        : `二采完成：已创建 ${result.outputs.length} 个新预览节点`);
+        ? `2采完成，但输入缓存清理失败：${result.cleanupWarning}`
+        : `2采完成：已创建 ${result.outputs.length} 个新预览节点`);
     } catch (error) {
       const latest = nodesSnapshot.current.find(
         (node) => node.id === previewId,
@@ -5575,20 +5505,20 @@ function CanvasWorkspace() {
             ...latest.content,
             status: "cancelled",
             executionProgress: null,
-            validationMessage: "已取消 ComfyUI 二采",
+            validationMessage: "已取消 ComfyUI 2采",
           },
         });
         try {
           await finalizeGenerationPlaceholder(placeholder, {
             status: "cancelled",
             executionProgress: null,
-            validationMessage: "已取消 ComfyUI 二采",
+            validationMessage: "已取消 ComfyUI 2采",
           });
         } catch (error) {
           preserveComfyTaskRecord = true;
           reportError(error);
         }
-        setNotice("已取消 ComfyUI 二采");
+        setNotice("已取消 ComfyUI 2采");
         return;
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -5597,14 +5527,14 @@ function CanvasWorkspace() {
           ...latest.content,
           status: "invalid",
           executionProgress: null,
-          validationMessage: `二采失败：${message}`,
+          validationMessage: `2采失败：${message}`,
         },
       });
       try {
         await finalizeGenerationPlaceholder(placeholder, {
           status: "invalid",
           executionProgress: null,
-          validationMessage: `二采失败：${message}`,
+          validationMessage: `2采失败：${message}`,
         });
       } catch (placeholderError) {
         preserveComfyTaskRecord = true;
@@ -5632,7 +5562,7 @@ function CanvasWorkspace() {
       || draft.secondaryResolutionMegapixels < 0.2
       || draft.secondaryResolutionMegapixels > 2
     ) {
-      setNotice("二采分辨率必须在 0.2 到 2.0 MP 之间");
+      setNotice("2采分辨率必须在 0.2 到 2.0 MP 之间");
       return;
     }
     if (
@@ -5640,7 +5570,7 @@ function CanvasWorkspace() {
       || draft.secondaryLoraStrength < 0
       || draft.secondaryLoraStrength > 10
     ) {
-      setNotice("二采 LoRA 强度必须在 0.00 到 10.00 之间");
+      setNotice("2采 LoRA 强度必须在 0.00 到 10.00 之间");
       return;
     }
     if (
@@ -5648,7 +5578,7 @@ function CanvasWorkspace() {
       || draft.secondarySchedulerSteps < 1
       || draft.secondarySchedulerSteps > 10000
     ) {
-      setNotice("二采 Scheduler Steps 必须是 1 到 10000 的整数");
+      setNotice("2采 Scheduler Steps 必须是 1 到 10000 的整数");
       return;
     }
     const invalidColorValue = [
@@ -5657,7 +5587,7 @@ function CanvasWorkspace() {
       draft.secondarySaturation,
     ].some((value) => !Number.isFinite(value) || value < 0 || value > 3);
     if (invalidColorValue) {
-      setNotice("二采亮度、对比度和饱和度必须在 0.00 到 3.00 之间");
+      setNotice("2采亮度、对比度和饱和度必须在 0.00 到 3.00 之间");
       return;
     }
     const overrides: SecondarySampleOverrides = {
@@ -5689,7 +5619,7 @@ function CanvasWorkspace() {
     );
     const taskLabel = persistedTask && isImageComfyTask(persistedTask)
       ? persistedTask.kind === "image-upscale" ? "图片放大" : "图片生成"
-      : persistedTask && isSecondaryComfyTask(persistedTask) ? "二采" : "生成";
+      : persistedTask && isSecondaryComfyTask(persistedTask) ? "2采" : "生成";
     cancelledComfyClients.current.add(clientId);
     changeNode(targetId, {
       content: {
@@ -6144,9 +6074,9 @@ function CanvasWorkspace() {
           workflowModuleVisibleIds,
           ...(livePreview
             ? {
-                liveComfyPreviewUrl: livePreview.url,
-                liveComfyPreviewMimeType: livePreview.mimeType,
-              }
+              liveComfyPreviewUrl: livePreview.url,
+              liveComfyPreviewMimeType: livePreview.mimeType,
+            }
             : {}),
           onH3LoraPreferenceChange: rememberH3LoraPreference,
           onChange: changeNode,
@@ -6454,9 +6384,9 @@ function CanvasWorkspace() {
     const source = recordAtCurrentFlowPosition(sourceNode);
     const sourceGeneratorId = secondaryTask
       ? task.sourceGeneratorId
-        || (typeof source.content.sourceGeneratorId === "string"
-          ? source.content.sourceGeneratorId
-          : "")
+      || (typeof source.content.sourceGeneratorId === "string"
+        ? source.content.sourceGeneratorId
+        : "")
       : task.nodeId;
     const generationElapsedSeconds = validExecutionElapsedSeconds(
       recovered.executionElapsedSeconds,
@@ -6473,7 +6403,7 @@ function CanvasWorkspace() {
     try {
       for (const [index, output] of recovered.outputs.entries()) {
         const title = secondaryTask
-          ? recovered.outputs.length > 1 ? `二采预览 ${index + 1}` : "二采预览"
+          ? recovered.outputs.length > 1 ? `2采预览 ${index + 1}` : "2采预览"
           : recovered.outputs.length > 1 ? `视频预览 ${index + 1}` : "视频预览";
         const outputContent: JsonObject = {
           videoUrl: output.url,
@@ -6670,7 +6600,7 @@ function CanvasWorkspace() {
           const imageTask = isImageComfyTask(task);
           const taskLabel = imageTask
             ? task.kind === "image-upscale" ? "放大图片" : "生成图片"
-            : secondaryTask ? "二采" : "生成";
+            : secondaryTask ? "2采" : "生成";
           recoveredNodeActiveKeys.current.set(task.nodeId, `${task.clientId}:running`);
           changeNode(task.nodeId, {
             content: {
@@ -6746,7 +6676,7 @@ function CanvasWorkspace() {
                     ? "已恢复 ComfyUI 完成图片放大"
                     : "已恢复 ComfyUI 完成任务及图片预览"
                   : isSecondaryComfyTask(task)
-                    ? "已恢复 ComfyUI 完成二采及二采预览"
+                    ? "已恢复 ComfyUI 完成2采及2采预览"
                     : "已恢复 ComfyUI 完成任务及视频预览");
               } finally {
                 recoveringComfyClients.current.delete(task.clientId);
@@ -6772,18 +6702,18 @@ function CanvasWorkspace() {
                 const imageTask = isImageComfyTask(task);
                 const recoveryLabel = imageTask
                   ? task.kind === "image-upscale" ? "图片放大恢复" : "图片生成恢复"
-                  : secondaryTask ? "二采恢复" : "恢复";
+                  : secondaryTask ? "2采恢复" : "恢复";
                 const validationMessage = recovered.status === "missing"
                   ? `${recoveryLabel}失败：任务不在 ComfyUI 队列或最近历史记录中`
                   : recovered.status === "success"
                     ? `${recoveryLabel}失败：ComfyUI 历史记录中没有${imageTask ? "图片" : "视频"}输出`
-                  : recovered.status === "cancelled"
+                    : recovered.status === "cancelled"
                       ? `已取消恢复的 ComfyUI ${imageTask
                         ? task.kind === "image-upscale" ? "图片放大" : "图片任务"
-                        : secondaryTask ? "二采" : "任务"}`
+                        : secondaryTask ? "2采" : "任务"}`
                       : `恢复的 ComfyUI ${imageTask
                         ? task.kind === "image-upscale" ? "图片放大" : "图片任务"
-                        : secondaryTask ? "二采" : "任务"}执行失败`;
+                        : secondaryTask ? "2采" : "任务"}执行失败`;
                 changeNode(task.nodeId, {
                   content: {
                     ...node.data.record.content,
@@ -6835,7 +6765,7 @@ function CanvasWorkspace() {
             const imageTask = isImageComfyTask(active.task);
             const taskLabel = imageTask
               ? active.task.kind === "image-upscale" ? "图片放大" : "图片任务"
-              : secondaryTask ? "二采" : "任务";
+              : secondaryTask ? "2采" : "任务";
             changeNode(nodeId, {
               content: {
                 ...(updatedNodeContents.get(nodeId) ?? node.data.record.content),
@@ -6882,11 +6812,11 @@ function CanvasWorkspace() {
     const sourceOffsetPosition = { x: sourceLeft + pasteOffset, y: sourceTop + pasteOffset };
     const placement = placeAtViewportCenter
       ? reserveNodePlacement(
-          activeProjectId,
-          undefined,
-          sourceRight - sourceLeft,
-          sourceBottom - sourceTop,
-        )
+        activeProjectId,
+        undefined,
+        sourceRight - sourceLeft,
+        sourceBottom - sourceTop,
+      )
       : null;
     const targetPosition = placement?.position ?? sourceOffsetPosition;
     const placementDelta = {
@@ -7190,34 +7120,34 @@ function CanvasWorkspace() {
 
       const restored = entry.kind === "prompt-migration"
         ? await invoke<RestoreNodeReplacementResult>("restore_node_replacement", {
-            input: {
-              previousNode: entry.previousNode,
-              deleted: entry.deleted,
-            },
-          })
+          input: {
+            previousNode: entry.previousNode,
+            deleted: entry.deleted,
+          },
+        })
         : {
-            node: null,
-            restored: await invoke<DeletedBatch>("restore_deleted_nodes", { batch: entry.batch }),
-          };
+          node: null,
+          restored: await invoke<DeletedBatch>("restore_deleted_nodes", { batch: entry.batch }),
+        };
       setNodes((current) => {
         const restoredTarget = restored.node;
         const withTarget = restoredTarget
           ? current.map((node) => (
-              node.id === restoredTarget.id
-                ? {
-                    ...node,
-                    width: restoredTarget.width,
-                    height: restoredTarget.height,
-                    position: { x: restoredTarget.x, y: restoredTarget.y },
-                    style: {
-                      ...node.style,
-                      width: restoredTarget.width,
-                      height: restoredTarget.height,
-                    },
-                    data: { ...node.data, record: restoredTarget },
-                  }
-                : node
-            ))
+            node.id === restoredTarget.id
+              ? {
+                ...node,
+                width: restoredTarget.width,
+                height: restoredTarget.height,
+                position: { x: restoredTarget.x, y: restoredTarget.y },
+                style: {
+                  ...node.style,
+                  width: restoredTarget.width,
+                  height: restoredTarget.height,
+                },
+                data: { ...node.data, record: restoredTarget },
+              }
+              : node
+          ))
           : current;
         const currentIds = new Set(withTarget.map((node) => node.id));
         return [
@@ -7667,13 +7597,13 @@ function CanvasWorkspace() {
             return nodeExists
               ? current.map((node) => node.id === record.id
                 ? {
-                    ...node,
-                    width: record.width,
-                    height: record.height,
-                    position: { x: record.x, y: record.y },
-                    style: { ...node.style, width: record.width, height: record.height },
-                    data: { ...node.data, record },
-                  }
+                  ...node,
+                  width: record.width,
+                  height: record.height,
+                  position: { x: record.x, y: record.y },
+                  style: { ...node.style, width: record.width, height: record.height },
+                  data: { ...node.data, record },
+                }
                 : node)
               : [...current, makeFlowNode(record)];
           });
@@ -7904,34 +7834,26 @@ function CanvasWorkspace() {
       && workflowModuleVisibleIds.includes(module.id)
     ));
     const defaultWorkflowModule = storyboardReferenceCompiler
-      ? visibleVideoModules.find((module) => (
-          module.variant === "reference-to-video"
-          && module.id === workflowModuleDefaults["video-generation:reference-to-video"]
-        )) ?? visibleVideoModules.find((module) => module.variant === "reference-to-video")
-      : visibleVideoModules.find((module) => module.id === videoGenerationDefaults.workflowModuleId)
-        ?? visibleVideoModules.find((module) => (
-          module.variant === videoGenerationDefaults.generationMode
-          && module.id === workflowModuleDefaults[workflowSlotForVideoMode(videoGenerationDefaults.generationMode)]
-        ))
-        ?? visibleVideoModules.find((module) => module.variant === videoGenerationDefaults.generationMode)
-        ?? visibleVideoModules[0];
+      ? visibleVideoModules.find((module) => module.variant === "reference-to-video")
+      ?? visibleVideoModules[0]
+      : visibleVideoModules[0];
     const nodeDefaults = storyboardReferenceCompiler
       ? {
-          ...videoGenerationDefaults,
-          generationMode: "reference-to-video" as VideoGenerationMode,
-          workflowModuleId: defaultWorkflowModule?.id ?? "",
-          workflowModuleRevision: defaultWorkflowModule?.revision ?? "",
-          generationDiffusionModelName: defaultWorkflowModule?.defaults.diffusionModelName
-            ?? videoGenerationDefaults.generationDiffusionModelName,
-        }
+        ...videoGenerationDefaults,
+        generationMode: "reference-to-video" as VideoGenerationMode,
+        workflowModuleId: defaultWorkflowModule?.id ?? "",
+        workflowModuleRevision: defaultWorkflowModule?.revision ?? "",
+        generationDiffusionModelName: defaultWorkflowModule?.defaults.diffusionModelName
+          ?? videoGenerationDefaults.generationDiffusionModelName,
+      }
       : {
-          ...videoGenerationDefaults,
-          generationMode: defaultWorkflowModule?.variant as VideoGenerationMode ?? videoGenerationDefaults.generationMode,
-          workflowModuleId: defaultWorkflowModule?.id ?? "",
-          workflowModuleRevision: defaultWorkflowModule?.revision ?? "",
-          generationDiffusionModelName: defaultWorkflowModule?.defaults.diffusionModelName
-            ?? videoGenerationDefaults.generationDiffusionModelName,
-        };
+        ...videoGenerationDefaults,
+        generationMode: defaultWorkflowModule?.variant as VideoGenerationMode ?? videoGenerationDefaults.generationMode,
+        workflowModuleId: defaultWorkflowModule?.id ?? "",
+        workflowModuleRevision: defaultWorkflowModule?.revision ?? "",
+        generationDiffusionModelName: defaultWorkflowModule?.defaults.diffusionModelName
+          ?? videoGenerationDefaults.generationDiffusionModelName,
+      };
     try {
       const result = await invoke<CreateNodeResult>("create_node", {
         input: {
@@ -7969,7 +7891,7 @@ function CanvasWorkspace() {
       finishNodePlacementReservation(placement.reservationId);
       reportError(error);
     }
-  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes, videoGenerationDefaults, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules]);
+  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes, videoGenerationDefaults, workflowModuleVisibleIds, workflowModules]);
 
   const addImageGenerationNode = useCallback(async (position?: { x: number; y: number }) => {
     if (!activeProjectId) return;
@@ -8068,9 +7990,9 @@ function CanvasWorkspace() {
           ? "Krea2 图像编辑请连接 1 张图片；第二张图片可选，最多 2 张"
           : isImageEdit && imagePaths.some((path) => !path)
             ? "接入图片缺少本地文件路径，无法提交到 ComfyUI"
-        : !positiveInput
-          ? "请通过连线接入正向提示词文本节点"
-          : "当前正向提示词节点内容为空，请先填写";
+            : !positiveInput
+              ? "请通过连线接入正向提示词文本节点"
+              : "当前正向提示词节点内容为空，请先填写";
       changeNode(targetId, { content: { ...target.content, status: "invalid", validationMessage: message } });
       setNotice(message);
       return;
@@ -8210,30 +8132,30 @@ function CanvasWorkspace() {
           fileType: output.fileType,
         });
         return {
-        imageUrl: output.url,
-        ...(assetPath ? { assetPath } : {}),
-        originalName: output.filename,
-        filename: output.filename,
-        subfolder: output.subfolder,
-        fileType: output.fileType,
-        seed: result.seed,
-        comfyPromptId: result.promptId,
-        comfyServerUrl: comfyUiServerUrlRef.current,
-        sourceGeneratorId: targetId,
-        promptSourceNodeId: positiveInput?.id ?? "",
-        generationPrompt: prompt,
-        generationNegativePrompt: negativePrompt,
-        generationWorkflowModuleId: moduleId,
-        generationWorkflowModuleRevision: typeof target.content.workflowModuleRevision === "string"
-          ? target.content.workflowModuleRevision
-          : "",
-        generationModelName: typeof result.modelName === "string" ? result.modelName : "",
-        generationWidth: width,
-        generationHeight: height,
-        ...(effectiveUpscaleEnabled ? { generationUpscaleMegapixels: upscaleMegapixels } : {}),
-        generationLoraName: isImageEdit ? "" : imageLoraName,
-        upscaleEnabled: effectiveUpscaleEnabled,
-        ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
+          imageUrl: output.url,
+          ...(assetPath ? { assetPath } : {}),
+          originalName: output.filename,
+          filename: output.filename,
+          subfolder: output.subfolder,
+          fileType: output.fileType,
+          seed: result.seed,
+          comfyPromptId: result.promptId,
+          comfyServerUrl: comfyUiServerUrlRef.current,
+          sourceGeneratorId: targetId,
+          promptSourceNodeId: positiveInput?.id ?? "",
+          generationPrompt: prompt,
+          generationNegativePrompt: negativePrompt,
+          generationWorkflowModuleId: moduleId,
+          generationWorkflowModuleRevision: typeof target.content.workflowModuleRevision === "string"
+            ? target.content.workflowModuleRevision
+            : "",
+          generationModelName: typeof result.modelName === "string" ? result.modelName : "",
+          generationWidth: width,
+          generationHeight: height,
+          ...(effectiveUpscaleEnabled ? { generationUpscaleMegapixels: upscaleMegapixels } : {}),
+          generationLoraName: isImageEdit ? "" : imageLoraName,
+          upscaleEnabled: effectiveUpscaleEnabled,
+          ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
         };
       };
       await completeGenerationPlaceholder(
@@ -8492,46 +8414,46 @@ function CanvasWorkspace() {
           fileType: output.fileType,
         });
         return {
-        imageUrl: output.url,
-        ...(assetPath ? { assetPath } : {}),
-        originalName: output.filename,
-        filename: output.filename,
-        subfolder: output.subfolder,
-        fileType: output.fileType,
-        seed: typeof preview.content.seed === "string" ? preview.content.seed : "",
-        comfyPromptId: result.promptId,
-        comfyServerUrl: comfyUiServerUrlRef.current,
-        sourceGeneratorId,
-        sourcePreviewId: previewId,
-        promptSourceNodeId: typeof preview.content.promptSourceNodeId === "string"
-          ? preview.content.promptSourceNodeId
-          : "",
-        generationPrompt: typeof preview.content.generationPrompt === "string"
-          ? preview.content.generationPrompt
-          : "",
-        generationNegativePrompt: typeof preview.content.generationNegativePrompt === "string"
-          ? preview.content.generationNegativePrompt
-          : "",
-        generationWorkflowModuleId: moduleId,
-        generationWorkflowModuleRevision: typeof preview.content.generationWorkflowModuleRevision === "string"
-          ? preview.content.generationWorkflowModuleRevision
-          : "",
-        generationModelName: typeof result.modelName === "string"
-          ? result.modelName
-          : typeof preview.content.generationModelName === "string"
-            ? preview.content.generationModelName
+          imageUrl: output.url,
+          ...(assetPath ? { assetPath } : {}),
+          originalName: output.filename,
+          filename: output.filename,
+          subfolder: output.subfolder,
+          fileType: output.fileType,
+          seed: typeof preview.content.seed === "string" ? preview.content.seed : "",
+          comfyPromptId: result.promptId,
+          comfyServerUrl: comfyUiServerUrlRef.current,
+          sourceGeneratorId,
+          sourcePreviewId: previewId,
+          promptSourceNodeId: typeof preview.content.promptSourceNodeId === "string"
+            ? preview.content.promptSourceNodeId
             : "",
-        generationWidth: outputWidth,
-        generationHeight: outputHeight,
-        generationUpscaleMegapixels: megapixels,
-        generationLoraName: typeof preview.content.generationLoraName === "string"
-          ? preview.content.generationLoraName
-          : "",
-        imageUpscale: true,
-        upscaleEnabled: true,
-        ...(validExecutionElapsedSeconds(result.executionElapsedSeconds) === null
-          ? {}
-          : { generationElapsedSeconds: validExecutionElapsedSeconds(result.executionElapsedSeconds) }),
+          generationPrompt: typeof preview.content.generationPrompt === "string"
+            ? preview.content.generationPrompt
+            : "",
+          generationNegativePrompt: typeof preview.content.generationNegativePrompt === "string"
+            ? preview.content.generationNegativePrompt
+            : "",
+          generationWorkflowModuleId: moduleId,
+          generationWorkflowModuleRevision: typeof preview.content.generationWorkflowModuleRevision === "string"
+            ? preview.content.generationWorkflowModuleRevision
+            : "",
+          generationModelName: typeof result.modelName === "string"
+            ? result.modelName
+            : typeof preview.content.generationModelName === "string"
+              ? preview.content.generationModelName
+              : "",
+          generationWidth: outputWidth,
+          generationHeight: outputHeight,
+          generationUpscaleMegapixels: megapixels,
+          generationLoraName: typeof preview.content.generationLoraName === "string"
+            ? preview.content.generationLoraName
+            : "",
+          imageUpscale: true,
+          upscaleEnabled: true,
+          ...(validExecutionElapsedSeconds(result.executionElapsedSeconds) === null
+            ? {}
+            : { generationElapsedSeconds: validExecutionElapsedSeconds(result.executionElapsedSeconds) }),
         };
       };
       await completeGenerationPlaceholder(
@@ -9303,8 +9225,8 @@ function CanvasWorkspace() {
       const inputKinds = new Set(["text", "image", "audio", "video"]);
       const selectedInputNodes = sourceNode.selected && inputKinds.has(sourceNode.data.record.kind)
         ? nodesSnapshot.current.filter((node) => (
-            node.selected && inputKinds.has(node.data.record.kind)
-          ))
+          node.selected && inputKinds.has(node.data.record.kind)
+        ))
         : [sourceNode];
       const batchIsTextOnly = selectedInputNodes.every(
         (node) => node.data.record.kind === "text",
@@ -9841,24 +9763,24 @@ function CanvasWorkspace() {
         const data = presentationUnchanged
           ? previousData!
           : {
-              ...node.data,
-              matched,
-              relationHighlighted,
-              relationPromptVersionLabel,
-              activeTaskCount,
-              inputCount: inputRecords.length,
-              outputCount,
-              contentParents,
-              mediaInputs,
-              textInputCount: connectedText.length,
-              textInputs,
-              promptNodeTitle,
-              h3LoraOptions,
-              krea2LoraOptions,
-              workflowModules,
-              workflowModuleDefaults,
-              workflowModuleVisibleIds,
-            };
+            ...node.data,
+            matched,
+            relationHighlighted,
+            relationPromptVersionLabel,
+            activeTaskCount,
+            inputCount: inputRecords.length,
+            outputCount,
+            contentParents,
+            mediaInputs,
+            textInputCount: connectedText.length,
+            textInputs,
+            promptNodeTitle,
+            h3LoraOptions,
+            krea2LoraOptions,
+            workflowModules,
+            workflowModuleDefaults,
+            workflowModuleVisibleIds,
+          };
         const result = previous?.source === node && previous.result.data === data
           ? previous.result
           : { ...node, data };
@@ -10219,1355 +10141,494 @@ function CanvasWorkspace() {
     document.body,
   );
 
+  const videoRegenerationUsesSharedPrimarySteps = workflowUsesSharedPrimarySteps(
+    videoRegenerationDraft
+      ? workflowModules.find((module) => (
+        !module.deletedAt && module.id === videoRegenerationDraft.originalSnapshot.workflowModuleId
+      ))
+      : undefined,
+  );
+
   const appSettingsDialog = settingsOpen && createPortal(
     <>
-    <div className="project-dialog-backdrop" onMouseDown={() => {
-      if (!workflowModuleDeletionMode && !workflowModuleRestoreRequest) setSettingsOpen(false);
-    }}>
-      <form
-        className="project-dialog app-settings-dialog"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (activeSettingsSection === "general") saveComfySettings();
-          if (activeSettingsSection === "video-defaults") saveVideoGenerationDefaults();
-          if (activeSettingsSection === "video-model") void saveH3ModelParameters();
-          if (activeSettingsSection === "image-model") void saveKrea2ModelParameters();
-        }}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="app-settings-header">
-          <div className="project-dialog-icon"><Settings2 size={21} /></div>
-          <div>
-            <h2>应用设置</h2>
-            <p>管理 SuCanvas 的连接、工作流、完整备份和本机安全。</p>
-          </div>
-          <button
-            type="button"
-            className="app-settings-close"
-            onClick={() => setSettingsOpen(false)}
-            title="关闭设置"
-            aria-label="关闭应用设置"
-          >
-            <X size={18} />
-          </button>
-        </div>
-        <div className="app-settings-body">
-          <nav className="app-settings-nav" aria-label="设置类目">
-            <button
-              type="button"
-              className={activeSettingsSection === "general" ? "is-active" : ""}
-              onClick={() => setActiveSettingsSection("general")}
-            >
-              <Settings2 size={16} />
-              <span><strong>基础设置</strong><small>ComfyUI 映射目录</small></span>
-            </button>
-            <button
-              type="button"
-              className={activeSettingsSection === "workflows" ? "is-active" : ""}
-              onClick={() => setActiveSettingsSection("workflows")}
-            >
-              <Clapperboard size={16} />
-              <span><strong>工作流方案</strong><small>多功能与多套方案</small></span>
-            </button>
-            <button
-              type="button"
-              className={activeSettingsSection === "video-defaults" ? "is-active" : ""}
-              onClick={() => setActiveSettingsSection("video-defaults")}
-            >
-              <SlidersHorizontal size={16} />
-              <span><strong>视频默认参数</strong><small>新节点的生成参数</small></span>
-            </button>
-            <button
-              type="button"
-              className={activeSettingsSection === "video-model" ? "is-active" : ""}
-              onClick={() => {
-                const module = workflowModules.find((candidate) => (
-                  !candidate.deletedAt
-                  && candidate.id === workflowModuleDefaults["video-generation:reference-to-video"]
-                ));
-                if (module) {
-                  setSelectedWorkflowModuleId(module.id);
-                  setH3DiffusionModelName(module.defaults.diffusionModelName);
-                  setH3ModelParametersDraft({
-                    primaryVideoSteps: module.defaults.primaryVideoSteps,
-                    primaryAudioSteps: module.defaults.primaryAudioSteps,
-                    secondarySchedulerSteps: module.defaults.secondarySchedulerSteps,
-                    primaryUpscaleFactor: module.defaults.primaryUpscaleFactor,
-                    primaryBrightness: module.defaults.primaryBrightness,
-                    primaryContrast: module.defaults.primaryContrast,
-                    primarySaturation: module.defaults.primarySaturation,
-                    secondaryBrightness: module.defaults.secondaryBrightness,
-                    secondaryContrast: module.defaults.secondaryContrast,
-                    secondarySaturation: module.defaults.secondarySaturation,
-                  });
-                }
-                setActiveSettingsSection("video-model");
-              }}
-            >
-              <SlidersHorizontal size={16} />
-              <span><strong>视频模型参数</strong><small>模型、音频与画面</small></span>
-            </button>
-            <button
-              type="button"
-              className={activeSettingsSection === "image-model" ? "is-active" : ""}
-              onClick={() => {
-                const module = workflowModules.find((candidate) => (
-                  !candidate.deletedAt
-                  && candidate.id === workflowModuleDefaults["image-generation"]
-                )) ?? workflowModules.find((candidate) => (
-                  !candidate.deletedAt && candidate.capability === "image-generation"
-                ));
-                if (module) {
-                  setSelectedImageWorkflowModuleId(module.id);
-                  setKrea2DiffusionModelName(
-                    isKrea2DiffusionModelName(module.defaults.diffusionModelName)
-                      ? module.defaults.diffusionModelName
-                      : "",
-                  );
-                }
-                setActiveSettingsSection("image-model");
-              }}
-            >
-              <ImageIcon size={16} />
-              <span><strong>图片模型参数</strong><small>按图片方案选择基础模型</small></span>
-            </button>
-            <button
-              type="button"
-              className={activeSettingsSection === "backup" ? "is-active" : ""}
-              onClick={() => setActiveSettingsSection("backup")}
-            >
-              <DatabaseBackup size={16} />
-              <span><strong>数据备份</strong><small>整机迁移与恢复</small></span>
-            </button>
-            <button
-              type="button"
-              className={activeSettingsSection === "privacy" ? "is-active" : ""}
-              onClick={() => setActiveSettingsSection("privacy")}
-            >
-              <FolderKanban size={16} />
-              <span><strong>私密项目</strong><small>隐藏与显示</small></span>
-            </button>
-            <button
-              type="button"
-              className={activeSettingsSection === "security" ? "is-active" : ""}
-              onClick={() => setActiveSettingsSection("security")}
-            >
-              <LockKeyhole size={16} />
-              <span><strong>应用锁</strong><small>密码与验证</small></span>
-            </button>
-          </nav>
-          <div className="app-settings-content">
-            {activeSettingsSection === "general" && (
-              <section className="settings-pane general-settings-pane" aria-labelledby="general-settings-title">
-                <div className="settings-pane-heading">
-                  <h3 id="general-settings-title">基础设置</h3>
-                  <p>配置远程 ComfyUI 的服务地址与 Windows 映射路径。</p>
-                </div>
-                <section className="general-settings-group" aria-labelledby="appearance-settings-title">
-                  <div className="general-settings-group-heading">
-                    <h4 id="appearance-settings-title">界面</h4>
-                    <p>调整应用中的文字与控件显示密度。</p>
-                  </div>
-                  <section className="ui-font-size-setting" aria-labelledby="ui-font-size-setting-title">
-                    <div>
-                      <strong id="ui-font-size-setting-title">界面字号</strong>
-                      <small>中字号会同步扩大文字、控件高度和菜单间距。</small>
-                    </div>
-                    <div className="ui-font-size-options" role="radiogroup" aria-label="界面字号">
-                      {(["small", "medium"] as const).map((size) => (
-                        <button
-                          key={size}
-                          type="button"
-                          role="radio"
-                          aria-checked={uiFontSize === size}
-                          className={uiFontSize === size ? "is-active" : ""}
-                          onClick={() => setUiFontSize(size)}
-                        >
-                          <span aria-hidden="true">Aa</span>
-                          {size === "small" ? "小" : "中"}
-                        </button>
-                      ))}
-                    </div>
-                  </section>
-                </section>
-                <section className="general-settings-group comfyui-settings-group" aria-label="ComfyUI 配置">
-                  <div className="comfyui-settings-fields">
-                    <label>
-                      ComfyUI 服务地址
-                      <input
-                        value={comfyUiServerUrlDraft}
-                        onChange={(event) => setComfyUiServerUrlDraft(event.currentTarget.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Escape") {
-                            event.preventDefault();
-                            setSettingsOpen(false);
-                          }
-                        }}
-                        placeholder="例如：http://192.168.5.108:8188"
-                        spellCheck={false}
-                      />
-                      <small>
-                        ComfyUI 网页与 API 的服务地址。保存后，生成提交、队列、预览和进度连接都会改用此地址。
-                      </small>
-                    </label>
-                    <label>
-                      ComfyUI 输入映射目录
-                      <input
-                        value={comfyInputRootDraft}
-                        onChange={(event) => setComfyInputRootDraft(event.currentTarget.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Escape") {
-                            event.preventDefault();
-                            setSettingsOpen(false);
-                          }
-                        }}
-                        placeholder="例如：X:\ComfyUI_windows_portable\ComfyUI\input"
-                        spellCheck={false}
-                      />
-                      <small>
-                        请填写 ComfyUI 的 input 根目录，例如
-                        X:\ComfyUI_windows_portable\ComfyUI\input。不要包含 infinite-canvas；程序会自动创建并在任务结束后清理
-                        infinite-canvas\任务ID。留空则不自动清理。
-                      </small>
-                    </label>
-                    <label>
-                      ComfyUI 输出映射目录
-                      <input
-                        value={comfyOutputRootDraft}
-                        onChange={(event) => setComfyOutputRootDraft(event.currentTarget.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Escape") {
-                            event.preventDefault();
-                            setSettingsOpen(false);
-                          }
-                        }}
-                        placeholder="例如：X:\ComfyUI_windows_portable\ComfyUI\output"
-                        spellCheck={false}
-                      />
-                      <small>
-                        请选择或填写远端 ComfyUI 的 output 根目录，不要包含生成任务的子文件夹和文件名。
-                      </small>
-                    </label>
-                  </div>
-                </section>
-              </section>
-            )}
-            {activeSettingsSection === "workflows" && (
-              <section className="settings-pane workflow-settings-pane" aria-labelledby="workflow-settings-title">
-                <div className="settings-pane-heading workflow-settings-heading">
-                  <div>
-                    <h3 id="workflow-settings-title">工作流方案</h3>
-                    <p>每个功能可并存多套方案；每套方案独立保存工作流、节点映射、参数默认值和恢复点。</p>
-                  </div>
-                  <label className="workflow-trash-toggle">
-                    <input
-                      type="checkbox"
-                      checked={showDeletedWorkflowModules}
-                      onChange={(event) => setShowDeletedWorkflowModules(event.currentTarget.checked)}
-                    />
-                    显示回收站
-                  </label>
-                </div>
-                <div className="workflow-module-manager">
-                  <aside className="workflow-module-list" aria-label="工作流方案列表">
-                    <div className="workflow-module-list-tools">
-                      <label className="workflow-module-search">
-                        <Search size={13} aria-hidden="true" />
-                        <input
-                          type="search"
-                          value={workflowModuleSearch}
-                          onChange={(event) => setWorkflowModuleSearch(event.currentTarget.value)}
-                          placeholder="搜索工作流名称"
-                          aria-label="搜索工作流名称"
-                        />
-                      </label>
-                      <button
-                        type="button"
-                        className="workflow-module-sort"
-                        onClick={() => setWorkflowModuleSortDirection((current) => (
-                          current === "asc" ? "desc" : "asc"
-                        ))}
-                        title={workflowModuleSortDirection === "asc" ? "当前按名称升序，点击改为降序" : "当前按名称降序，点击改为升序"}
-                      >
-                        名称 {workflowModuleSortDirection === "asc" ? "A–Z" : "Z–A"}
-                      </button>
-                    </div>
-                    {WORKFLOW_CAPABILITIES.map((capability) => {
-                      const search = workflowModuleSearch.trim().toLocaleLowerCase();
-                      const modules = workflowModules
-                        .filter((module) => (
-                          module.capability === capability.value
-                          && (showDeletedWorkflowModules || !module.deletedAt)
-                          && (!search || module.name.toLocaleLowerCase().includes(search))
-                        ))
-                        .sort((left, right) => {
-                          const comparison = left.name.localeCompare(right.name, "zh-CN", {
-                            numeric: true,
-                            sensitivity: "base",
-                          }) || left.revision.localeCompare(right.revision, "zh-CN", {
-                            numeric: true,
-                            sensitivity: "base",
-                          });
-                          return workflowModuleSortDirection === "asc" ? comparison : -comparison;
-                        });
-                      return (
-                        <section key={capability.value} className="workflow-module-group">
-                          <header>
-                            <strong>{capability.label}</strong>
-                            <span>{modules.length}</span>
-                          </header>
-                          {modules.map((module) => (
-                            <button
-                              key={module.id}
-                              type="button"
-                              className={`${selectedWorkflowModuleId === module.id ? "is-active" : ""} ${module.deletedAt ? "is-deleted" : ""}`}
-                              onClick={() => setSelectedWorkflowModuleId(module.id)}
-                            >
-                              <span>{module.name}</span>
-                              <small>
-                                {workflowVariantLabel(module)} · {module.revision}
-                                {workflowModuleVisibleIds.includes(module.id) ? " · 前端显示" : ""}
-                                {module.deletedAt ? " · 回收站" : ""}
-                              </small>
-                            </button>
-                          ))}
-                          {!modules.length && <p>{workflowModuleSearch.trim() ? "无匹配方案" : "尚无方案"}</p>}
-                        </section>
-                      );
-                    })}
-                    <button
-                      type="button"
-                      className="workflow-module-new"
-                      onClick={() => {
-                        setSelectedWorkflowModuleId("");
-                        setWorkflowModuleNameDraft("新工作流方案");
-                        setWorkflowModuleRevisionDraft("V2");
-                        setWorkflowModuleCapabilityDraft("video-generation");
-                        setWorkflowModuleVariantDraft("reference-to-video");
-                        setWorkflowModulePathDraft(h3WorkflowPathDraft || DEFAULT_H3_REFERENCE_WORKFLOW_PATH);
-                        setWorkflowModuleValidation(null);
-                        setWorkflowModuleBindingsDraft("");
-                      }}
-                    >
-                      <Plus size={14} /> 新建方案
-                    </button>
-                    <button
-                      type="button"
-                      className="workflow-module-new"
-                      onClick={() => void importWorkflowModuleBundle()}
-                      disabled={workflowModulesBusy}
-                    >
-                      <Upload size={13} /> 导入备份为新方案
-                    </button>
-                  </aside>
-                  <div className="workflow-module-editor">
-                    <div className="workflow-module-editor-title">
-                      <div>
-                        <strong>{selectedWorkflowModule ? "编辑方案" : "新建方案"}</strong>
-                        <small>{selectedWorkflowModule?.adapter.adapterId ?? WORKFLOW_PACKAGE_ENGINE}</small>
-                      </div>
-                      {selectedWorkflowModule && !selectedWorkflowModule.deletedAt && (
-                        <div className="workflow-module-title-actions">
-                          <label className="workflow-module-frontend-toggle">
-                            <input
-                              type="checkbox"
-                              checked={workflowModuleVisibleIds.includes(selectedWorkflowModule.id)}
-                              onChange={(event) => setWorkflowModuleFrontendVisibility(
-                                selectedWorkflowModule,
-                                event.currentTarget.checked,
-                              )}
-                            />
-                            <span>显示在前端</span>
-                          </label>
-                          <button
-                            type="button"
-                            className="workflow-module-delete-icon"
-                            aria-label="删除方案"
-                            title="删除方案"
-                            disabled={workflowModulesBusy}
-                            onClick={() => setWorkflowModuleDeletionMode("trash")}
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                    <div className="workflow-module-fields">
-                      <label>
-                        方案名称
-                        <input
-                          value={workflowModuleNameDraft}
-                          onChange={(event) => setWorkflowModuleNameDraft(event.currentTarget.value)}
-                          disabled={Boolean(selectedWorkflowModule?.deletedAt)}
-                        />
-                      </label>
-                      <label>
-                        修订名称
-                        <input
-                          value={workflowModuleRevisionDraft}
-                          onChange={(event) => setWorkflowModuleRevisionDraft(event.currentTarget.value)}
-                          placeholder="例如：v1、稳定版、当前"
-                          disabled={Boolean(selectedWorkflowModule?.deletedAt)}
-                        />
-                      </label>
-                      <div className="workflow-module-field">
-                        <span>功能类型</span>
-                        <SettingsSelect
-                          value={workflowModuleCapabilityDraft}
-                          onChange={(value) => {
-                            const capability = value as WorkflowCapability;
-                            setWorkflowModuleCapabilityDraft(capability);
-                            setWorkflowModuleVariantDraft(capability === "image-generation"
-                              ? "image-generation"
-                              : "reference-to-video");
-                          }}
-                          disabled={Boolean(selectedWorkflowModule?.deletedAt)}
-                          ariaLabel="工作流功能类型"
-                          options={WORKFLOW_CAPABILITIES.map((capability) => ({
-                            value: capability.value,
-                            label: capability.label,
-                          }))}
-                        />
-                      </div>
-                      {workflowModuleCapabilityDraft === "video-generation" && (
-                        <div className="workflow-module-field">
-                          <span>视频生成子类型</span>
-                          <SettingsSelect
-                            value={workflowModuleVariantDraft}
-                            onChange={(value) => {
-                              const variant = value as WorkflowVariant;
-                              setWorkflowModuleVariantDraft(variant);
-                              setWorkflowModuleValidation(null);
-                              if (!selectedWorkflowModule) {
-                                setWorkflowModuleBindingsDraft("");
-                                setWorkflowModulePathDraft(
-                                  variant === "first-last-frame"
-                                    ? DEFAULT_H3_FIRST_LAST_WORKFLOW_PATH
-                                    : variant === "image-to-video"
-                                      ? DEFAULT_H3_IMAGE_TO_VIDEO_WORKFLOW_PATH
-                                      : variant === "last-frame-to-video"
-                                        ? DEFAULT_H3_LAST_FRAME_TO_VIDEO_WORKFLOW_PATH
-                                      : h3WorkflowPathDraft || DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
-                                );
-                              }
-                            }}
-                            disabled={Boolean(selectedWorkflowModule?.deletedAt)}
-                            ariaLabel="视频生成子类型"
-                            options={WORKFLOW_VIDEO_VARIANTS.map((variant) => ({
-                              value: variant.value,
-                              label: `${variant.label}${variant.value === "text-to-video" ? "（等待对应适配器）" : ""}`,
-                              disabled: variant.value === "text-to-video",
-                            }))}
-                          />
-                        </div>
-                      )}
-                    </div>
-                    <label className="workflow-module-path-field">
-                      API 工作流 JSON
-                      <input
-                        value={workflowModulePathDraft}
-                        onChange={(event) => {
-                          setWorkflowModulePathDraft(event.currentTarget.value);
-                          setWorkflowModuleValidation(null);
-                        }}
-                        placeholder="D:\\...\\workflow_api.json"
-                        spellCheck={false}
-                        disabled={Boolean(selectedWorkflowModule?.deletedAt)}
-                      />
-                      <small>
-                        保存后会复制到应用的独立方案仓库，原始 JSON 后续移动或删除不会影响已保存方案。
-                      </small>
-                    </label>
-                    <details className="workflow-bindings-editor">
-                      <summary>高级节点映射</summary>
-                      <p>工作流节点 ID 变化时在这里调整映射。留空会使用当前 H3 多参默认映射。</p>
-                      <textarea
-                        value={workflowModuleBindingsDraft}
-                        onChange={(event) => {
-                          setWorkflowModuleBindingsDraft(event.currentTarget.value);
-                          setWorkflowModuleValidation(null);
-                        }}
-                        spellCheck={false}
-                        disabled={Boolean(selectedWorkflowModule?.deletedAt)}
-                        placeholder="留空使用默认节点映射"
-                      />
-                    </details>
-                    {workflowModuleValidation && (
-                      <div className={`workflow-module-validation ${workflowModuleValidation.compatible ? "is-valid" : "is-invalid"}`}>
-                        <strong>{workflowModuleValidation.compatible ? "兼容性检查通过" : "兼容性检查未通过"}</strong>
-                        {workflowModuleValidation.issues.map((issue) => <span key={issue}>{issue}</span>)}
-                      </div>
-                    )}
-                    {selectedWorkflowModule && (
-                      <div className="workflow-module-meta">
-                        <span>内部副本：{selectedWorkflowModule.sourceWorkflowName}</span>
-                        <span>恢复点：{selectedWorkflowModule.backupCount}</span>
-                        <span>引用：{workflowModuleUsageCount(selectedWorkflowModule.id)}</span>
-                      </div>
-                    )}
-                    {selectedWorkflowModule && !selectedWorkflowModule.deletedAt && workflowModuleUsageCount(selectedWorkflowModule.id) > 0 && (
-                      <div className="workflow-module-replacement">
-                        <span>删除时替换引用（可选）</span>
-                        <SettingsSelect
-                          value={workflowModuleReplacementId}
-                          onChange={setWorkflowModuleReplacementId}
-                          ariaLabel="删除方案时替换引用"
-                          options={[
-                            { value: "", label: "不替换，相关节点显示方案缺失" },
-                            ...workflowModules.filter((module) => (
-                              !module.deletedAt
-                              && module.id !== selectedWorkflowModule.id
-                              && workflowModuleFamilyKey(module) === workflowModuleFamilyKey(selectedWorkflowModule)
-                            )).map((module) => ({
-                              value: module.id,
-                              label: `${module.name} · ${module.revision}`,
-                            })),
-                          ]}
-                        />
-                      </div>
-                    )}
-                    <div className="workflow-module-actions">
-                      {!selectedWorkflowModule?.deletedAt ? (
-                        <>
-                          <button type="button" onClick={() => void validateWorkflowModuleDraft()} disabled={workflowModulesBusy}>
-                            验证适配
-                          </button>
-                          <button type="button" onClick={() => void saveWorkflowModuleDraft(false)} disabled={workflowModulesBusy}>
-                            另存为新方案
-                          </button>
-                          {selectedWorkflowModule && (
-                            <button type="button" onClick={() => void exportSelectedWorkflowModule()} disabled={workflowModulesBusy}>
-                              导出备份
-                            </button>
-                          )}
-                          {selectedWorkflowModule && (
-                            <button type="button" onClick={() => void requestWorkflowModuleRestore()} disabled={workflowModulesBusy}>
-                              从备份恢复当前方案
-                            </button>
-                          )}
-                          {selectedWorkflowModule && selectedWorkflowModule.backupCount > 0 && (
-                            <button type="button" onClick={() => void restoreSelectedWorkflowModuleBackup()} disabled={workflowModulesBusy}>
-                              恢复到覆盖前状态
-                            </button>
-                          )}
-                          {selectedWorkflowModule && (
-                            <button type="button" className="primary-button workflow-module-save-button" onClick={() => void saveWorkflowModuleDraft(true)} disabled={workflowModulesBusy}>
-                              保存
-                            </button>
-                          )}
-                        </>
-                      ) : (
-                        <>
-                          <button type="button" className="primary-button" onClick={() => void restoreSelectedWorkflowModule()} disabled={workflowModulesBusy}>
-                            恢复方案
-                          </button>
-                          <button type="button" className="dialog-danger" onClick={() => setWorkflowModuleDeletionMode("purge")} disabled={workflowModulesBusy}>
-                            彻底删除
-                          </button>
-                        </>
-                      )}
-                    </div>
-                    {!workflowModulesReady && <p className="workflow-module-loading">正在读取工作流方案…</p>}
-                  </div>
-                </div>
-              </section>
-            )}
-            {activeSettingsSection === "video-defaults" && (
-              <section className="settings-pane video-defaults-settings-pane" aria-labelledby="video-defaults-settings-title">
-                <div className="settings-pane-heading">
-                  <div>
-                    <h3 id="video-defaults-settings-title">视频默认参数</h3>
-                    <p>这里的参数会套用到之后新建的视频生成节点；已在画布上的节点不会被改动。</p>
-                  </div>
-                </div>
-                <VideoGenerationDefaultsEditor
-                  value={videoGenerationDefaultsDraft}
-                  workflowModules={workflowModules}
-                  workflowDefaultsByModule={videoGenerationDefaultsByWorkflow}
-                  h3LoraOptions={h3LoraOptions}
-                  onChange={(patch) => setVideoGenerationDefaultsDraft((current) => ({ ...current, ...patch }))}
-                />
-              </section>
-            )}
-            {activeSettingsSection === "video-model" && (
-              <section className="settings-pane model-settings-pane" aria-labelledby="model-settings-title">
-                <div className="settings-pane-heading">
-                  <h3 id="model-settings-title">视频模型参数</h3>
-                  <p>参数独立保存在所选工作流方案中，不会影响其他并存方案。</p>
-                </div>
-                <div className="model-workflow-module-select">
-                  <span>编辑方案</span>
-                  <SettingsSelect
-                    value={selectedWorkflowModule?.capability === "video-generation" ? selectedWorkflowModule.id : ""}
-                    onChange={(value) => {
-                      const module = workflowModules.find((candidate) => candidate.id === value);
-                      if (!module) return;
-                      setSelectedWorkflowModuleId(module.id);
-                      setH3DiffusionModelName(module.defaults.diffusionModelName);
-                      setH3ModelParametersDraft({
-                        primaryVideoSteps: module.defaults.primaryVideoSteps,
-                        primaryAudioSteps: module.defaults.primaryAudioSteps,
-                        secondarySchedulerSteps: module.defaults.secondarySchedulerSteps,
-                        primaryUpscaleFactor: module.defaults.primaryUpscaleFactor,
-                        primaryBrightness: module.defaults.primaryBrightness,
-                        primaryContrast: module.defaults.primaryContrast,
-                        primarySaturation: module.defaults.primarySaturation,
-                        secondaryBrightness: module.defaults.secondaryBrightness,
-                        secondaryContrast: module.defaults.secondaryContrast,
-                        secondarySaturation: module.defaults.secondarySaturation,
-                      });
-                      setH3LoraPreference((current) => ({
-                        ...current,
-                        loraName: module.defaults.loraName,
-                        loraStrength: module.defaults.loraStrength,
-                      }));
-                    }}
-                    ariaLabel="模型参数编辑方案"
-                    placeholder="没有可用方案"
-                    options={workflowModules.filter((module) => (
-                      !module.deletedAt
-                      && module.capability === "video-generation"
-                      && module.variant !== "text-to-video"
-                    )).map((module) => ({
-                      value: module.id,
-                      label: `${module.name} · ${module.revision}`,
-                    }))}
-                  />
-                </div>
-                <div className="model-workflow-module-select model-diffusion-model-select">
-                  <span>MiniMax H3 基础模型</span>
-                  <SettingsSelect
-                    value={h3DiffusionModelName}
-                    onChange={setH3DiffusionModelName}
-                    ariaLabel="MiniMax H3 基础模型"
-                    placeholder={h3DiffusionModelCatalogLoaded ? "MinimaxH3 目录中没有可用模型" : "正在读取 ComfyUI 模型…"}
-                    disabled={!h3DiffusionModelOptions.length}
-                    options={h3DiffusionModelOptions.map((model) => ({
-                      value: model,
-                      label: h3DiffusionModelDisplayName(model),
-                    }))}
-                  />
-                  <small>来自 ComfyUI 的 models/diffusion_models/MinimaxH3 目录，保存后应用于当前工作流方案。</small>
-                </div>
-                <section className="h3-model-parameters" aria-label="H3 模型参数">
-                  {selectedWorkflowModule?.uiSchema.groups.map((group, groupIndex) => (
-                    <div className="h3-model-parameter-group" key={group.id}>
-                      <strong>{group.title}</strong>
-                      <div className="h3-model-parameters-grid">
-                        {group.fields.filter((field) => (
-                          field.key !== "primaryVideoSteps"
-                          && field.key !== "secondarySchedulerSteps"
-                        )).map((field, fieldIndex) => (
-                          <label key={field.key}>
-                            {field.label}
-                            <ModelParameterNumberInput
-                              autoFocus={groupIndex === 0 && fieldIndex === 0}
-                              min={field.minKey
-                                ? h3ModelParametersDraft[field.minKey] || field.min
-                                : field.min}
-                              max={field.max}
-                              step={field.step}
-                              value={h3ModelParametersDraft[field.key]}
-                              onChange={(value) => setH3ModelParametersDraft((current) => ({
-                                ...current,
-                                [field.key]: value,
-                              }))}
-                            />
-                          </label>
-                        ))}
-                      </div>
-                      {group.id === "sampling-steps"
-                        ? <small className="h3-model-parameters-note">Video Steps 与二采 Steps 已移至视频节点；这里保留一采 Audio Steps。</small>
-                        : group.note && <small className="h3-model-parameters-note">{group.note}</small>}
-                    </div>
-                  ))}
-                </section>
-              </section>
-            )}
-            {activeSettingsSection === "image-model" && (
-              <section className="settings-pane model-settings-pane" aria-labelledby="image-model-settings-title">
-                <div className="settings-pane-heading">
-                  <h3 id="image-model-settings-title">图片模型参数</h3>
-                  <p>每个图片生成方案独立保存基础模型；当前支持 Krea2 文生图与图像编辑。</p>
-                </div>
-                <div className="model-workflow-module-select">
-                  <span>编辑方案</span>
-                  <SettingsSelect
-                    value={selectedImageWorkflowModule?.id ?? ""}
-                    onChange={(value) => {
-                      const module = workflowModules.find((candidate) => (
-                        !candidate.deletedAt
-                        && candidate.capability === "image-generation"
-                        && candidate.id === value
-                      ));
-                      if (!module) return;
-                      setSelectedImageWorkflowModuleId(module.id);
-                      setKrea2DiffusionModelName(
-                        isKrea2DiffusionModelName(module.defaults.diffusionModelName)
-                          ? module.defaults.diffusionModelName
-                          : "",
-                      );
-                    }}
-                    ariaLabel="图片模型参数编辑方案"
-                    placeholder="没有可用图片方案"
-                    options={workflowModules.filter((module) => (
-                      !module.deletedAt && module.capability === "image-generation"
-                    )).map((module) => ({
-                      value: module.id,
-                      label: `${module.name} · ${module.revision}`,
-                    }))}
-                  />
-                </div>
-                <div className="model-workflow-module-select model-diffusion-model-select">
-                  <span>Krea2 基础模型</span>
-                  <SettingsSelect
-                    value={krea2DiffusionModelName}
-                    onChange={setKrea2DiffusionModelName}
-                    ariaLabel="Krea2 基础模型"
-                    placeholder={krea2DiffusionModelCatalogLoaded ? "Krea2 目录中没有可用模型" : "正在读取 ComfyUI 模型…"}
-                    disabled={!selectedImageWorkflowModule || !krea2DiffusionModelOptions.length}
-                    options={krea2DiffusionModelOptions.map((model) => ({
-                      value: model,
-                      label: h3DiffusionModelDisplayName(model),
-                    }))}
-                  />
-                  <small>仅显示 ComfyUI 中 Krea2 目录的 UNET 基础模型；保存后应用于当前图片方案、图像编辑及图片放大。</small>
-                </div>
-              </section>
-            )}
-            {activeSettingsSection === "backup" && (
-              <section className="settings-pane app-backup-settings" aria-labelledby="app-backup-settings-title">
-                <div className="settings-pane-heading">
-                  <h3 id="app-backup-settings-title">数据备份与恢复</h3>
-                  <p>将项目数据库、素材、工作流方案与适配器、方案恢复点和软件设置保存为一个完整备份。</p>
-                </div>
-                <div className="app-backup-card">
-                  <span className="app-backup-card-icon"><DatabaseBackup size={19} /></span>
-                  <div>
-                    <strong>一键备份整个软件</strong>
-                    <p>备份时创建数据库一致性快照，不会直接复制正在写入的数据库。备份文件可以保存到移动硬盘或同步盘。</p>
-                  </div>
-                  <button
-                    type="button"
-                    className="primary-button"
-                    onClick={() => void exportFullAppBackup()}
-                    disabled={appBackupBusy}
-                  >
-                    {appBackupBusy ? "处理中…" : "立即备份"}
-                  </button>
-                </div>
-                <div className="app-backup-card">
-                  <span className="app-backup-card-icon is-restore"><RotateCcw size={19} /></span>
-                  <div>
-                    <strong>从完整备份恢复</strong>
-                    <p>适用于新电脑安装后的整机恢复。软件会先校验备份，并保留恢复前的数据目录；重新启动后生效。</p>
-                  </div>
-                  <button
-                    type="button"
-                    className="app-backup-restore-button"
-                    onClick={() => void chooseFullAppBackupToRestore()}
-                    disabled={appBackupBusy}
-                  >
-                    选择备份恢复
-                  </button>
-                </div>
-                <div className="app-backup-includes">
-                  <strong>备份内容</strong>
-                  <span>项目和节点数据库</span>
-                  <span>已导入的图片、音频、视频素材</span>
-                  <span>全部工作流与适配器</span>
-                  <span>方案备份、应用锁和界面设置</span>
-                </div>
-                {runtime?.dataPath && (
-                  <p className="app-backup-data-path" title={runtime.dataPath}>
-                    当前数据库：{runtime.dataPath}
-                  </p>
-                )}
-                <p className="app-backup-external-note">
-                  ComfyUI 输出目录中的生成文件属于外部数据，不在软件备份内；如需长期保留，请同时备份 ComfyUI output 目录。
-                </p>
-                {appBackupMessage && (
-                  <p className={`app-backup-message is-${appBackupMessageKind}`} role="status">
-                    {appBackupMessage}
-                  </p>
-                )}
-              </section>
-            )}
-            {activeSettingsSection === "privacy" && (
-        <section className="private-project-settings settings-pane" aria-labelledby="private-project-settings-title">
-          <div className="private-project-settings-heading">
-            <span className="private-project-settings-icon"><LockKeyhole size={16} /></span>
+      <div className="project-dialog-backdrop" onMouseDown={() => {
+        if (!workflowModuleDeletionMode && !workflowModuleRestoreRequest) setSettingsOpen(false);
+      }}>
+        <form
+          className="project-dialog app-settings-dialog"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (activeSettingsSection === "general") saveComfySettings();
+            if (activeSettingsSection === "video-defaults") saveVideoGenerationDefaults();
+            if (activeSettingsSection === "video-model") void saveH3ModelParameters();
+            if (activeSettingsSection === "image-model") void saveKrea2ModelParameters();
+          }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <div className="app-settings-header">
+            <div className="project-dialog-icon"><Settings2 size={21} /></div>
             <div>
-              <strong id="private-project-settings-title">私密项目</strong>
-              <small>被设为私密的项目默认不会出现在项目首页，项目数据不会被删除。</small>
+              <h2>应用设置</h2>
+              <p>管理 SuCanvas 的连接、工作流、完整备份和本机安全。</p>
             </div>
             <button
               type="button"
-              className={`private-project-visibility ${showPrivateProjects ? "is-active" : ""}`}
-              role="switch"
-              aria-checked={showPrivateProjects}
-              onClick={togglePrivateProjectVisibility}
-              title="显示或隐藏私密项目（Ctrl+H）"
+              className="app-settings-close"
+              onClick={() => setSettingsOpen(false)}
+              title="关闭设置"
+              aria-label="关闭应用设置"
             >
-              {showPrivateProjects ? <Eye size={14} /> : <EyeOff size={14} />}
-              {showPrivateProjects ? "正在显示" : "显示私密项目"}
+              <X size={18} />
             </button>
           </div>
-          <div className="private-project-search">
-            <Search size={14} aria-hidden="true" />
-            <input
-              type="search"
-              value={privateProjectSearch}
-              onChange={(event) => setPrivateProjectSearch(event.currentTarget.value)}
-              placeholder="搜索项目名称"
-              aria-label="搜索私密项目设置中的项目"
-              spellCheck={false}
-            />
-            <span>{filteredPrivateProjects.length} / {projects.length}</span>
-            {privateProjectSearch && (
+          <div className="app-settings-body">
+            <nav className="app-settings-nav" aria-label="设置类目">
               <button
                 type="button"
-                onClick={() => setPrivateProjectSearch("")}
-                title="清空搜索"
-                aria-label="清空项目搜索"
+                className={activeSettingsSection === "general" ? "is-active" : ""}
+                onClick={() => setActiveSettingsSection("general")}
               >
-                <X size={13} />
+                <Settings2 size={16} />
+                <span><strong>基础设置</strong><small>ComfyUI 映射目录</small></span>
               </button>
-            )}
-          </div>
-          <div className="private-project-list">
-            {filteredPrivateProjects.map((project) => {
-              const busy = privateProjectBusyId === project.canvas.id;
-              return (
-                <div className="private-project-row" key={project.canvas.id}>
-                  <span className="private-project-row-icon">
-                    {project.canvas.isPrivate ? <LockKeyhole size={14} /> : <FolderKanban size={14} />}
-                  </span>
-                  <span className="private-project-row-name" title={project.canvas.name}>
-                    {project.canvas.name}
-                  </span>
-                  <button
-                    type="button"
-                    className={`private-project-toggle ${project.canvas.isPrivate ? "is-private" : ""}`}
-                    role="switch"
-                    aria-checked={project.canvas.isPrivate}
-                    aria-label={`${project.canvas.name}：${project.canvas.isPrivate ? "取消私密" : "设为私密"}`}
-                    onClick={() => void changeProjectPrivacy(project.canvas.id, !project.canvas.isPrivate)}
-                    disabled={Boolean(privateProjectBusyId)}
-                  >
-                    <span aria-hidden="true" />
-                    {busy ? "保存中" : project.canvas.isPrivate ? "私密" : "普通"}
-                  </button>
-                </div>
-              );
-            })}
-            {filteredPrivateProjects.length === 0 && (
-              <div className="private-project-empty">没有匹配的项目</div>
-            )}
-          </div>
-          <p className="private-project-note">
-            这是界面隐藏功能，不会加密项目文件；需要防止他人打开软件时，请同时启用本机应用锁。显示开关状态会在重启后继续保留。
-          </p>
-        </section>
-            )}
-            {activeSettingsSection === "security" && (
-        <section className="app-lock-settings settings-pane" aria-labelledby="app-lock-settings-title">
-          <div className="app-lock-settings-heading">
-            <span className="app-lock-settings-icon"><LockKeyhole size={16} /></span>
-            <div>
-              <strong id="app-lock-settings-title">本机应用锁</strong>
-              <small>密码经 Argon2 加盐哈希后保存在本机，不会保存明文。</small>
+              <button
+                type="button"
+                className={activeSettingsSection === "workflows" ? "is-active" : ""}
+                onClick={() => setActiveSettingsSection("workflows")}
+              >
+                <Clapperboard size={16} />
+                <span><strong>工作流方案</strong><small>多功能与多套方案</small></span>
+              </button>
+              <button
+                type="button"
+                className={activeSettingsSection === "video-defaults" ? "is-active" : ""}
+                onClick={() => setActiveSettingsSection("video-defaults")}
+              >
+                <SlidersHorizontal size={16} />
+                <span><strong>视频默认参数</strong><small>新节点的生成参数</small></span>
+              </button>
+              <button
+                type="button"
+                className={activeSettingsSection === "video-model" ? "is-active" : ""}
+                onClick={() => {
+                  const module = workflowModules.find((candidate) => (
+                    !candidate.deletedAt
+                    && candidate.id === workflowModuleDefaults["video-generation:reference-to-video"]
+                  ));
+                  if (module) {
+                    setSelectedWorkflowModuleId(module.id);
+                    setH3DiffusionModelName(module.defaults.diffusionModelName);
+                    setH3ModelParametersDraft({
+                      primaryVideoSteps: module.defaults.primaryVideoSteps,
+                      primaryAudioSteps: workflowUsesSharedPrimarySteps(module)
+                        ? module.defaults.primaryVideoSteps
+                        : module.defaults.primaryAudioSteps,
+                      secondarySchedulerSteps: module.defaults.secondarySchedulerSteps,
+                      primaryUpscaleFactor: module.defaults.primaryUpscaleFactor,
+                      primaryBrightness: module.defaults.primaryBrightness,
+                      primaryContrast: module.defaults.primaryContrast,
+                      primarySaturation: module.defaults.primarySaturation,
+                      secondaryBrightness: module.defaults.secondaryBrightness,
+                      secondaryContrast: module.defaults.secondaryContrast,
+                      secondarySaturation: module.defaults.secondarySaturation,
+                    });
+                  }
+                  setActiveSettingsSection("video-model");
+                }}
+              >
+                <SlidersHorizontal size={16} />
+                <span><strong>视频模型参数</strong><small>模型、音频与画面</small></span>
+              </button>
+              <button
+                type="button"
+                className={activeSettingsSection === "image-model" ? "is-active" : ""}
+                onClick={() => {
+                  const module = workflowModules.find((candidate) => (
+                    !candidate.deletedAt
+                    && candidate.id === workflowModuleDefaults["image-generation"]
+                  )) ?? workflowModules.find((candidate) => (
+                    !candidate.deletedAt && candidate.capability === "image-generation"
+                  ));
+                  if (module) {
+                    setSelectedImageWorkflowModuleId(module.id);
+                    setKrea2DiffusionModelName(
+                      isKrea2DiffusionModelName(module.defaults.diffusionModelName)
+                        ? module.defaults.diffusionModelName
+                        : "",
+                    );
+                  }
+                  setActiveSettingsSection("image-model");
+                }}
+              >
+                <ImageIcon size={16} />
+                <span><strong>图片模型参数</strong><small>按图片方案选择基础模型</small></span>
+              </button>
+              <button
+                type="button"
+                className={activeSettingsSection === "backup" ? "is-active" : ""}
+                onClick={() => setActiveSettingsSection("backup")}
+              >
+                <DatabaseBackup size={16} />
+                <span><strong>数据备份</strong><small>整机迁移与恢复</small></span>
+              </button>
+              <button
+                type="button"
+                className={activeSettingsSection === "privacy" ? "is-active" : ""}
+                onClick={() => setActiveSettingsSection("privacy")}
+              >
+                <FolderKanban size={16} />
+                <span><strong>私密项目</strong><small>隐藏与显示</small></span>
+              </button>
+              <button
+                type="button"
+                className={activeSettingsSection === "security" ? "is-active" : ""}
+                onClick={() => setActiveSettingsSection("security")}
+              >
+                <LockKeyhole size={16} />
+                <span><strong>应用锁</strong><small>密码与验证</small></span>
+              </button>
+            </nav>
+            <div className="app-settings-content">
+              {activeSettingsSection === "general" && (
+                <GeneralSettingsPanel
+                  uiFontSize={uiFontSize}
+                  setUiFontSize={setUiFontSize}
+                  comfyUiServerUrlDraft={comfyUiServerUrlDraft}
+                  setComfyUiServerUrlDraft={setComfyUiServerUrlDraft}
+                  setSettingsOpen={setSettingsOpen}
+                  comfyInputRootDraft={comfyInputRootDraft}
+                  setComfyInputRootDraft={setComfyInputRootDraft}
+                  comfyOutputRootDraft={comfyOutputRootDraft}
+                  setComfyOutputRootDraft={setComfyOutputRootDraft}
+                />
+              )}
+              {activeSettingsSection === "workflows" && (
+                <WorkflowSettingsPanel
+                  showDeletedWorkflowModules={showDeletedWorkflowModules}
+                  setShowDeletedWorkflowModules={setShowDeletedWorkflowModules}
+                  workflowModuleSearch={workflowModuleSearch}
+                  setWorkflowModuleSearch={setWorkflowModuleSearch}
+                  setWorkflowModuleSortDirection={setWorkflowModuleSortDirection}
+                  workflowModuleSortDirection={workflowModuleSortDirection}
+                  workflowModules={workflowModules}
+                  selectedWorkflowModuleId={selectedWorkflowModuleId}
+                  setSelectedWorkflowModuleId={setSelectedWorkflowModuleId}
+                  workflowModuleVisibleIds={workflowModuleVisibleIds}
+                  setWorkflowModuleNameDraft={setWorkflowModuleNameDraft}
+                  setWorkflowModuleRevisionDraft={setWorkflowModuleRevisionDraft}
+                  setWorkflowModuleCapabilityDraft={setWorkflowModuleCapabilityDraft}
+                  setWorkflowModuleVariantDraft={setWorkflowModuleVariantDraft}
+                  setWorkflowModulePathDraft={setWorkflowModulePathDraft}
+                  h3WorkflowPathDraft={h3WorkflowPathDraft}
+                  setWorkflowModuleValidation={setWorkflowModuleValidation}
+                  setWorkflowModuleBindingsDraft={setWorkflowModuleBindingsDraft}
+                  importWorkflowModuleBundle={importWorkflowModuleBundle}
+                  workflowModulesBusy={workflowModulesBusy}
+                  selectedWorkflowModule={selectedWorkflowModule}
+                  setWorkflowModuleFrontendVisibility={setWorkflowModuleFrontendVisibility}
+                  setWorkflowModuleDeletionMode={setWorkflowModuleDeletionMode}
+                  workflowModuleNameDraft={workflowModuleNameDraft}
+                  workflowModuleRevisionDraft={workflowModuleRevisionDraft}
+                  workflowModuleCapabilityDraft={workflowModuleCapabilityDraft}
+                  workflowModuleVariantDraft={workflowModuleVariantDraft}
+                  workflowModulePathDraft={workflowModulePathDraft}
+                  workflowModuleBindingsDraft={workflowModuleBindingsDraft}
+                  workflowModuleValidation={workflowModuleValidation}
+                  workflowModuleUsageCount={workflowModuleUsageCount}
+                  workflowModuleReplacementId={workflowModuleReplacementId}
+                  setWorkflowModuleReplacementId={setWorkflowModuleReplacementId}
+                  validateWorkflowModuleDraft={validateWorkflowModuleDraft}
+                  saveWorkflowModuleDraft={saveWorkflowModuleDraft}
+                  exportSelectedWorkflowModule={exportSelectedWorkflowModule}
+                  requestWorkflowModuleRestore={requestWorkflowModuleRestore}
+                  restoreSelectedWorkflowModuleBackup={restoreSelectedWorkflowModuleBackup}
+                  restoreSelectedWorkflowModule={restoreSelectedWorkflowModule}
+                  workflowModulesReady={workflowModulesReady}
+                />
+              )}
+              {activeSettingsSection === "video-defaults" && (
+                <VideoDefaultsSettingsPanel
+                  videoGenerationDefaultsDraft={videoGenerationDefaultsDraft}
+                  workflowModules={workflowModules}
+                  videoGenerationDefaultsByWorkflow={videoGenerationDefaultsByWorkflow}
+                  h3LoraOptions={h3LoraOptions}
+                  setVideoGenerationDefaultsDraft={setVideoGenerationDefaultsDraft}
+                />
+              )}
+              {activeSettingsSection === "video-model" && (
+                <VideoModelSettingsPanel
+                  selectedWorkflowModule={selectedWorkflowModule}
+                  workflowModules={workflowModules}
+                  setSelectedWorkflowModuleId={setSelectedWorkflowModuleId}
+                  setH3DiffusionModelName={setH3DiffusionModelName}
+                  setH3ModelParametersDraft={setH3ModelParametersDraft}
+                  workflowUsesSharedPrimarySteps={workflowUsesSharedPrimarySteps}
+                  setH3LoraPreference={setH3LoraPreference}
+                  h3DiffusionModelName={h3DiffusionModelName}
+                  h3DiffusionModelCatalogLoaded={h3DiffusionModelCatalogLoaded}
+                  h3DiffusionModelOptions={h3DiffusionModelOptions}
+                  h3ModelParametersDraft={h3ModelParametersDraft}
+                />
+              )}
+              {activeSettingsSection === "image-model" && (
+                <ImageModelSettingsPanel
+                  selectedImageWorkflowModule={selectedImageWorkflowModule}
+                  workflowModules={workflowModules}
+                  setSelectedImageWorkflowModuleId={setSelectedImageWorkflowModuleId}
+                  setKrea2DiffusionModelName={setKrea2DiffusionModelName}
+                  isKrea2DiffusionModelName={isKrea2DiffusionModelName}
+                  krea2DiffusionModelName={krea2DiffusionModelName}
+                  krea2DiffusionModelCatalogLoaded={krea2DiffusionModelCatalogLoaded}
+                  krea2DiffusionModelOptions={krea2DiffusionModelOptions}
+                />
+              )}
+              {activeSettingsSection === "backup" && (
+                <BackupSettingsPanel
+                  exportFullAppBackup={exportFullAppBackup}
+                  appBackupBusy={appBackupBusy}
+                  chooseFullAppBackupToRestore={chooseFullAppBackupToRestore}
+                  runtime={runtime}
+                  appBackupMessage={appBackupMessage}
+                  appBackupMessageKind={appBackupMessageKind}
+                />
+              )}
+              {activeSettingsSection === "privacy" && (
+                <PrivacySettingsPanel
+                  showPrivateProjects={showPrivateProjects}
+                  togglePrivateProjectVisibility={togglePrivateProjectVisibility}
+                  privateProjectSearch={privateProjectSearch}
+                  setPrivateProjectSearch={setPrivateProjectSearch}
+                  filteredPrivateProjects={filteredPrivateProjects}
+                  projects={projects}
+                  privateProjectBusyId={privateProjectBusyId}
+                  changeProjectPrivacy={changeProjectPrivacy}
+                />
+              )}
+              {activeSettingsSection === "security" && (
+                <SecuritySettingsPanel
+                  appLockEnabled={appLockEnabled}
+                  appLockStatusReady={appLockStatusReady}
+                  appLockPasswordVisible={appLockPasswordVisible}
+                  appLockCurrentPassword={appLockCurrentPassword}
+                  setAppLockCurrentPassword={setAppLockCurrentPassword}
+                  saveAppLockPassword={saveAppLockPassword}
+                  appLockBusy={appLockBusy}
+                  setAppLockPasswordVisible={setAppLockPasswordVisible}
+                  appLockNewPassword={appLockNewPassword}
+                  setAppLockNewPassword={setAppLockNewPassword}
+                  appLockConfirmPassword={appLockConfirmPassword}
+                  setAppLockConfirmPassword={setAppLockConfirmPassword}
+                  appLockMessage={appLockMessage}
+                  appLockMessageKind={appLockMessageKind}
+                  turnOffAppLock={turnOffAppLock}
+                />
+              )}
             </div>
-            <span className={`app-lock-status ${appLockEnabled ? "is-enabled" : ""}`}>
-              {!appLockStatusReady ? "读取中" : appLockEnabled ? "已启用" : "未启用"}
-            </span>
           </div>
-          {appLockStatusReady && (
-            <div className="app-lock-fields">
-              {appLockEnabled && (
-                <label>
-                  当前密码
-                  <div className="password-input-wrap">
-                    <input
-                      type={appLockPasswordVisible ? "text" : "password"}
-                      value={appLockCurrentPassword}
-                      onChange={(event) => setAppLockCurrentPassword(event.currentTarget.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          void saveAppLockPassword();
-                        }
-                      }}
-                      autoComplete="current-password"
-                      disabled={appLockBusy}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setAppLockPasswordVisible((visible) => !visible)}
-                      title={appLockPasswordVisible ? "隐藏密码" : "显示密码"}
-                      aria-label={appLockPasswordVisible ? "隐藏密码" : "显示密码"}
-                    >
-                      {appLockPasswordVisible ? <EyeOff size={15} /> : <Eye size={15} />}
-                    </button>
-                  </div>
-                </label>
-              )}
-              <div className="app-lock-new-passwords">
-                <label>
-                  {appLockEnabled ? "新密码" : "设置密码"}
-                  <input
-                    type={appLockPasswordVisible ? "text" : "password"}
-                    value={appLockNewPassword}
-                    onChange={(event) => setAppLockNewPassword(event.currentTarget.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        void saveAppLockPassword();
-                      }
-                    }}
-                    autoComplete="new-password"
-                    placeholder="至少 4 个字符"
-                    maxLength={128}
-                    disabled={appLockBusy}
-                  />
-                </label>
-                <label>
-                  确认新密码
-                  <input
-                    type={appLockPasswordVisible ? "text" : "password"}
-                    value={appLockConfirmPassword}
-                    onChange={(event) => setAppLockConfirmPassword(event.currentTarget.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        void saveAppLockPassword();
-                      }
-                    }}
-                    autoComplete="new-password"
-                    maxLength={128}
-                    disabled={appLockBusy}
-                  />
-                </label>
-              </div>
-              {appLockMessage && (
-                <p className={`app-lock-message is-${appLockMessageKind}`} role="status">
-                  {appLockMessage}
-                </p>
-              )}
-              <div className="app-lock-actions">
-                {appLockEnabled && (
-                  <button
-                    type="button"
-                    className="app-lock-disable"
-                    onClick={() => void turnOffAppLock()}
-                    disabled={appLockBusy || !appLockCurrentPassword}
-                  >
-                    关闭应用锁
+          {(activeSettingsSection === "general"
+            || activeSettingsSection === "video-defaults"
+            || activeSettingsSection === "video-model"
+            || activeSettingsSection === "image-model") && (
+              <div className="project-dialog-actions">
+                {activeSettingsSection === "general" && (
+                  <button type="submit" className="primary-button">
+                    保存基础设置
                   </button>
                 )}
-                <button
-                  type="button"
-                  className="app-lock-save"
-                  onClick={() => void saveAppLockPassword()}
-                  disabled={appLockBusy || !appLockNewPassword || !appLockConfirmPassword || (appLockEnabled && !appLockCurrentPassword)}
-                >
-                  {appLockBusy ? "处理中…" : appLockEnabled ? "修改密码" : "启用应用锁"}
-                </button>
+                {activeSettingsSection === "video-defaults" && (
+                  <button type="submit" className="primary-button">
+                    保存为默认值
+                  </button>
+                )}
+                {activeSettingsSection === "video-model" && (
+                  <button type="submit" className="primary-button">
+                    保存视频模型参数
+                  </button>
+                )}
+                {activeSettingsSection === "image-model" && (
+                  <button type="submit" className="primary-button">
+                    保存图片模型参数
+                  </button>
+                )}
               </div>
+            )}
+        </form>
+      </div>
+      {workflowModuleDeletionMode && selectedWorkflowModule && (
+        <div
+          className="project-dialog-backdrop workflow-delete-dialog-backdrop"
+          onMouseDown={() => {
+            if (!workflowModulesBusy) setWorkflowModuleDeletionMode(null);
+          }}
+        >
+          <div
+            className="project-dialog project-delete-dialog workflow-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="workflow-delete-title"
+            aria-describedby="workflow-delete-description"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><Trash2 size={22} /></div>
+            <div>
+              <h2 id="workflow-delete-title">
+                {workflowModuleDeletionMode === "trash" ? "将方案移入回收站？" : "彻底删除工作流方案？"}
+              </h2>
+              <p id="workflow-delete-description">{workflowModuleDeletionDescription}</p>
+              {workflowModuleDeletionMode === "purge" && (
+                <p className="workflow-delete-warning">方案文件和恢复点删除后无法找回。</p>
+              )}
             </div>
-          )}
-        </section>
-            )}
+            <div className="project-dialog-actions">
+              <button
+                type="button"
+                className="dialog-cancel"
+                autoFocus
+                disabled={workflowModulesBusy}
+                onClick={() => setWorkflowModuleDeletionMode(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="dialog-danger"
+                disabled={workflowModulesBusy}
+                onClick={() => {
+                  const mode = workflowModuleDeletionMode;
+                  setWorkflowModuleDeletionMode(null);
+                  if (mode === "trash") void trashSelectedWorkflowModule();
+                  else void purgeSelectedWorkflowModule();
+                }}
+              >
+                <Trash2 size={14} />
+                {workflowModuleDeletionMode === "trash" ? "移入回收站" : "永久删除"}
+              </button>
+            </div>
           </div>
         </div>
-        {(activeSettingsSection === "general"
-          || activeSettingsSection === "video-defaults"
-          || activeSettingsSection === "video-model"
-          || activeSettingsSection === "image-model") && (
-          <div className="project-dialog-actions">
-            {activeSettingsSection === "general" && (
-              <button type="submit" className="primary-button">
-                保存基础设置
-              </button>
-            )}
-            {activeSettingsSection === "video-defaults" && (
-              <button type="submit" className="primary-button">
-                保存为默认值
-              </button>
-            )}
-            {activeSettingsSection === "video-model" && (
-              <button type="submit" className="primary-button">
-                保存视频模型参数
-              </button>
-            )}
-            {activeSettingsSection === "image-model" && (
-              <button type="submit" className="primary-button">
-                保存图片模型参数
-              </button>
-            )}
-          </div>
-        )}
-      </form>
-    </div>
-    {workflowModuleDeletionMode && selectedWorkflowModule && (
-      <div
-        className="project-dialog-backdrop workflow-delete-dialog-backdrop"
-        onMouseDown={() => {
-          if (!workflowModulesBusy) setWorkflowModuleDeletionMode(null);
-        }}
-      >
+      )}
+      {appBackupRestorePath && (
         <div
-          className="project-dialog project-delete-dialog workflow-delete-dialog"
-          role="alertdialog"
-          aria-modal="true"
-          aria-labelledby="workflow-delete-title"
-          aria-describedby="workflow-delete-description"
-          onMouseDown={(event) => event.stopPropagation()}
+          className="project-dialog-backdrop app-backup-restore-backdrop"
+          onMouseDown={() => {
+            if (!appBackupBusy) setAppBackupRestorePath(null);
+          }}
         >
-          <div className="project-dialog-icon"><Trash2 size={22} /></div>
-          <div>
-            <h2 id="workflow-delete-title">
-              {workflowModuleDeletionMode === "trash" ? "将方案移入回收站？" : "彻底删除工作流方案？"}
-            </h2>
-            <p id="workflow-delete-description">{workflowModuleDeletionDescription}</p>
-            {workflowModuleDeletionMode === "purge" && (
-              <p className="workflow-delete-warning">方案文件和恢复点删除后无法找回。</p>
-            )}
-          </div>
-          <div className="project-dialog-actions">
-            <button
-              type="button"
-              className="dialog-cancel"
-              autoFocus
-              disabled={workflowModulesBusy}
-              onClick={() => setWorkflowModuleDeletionMode(null)}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              className="dialog-danger"
-              disabled={workflowModulesBusy}
-              onClick={() => {
-                const mode = workflowModuleDeletionMode;
-                setWorkflowModuleDeletionMode(null);
-                if (mode === "trash") void trashSelectedWorkflowModule();
-                else void purgeSelectedWorkflowModule();
-              }}
-            >
-              <Trash2 size={14} />
-              {workflowModuleDeletionMode === "trash" ? "移入回收站" : "永久删除"}
-            </button>
+          <div
+            className="project-dialog project-delete-dialog app-backup-restore-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="app-backup-restore-title"
+            aria-describedby="app-backup-restore-description"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><RotateCcw size={22} /></div>
+            <div>
+              <h2 id="app-backup-restore-title">恢复整个软件数据？</h2>
+              <p id="app-backup-restore-description">
+                当前项目、素材、工作流和软件设置将在下次启动时被备份中的内容替换。恢复前的 data 目录会自动保留。
+              </p>
+              <p className="app-backup-restore-file" title={appBackupRestorePath}>{appBackupRestorePath}</p>
+            </div>
+            <div className="project-dialog-actions">
+              <button
+                type="button"
+                className="dialog-cancel"
+                autoFocus
+                disabled={appBackupBusy}
+                onClick={() => setAppBackupRestorePath(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={appBackupBusy}
+                onClick={() => void restoreFullAppBackup()}
+              >
+                {appBackupBusy ? "校验中…" : "确认恢复"}
+              </button>
+            </div>
           </div>
         </div>
-      </div>
-    )}
-    {appBackupRestorePath && (
-      <div
-        className="project-dialog-backdrop app-backup-restore-backdrop"
-        onMouseDown={() => {
-          if (!appBackupBusy) setAppBackupRestorePath(null);
-        }}
-      >
+      )}
+      {workflowModuleRestoreRequest && (
         <div
-          className="project-dialog project-delete-dialog app-backup-restore-dialog"
-          role="alertdialog"
-          aria-modal="true"
-          aria-labelledby="app-backup-restore-title"
-          aria-describedby="app-backup-restore-description"
-          onMouseDown={(event) => event.stopPropagation()}
+          className="project-dialog-backdrop workflow-delete-dialog-backdrop"
+          onMouseDown={() => {
+            if (!workflowModulesBusy) setWorkflowModuleRestoreRequest(null);
+          }}
         >
-          <div className="project-dialog-icon"><RotateCcw size={22} /></div>
-          <div>
-            <h2 id="app-backup-restore-title">恢复整个软件数据？</h2>
-            <p id="app-backup-restore-description">
-              当前项目、素材、工作流和软件设置将在下次启动时被备份中的内容替换。恢复前的 data 目录会自动保留。
-            </p>
-            <p className="app-backup-restore-file" title={appBackupRestorePath}>{appBackupRestorePath}</p>
-          </div>
-          <div className="project-dialog-actions">
-            <button
-              type="button"
-              className="dialog-cancel"
-              autoFocus
-              disabled={appBackupBusy}
-              onClick={() => setAppBackupRestorePath(null)}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              className="primary-button"
-              disabled={appBackupBusy}
-              onClick={() => void restoreFullAppBackup()}
-            >
-              {appBackupBusy ? "校验中…" : "确认恢复"}
-            </button>
+          <div
+            className="project-dialog project-delete-dialog workflow-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="workflow-restore-title"
+            aria-describedby="workflow-restore-description"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><RotateCcw size={22} /></div>
+            <div>
+              <h2 id="workflow-restore-title">从备份恢复当前方案？</h2>
+              <p id="workflow-restore-description">
+                将使用“{workflowModuleRestoreRequest.bundlePath.split(/[\\/]/).pop()}”完整替换当前方案“{workflowModuleRestoreRequest.moduleName}”。
+              </p>
+              <p className="workflow-delete-warning">当前内容会先自动保存为恢复点，需要时仍可撤回。</p>
+            </div>
+            <div className="project-dialog-actions">
+              <button
+                type="button"
+                className="dialog-cancel"
+                autoFocus
+                disabled={workflowModulesBusy}
+                onClick={() => setWorkflowModuleRestoreRequest(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={workflowModulesBusy}
+                onClick={() => void restoreWorkflowModuleFromBundle()}
+              >
+                <RotateCcw size={14} />
+                {workflowModulesBusy ? "正在恢复…" : "确认恢复"}
+              </button>
+            </div>
           </div>
         </div>
-      </div>
-    )}
-    {workflowModuleRestoreRequest && (
-      <div
-        className="project-dialog-backdrop workflow-delete-dialog-backdrop"
-        onMouseDown={() => {
-          if (!workflowModulesBusy) setWorkflowModuleRestoreRequest(null);
-        }}
-      >
-        <div
-          className="project-dialog project-delete-dialog workflow-delete-dialog"
-          role="alertdialog"
-          aria-modal="true"
-          aria-labelledby="workflow-restore-title"
-          aria-describedby="workflow-restore-description"
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <div className="project-dialog-icon"><RotateCcw size={22} /></div>
-          <div>
-            <h2 id="workflow-restore-title">从备份恢复当前方案？</h2>
-            <p id="workflow-restore-description">
-              将使用“{workflowModuleRestoreRequest.bundlePath.split(/[\\/]/).pop()}”完整替换当前方案“{workflowModuleRestoreRequest.moduleName}”。
-            </p>
-            <p className="workflow-delete-warning">当前内容会先自动保存为恢复点，需要时仍可撤回。</p>
-          </div>
-          <div className="project-dialog-actions">
-            <button
-              type="button"
-              className="dialog-cancel"
-              autoFocus
-              disabled={workflowModulesBusy}
-              onClick={() => setWorkflowModuleRestoreRequest(null)}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              className="primary-button"
-              disabled={workflowModulesBusy}
-              onClick={() => void restoreWorkflowModuleFromBundle()}
-            >
-              <RotateCcw size={14} />
-              {workflowModulesBusy ? "正在恢复…" : "确认恢复"}
-            </button>
-          </div>
-        </div>
-      </div>
-    )}
+      )}
     </>,
     document.body,
   );
 
   if (!activeProjectId) {
     return (
-      <main className="project-home">
-        <header className="project-home-header">
-          <div className="project-home-brand">
-            <div className="project-home-mark">
-              <img src={suCanvasLogo} alt="" />
-            </div>
-            <div>
-              <strong>SuCanvas</strong>
-              <span>项目工作区</span>
-            </div>
-          </div>
-          <div className="project-header-actions">
-            {comfyQueueIndicator}
-            <label className="project-columns-control">
-              <span>每行项目数</span>
-              <input
-                type="range"
-                min={3}
-                max={8}
-                step={1}
-                value={projectColumns}
-                onChange={(event) => setProjectColumns(Number(event.currentTarget.value))}
-                aria-label="每行显示项目数量"
-              />
-              <output>{projectColumns}</output>
-            </label>
-            <button
-              className="system-settings-button"
-              onClick={openAppSettings}
-              title="应用设置"
-              aria-label="打开应用设置"
-            >
-              <Settings2 size={16} />
-            </button>
-            <button
-              className="theme-toggle-button"
-              onClick={toggleTheme}
-              title={theme === "dark" ? "切换到白色模式" : "切换到黑暗模式"}
-              aria-label={theme === "dark" ? "切换到白色模式" : "切换到黑暗模式"}
-            >
-              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-            </button>
-          </div>
-        </header>
-
-        <section className="project-home-content">
-          <div className="project-section-heading">
-            <div>
-              <span className="eyebrow">PROJECTS</span>
-              <h1>选择一个画布项目</h1>
-              <p>每个项目拥有独立的节点、图片、连接和生成流程。</p>
-            </div>
-            <span className="project-total">
-              {visibleProjects.length} 个项目
-              {!showPrivateProjects && privateProjectCount > 0 ? ` · 已隐藏 ${privateProjectCount} 个` : ""}
-            </span>
-          </div>
-
-          <div
-            className="project-grid"
-            style={{ gridTemplateColumns: `repeat(${projectColumns}, minmax(0, 1fr))` }}
-          >
-            <button
-              className="new-project-card"
-              onClick={() => setCreateProjectOpen(true)}
-              disabled={!projectHomeReady}
-            >
-              <span className="new-project-icon"><Plus size={26} /></span>
-              <strong>新建项目</strong>
-              <span>创建一张新的无限画布</span>
-            </button>
-
-            {visibleProjects.map((project) => (
-              <article
-                className="project-card"
-                key={project.canvas.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => void openProject(project.canvas.id)}
-                onKeyDown={(event) => {
-                  if (event.target !== event.currentTarget) return;
-                  if (event.key !== "Enter" && event.key !== " ") return;
-                  event.preventDefault();
-                  void openProject(project.canvas.id);
-                }}
-              >
-                <ProjectThumbnail project={project} />
-                <div className="project-card-info">
-                  <div>
-                    <strong>
-                      <span className="project-name-text">{project.canvas.name}</span>
-                      {project.canvas.isPrivate && (
-                        <span className="project-private-badge" title="私密项目">
-                          <LockKeyhole size={10} /> 私密
-                        </span>
-                      )}
-                    </strong>
-                    <span>
-                      更新于 {new Intl.DateTimeFormat("zh-CN", {
-                        month: "numeric",
-                        day: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      }).format(new Date(project.canvas.updatedAt))}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    className="project-delete"
-                    aria-label={`删除项目：${project.canvas.name}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setProjectToDelete(project);
-                    }}
-                  >
-                    删除 <Trash2 size={13} />
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        {createProjectOpen && (
-          <div className="project-dialog-backdrop" onMouseDown={() => setCreateProjectOpen(false)}>
-            <form
-              className="project-dialog"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void createProject();
-              }}
-              onMouseDown={(event) => event.stopPropagation()}
-            >
-              <div className="project-dialog-icon"><FolderKanban size={22} /></div>
-              <div>
-                <h2>新建项目</h2>
-                <p>项目会创建一张独立的无限画布。</p>
-              </div>
-              <label>
-                项目名称
-                <input
-                  autoFocus
-                  value={newProjectName}
-                  onChange={(event) => setNewProjectName(event.currentTarget.value)}
-                  placeholder="例如：产品宣传片"
-                  maxLength={120}
-                />
-              </label>
-              <div className="project-dialog-actions">
-                <button type="button" className="dialog-cancel" onClick={() => setCreateProjectOpen(false)}>
-                  取消
-                </button>
-                <button type="submit" className="primary-button" disabled={!newProjectName.trim()}>
-                  创建并进入
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {projectToDelete && (
-          <div
-            className="project-dialog-backdrop"
-            onMouseDown={() => {
-              if (!deletingProjectId) setProjectToDelete(null);
-            }}
-          >
-            <div
-              className="project-dialog project-delete-dialog"
-              role="alertdialog"
-              aria-modal="true"
-              aria-labelledby="delete-project-title"
-              aria-describedby="delete-project-description"
-              onMouseDown={(event) => event.stopPropagation()}
-            >
-              <div className="project-dialog-icon"><Trash2 size={22} /></div>
-              <div>
-                <h2 id="delete-project-title">确认删除项目？</h2>
-                <p id="delete-project-description">
-                  “{projectToDelete.canvas.name}”中的所有节点和连线都会被永久删除，此操作无法撤销。
-                </p>
-              </div>
-              <div className="project-dialog-actions">
-                <button
-                  type="button"
-                  className="dialog-cancel"
-                  autoFocus
-                  disabled={Boolean(deletingProjectId)}
-                  onClick={() => setProjectToDelete(null)}
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  className="dialog-danger"
-                  disabled={Boolean(deletingProjectId)}
-                  onClick={() => void deleteProject()}
-                >
-                  <Trash2 size={14} />
-                  {deletingProjectId ? "正在删除…" : "确认删除"}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-        {appSettingsDialog}
-        {privateProjectVisibilityUnlockDialog}
-        {globalNoticeToast}
-      </main>
+      <ProjectHome
+        comfyQueueIndicator={comfyQueueIndicator}
+        projectColumns={projectColumns}
+        setProjectColumns={setProjectColumns}
+        openAppSettings={openAppSettings}
+        toggleTheme={toggleTheme}
+        theme={theme}
+        visibleProjects={visibleProjects}
+        showPrivateProjects={showPrivateProjects}
+        privateProjectCount={privateProjectCount}
+        setCreateProjectOpen={setCreateProjectOpen}
+        projectHomeReady={projectHomeReady}
+        openProject={openProject}
+        setProjectToDelete={setProjectToDelete}
+        createProjectOpen={createProjectOpen}
+        createProject={createProject}
+        newProjectName={newProjectName}
+        setNewProjectName={setNewProjectName}
+        projectToDelete={projectToDelete}
+        deletingProjectId={deletingProjectId}
+        deleteProject={deleteProject}
+        appSettingsDialog={appSettingsDialog}
+        privateProjectVisibilityUnlockDialog={privateProjectVisibilityUnlockDialog}
+        globalNoticeToast={globalNoticeToast}
+      />
     );
   }
 
@@ -11580,25 +10641,25 @@ function CanvasWorkspace() {
   const contextMenuImageAssetPath = contextMenuClickedRecord?.kind === "image"
     && typeof contextMenuClickedRecord.content.assetPath === "string"
     && contextMenuClickedRecord.content.assetPath.trim()
-      ? contextMenuClickedRecord.content.assetPath
-      : null;
+    ? contextMenuClickedRecord.content.assetPath
+    : null;
   const contextMenuUploadedMedia = contextMenuClickedRecord
     && ["image", "audio", "video"].includes(contextMenuClickedRecord.kind)
     && typeof contextMenuClickedRecord.content.assetPath === "string"
     && contextMenuClickedRecord.content.assetPath.trim()
-      ? contextMenuClickedRecord
-      : null;
+    ? contextMenuClickedRecord
+    : null;
   const contextMenuGeneratedVideo = contextMenuClickedRecord?.kind === "generated-video"
     && contextMenuClickedRecord.content.generationPlaceholder !== true
     && typeof contextMenuClickedRecord.content.videoUrl === "string"
     && contextMenuClickedRecord.content.videoUrl.trim()
-      ? contextMenuClickedRecord
-      : null;
+    ? contextMenuClickedRecord
+    : null;
   const contextMenuGeneratedImage = contextMenuClickedRecord?.kind === "generated-image"
     && typeof contextMenuClickedRecord.content.imageUrl === "string"
     && contextMenuClickedRecord.content.imageUrl.trim()
-      ? contextMenuClickedRecord
-      : null;
+    ? contextMenuClickedRecord
+    : null;
   const contextMenuImageIsProjectPreview = Boolean(
     contextMenuImageAssetPath
     && canvasPath[0]?.previewImagePath === contextMenuImageAssetPath,
@@ -11684,15 +10745,15 @@ function CanvasWorkspace() {
               className={`alignment-guide is-${guide.orientation}`}
               style={guide.orientation === "vertical"
                 ? {
-                    left: guide.position,
-                    top: guide.start,
-                    height: Math.max(1, guide.end - guide.start),
-                  }
+                  left: guide.position,
+                  top: guide.start,
+                  height: Math.max(1, guide.end - guide.start),
+                }
                 : {
-                    left: guide.start,
-                    top: guide.position,
-                    width: Math.max(1, guide.end - guide.start),
-                  }}
+                  left: guide.start,
+                  top: guide.position,
+                  width: Math.max(1, guide.end - guide.start),
+                }}
             />
           ))}
           {spacingGuides.map((guide, index) => (
@@ -11701,15 +10762,15 @@ function CanvasWorkspace() {
               className={`spacing-guide is-${guide.orientation}`}
               style={guide.orientation === "horizontal"
                 ? {
-                    left: guide.start,
-                    top: guide.position,
-                    width: Math.max(1, guide.end - guide.start),
-                  }
+                  left: guide.start,
+                  top: guide.position,
+                  width: Math.max(1, guide.end - guide.start),
+                }
                 : {
-                    left: guide.position,
-                    top: guide.start,
-                    height: Math.max(1, guide.end - guide.start),
-                  }}
+                  left: guide.position,
+                  top: guide.start,
+                  height: Math.max(1, guide.end - guide.start),
+                }}
             />
           ))}
         </ViewportPortal>
@@ -11723,15 +10784,15 @@ function CanvasWorkspace() {
               ? "#4eb9c8"
               : (node.data as CanvasNodeData | undefined)?.record.kind === "audio"
                 ? "#c77dd6"
-              : (node.data as CanvasNodeData | undefined)?.record.kind === "note"
-                ? "#c8a957"
-              : (node.data as CanvasNodeData | undefined)?.record.kind === "video"
-                ? "#d8ad55"
-              : (node.data as CanvasNodeData | undefined)?.record.kind === "video-generation"
-                ? "#e48a65"
-              : (node.data as CanvasNodeData | undefined)?.record.kind === "generated-video"
-                ? "#6fb5df"
-                : "#8b7cf6"
+                : (node.data as CanvasNodeData | undefined)?.record.kind === "note"
+                  ? "#c8a957"
+                  : (node.data as CanvasNodeData | undefined)?.record.kind === "video"
+                    ? "#d8ad55"
+                    : (node.data as CanvasNodeData | undefined)?.record.kind === "video-generation"
+                      ? "#e48a65"
+                      : (node.data as CanvasNodeData | undefined)?.record.kind === "generated-video"
+                        ? "#6fb5df"
+                        : "#8b7cf6"
           }
           maskColor={theme === "light" ? "rgba(238, 240, 245, 0.72)" : "rgba(9, 11, 17, 0.75)"}
         />
@@ -12082,7 +11143,7 @@ function CanvasWorkspace() {
                 />
               </label>
               <label>
-                一采分辨率（MP）
+                1采分辨率（MP）
                 <ModelParameterNumberInput
                   regenerationField="primaryResolutionMegapixels"
                   min={0.2}
@@ -12096,7 +11157,7 @@ function CanvasWorkspace() {
                 />
               </label>
               <label>
-                一采 LoRA 强度
+                1采 LoRA 强度
                 <ModelParameterNumberInput
                   regenerationField="loraStrength"
                   min={0}
@@ -12120,10 +11181,13 @@ function CanvasWorkspace() {
                   onChange={(value) => setVideoRegenerationDraft((current) => current && ({
                     ...current,
                     primaryVideoSteps: value,
+                    primaryAudioSteps: videoRegenerationUsesSharedPrimarySteps
+                      ? value
+                      : current.primaryAudioSteps,
                   }))}
                 />
               </label>
-              <label>
+              {!videoRegenerationUsesSharedPrimarySteps && <label>
                 Audio Steps
                 <ModelParameterNumberInput
                   regenerationField="primaryAudioSteps"
@@ -12136,7 +11200,7 @@ function CanvasWorkspace() {
                     primaryAudioSteps: value,
                   }))}
                 />
-              </label>
+              </label>}
               <label>
                 亮度
                 <ModelParameterNumberInput
@@ -12291,8 +11355,8 @@ function CanvasWorkspace() {
           >
             <div className="project-dialog-icon"><Sparkles size={21} /></div>
             <div>
-              <h2>调整二采参数</h2>
-              <p>默认使用“{secondarySampleDraft.previewTitle}”当前可用的二采设置，只覆盖下列项目。</p>
+              <h2>调整2采参数</h2>
+              <p>默认使用“{secondarySampleDraft.previewTitle}”当前可用的2采设置，只覆盖下列项目。</p>
             </div>
             <div className="video-regeneration-fields">
               <label>
@@ -12307,7 +11371,7 @@ function CanvasWorkspace() {
                       ...current,
                       seed: event.currentTarget.value.replace(/\D/g, ""),
                     }))}
-                    aria-label="二采 Seed"
+                    aria-label="2采 Seed"
                     spellCheck={false}
                   />
                   <button
@@ -12326,7 +11390,7 @@ function CanvasWorkspace() {
                 </div>
               </label>
               <label>
-                二采分辨率（MP）
+                2采分辨率（MP）
                 <ModelParameterNumberInput
                   secondarySampleField="secondaryResolutionMegapixels"
                   min={0.2}
@@ -12340,7 +11404,7 @@ function CanvasWorkspace() {
                 />
               </label>
               <label>
-                二采 LoRA 强度
+                2采 LoRA 强度
                 <div className={`secondary-sample-lora-control ${secondarySampleDraft.secondaryLoraBypassed ? "is-bypassed" : "is-enabled"}`}>
                   <ModelParameterNumberInput
                     secondarySampleField="secondaryLoraStrength"
@@ -12360,10 +11424,10 @@ function CanvasWorkspace() {
                       className="video-lora-bypass-switch"
                       role="switch"
                       aria-checked={!secondarySampleDraft.secondaryLoraBypassed}
-                      aria-label="启用二采 LoRA"
+                      aria-label="启用2采 LoRA"
                       title={secondarySampleDraft.secondaryLoraBypassed
-                        ? "二采 LoRA 已关闭，点击启用"
-                        : "二采 LoRA 已启用，点击关闭"}
+                        ? "2采 LoRA 已关闭，点击启用"
+                        : "2采 LoRA 已启用，点击关闭"}
                       onClick={() => setSecondarySampleDraft((current) => current && ({
                         ...current,
                         secondaryLoraBypassed: !current.secondaryLoraBypassed,
@@ -12450,7 +11514,7 @@ function CanvasWorkspace() {
               </fieldset>
             </div>
             <p className="video-regeneration-note">
-              Seed 默认保持原视频数值，点击色子才会随机更换。二采 LoRA 默认关闭，其余提示词、素材、模型及 LoRA 文件保持原二采逻辑。
+              Seed 默认保持原视频数值，点击色子才会随机更换。2采 LoRA 默认关闭，其余提示词、素材、模型及 LoRA 文件保持原2采逻辑。
             </p>
             <div className="project-dialog-actions">
               <button type="button" className="dialog-cancel" onClick={() => setSecondarySampleDraft(null)}>
@@ -12458,7 +11522,7 @@ function CanvasWorkspace() {
               </button>
               <button type="submit" className="primary-button">
                 <Sparkles size={13} />
-                开始二采
+                开始2采
               </button>
             </div>
           </form>
@@ -12651,78 +11715,7 @@ function CanvasWorkspace() {
   );
 }
 
-function AppLockScreen({ onUnlock }: { onUnlock: () => void }) {
-  const [password, setPassword] = useState("");
-  const [passwordVisible, setPasswordVisible] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
 
-  const unlock = async () => {
-    if (!password || busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      const accepted = await invoke<boolean>("verify_app_lock_password", { password });
-      if (!accepted) {
-        setPassword("");
-        setError("密码错误，请重新输入");
-        return;
-      }
-      onUnlock();
-    } catch (unlockError) {
-      const message = unlockError instanceof Error ? unlockError.message : String(unlockError);
-      setError(message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <main className="app-lock-screen">
-      <form
-        className="app-lock-card"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void unlock();
-        }}
-      >
-        <div className="app-lock-mark">
-          <img src={suCanvasLogo} alt="" />
-        </div>
-        <span className="app-lock-eyebrow">SUCANVAS</span>
-        <h1>应用已锁定</h1>
-        <p>输入本机应用锁密码以继续。</p>
-        <label>
-          密码
-          <div className="app-lock-screen-input">
-            <input
-              autoFocus
-              type={passwordVisible ? "text" : "password"}
-              value={password}
-              onChange={(event) => setPassword(event.currentTarget.value)}
-              autoComplete="current-password"
-              disabled={busy}
-            />
-            <button
-              type="button"
-              onClick={() => setPasswordVisible((visible) => !visible)}
-              title={passwordVisible ? "隐藏密码" : "显示密码"}
-              aria-label={passwordVisible ? "隐藏密码" : "显示密码"}
-            >
-              {passwordVisible ? <EyeOff size={16} /> : <Eye size={16} />}
-            </button>
-          </div>
-        </label>
-        <div className={`app-lock-screen-feedback ${error ? "is-error" : ""}`} aria-live="polite">
-          {error || "密码只在本机验证"}
-        </div>
-        <button className="app-lock-unlock" type="submit" disabled={!password || busy}>
-          {busy ? "正在验证…" : "解锁"}
-        </button>
-      </form>
-    </main>
-  );
-}
 
 export default function App() {
   const [accessState, setAccessState] = useState<"checking" | "locked" | "unlocked" | "error">("checking");

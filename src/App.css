@@ -128,7 +128,7 @@ button { color: inherit; }
 .app-settings-nav > button.is-active { color: #d9d4ff; background: rgba(139, 124, 246, .13); border-color: rgba(139, 124, 246, .30); }
 .app-settings-nav > button.is-active strong { color: #f0edff; }
 .app-settings-nav > button.is-active small { color: #9990d7; }
-.app-settings-content { min-width: 0; min-height: 0; padding: 20px 22px 24px; overflow-x: hidden; overflow-y: auto; scrollbar-color: #4b4a66 #171a23; scrollbar-width: thin; }
+.app-settings-content { min-width: 0; min-height: 0; padding: 20px 22px 24px; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; scrollbar-color: #4b4a66 #171a23; scrollbar-width: thin; }
 .settings-pane { min-width: 0; }
 .settings-pane-heading { padding-bottom: 15px; border-bottom: 1px solid #292f3a; }
 .settings-pane-heading h3 { margin: 0 0 5px; color: #e7e9ef; font-size: calc(14px + var(--ui-font-adjust)); }

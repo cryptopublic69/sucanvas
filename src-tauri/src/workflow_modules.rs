@@ -589,7 +589,7 @@ impl Default for WorkflowUiSchema {
                     fields: vec![
                         field(
                             "primaryVideoSteps",
-                            "一采 Video Steps",
+                            "1采 Video Steps",
                             1.0,
                             1000.0,
                             1.0,
@@ -599,7 +599,7 @@ impl Default for WorkflowUiSchema {
                             min_key: Some("primaryVideoSteps".to_owned()),
                             ..field(
                                 "primaryAudioSteps",
-                                "一采 Audio Steps",
+                                "1采 Audio Steps",
                                 1.0,
                                 1000.0,
                                 1.0,
@@ -608,7 +608,7 @@ impl Default for WorkflowUiSchema {
                         },
                         field(
                             "secondarySchedulerSteps",
-                            "二采基本调度 Steps",
+                            "2采基本调度 Steps",
                             1.0,
                             10000.0,
                             1.0,
@@ -619,7 +619,7 @@ impl Default for WorkflowUiSchema {
                 },
                 WorkflowUiGroup {
                     id: "primary-color".to_owned(),
-                    title: "一采画面调整".to_owned(),
+                    title: "1采画面调整".to_owned(),
                     fields: vec![
                         field("primaryBrightness", "亮度", 0.0, 3.0, 0.01, 1.0),
                         field("primaryContrast", "对比度", 0.0, 3.0, 0.01, 0.9),
@@ -629,7 +629,7 @@ impl Default for WorkflowUiSchema {
                 },
                 WorkflowUiGroup {
                     id: "secondary-color".to_owned(),
-                    title: "二采画面调整".to_owned(),
+                    title: "2采画面调整".to_owned(),
                     fields: vec![
                         field("secondaryBrightness", "亮度", 0.0, 3.0, 0.01, 1.0),
                         field("secondaryContrast", "对比度", 0.0, 3.0, 0.01, 0.9),

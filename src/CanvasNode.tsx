@@ -3463,7 +3463,6 @@ function VideoGenerationLoraDefaultsFields({
   stepsLabel,
   h3LoraOptions,
   secondary = false,
-  secondaryStageLabel = "二采",
   onChange,
 }: {
   label: string;
@@ -3474,13 +3473,12 @@ function VideoGenerationLoraDefaultsFields({
   stepsLabel: string;
   h3LoraOptions: string[];
   secondary?: boolean;
-  secondaryStageLabel?: string;
   onChange: (patch: Partial<VideoGenerationDefaults>) => void;
 }) {
   const effectiveLoraBypassed = loraBypassed || !loraName;
   const selectedLoraAvailable = effectiveLoraBypassed
     || h3LoraOptions.some((option) => sameH3LoraName(option, loraName));
-  const prefix = secondary ? secondaryStageLabel : "一采";
+  const prefix = secondary ? "2采" : "1采";
   return (
     <div className={`video-defaults-lora-fields ${secondary ? "is-secondary" : ""} ${effectiveLoraBypassed ? "is-bypassed" : ""}`}>
       <div className="video-defaults-lora-model-row">
@@ -3571,9 +3569,9 @@ function VideoGenerationDefaultsEditor({
   const supportsPrimaryUpscaleFactor = Boolean(
     selectedWorkflowModule?.bindings.primaryUpscaleNodeId?.trim(),
   );
-  const secondaryStageLabel = selectedWorkflowModule?.revision.trim().toUpperCase().startsWith("V3")
+  const upscaleStageLabel = selectedWorkflowModule?.revision.trim().toUpperCase().startsWith("V3")
     ? "二段"
-    : "二采";
+    : "2采";
   return (
     <div className="video-node-body has-media video-defaults-editor">
       <section className="video-defaults-card video-defaults-basic-card">
@@ -3637,10 +3635,10 @@ function VideoGenerationDefaultsEditor({
           />
         </label>
       </div>
-      <div className="video-resolution-pair" aria-label={`默认一采和${secondaryStageLabel}分辨率`}>
+      <div className="video-resolution-pair" aria-label="默认1采和2采分辨率">
         <div className="video-resolution-column">
           <label className="video-resolution-inline">
-            <span>一采大小</span>
+            <span>1采大小</span>
             <input
               className="video-parameter-range"
               type="range"
@@ -3650,12 +3648,12 @@ function VideoGenerationDefaultsEditor({
               step="0.1"
               value={value.generationPrimaryResolution}
               onChange={(event) => onChange({ generationPrimaryResolution: Number(event.currentTarget.value) })}
-              aria-label="默认一采大小分辨率"
+              aria-label="默认1采大小分辨率"
             />
             <output>{value.generationPrimaryResolution.toFixed(1)} MP</output>
           </label>
           {supportsPrimaryUpscaleFactor && (
-            <label className="video-primary-upscale-control" title={`${secondaryStageLabel} latent 放大倍率：${value.generationPrimaryUpscaleFactor.toFixed(1)}×`}>
+            <label className="video-primary-upscale-control" title={`${upscaleStageLabel} latent 放大倍率：${value.generationPrimaryUpscaleFactor.toFixed(1)}×`}>
               <span>放大</span>
               <input
                 className="video-parameter-range"
@@ -3667,7 +3665,7 @@ function VideoGenerationDefaultsEditor({
                 style={{
                   "--video-range-progress": `${(value.generationPrimaryUpscaleFactor - 1) * 100}%`,
                 } as CSSProperties}
-                aria-label={`默认${secondaryStageLabel} latent 放大倍率`}
+                aria-label={`默认${upscaleStageLabel} latent 放大倍率`}
                 onChange={(event) => onChange({
                   generationPrimaryUpscaleFactor: Number(event.currentTarget.value),
                 })}
@@ -3677,7 +3675,7 @@ function VideoGenerationDefaultsEditor({
           )}
         </div>
         <label className="video-resolution-inline">
-          <span>{secondaryStageLabel}大小</span>
+          <span>2采大小</span>
           <input
             className="video-parameter-range"
             type="range"
@@ -3687,7 +3685,7 @@ function VideoGenerationDefaultsEditor({
             step="0.1"
             value={value.generationSecondaryResolution}
             onChange={(event) => onChange({ generationSecondaryResolution: Number(event.currentTarget.value) })}
-            aria-label={`默认${secondaryStageLabel}大小分辨率`}
+            aria-label="默认2采大小分辨率"
           />
           <output>{value.generationSecondaryResolution.toFixed(1)} MP</output>
         </label>
@@ -3695,7 +3693,7 @@ function VideoGenerationDefaultsEditor({
       </section>
       <section className="video-defaults-card video-defaults-sampling-card is-primary">
         <header>
-          <div><strong>一采参数</strong></div>
+          <div><strong>1采参数</strong></div>
         </header>
       <VideoGenerationLoraDefaultsFields
         label="LoRA 模型"
@@ -3710,7 +3708,7 @@ function VideoGenerationDefaultsEditor({
       </section>
       <section className="video-defaults-card video-defaults-sampling-card is-secondary">
         <header>
-          <div><strong>{secondaryStageLabel}参数</strong></div>
+          <div><strong>2采参数</strong></div>
         </header>
       <VideoGenerationLoraDefaultsFields
         label="LoRA 模型"
@@ -3721,7 +3719,6 @@ function VideoGenerationDefaultsEditor({
         stepsLabel="调度步数"
         h3LoraOptions={h3LoraOptions}
         secondary
-        secondaryStageLabel={secondaryStageLabel}
         onChange={onChange}
       />
       </section>
@@ -4797,9 +4794,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ?? availableWorkflowModules.find((module) => module.variant === videoGenerationMode)
     ?? availableWorkflowModules[0]
     ?? null;
-  const secondaryStageLabel = selectedNodeWorkflowModule?.revision.trim().toUpperCase().startsWith("V3")
+  const styleLoraSecondaryTargetLabel = selectedNodeWorkflowModule?.revision.trim().toUpperCase().startsWith("V3")
     ? "二段"
-    : "二采";
+    : "2采";
   const selectedImageWorkflowModule = allAvailableImageWorkflowModules.find(
     (module) => module.id === configuredWorkflowModuleId,
   ) ?? null;
@@ -5171,7 +5168,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   }, [id, isContentIterationNode, onChange, record.title]);
 
   useEffect(() => {
-    if (!isGeneratedVideo || !validationMessage.startsWith("二采完成")) return;
+    if (!isGeneratedVideo || !validationMessage.startsWith("2采完成")) return;
     onChange(id, {
       content: {
         ...record.content,
@@ -7217,7 +7214,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     <div
                       className={`video-execution-progress ${executionProgress === null ? "is-indeterminate" : ""}`}
                       role="progressbar"
-                      aria-label="二采当前步骤进度"
+                      aria-label="2采当前步骤进度"
                       aria-valuemin={0}
                       aria-valuemax={100}
                       aria-valuenow={executionProgress ?? undefined}
@@ -7290,8 +7287,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   else if (event.ctrlKey) onConfigureSecondarySample(id);
                   else void onSecondarySample(id);
                 }}
-                title={executionRunning ? "取消这次二采" : "点击直接二采；Ctrl+点击可调整二采参数"}
-                aria-label={executionRunning ? "取消二采" : "二采当前视频"}
+                title={executionRunning ? "取消这次2采" : "点击直接2采；Ctrl+点击可调整2采参数"}
+                aria-label={executionRunning ? "取消2采" : "2采当前视频"}
               >
                 {executionRunning
                   ? <Square size={11} fill="currentColor" />
@@ -7430,7 +7427,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   <header>
                     <div>
                       <strong>生成信息</strong>
-                      <span>{isSecondaryPreview ? `${secondaryStageLabel}预览` : "一采预览"}</span>
+                      <span>{isSecondaryPreview ? "2采预览" : "1采预览"}</span>
                     </div>
                   </header>
                   <section className="generated-video-info-summary">
@@ -7469,7 +7466,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     </div>
                   </section>
                   <section className="generated-video-stage-info">
-                    <h4>一采</h4>
+                    <h4>1采</h4>
                     <dl>
                       <dt>分辨率</dt><dd>{generatedVideoSnapshot.primaryResolutionMegapixels.toFixed(1)} MP</dd>
                       {generatedVideoUsesReferenceImageSize && <>
@@ -7497,7 +7494,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   </section>
                   {isSecondaryPreview && (
                     <section className="generated-video-stage-info">
-                      <h4>{secondaryStageLabel}</h4>
+                      <h4>2采</h4>
                       <dl>
                         <dt>分辨率</dt><dd>{generatedVideoSnapshot.secondaryResolutionMegapixels.toFixed(1)} MP</dd>
                         {generatedVideoUsesReferenceImageSize && <>
@@ -7539,7 +7536,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                           ? "未记录"
                           : `×${generatedVideoSnapshot.styleLoraStrength.toFixed(2)}`}</dd>
                         <dt>作用范围</dt>
-                        <dd>{generatedVideoSnapshot.styleLoraApplyToSecondary ? `一采、${secondaryStageLabel}` : "仅一采"}</dd>
+                        <dd>{generatedVideoSnapshot.styleLoraApplyToSecondary ? `1采、${styleLoraSecondaryTargetLabel}` : "仅1采"}</dd>
                       </dl>
                     </section>
                   )}
@@ -8079,10 +8076,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               {/* Native select option fonts are ignored by Windows WebView2, so this menu is custom. */}
             </div>
           </div>
-          <div className="video-resolution-pair" aria-label={`一采和${secondaryStageLabel}分辨率`}>
+          <div className="video-resolution-pair" aria-label="1采和2采分辨率">
             <div className="video-resolution-column">
               <label className="video-resolution-inline">
-                <span>一采</span>
+                <span>1采</span>
                 <input
                   className="video-parameter-range"
                   type="range"
@@ -8099,14 +8096,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     },
                   })}
                   onPointerDown={(event) => event.stopPropagation()}
-                  aria-label="一采分辨率"
+                  aria-label="1采分辨率"
                 />
                 <output>{primaryVideoResolution.toFixed(1)} MP</output>
               </label>
               {supportsPrimaryUpscaleFactor && (
                 <label
                   className="nodrag nowheel video-primary-upscale-control"
-                  title={`一采放大倍率：${primaryUpscaleFactor.toFixed(1)}×`}
+                  title={`1采放大倍率：${primaryUpscaleFactor.toFixed(1)}×`}
                   onPointerDown={(event) => event.stopPropagation()}
                 >
                   <span>放大</span>
@@ -8120,7 +8117,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     style={{
                       "--video-range-progress": `${(primaryUpscaleFactor - 1) * 100}%`,
                     } as CSSProperties}
-                    aria-label="一采放大倍率"
+                    aria-label="1采放大倍率"
                     onChange={(event) => {
                       onChange(id, {
                         content: {
@@ -8137,7 +8134,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               )}
             </div>
             <label className="video-resolution-inline">
-              <span>{secondaryStageLabel}</span>
+              <span>2采</span>
               <input
                 className="video-parameter-range"
                 type="range"
@@ -8154,7 +8151,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   },
                 })}
                 onPointerDown={(event) => event.stopPropagation()}
-                aria-label={`${secondaryStageLabel}分辨率`}
+                aria-label="2采分辨率"
               />
               <output>{secondaryVideoResolution.toFixed(1)} MP</output>
             </label>
@@ -8169,8 +8166,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 aria-haspopup="menu"
                 aria-expanded={loraMenuOpen}
                 title={availableH3LoraName ?? (h3LoraName
-                  ? "所选一采 LoRA 已不在 MinimaxH3 目录中"
-                  : "一采 LoRA 未选择")}
+                  ? "所选1采 LoRA 已不在 MinimaxH3 目录中"
+                  : "1采 LoRA 未选择")}
                 onClick={() => {
                   setAspectRatioMenuOpen(false);
                   setSecondaryLoraMenuOpen(false);
@@ -8268,7 +8265,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 max={10}
                 disabled={h3LoraBypassed}
                 displayDecimals={2}
-                ariaLabel="手动输入一采 LoRA 权重"
+                ariaLabel="手动输入1采 LoRA 权重"
                 onChange={(loraStrength) => {
                   onH3LoraPreferenceChange({ loraName: h3LoraName, loraStrength });
                   onChange(id, {
@@ -8284,14 +8281,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </label>
             <label
               className="nodrag nowheel video-lora-steps"
-              title="一采 Video Steps"
+              title="1采 Video Steps"
               onPointerDown={(event) => event.stopPropagation()}
             >
                 <span>S</span>
               <CompactIntegerInput
                 value={primaryVideoSteps}
                 min={1}
-                ariaLabel="一采 Video Steps"
+                ariaLabel="1采 Video Steps"
                 onChange={(value) => {
                   onChange(id, {
                     content: {
@@ -8306,7 +8303,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </label>
           </div>
           <div className={`video-lora-control is-secondary ${h3SecondaryLoraBypassed ? "is-bypassed" : ""} ${secondaryLoraMenuOpen ? "is-menu-open" : ""}`}>
-            <span>{secondaryStageLabel} LoRA</span>
+            <span>2采 LoRA</span>
             <div ref={secondaryLoraControlRef} className="video-lora-select">
               <button
                 type="button"
@@ -8315,8 +8312,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 aria-haspopup="menu"
                 aria-expanded={secondaryLoraMenuOpen}
                 title={availableH3SecondaryLoraName ?? (h3SecondaryLoraName
-                  ? `所选${secondaryStageLabel} LoRA 已不在 MinimaxH3 目录中`
-                  : `${secondaryStageLabel} LoRA 未设置`)}
+                  ? "所选2采 LoRA 已不在 MinimaxH3 目录中"
+                  : "2采 LoRA 未设置")}
                 onClick={() => {
                   setAspectRatioMenuOpen(false);
                   setLoraMenuOpen(false);
@@ -8333,7 +8330,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
               </button>
               {secondaryLoraMenuOpen && (
-                <div className="video-lora-select-menu" role="menu" aria-label={`MiniMax H3 ${secondaryStageLabel} LoRA`}>
+                <div className="video-lora-select-menu" role="menu" aria-label="MiniMax H3 2采 LoRA">
                   <button
                     type="button"
                     role="menuitemradio"
@@ -8396,8 +8393,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               max="10"
               step="0.01"
               value={h3SecondaryLoraStrength}
-              title={`${secondaryStageLabel} LoRA 权重：${h3SecondaryLoraStrength.toFixed(2)}`}
-              aria-label={`${secondaryStageLabel} LoRA 权重`}
+              title={`2采 LoRA 权重：${h3SecondaryLoraStrength.toFixed(2)}`}
+              aria-label="2采 LoRA 权重"
               onChange={(event) => {
                 const secondaryLoraStrength = Number(event.currentTarget.value);
                 onH3LoraPreferenceChange({ secondaryLoraStrength });
@@ -8412,14 +8409,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               }}
               onPointerDown={(event) => event.stopPropagation()}
             />
-            <label className="video-lora-strength is-plain-value" title={`${secondaryStageLabel} LoRA 权重`}>
+            <label className="video-lora-strength is-plain-value" title="2采 LoRA 权重">
               <CompactDecimalInput
                 value={h3SecondaryLoraStrength}
                 min={0}
                 max={10}
                 disabled={h3SecondaryLoraBypassed}
                 displayDecimals={2}
-                ariaLabel={`手动输入${secondaryStageLabel} LoRA 权重`}
+                ariaLabel="手动输入2采 LoRA 权重"
                 onChange={(secondaryLoraStrength) => {
                   onH3LoraPreferenceChange({ secondaryLoraStrength });
                   onChange(id, {
@@ -8435,14 +8432,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </label>
             <label
               className="nodrag nowheel video-lora-steps"
-              title={`${secondaryStageLabel}基本调度 Steps`}
+              title="2采基本调度 Steps"
               onPointerDown={(event) => event.stopPropagation()}
             >
               <span>S</span>
               <CompactIntegerInput
                 value={secondarySchedulerSteps}
                 min={1}
-                ariaLabel={`${secondaryStageLabel}基本调度 Steps`}
+                ariaLabel="2采基本调度 Steps"
                 onChange={(value) => {
                   onChange(id, {
                     content: {
@@ -8586,14 +8583,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </label>
             <label
               className="nodrag nowheel video-style-lora-secondary-toggle"
-              title={`选择应用于${secondaryStageLabel}`}
+              title={`选择应用于${styleLoraSecondaryTargetLabel}`}
               onPointerDown={(event) => event.stopPropagation()}
             >
               <input
                 type="checkbox"
                 checked={h3StyleLoraApplyToSecondary}
                 disabled={h3StyleLoraBypassed}
-                aria-label={`选择应用于${secondaryStageLabel}`}
+                aria-label={`选择应用于${styleLoraSecondaryTargetLabel}`}
                 onChange={(event) => {
                   const styleLoraApplyToSecondary = event.currentTarget.checked;
                   onH3LoraPreferenceChange({ styleLoraApplyToSecondary });
@@ -8607,7 +8604,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   });
                 }}
               />
-              <span>{secondaryStageLabel}</span>
+              <span>{styleLoraSecondaryTargetLabel}</span>
             </label>
           </div>
           <div className="video-seed-control">

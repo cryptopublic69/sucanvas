@@ -1646,7 +1646,7 @@ fn configure_h3_diffusion_model(
             .get(&bindings.secondary_diffusion_model_node_id)
             .ok_or_else(|| {
                 format!(
-                    "API 工作流缺少二采大模型加载节点 {}",
+                    "API 工作流缺少2采大模型加载节点 {}",
                     bindings.secondary_diffusion_model_node_id
                 )
             })?;
@@ -1759,7 +1759,7 @@ fn configure_h3_loras(
     let primary_upstream = read_lora_upstream(&bindings.primary_lora_node_id)?;
     let secondary_upstream = read_lora_upstream(&bindings.secondary_lora_node_id)?;
 
-    // I2V/尾帧/首尾帧 V3 的一采和二段共用原始 Sigma/latent 流程。风格 LoRA
+    // I2V/尾帧/首尾帧 V3 的1采和二段共用原始 Sigma/latent 流程。风格 LoRA
     // 只能接在各自引导器之前：若把二段改接成 Fla 的独立模型/调度链，会破坏 V3
     // 的 `208 -> 209 -> 210` 连续二段流程。这里仅切换 126 和 279 的模型输入。
     let uses_v3_stage_local_style = bindings.primary_lora_node_id
@@ -1874,7 +1874,7 @@ fn configure_h3_loras(
             .map(str::to_owned)
             .ok_or_else(|| {
                 format!(
-                    "API 工作流一采采样器 {} 缺少 guider 连接",
+                    "API 工作流1采采样器 {} 缺少 guider 连接",
                     bindings.primary_sampler_node_id
                 )
             })?;
@@ -2051,12 +2051,17 @@ fn configure_h3_steps(
             json!(primary_audio_steps),
         )?;
     }
-    set_workflow_input(
-        workflow,
-        &bindings.secondary_scheduler_node_id,
-        "steps",
-        json!(secondary_scheduler_steps),
-    )?;
+    // I2V/尾帧/首尾帧 V3 的原生二段从1采 BasicScheduler 的 Sigma
+    // 序列分离出来，因此两个绑定都会指向同一个节点。此时二段值不能再
+    // 写回该节点，否则会在此处覆盖刚设置的1采步数。
+    if bindings.secondary_scheduler_node_id != *primary_steps_node_id {
+        set_workflow_input(
+            workflow,
+            &bindings.secondary_scheduler_node_id,
+            "steps",
+            json!(secondary_scheduler_steps),
+        )?;
+    }
     Ok(())
 }
 
@@ -2722,7 +2727,7 @@ fn configure_v3_independent_secondary_source(
     style_lora_apply_to_secondary: bool,
     bindings: &WorkflowBindings,
 ) -> Result<(), String> {
-    // V3 的内置二段是 125 -> 209 的连续潜空间流程；独立“二采”则按 Fla V3 的
+    // V3 的内置二段是 125 -> 209 的连续潜空间流程；独立“2采”则按 Fla V3 的
     // 解码视频 -> 调整尺寸 -> 编码 AV latent -> 独立采样流程构造，不能复用内置二段。
     const VIDEO_INPUT_NODE_ID: &str = "9300";
     const RESOLUTION_NODE_ID: &str = "9398";
@@ -2765,7 +2770,7 @@ fn configure_v3_independent_secondary_source(
         json!({
             "inputs": { "aspect_ratio": aspect_ratio, "megapixels": secondary_resolution_megapixels, "multiple": 32 },
             "class_type": "ResolutionSelector",
-            "_meta": { "title": "独立二采尺寸" }
+            "_meta": { "title": "独立2采尺寸" }
         }),
     );
     workflow_object.insert(
@@ -3824,39 +3829,39 @@ async fn submit_comfyui_workflow_inner(
         || input.primary_resolution_megapixels < 0.2
         || input.primary_resolution_megapixels > 2.0
     {
-        return Err("一采分辨率必须在0.2到2.0 MP之间".to_owned());
+        return Err("1采分辨率必须在0.2到2.0 MP之间".to_owned());
     }
     if !input.secondary_resolution_megapixels.is_finite()
         || input.secondary_resolution_megapixels < 0.2
         || input.secondary_resolution_megapixels > 2.0
     {
-        return Err("二采分辨率必须在0.2到2.0 MP之间".to_owned());
+        return Err("2采分辨率必须在0.2到2.0 MP之间".to_owned());
     }
     if input.primary_video_steps < 1 {
-        return Err("一采 Video Steps 必须是正整数".to_owned());
+        return Err("1采 Video Steps 必须是正整数".to_owned());
     }
     if !bindings.primary_audio_steps_input_name.trim().is_empty()
         && input.primary_audio_steps < input.primary_video_steps
     {
-        return Err("一采 Audio Steps 不能小于 Video Steps".to_owned());
+        return Err("1采 Audio Steps 不能小于 Video Steps".to_owned());
     }
     if input.secondary_scheduler_steps < 1 {
-        return Err("二采基本调度器 Steps 必须是正整数".to_owned());
+        return Err("2采基本调度器 Steps 必须是正整数".to_owned());
     }
     if !input.primary_upscale_factor.is_finite()
         || input.primary_upscale_factor < 1.0
         || input.primary_upscale_factor > 2.0
     {
-        return Err("一采放大倍率必须在1.0到2.0之间".to_owned());
+        return Err("1采放大倍率必须在1.0到2.0之间".to_owned());
     }
     let ref_image_size = ref_image_size_for_variant(&adapter_variant, input.ref_image_size.trim())?;
     for (label, value) in [
-        ("一采亮度", input.primary_brightness),
-        ("一采对比度", input.primary_contrast),
-        ("一采饱和度", input.primary_saturation),
-        ("二采亮度", input.secondary_brightness),
-        ("二采对比度", input.secondary_contrast),
-        ("二采饱和度", input.secondary_saturation),
+        ("1采亮度", input.primary_brightness),
+        ("1采对比度", input.primary_contrast),
+        ("1采饱和度", input.primary_saturation),
+        ("2采亮度", input.secondary_brightness),
+        ("2采对比度", input.secondary_contrast),
+        ("2采饱和度", input.secondary_saturation),
     ] {
         if !value.is_finite() || !(0.0..=3.0).contains(&value) {
             return Err(format!("{label}必须在0.00到3.00之间"));
@@ -3881,7 +3886,7 @@ async fn submit_comfyui_workflow_inner(
         && !is_model_name_in_directory(secondary_lora_name, &bindings.lora_directory)
     {
         return Err(format!(
-            "二采 LoRA 只能选择 {} 目录中的模型；未设置二采 LoRA 时请开启 Bypass",
+            "2采 LoRA 只能选择 {} 目录中的模型；未设置2采 LoRA 时请开启 Bypass",
             bindings.lora_directory
         ));
     }
@@ -3889,7 +3894,7 @@ async fn submit_comfyui_workflow_inner(
         || secondary_lora_strength < 0.0
         || secondary_lora_strength > 10.0
     {
-        return Err("二采 LoRA 权重必须在0.0到10.0之间".to_owned());
+        return Err("2采 LoRA 权重必须在0.0到10.0之间".to_owned());
     }
     let style_lora_name = input.style_lora_name.as_deref().unwrap_or("").trim();
     let style_lora_bypassed =
@@ -3961,7 +3966,7 @@ async fn submit_comfyui_workflow_inner(
                 &server_url,
                 source,
                 &task.upload_subfolder,
-                "二采源视频",
+                "2采源视频",
             )
             .await?,
         )
@@ -4798,6 +4803,22 @@ mod tests {
         assert!(workflow["124"]["inputs"].get("audio_steps").is_none());
         assert_eq!(workflow["210"]["inputs"]["scale"], 1.6);
         assert_eq!(workflow["391"]["inputs"]["steps"], 6);
+    }
+
+    #[test]
+    fn keeps_i2v_v3_primary_steps_when_native_second_stage_shares_its_scheduler() {
+        let mut workflow = json!({
+            "124": { "inputs": { "steps": 4 } }
+        });
+        let mut bindings = WorkflowBindings::default();
+        bindings.primary_steps_node_id = "124".to_owned();
+        bindings.primary_video_steps_input_name = "steps".to_owned();
+        bindings.primary_audio_steps_input_name = String::new();
+        bindings.secondary_scheduler_node_id = "124".to_owned();
+
+        configure_h3_steps(&mut workflow, 8, 999, 2, &bindings).unwrap();
+
+        assert_eq!(workflow["124"]["inputs"]["steps"], 8);
     }
 
     #[test]
