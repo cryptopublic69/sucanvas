@@ -8,6 +8,7 @@ import {
   Background,
   BackgroundVariant,
   Connection,
+  ControlButton,
   Controls,
   Edge,
   MiniMap,
@@ -52,6 +53,7 @@ import {
   Thermometer,
   Trash2,
   Upload,
+  Unlink2,
   X
 } from "lucide-react";
 import {
@@ -368,6 +370,13 @@ function comfyGpuMonitorFromSocketData(data: unknown): ComfyGpuMonitor | null {
 function CanvasWorkspace() {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasFlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [hideUnselectedEdges, setHideUnselectedEdges] = useState(
+    () => window.localStorage.getItem("infinite-canvas:hide-unselected-edges") === "true",
+  );
+
+  useEffect(() => {
+    window.localStorage.setItem("infinite-canvas:hide-unselected-edges", String(hideUnselectedEdges));
+  }, [hideUnselectedEdges]);
   const [canvasName, setCanvasName] = useState("SuCanvas");
   const [editingProjectName, setEditingProjectName] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
@@ -9684,24 +9693,62 @@ function CanvasWorkspace() {
     );
   }, [activateTextInput]);
 
+  const selectionVisibleEdgeIds = useMemo(() => {
+    const visibleIds = new Set<string>();
+    const selected = nodes.filter((node) => node.selected);
+    if (selected.length !== 1) return visibleIds;
+    const selectedNode = selected[0];
+    const kind = selectedNode.data.record.kind;
+    const usedVideoPromptId = kind === "generated-video"
+      ? generationSnapshotFromContent(selectedNode.data.record.content)?.promptNodeId ?? ""
+      : "";
+    const generatorKind = kind === "generated-video"
+      ? "video-generation"
+      : kind === "generated-image" ? "image-generation" : null;
+    const generatorIds = new Set<string>();
+    const nodeKinds = new Map(nodes.map((node) => [node.id, node.data.record.kind]));
+
+    edges.forEach((edge) => {
+      if (edge.source === selectedNode.id || edge.target === selectedNode.id) {
+        visibleIds.add(edge.id);
+      }
+      if (generatorKind && edge.target === selectedNode.id
+        && nodeKinds.get(edge.source) === generatorKind
+        && (edge.data as CanvasEdgeData | undefined)?.record?.kind === "output") {
+        generatorIds.add(edge.source);
+      }
+    });
+    // Include generator inputs, without revealing its other outputs or recursing upstream.
+    edges.forEach((edge) => {
+      if (!generatorIds.has(edge.target)) return;
+      // Historical results use their captured prompt, never the generator's current selection.
+      if (kind === "generated-video" && nodeKinds.get(edge.source) === "text"
+        && edge.source !== usedVideoPromptId) return;
+      visibleIds.add(edge.id);
+    });
+    return visibleIds;
+  }, [edges, nodes]);
+
   const interactiveEdges = useMemo(
     () => edges.map((edge) => {
       const protectedRelationshipEdge = protectedGenerationEdgeIds.has(edge.id);
       return {
         ...edge,
         type: "canvasEdge",
+        hidden: edge.hidden || (hideUnselectedEdges && !selectionVisibleEdgeIds.has(edge.id)),
         selectable: !protectedRelationshipEdge,
         deletable: !protectedRelationshipEdge,
         focusable: !protectedRelationshipEdge,
         data: {
           ...edge.data,
+          flowHighlighted: selectionVisibleEdgeIds.has(edge.id),
           onDisconnect: protectedRelationshipEdge
             ? undefined
             : (edgeId: string) => void disconnectEdge(edgeId),
         },
       };
     }),
-    [disconnectEdge, edges, protectedGenerationEdgeIds],
+    [disconnectEdge, edges, hideUnselectedEdges, protectedGenerationEdgeIds, selectionVisibleEdgeIds],
   );
 
   const visibleNodes = useMemo(
@@ -10811,7 +10858,19 @@ function CanvasWorkspace() {
             />
           ))}
         </ViewportPortal>
-        <Controls position="bottom-left" showInteractive={false} />
+        <Controls position="bottom-left" showInteractive={false}>
+          <ControlButton
+            className="canvas-edge-visibility-toggle"
+            aria-label="隐藏连线"
+            aria-pressed={hideUnselectedEdges}
+            onClick={() => setHideUnselectedEdges((hidden) => !hidden)}
+            title={hideUnselectedEdges
+              ? "隐藏连线已开启：单选时显示相关连线，生成结果同时显示生成节点的输入连线；点击显示全部连线"
+              : "隐藏连线：单选时显示相关连线，生成结果同时显示生成节点的输入连线"}
+          >
+            {hideUnselectedEdges ? <Unlink2 size={14} /> : <Link2 size={14} />}
+          </ControlButton>
+        </Controls>
         <MiniMap
           position="bottom-right"
           pannable

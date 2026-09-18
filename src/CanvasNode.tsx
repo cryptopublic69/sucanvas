@@ -1550,6 +1550,7 @@ interface NodeClipboard {
 
 interface CanvasEdgeData extends Record<string, unknown> {
   record?: EdgeRecord;
+  flowHighlighted?: boolean;
   onDisconnect?: (edgeId: string) => void;
 }
 
@@ -4371,6 +4372,16 @@ function edgeEndpointAtNodeBorder(
   }
 }
 
+// Nested, centered dashes fade along the curve, including when the edge bends back.
+const EDGE_FLOW_FADE_LAYERS = Array.from({ length: 24 }, (_, index) => {
+  const length = 18 * (1 - index / 24);
+  return {
+    strokeDasharray: `${length} ${100 - length}`,
+    "--flow-offset-start": `${length / 2}px`,
+    "--flow-offset-end": `${length / 2 - 100}px`,
+  } as CSSProperties;
+});
+
 function CanvasEdge({
   id,
   sourceX,
@@ -4397,6 +4408,7 @@ function CanvasEdge({
   });
   const onDisconnect = (data as CanvasEdgeData | undefined)?.onDisconnect;
   const edgeKind = (data as CanvasEdgeData | undefined)?.record?.kind;
+  const flowHighlighted = (data as CanvasEdgeData | undefined)?.flowHighlighted;
   const disconnect = () => onDisconnect?.(id);
   const showDisconnect = () => {
     if (disconnectHideTimer.current !== undefined) {
@@ -4427,6 +4439,19 @@ function CanvasEdge({
         className={`canvas-edge ${edgeKind === "content-derivation" || edgeKind === "scene-branch" ? "is-content-derivation" : ""}`}
         interactionWidth={24}
       />
+      {flowHighlighted && (
+        <g className="canvas-edge-flow-highlight" aria-hidden="true">
+          {EDGE_FLOW_FADE_LAYERS.map((layerStyle, index) => (
+            <path
+              key={index}
+              d={edgePath}
+              pathLength={100}
+              className="canvas-edge-flow-layer"
+              style={layerStyle}
+            />
+          ))}
+        </g>
+      )}
       {onDisconnect && (
         <EdgeLabelRenderer>
           <div

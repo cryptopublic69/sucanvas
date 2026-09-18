@@ -1392,6 +1392,11 @@ button { color: inherit; }
 .canvas-edge.is-content-derivation { stroke: #8b7cf6; stroke-width: 2.25; stroke-dasharray: 7 5; }
 .react-flow__edge.selected .canvas-edge { stroke: #9a8dff; }
 .react-flow__edge.selected .canvas-edge.is-content-derivation { stroke: #b1a7ff; }
+.canvas-edge-flow-highlight { fill: none; stroke: #d6cfff; stroke-width: 2.5; stroke-linecap: round; pointer-events: none; filter: drop-shadow(0 0 1.5px rgba(163, 145, 255, .3)); }
+.canvas-edge-flow-layer { stroke-opacity: .055; pointer-events: none; animation: canvas-edge-flow 2.8s linear infinite; }
+@keyframes canvas-edge-flow { from { stroke-dashoffset: var(--flow-offset-start); } to { stroke-dashoffset: var(--flow-offset-end); } }
+:root[data-theme="light"] .canvas-edge-flow-highlight { stroke: #8063e0; filter: drop-shadow(0 0 1px rgba(116, 82, 211, .2)); }
+@media (prefers-reduced-motion: reduce) { .canvas-edge-flow-highlight { filter: none; } .canvas-edge-flow-layer { animation: none; stroke-dasharray: none !important; } }
 .react-flow__nodes { position: absolute; z-index: 4; }
 .react-flow__edgelabel-renderer { z-index: 3; }
 .canvas-edge-disconnect-hit-area { position: absolute; z-index: 3; display: grid; width: 38px; height: 38px; place-items: center; pointer-events: all; }
@@ -1486,6 +1491,9 @@ button { color: inherit; }
 .react-flow__controls-button { width: 30px !important; height: 30px !important; color: #a6abba !important; background: #151821 !important; border-bottom-color: #303541 !important; }
 .react-flow__controls-button:hover { color: white !important; background: #20242f !important; }
 .react-flow__controls-button svg { fill: currentColor !important; }
+.react-flow__controls .canvas-edge-visibility-toggle svg { fill: none !important; }
+.react-flow__controls .canvas-edge-visibility-toggle[aria-pressed="true"] { color: #c7beff !important; background: #30294e !important; }
+:root[data-theme="light"] .react-flow__controls .canvas-edge-visibility-toggle[aria-pressed="true"] { color: #5943b2 !important; background: #eae4ff !important; }
 .react-flow__minimap { margin: 13px !important; overflow: hidden; background: #11141c !important; border: 1px solid #343946; border-radius: 10px; box-shadow: 0 12px 30px rgba(0,0,0,.25); }
 
 .drop-overlay { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; pointer-events: none; background: rgba(9, 11, 17, 0.58); border: 2px solid rgba(126, 111, 239, 0.7); }
