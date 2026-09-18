@@ -81,6 +81,10 @@ pub struct WorkflowBindings {
     #[serde(default = "default_secondary_style_lora_node_id")]
     pub secondary_style_lora_node_id: String,
     #[serde(default)]
+    pub primary_style_lora_node_ids: Vec<String>,
+    #[serde(default)]
+    pub secondary_style_lora_node_ids: Vec<String>,
+    #[serde(default)]
     pub primary_sol_attn_node_id: String,
     #[serde(default)]
     pub secondary_sol_attn_node_id: String,
@@ -148,6 +152,12 @@ impl Default for WorkflowBindings {
             secondary_lora_node_id: "401".to_owned(),
             primary_style_lora_node_id: default_primary_style_lora_node_id(),
             secondary_style_lora_node_id: default_secondary_style_lora_node_id(),
+            primary_style_lora_node_ids: ["9200", "9500", "9502", "9504", "9506", "9508"]
+                .map(str::to_owned)
+                .to_vec(),
+            secondary_style_lora_node_ids: ["9201", "9501", "9503", "9505", "9507", "9509"]
+                .map(str::to_owned)
+                .to_vec(),
             primary_sol_attn_node_id: "417".to_owned(),
             secondary_sol_attn_node_id: "9202".to_owned(),
             primary_sampler_node_id: "357".to_owned(),
@@ -206,6 +216,8 @@ impl WorkflowBindings {
             secondary_lora_node_id: String::new(),
             primary_style_lora_node_id: String::new(),
             secondary_style_lora_node_id: String::new(),
+            primary_style_lora_node_ids: Vec::new(),
+            secondary_style_lora_node_ids: Vec::new(),
             primary_sol_attn_node_id: String::new(),
             secondary_sol_attn_node_id: String::new(),
             primary_sampler_node_id: "160".to_owned(),
@@ -257,6 +269,8 @@ impl WorkflowBindings {
             secondary_lora_node_id: String::new(),
             primary_style_lora_node_id: String::new(),
             secondary_style_lora_node_id: String::new(),
+            primary_style_lora_node_ids: Vec::new(),
+            secondary_style_lora_node_ids: Vec::new(),
             primary_sol_attn_node_id: String::new(),
             secondary_sol_attn_node_id: String::new(),
             primary_sampler_node_id: "7".to_owned(),
@@ -307,6 +321,12 @@ impl WorkflowBindings {
             secondary_lora_node_id: "401".to_owned(),
             primary_style_lora_node_id: default_primary_style_lora_node_id(),
             secondary_style_lora_node_id: default_secondary_style_lora_node_id(),
+            primary_style_lora_node_ids: ["9200", "9500", "9502", "9504", "9506", "9508"]
+                .map(str::to_owned)
+                .to_vec(),
+            secondary_style_lora_node_ids: ["9201", "9501", "9503", "9505", "9507", "9509"]
+                .map(str::to_owned)
+                .to_vec(),
             primary_sol_attn_node_id: "418".to_owned(),
             secondary_sol_attn_node_id: "9202".to_owned(),
             primary_sampler_node_id: "331".to_owned(),

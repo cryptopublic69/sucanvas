@@ -936,6 +936,9 @@ button { color: inherit; }
 .generated-video-stage-info dl { display: grid; grid-template-columns: minmax(74px, 1fr) minmax(0, 1.4fr); gap: 5px 9px; margin: 7px 0 0; }
 .generated-video-stage-info dt { color: #778191; font-size: calc(8.5px + var(--ui-font-adjust)); }
 .generated-video-stage-info dd { min-width: 0; margin: 0; overflow: hidden; color: #d1d6df; font-size: calc(8.7px + var(--ui-font-adjust)); font-weight: 600; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.generated-lora-name-strength { display: flex; min-width: 0; justify-content: flex-end; align-items: baseline; }
+.generated-lora-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.generated-lora-strength { flex: 0 0 auto; white-space: nowrap; }
 .generated-video-prompt-info { padding: 8px; background: #11141b; border: 1px solid #2d333e; border-radius: 8px; }
 .generated-video-prompt-info > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .generated-video-prompt-info button { display: grid; width: 24px; height: 24px; place-items: center; padding: 0; color: #9991d5; background: transparent; border: 0; border-radius: 5px; cursor: pointer; }
@@ -2235,3 +2238,13 @@ button { color: inherit; }
   .app-settings-content { padding: 16px 12px 20px; }
   .private-project-list { grid-template-columns: 1fr; }
 }
+
+.style-lora-editor { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 6px 0; }
+.style-lora-editor.is-menu-open, .style-lora-row.is-menu-open { z-index: 30; }
+.style-lora-heading { display: flex; justify-content: space-between; align-items: center; font-size: 11px; }
+.style-lora-heading > button, .style-lora-row > button { border: 1px solid #353b48; border-radius: 4px; background: #202530; padding: 3px 6px; }
+.style-lora-heading button:disabled { opacity: .4; }
+.style-lora-row { position: relative; display: grid; grid-template-columns: 14px minmax(0, 1fr) 58px 24px; gap: 5px; align-items: center; padding: 5px; border: 1px solid #303746; border-radius: 5px; font-size: 10px; }
+.style-lora-row input[type=number] { min-width: 0; width: 100%; height: 26px; box-sizing: border-box; background: #11151e; color: inherit; border: 1px solid #353b48; border-radius: 4px; }
+.style-lora-options { grid-column: 2 / -1; display: flex; gap: 12px; }
+.style-lora-options label { display: flex; align-items: center; gap: 4px; }

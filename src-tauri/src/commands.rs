@@ -28,12 +28,13 @@ use crate::{
         ComfySubmitResult, CreateEdgeInput, CreateEmptyFolderInput, CreateEmptyFolderResult,
         CreateNodeInput, CreateNodeResult, CreateProjectInput, DeleteFolderResult,
         DeleteNodesInput, DeletedBatch, EdgeRecord, FolderActionInput, GroupNodesIntoFolderInput,
-        GroupNodesIntoFolderResult, GroupRelatedNodesIntoFolderInput, MergeFoldersInput,
-        MergeFoldersResult, NodeRecord, ReplaceNodeAndDeleteInput, ReplaceNodeAndDeleteResult,
-        ResizeImageResult, RestoreNodeReplacementInput, RestoreNodeReplacementResult, RuntimeInfo,
-        SetAppLockInput, SetProjectPreviewImageInput, SetProjectPrivacyInput,
-        UndoCancelFolderInput, UndoDeleteFolderInput, UndoFolderGroupingInput,
-        UndoFolderMergeInput, UpdateNodeInput, UpdateProjectInput, WorkspaceSnapshot,
+        GroupNodesIntoFolderResult, GroupRelatedNodesIntoFolderInput, H3StyleLora,
+        MergeFoldersInput, MergeFoldersResult, NodeRecord, ReplaceNodeAndDeleteInput,
+        ReplaceNodeAndDeleteResult, ResizeImageResult, RestoreNodeReplacementInput,
+        RestoreNodeReplacementResult, RuntimeInfo, SetAppLockInput, SetProjectPreviewImageInput,
+        SetProjectPrivacyInput, UndoCancelFolderInput, UndoDeleteFolderInput,
+        UndoFolderGroupingInput, UndoFolderMergeInput, UpdateNodeInput, UpdateProjectInput,
+        WorkspaceSnapshot,
     },
     workflow_modules::{
         self, SaveWorkflowModuleInput, WorkflowBindings, WorkflowInputContract,
@@ -1723,6 +1724,53 @@ fn configure_h3_sol_attn_model(
     Ok(json!([node_id, 0]))
 }
 
+fn configure_h3_style_chain(
+    workflow: &mut Value,
+    bindings: &WorkflowBindings,
+    styles: &[H3StyleLora],
+    mut upstream: Value,
+    secondary: bool,
+) -> Result<Value, String> {
+    if styles.len() > 6 {
+        return Err("最多支持6个风格 LoRA".to_owned());
+    }
+    let ids = if secondary {
+        &bindings.secondary_style_lora_node_ids
+    } else {
+        &bindings.primary_style_lora_node_ids
+    };
+    let legacy_id = if secondary {
+        &bindings.secondary_style_lora_node_id
+    } else {
+        &bindings.primary_style_lora_node_id
+    };
+    for (index, slot) in styles.iter().enumerate() {
+        if slot.bypassed || (secondary && !slot.apply_to_secondary) {
+            continue;
+        }
+        let node_id = ids
+            .get(index)
+            .or_else(|| if index == 0 { Some(legacy_id) } else { None })
+            .ok_or_else(|| format!("工作流未预留风格 LoRA 槽位 {}，请升级工作流", index + 1))?;
+        ensure_h3_style_lora_loader(workflow, node_id, &upstream, bindings)?;
+        set_workflow_input(workflow, node_id, "lora_name", json!(slot.name.trim()))?;
+        set_workflow_input(workflow, node_id, "strength_model", json!(slot.strength))?;
+        upstream = json!([node_id, 0]);
+    }
+    Ok(upstream)
+}
+
+fn second_pass_styles(styles: &[H3StyleLora]) -> Vec<H3StyleLora> {
+    styles
+        .iter()
+        .cloned()
+        .map(|mut slot| {
+            slot.apply_to_secondary = slot.apply_to_second_pass.unwrap_or(slot.apply_to_secondary);
+            slot
+        })
+        .collect()
+}
+
 fn configure_h3_loras(
     workflow: &mut Value,
     primary_lora_name: &str,
@@ -1736,7 +1784,16 @@ fn configure_h3_loras(
     style_lora_bypassed: bool,
     style_lora_apply_to_secondary: bool,
     bindings: &WorkflowBindings,
+    style_loras: Option<&[H3StyleLora]>,
 ) -> Result<(), String> {
+    let legacy = [H3StyleLora {
+        name: style_lora_name.to_owned(),
+        strength: style_lora_strength,
+        bypassed: style_lora_bypassed,
+        apply_to_secondary: style_lora_apply_to_secondary,
+        apply_to_second_pass: None,
+    }];
+    let styles = style_loras.unwrap_or(&legacy);
     let read_lora_upstream = |node_id: &str| -> Result<Value, String> {
         let class_type = workflow
             .get(node_id)
@@ -1817,53 +1874,10 @@ fn configure_h3_loras(
             "model",
             stage_model.clone(),
         )?;
-        let primary_stage_model = if style_lora_bypassed {
-            stage_model.clone()
-        } else {
-            ensure_h3_style_lora_loader(
-                workflow,
-                &bindings.primary_style_lora_node_id,
-                &stage_model,
-                bindings,
-            )?;
-            set_workflow_input(
-                workflow,
-                &bindings.primary_style_lora_node_id,
-                "lora_name",
-                Value::String(style_lora_name.to_owned()),
-            )?;
-            set_workflow_input(
-                workflow,
-                &bindings.primary_style_lora_node_id,
-                "strength_model",
-                json!(style_lora_strength),
-            )?;
-            json!([bindings.primary_style_lora_node_id, 0])
-        };
-        let secondary_stage_model = if style_lora_bypassed || !style_lora_apply_to_secondary {
-            stage_model
-        } else {
-            let secondary_stage_upstream = json!([bindings.live_preview_node_id, 0]);
-            ensure_h3_style_lora_loader(
-                workflow,
-                &bindings.secondary_style_lora_node_id,
-                &secondary_stage_upstream,
-                bindings,
-            )?;
-            set_workflow_input(
-                workflow,
-                &bindings.secondary_style_lora_node_id,
-                "lora_name",
-                Value::String(style_lora_name.to_owned()),
-            )?;
-            set_workflow_input(
-                workflow,
-                &bindings.secondary_style_lora_node_id,
-                "strength_model",
-                json!(style_lora_strength),
-            )?;
-            json!([bindings.secondary_style_lora_node_id, 0])
-        };
+        let primary_stage_model =
+            configure_h3_style_chain(workflow, bindings, styles, stage_model.clone(), false)?;
+        let secondary_stage_model =
+            configure_h3_style_chain(workflow, bindings, styles, stage_model, true)?;
         let primary_guider_node_id = workflow
             .get(&bindings.primary_sampler_node_id)
             .and_then(|node| node.get("inputs"))
@@ -1890,6 +1904,20 @@ fn configure_h3_loras(
             "model",
             secondary_stage_model,
         )?;
+        let mut independent_bindings = bindings.clone();
+        independent_bindings.secondary_style_lora_node_ids =
+            (9600..9606).map(|id| id.to_string()).collect();
+        let independent_styles = second_pass_styles(styles);
+        let independent_model = configure_h3_style_chain(
+            workflow,
+            &independent_bindings,
+            &independent_styles,
+            json!([bindings.live_preview_node_id, 0]),
+            true,
+        )?;
+        for id in ["9391", "9393"] {
+            set_workflow_input(workflow, id, "model", independent_model.clone())?;
+        }
         return Ok(());
     }
 
@@ -1933,52 +1961,35 @@ fn configure_h3_loras(
         json!([bindings.secondary_lora_node_id, 0])
     };
 
-    let primary_style_model = if style_lora_bypassed {
-        primary_model.clone()
+    let has_native_stages =
+        !bindings.live_preview_node_id.is_empty() && workflow.get("209").is_some();
+    let primary_style_model = if has_native_stages {
+        // Keep shared patches free of styles so the two guiders can select independently.
+        set_workflow_input(
+            workflow,
+            &bindings.primary_model_target_node_id,
+            "model",
+            primary_model.clone(),
+        )?;
+        let base = json!([bindings.live_preview_node_id, 0]);
+        let first = configure_h3_style_chain(workflow, bindings, styles, base.clone(), false)?;
+        set_workflow_input(workflow, "126", "model", first)?;
+        let mut stage_bindings = bindings.clone();
+        stage_bindings.secondary_style_lora_node_ids =
+            (9600..9606).map(|id| id.to_string()).collect();
+        let second = configure_h3_style_chain(workflow, &stage_bindings, styles, base, true)?;
+        set_workflow_input(workflow, "9606", "model", second)?;
+        primary_model
     } else {
-        ensure_h3_style_lora_loader(
-            workflow,
-            &bindings.primary_style_lora_node_id,
-            &primary_model,
-            bindings,
-        )?;
-        set_workflow_input(
-            workflow,
-            &bindings.primary_style_lora_node_id,
-            "lora_name",
-            Value::String(style_lora_name.to_owned()),
-        )?;
-        set_workflow_input(
-            workflow,
-            &bindings.primary_style_lora_node_id,
-            "strength_model",
-            json!(style_lora_strength),
-        )?;
-        json!([bindings.primary_style_lora_node_id, 0])
+        configure_h3_style_chain(workflow, bindings, styles, primary_model, false)?
     };
-    let secondary_style_model = if style_lora_bypassed || !style_lora_apply_to_secondary {
-        secondary_model.clone()
-    } else {
-        ensure_h3_style_lora_loader(
-            workflow,
-            &bindings.secondary_style_lora_node_id,
-            &secondary_model,
-            bindings,
-        )?;
-        set_workflow_input(
-            workflow,
-            &bindings.secondary_style_lora_node_id,
-            "lora_name",
-            Value::String(style_lora_name.to_owned()),
-        )?;
-        set_workflow_input(
-            workflow,
-            &bindings.secondary_style_lora_node_id,
-            "strength_model",
-            json!(style_lora_strength),
-        )?;
-        json!([bindings.secondary_style_lora_node_id, 0])
-    };
+    let secondary_style_model = configure_h3_style_chain(
+        workflow,
+        bindings,
+        &second_pass_styles(styles),
+        secondary_model,
+        true,
+    )?;
     let primary_stage_model = configure_h3_sol_attn_model(
         workflow,
         &bindings.primary_sol_attn_node_id,
@@ -2156,6 +2167,11 @@ fn install_clean_video_output(
         .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
     workflow_object.remove(&bindings.primary_output_node_id);
     workflow_object.remove(&bindings.secondary_output_node_id);
+    // Only the requested output should execute in SuCanvas. The saved independent
+    // output remains available when opening the workflow directly in ComfyUI.
+    if uses_v3_native_second_stage(bindings) {
+        workflow_object.remove("9404");
+    }
     workflow_object.insert(
         bindings.clean_video_node_id.clone(),
         json!({
@@ -2389,6 +2405,7 @@ fn configure_h3_generation(
     style_lora_bypassed: bool,
     style_lora_apply_to_secondary: bool,
     bindings: &WorkflowBindings,
+    style_loras: Option<&[H3StyleLora]>,
 ) -> Result<(), String> {
     set_workflow_input(
         workflow,
@@ -2460,6 +2477,7 @@ fn configure_h3_generation(
         style_lora_bypassed,
         style_lora_apply_to_secondary,
         bindings,
+        style_loras,
     )?;
     install_clean_video_output(workflow, secondary_sampling_enabled, bindings)?;
     Ok(())
@@ -2723,122 +2741,63 @@ fn configure_v3_independent_secondary_source(
     secondary_brightness: f64,
     secondary_contrast: f64,
     secondary_saturation: f64,
-    style_lora_bypassed: bool,
-    style_lora_apply_to_secondary: bool,
+    _style_lora_bypassed: bool,
+    _style_lora_apply_to_secondary: bool,
     bindings: &WorkflowBindings,
 ) -> Result<(), String> {
-    // V3 的内置二段是 125 -> 209 的连续潜空间流程；独立“2采”则按 Fla V3 的
-    // 解码视频 -> 调整尺寸 -> 编码 AV latent -> 独立采样流程构造，不能复用内置二段。
-    const VIDEO_INPUT_NODE_ID: &str = "9300";
-    const RESOLUTION_NODE_ID: &str = "9398";
-    const RESIZE_NODE_ID: &str = "9383";
-    const VIDEO_ENCODE_NODE_ID: &str = "9386";
-    const AUDIO_ENCODE_NODE_ID: &str = "9388";
-    const LATENT_NODE_ID: &str = "9390";
-    const SCHEDULER_NODE_ID: &str = "9391";
-    const GUIDER_NODE_ID: &str = "9393";
-    const SAMPLER_NODE_ID: &str = "9387";
-    const DECODE_NODE_ID: &str = "9395";
-    const COLOR_NODE_ID: &str = "9403";
-
-    let secondary_model = if style_lora_bypassed || !style_lora_apply_to_secondary {
-        json!([bindings.live_preview_node_id, 0])
-    } else {
-        json!([bindings.secondary_style_lora_node_id, 0])
-    };
-    let workflow_object = workflow
-        .as_object_mut()
-        .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
-    workflow_object.insert(
-        VIDEO_INPUT_NODE_ID.to_owned(),
-        json!({
-            "inputs": {
-                "video": uploaded_video,
-                "force_rate": 24.0,
-                "custom_width": 0,
-                "custom_height": 0,
-                "frame_load_cap": 0,
-                "skip_first_frames": 0,
-                "select_every_nth": 1
-            },
-            "class_type": "VHS_LoadVideo",
-            "_meta": { "title": "Load Selected Preview For Secondary Sampling" }
-        }),
-    );
-    workflow_object.insert(
-        RESOLUTION_NODE_ID.to_owned(),
-        json!({
-            "inputs": { "aspect_ratio": aspect_ratio, "megapixels": secondary_resolution_megapixels, "multiple": 32 },
-            "class_type": "ResolutionSelector",
-            "_meta": { "title": "独立2采尺寸" }
-        }),
-    );
-    workflow_object.insert(
-        RESIZE_NODE_ID.to_owned(),
-        json!({
-            "inputs": {
-                "image": [VIDEO_INPUT_NODE_ID, 0], "width": [RESOLUTION_NODE_ID, 0], "height": [RESOLUTION_NODE_ID, 1],
-                "upscale_method": "nvidia_rtx_vsr", "keep_proportion": "crop", "pad_color": "0, 0, 0",
-                "crop_position": "center", "divisible_by": 32, "device": "cpu"
-            },
-            "class_type": "ImageResizeKJv2",
-            "_meta": { "title": "Resize Image v2" }
-        }),
-    );
-    workflow_object.insert(
-        VIDEO_ENCODE_NODE_ID.to_owned(),
-        json!({ "inputs": { "pixels": [RESIZE_NODE_ID, 0], "vae": ["119", 0] }, "class_type": "VAEEncode" }),
-    );
-    workflow_object.insert(
-        AUDIO_ENCODE_NODE_ID.to_owned(),
-        json!({ "inputs": { "audio": [VIDEO_INPUT_NODE_ID, 2], "vae": ["120", 0] }, "class_type": "VAEEncodeAudio" }),
-    );
-    workflow_object.insert(
-        LATENT_NODE_ID.to_owned(),
-        json!({ "inputs": { "video_latent": [VIDEO_ENCODE_NODE_ID, 0], "audio_latent": [AUDIO_ENCODE_NODE_ID, 0] }, "class_type": "PT_H3ConcatAVLatent" }),
-    );
-    workflow_object.insert(
-        SCHEDULER_NODE_ID.to_owned(),
-        json!({ "inputs": { "scheduler": "simple", "steps": secondary_scheduler_steps, "denoise": 0.2, "model": secondary_model.clone() }, "class_type": "BasicScheduler" }),
-    );
-    workflow_object.insert(
-        GUIDER_NODE_ID.to_owned(),
-        json!({ "inputs": { "model": secondary_model, "conditioning": ["278", 0] }, "class_type": "BasicGuider" }),
-    );
-    workflow_object.insert(
-        SAMPLER_NODE_ID.to_owned(),
-        json!({
-            "inputs": { "noise": ["129", 0], "guider": [GUIDER_NODE_ID, 0], "sampler": ["123", 0], "sigmas": [SCHEDULER_NODE_ID, 0], "latent_image": [LATENT_NODE_ID, 0] },
-            "class_type": "SamplerCustomAdvanced"
-        }),
-    );
-    workflow_object.insert(
-        DECODE_NODE_ID.to_owned(),
-        json!({ "inputs": { "samples": [SAMPLER_NODE_ID, 0], "vae": ["119", 0] }, "class_type": "VAEDecode" }),
-    );
-    workflow_object.insert(
-        COLOR_NODE_ID.to_owned(),
-        json!({
-            "inputs": { "brightness": secondary_brightness, "contrast": secondary_contrast, "saturation": secondary_saturation, "image": [DECODE_NODE_ID, 0] },
-            "class_type": "LayerColor: BrightnessContrastV2"
-        }),
-    );
-
-    set_workflow_input(workflow, "278", "first_frame", json!([RESIZE_NODE_ID, 0]))?;
-    set_workflow_input(workflow, "278", "width", json!([RESOLUTION_NODE_ID, 0]))?;
-    set_workflow_input(workflow, "278", "height", json!([RESOLUTION_NODE_ID, 1]))?;
-    set_workflow_input(
-        workflow,
-        &bindings.clean_video_node_id,
-        "images",
-        json!([COLOR_NODE_ID, 0]),
-    )?;
-    set_workflow_input(
-        workflow,
-        &bindings.clean_video_node_id,
-        "audio",
-        json!([VIDEO_INPUT_NODE_ID, 2]),
-    )?;
+    // The complete independent branch is persisted in each V3 workflow.
+    // Missing nodes indicate an old/incomplete module; never reconstruct it here.
+    for (id, expected) in [
+        ("9300", "VHS_LoadVideo"),
+        ("9398", "ResolutionSelector"),
+        ("9383", "ImageResizeKJv2"),
+        ("9386", "VAEEncode"),
+        ("9388", "VAEEncodeAudio"),
+        ("9390", "PT_H3ConcatAVLatent"),
+        ("9391", "BasicScheduler"),
+        ("9393", "BasicGuider"),
+        ("9387", "SamplerCustomAdvanced"),
+        ("9395", "VAEDecode"),
+        ("9403", "LayerColor: BrightnessContrastV2"),
+    ] {
+        if workflow[id]["class_type"].as_str() != Some(expected) {
+            return Err(format!(
+                "V3 工作流缺少内嵌独立2采节点 {id}（{expected}），请更新工作流模块"
+            ));
+        }
+    }
+    if workflow.get("9394").is_none() {
+        return Err("V3 工作流缺少内嵌独立2采条件节点 9394，请更新工作流模块".to_owned());
+    }
+    let secondary_model = workflow
+        .pointer("/9393/inputs/model")
+        .cloned()
+        .ok_or_else(|| "V3 工作流缺少2采模型连接".to_owned())?;
+    for (id, input, value) in [
+        ("9300", "video", json!(uploaded_video)),
+        ("9398", "aspect_ratio", json!(aspect_ratio)),
+        ("9398", "megapixels", json!(secondary_resolution_megapixels)),
+        ("9383", "image", json!(["9300", 0])),
+        ("9388", "audio", json!(["9300", 2])),
+        ("9391", "steps", json!(secondary_scheduler_steps)),
+        ("9391", "model", secondary_model.clone()),
+        ("9393", "model", secondary_model),
+        ("9403", "brightness", json!(secondary_brightness)),
+        ("9403", "contrast", json!(secondary_contrast)),
+        ("9403", "saturation", json!(secondary_saturation)),
+        (
+            bindings.clean_video_node_id.as_str(),
+            "images",
+            json!(["9403", 0]),
+        ),
+        (
+            bindings.clean_video_node_id.as_str(),
+            "audio",
+            json!(["9300", 2]),
+        ),
+    ] {
+        set_workflow_input(workflow, id, input, value)?;
+    }
     Ok(())
 }
 
@@ -3896,6 +3855,24 @@ async fn submit_comfyui_workflow_inner(
     {
         return Err("2采 LoRA 权重必须在0.0到10.0之间".to_owned());
     }
+    if let Some(styles) = &input.style_loras {
+        if styles.len() > 6 {
+            return Err("最多支持6个风格 LoRA".to_owned());
+        }
+        for (index, slot) in styles.iter().enumerate() {
+            if !slot.strength.is_finite() || !(0.0..=10.0).contains(&slot.strength) {
+                return Err(format!("风格 LoRA {} 权重必须在0到10之间", index + 1));
+            }
+            if !slot.bypassed
+                && !is_model_name_in_directory(slot.name.trim(), &bindings.lora_directory)
+            {
+                return Err(format!(
+                    "风格 LoRA {} 请选择有效模型或开启 Bypass",
+                    index + 1
+                ));
+            }
+        }
+    }
     let style_lora_name = input.style_lora_name.as_deref().unwrap_or("").trim();
     let style_lora_bypassed =
         style_lora_name.is_empty() || input.style_lora_bypassed.unwrap_or(false);
@@ -4005,6 +3982,7 @@ async fn submit_comfyui_workflow_inner(
         style_lora_bypassed,
         style_lora_apply_to_secondary,
         &bindings,
+        input.style_loras.as_deref(),
     )?;
     if let Some(ref_image_size) = ref_image_size {
         configure_h3_ref_image_size(&mut workflow, ref_image_size, bindings)?;
@@ -4664,6 +4642,449 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn saved_native_v3_style_chains_reach_both_guiders() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows");
+        for name in [
+            "MiniMax+H3图生视频V3.json",
+            "MiniMax+H3尾帧生视频V3.json",
+            "MiniMax+H3首尾帧生视频V3.json",
+        ] {
+            let workflow: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
+            for (guider, ids) in [
+                ("126", ["9200", "9500", "9502", "9504", "9506", "9508"]),
+                ("279", ["9201", "9501", "9503", "9505", "9507", "9509"]),
+            ] {
+                assert_eq!(
+                    workflow.pointer(&format!("/{guider}/inputs/model")),
+                    Some(&json!([ids[5], 0])),
+                    "{name}"
+                );
+                for (index, id) in ids.iter().enumerate() {
+                    let upstream = if index == 0 { "141" } else { ids[index - 1] };
+                    assert_eq!(
+                        workflow.pointer(&format!("/{id}/inputs/model")),
+                        Some(&json!([upstream, 0])),
+                        "{name}"
+                    );
+                }
+            }
+            // Sharing the original scheduler is essential to native V3 continuity.
+            assert_eq!(
+                workflow.pointer("/124/inputs/model"),
+                Some(&json!(["141", 0])),
+                "{name}"
+            );
+            assert_eq!(
+                workflow.pointer("/209/inputs/sigmas"),
+                Some(&json!(["208", 1])),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn six_style_slots_chain_and_bypass_in_all_h3_templates() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows");
+        let bindings = WorkflowBindings::default();
+        let mut count = 0;
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            if !name.contains("H3") || path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            count += 1;
+            let mut workflow: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            let mut styles: Vec<super::H3StyleLora> = (0..6)
+                .map(|index| super::H3StyleLora {
+                    name: format!("MinimaxH3/style-{index}.safetensors"),
+                    strength: (index + 1) as f64 / 10.0,
+                    bypassed: false,
+                    apply_to_secondary: index % 2 == 1,
+                    apply_to_second_pass: None,
+                })
+                .collect();
+            let primary = super::configure_h3_style_chain(
+                &mut workflow,
+                &bindings,
+                &styles,
+                json!(["base", 0]),
+                false,
+            )
+            .unwrap();
+            assert_eq!(primary, json!(["9508", 0]));
+            assert_eq!(
+                workflow.pointer("/9508/inputs/model"),
+                Some(&json!(["9506", 0]))
+            );
+            assert_eq!(
+                workflow.pointer("/9508/inputs/strength_model"),
+                Some(&json!(0.6))
+            );
+            let secondary = super::configure_h3_style_chain(
+                &mut workflow,
+                &bindings,
+                &styles,
+                json!(["secondary", 0]),
+                true,
+            )
+            .unwrap();
+            assert_eq!(secondary, json!(["9509", 0]));
+            assert_eq!(
+                workflow.pointer("/9501/inputs/model"),
+                Some(&json!(["secondary", 0]))
+            );
+            assert_eq!(
+                workflow.pointer("/9509/inputs/model"),
+                Some(&json!(["9505", 0]))
+            );
+            styles[0].bypassed = true;
+            styles[4].bypassed = true;
+            super::configure_h3_style_chain(
+                &mut workflow,
+                &bindings,
+                &styles,
+                json!(["base", 0]),
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                workflow.pointer("/9500/inputs/model"),
+                Some(&json!(["base", 0]))
+            );
+            assert_eq!(
+                workflow.pointer("/9508/inputs/model"),
+                Some(&json!(["9504", 0]))
+            );
+            for slot in &mut styles {
+                slot.bypassed = true;
+            }
+            assert_eq!(
+                super::configure_h3_style_chain(
+                    &mut workflow,
+                    &bindings,
+                    &styles,
+                    json!(["base", 0]),
+                    false
+                )
+                .unwrap(),
+                json!(["base", 0])
+            );
+            assert_eq!(
+                super::configure_h3_style_chain(
+                    &mut workflow,
+                    &bindings,
+                    &[],
+                    json!(["base", 0]),
+                    true
+                )
+                .unwrap(),
+                json!(["base", 0])
+            );
+            styles.push(styles[0].clone());
+            assert!(super::configure_h3_style_chain(
+                &mut workflow,
+                &bindings,
+                &styles,
+                json!(["base", 0]),
+                false
+            )
+            .is_err());
+        }
+        assert_eq!(count, 8);
+    }
+
+    #[test]
+    fn v3_style_stack_preserves_sigma_flow_and_independent_secondary_uses_last_slot() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows/MiniMax+H3图生视频V3.json");
+        let mut workflow: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let sigmas = workflow.get("209").cloned();
+        let mut bindings = WorkflowBindings::default();
+        bindings.primary_lora_node_id = "147".into();
+        bindings.secondary_lora_node_id = "147".into();
+        bindings.primary_sol_attn_node_id.clear();
+        bindings.secondary_sol_attn_node_id.clear();
+        bindings.primary_model_target_node_id = "142".into();
+        bindings.live_preview_node_id = "141".into();
+        bindings.primary_sampler_node_id = "125".into();
+        bindings.secondary_scheduler_node_id = "124".into();
+        bindings.secondary_guider_node_id = "279".into();
+        let styles = vec![
+            super::H3StyleLora {
+                name: "MinimaxH3/style.safetensors".into(),
+                strength: 0.5,
+                bypassed: false,
+                apply_to_secondary: true,
+                apply_to_second_pass: None,
+            };
+            6
+        ];
+        super::configure_h3_loras(
+            &mut workflow,
+            "",
+            1.0,
+            true,
+            "",
+            1.0,
+            true,
+            "",
+            1.0,
+            true,
+            false,
+            &bindings,
+            Some(&styles),
+        )
+        .unwrap();
+        assert_eq!(workflow.get("209"), sigmas.as_ref());
+        assert_eq!(
+            workflow.pointer("/279/inputs/model"),
+            Some(&json!(["9509", 0]))
+        );
+        assert_eq!(
+            workflow.pointer("/126/inputs/model"),
+            Some(&json!(["9508", 0]))
+        );
+        super::install_clean_video_output(&mut workflow, true, &bindings).unwrap();
+        super::configure_v3_independent_secondary_source(
+            &mut workflow,
+            "source.mp4",
+            "16:9 (Widescreen)",
+            0.5,
+            4,
+            1.0,
+            1.0,
+            1.0,
+            true,
+            false,
+            &bindings,
+        )
+        .unwrap();
+        assert_eq!(
+            workflow.pointer("/9393/inputs/model"),
+            Some(&json!(["9605", 0]))
+        );
+    }
+
+    #[test]
+    fn embedded_v3_secondary_branches_preserve_native_generation_and_custom_settings() {
+        for name in [
+            "MiniMax+H3图生视频V3.json",
+            "MiniMax+H3尾帧生视频V3.json",
+            "MiniMax+H3首尾帧生视频V3.json",
+        ] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("workflows")
+                .join(name);
+            let mut workflow: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            let original = workflow.clone();
+            let mut bindings = WorkflowBindings::default();
+            bindings.primary_lora_node_id = "147".into();
+            bindings.secondary_lora_node_id = "147".into();
+            bindings.primary_model_target_node_id = "142".into();
+            bindings.live_preview_node_id = "141".into();
+            bindings.secondary_scheduler_node_id = "124".into();
+            bindings.secondary_guider_node_id = "279".into();
+            bindings.primary_output_node_id = "275".into();
+            bindings.secondary_output_node_id = "275".into();
+            assert_eq!(
+                workflow["9393"]["inputs"]["conditioning"],
+                json!(["9394", 0])
+            );
+            assert_eq!(
+                workflow["9387"]["inputs"]["latent_image"],
+                json!(["9390", 0])
+            );
+            assert_eq!(workflow["9404"]["inputs"]["images"], json!(["9403", 0]));
+            super::install_clean_video_output(&mut workflow, false, &bindings).unwrap();
+            assert!(workflow.get("9404").is_none());
+            workflow["9391"]["inputs"]["denoise"] = json!(0.35);
+            workflow["9383"]["inputs"]["upscale_method"] = json!("bicubic");
+            let count = workflow.as_object().unwrap().len();
+            super::configure_v3_independent_secondary_source(
+                &mut workflow,
+                "chosen.mp4",
+                "16:9",
+                1.0,
+                7,
+                1.1,
+                0.9,
+                1.2,
+                true,
+                false,
+                &bindings,
+            )
+            .unwrap();
+            assert_eq!(workflow.as_object().unwrap().len(), count);
+            for id in ["124", "125", "208", "209", "278", "279"] {
+                assert_eq!(workflow[id], original[id], "{name}: {id}");
+            }
+            assert_eq!(workflow["9391"]["inputs"]["denoise"], json!(0.35));
+            assert_eq!(
+                workflow["9383"]["inputs"]["upscale_method"],
+                json!("bicubic")
+            );
+            assert_eq!(workflow["9391"]["inputs"]["steps"], json!(7));
+            assert_eq!(workflow["9300"]["inputs"]["video"], json!("chosen.mp4"));
+            assert_eq!(workflow["9000"]["inputs"]["audio"], json!(["9300", 2]));
+            workflow.as_object_mut().unwrap().remove("9387");
+            let incomplete = workflow.clone();
+            assert!(super::configure_v3_independent_secondary_source(
+                &mut workflow,
+                "chosen.mp4",
+                "16:9",
+                1.0,
+                7,
+                1.1,
+                0.9,
+                1.2,
+                true,
+                false,
+                &bindings,
+            )
+            .is_err());
+            assert_eq!(workflow, incomplete);
+        }
+    }
+
+    #[test]
+    fn v3_style_scopes_are_independent_for_every_workflow() {
+        for name in [
+            "MiniMax+H3图生视频V3.json",
+            "MiniMax+H3尾帧生视频V3.json",
+            "MiniMax+H3首尾帧生视频V3.json",
+            "MiniMax+H3+Fla全能参考V3.json",
+        ] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("workflows")
+                .join(name);
+            let saved: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            let native = saved.get("279").is_some();
+            let mut bindings = WorkflowBindings::default();
+            bindings.primary_lora_node_id = "147".into();
+            bindings.secondary_lora_node_id = if native { "147" } else { "401" }.into();
+            bindings.primary_sol_attn_node_id.clear();
+            bindings.secondary_sol_attn_node_id = if native { "" } else { "9202" }.into();
+            bindings.primary_model_target_node_id = "142".into();
+            bindings.primary_sampler_node_id = "125".into();
+            bindings.live_preview_node_id = "141".into();
+            bindings.secondary_scheduler_node_id = if native { "124" } else { "391" }.into();
+            bindings.secondary_guider_node_id = if native { "279" } else { "393" }.into();
+            for stage in [false, true] {
+                for pass in [false, true] {
+                    for bypassed in [false, true] {
+                        let mut workflow = saved.clone();
+                        let styles = [super::H3StyleLora {
+                            name: "MinimaxH3/style.safetensors".into(),
+                            strength: 0.7,
+                            bypassed,
+                            apply_to_secondary: stage,
+                            apply_to_second_pass: Some(pass),
+                        }];
+                        super::configure_h3_loras(
+                            &mut workflow,
+                            "",
+                            1.0,
+                            true,
+                            "",
+                            1.0,
+                            true,
+                            "",
+                            1.0,
+                            true,
+                            false,
+                            &bindings,
+                            Some(&styles),
+                        )
+                        .unwrap();
+                        let stage_id = if native { "279" } else { "9606" };
+                        let stage_style = if native { "9201" } else { "9600" };
+                        assert_eq!(
+                            workflow[stage_id]["inputs"]["model"],
+                            json!([
+                                if stage && !bypassed {
+                                    stage_style
+                                } else {
+                                    "141"
+                                },
+                                0
+                            ]),
+                            "{name}"
+                        );
+                        if native {
+                            assert_eq!(
+                                workflow["9393"]["inputs"]["model"],
+                                json!([if pass && !bypassed { "9600" } else { "141" }, 0])
+                            );
+                        } else {
+                            assert_eq!(
+                                workflow["9202"]["inputs"]["model"],
+                                if pass && !bypassed {
+                                    json!(["9201", 0])
+                                } else {
+                                    saved["401"]["inputs"]["model"].clone()
+                                }
+                            );
+                        }
+                        assert_eq!(
+                            workflow["126"]["inputs"]["model"],
+                            json!([if bypassed { "141" } else { "9200" }, 0])
+                        );
+                        for id in ["208", "209", "210", "212"] {
+                            assert_eq!(workflow[id], saved[id]);
+                        }
+                        assert_eq!(
+                            workflow.as_object().unwrap().len(),
+                            saved.as_object().unwrap().len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_style_slot_reports_error_without_creating_nodes() {
+        let mut workflow = resolution_test_workflow();
+        let styles = vec![
+            super::H3StyleLora {
+                name: "MinimaxH3/style.safetensors".into(),
+                strength: 0.5,
+                bypassed: false,
+                apply_to_secondary: true,
+                apply_to_second_pass: None,
+            };
+            2
+        ];
+        assert!(super::configure_h3_style_chain(
+            &mut workflow,
+            &WorkflowBindings::default(),
+            &styles,
+            json!(["base", 0]),
+            false
+        )
+        .is_err());
+        assert!(workflow.get("9500").is_none());
+    }
+
+    #[test]
     fn resizes_the_longest_image_edge_without_upscaling() {
         assert_eq!(resized_image_dimensions(4000, 3000, 1920), (1920, 1440));
         assert_eq!(resized_image_dimensions(3000, 4000, 1920), (1440, 1920));
@@ -5211,6 +5632,7 @@ mod tests {
             true,
             false,
             &WorkflowBindings::default(),
+            None,
         )
         .unwrap();
         configure_secondary_source_video(
@@ -5286,6 +5708,7 @@ mod tests {
             true,
             false,
             &WorkflowBindings::default(),
+            None,
         )
         .unwrap();
 
@@ -5404,6 +5827,7 @@ mod tests {
             true,
             false,
             &WorkflowBindings::default(),
+            None,
         )
         .unwrap();
 
@@ -5527,6 +5951,7 @@ mod tests {
             true,
             false,
             &WorkflowBindings::default(),
+            None,
         )
         .unwrap_err();
         assert!(error.contains("节点 354 必须是 LoRA 加载器 LoraLoaderModelOnly"));
@@ -5565,6 +5990,7 @@ mod tests {
             true,
             false,
             &WorkflowBindings::default(),
+            None,
         )
         .unwrap();
 
@@ -5631,6 +6057,7 @@ mod tests {
             false,
             true,
             &WorkflowBindings::default(),
+            None,
         )
         .unwrap();
 
@@ -5705,6 +6132,7 @@ mod tests {
             true,
             false,
             &WorkflowBindings::default(),
+            None,
         )
         .unwrap();
 

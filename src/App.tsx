@@ -1,3 +1,4 @@
+import { h3StyleLorasFromContent, styleLoraValidationError, usedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -276,6 +277,8 @@ const H3_FLA_REFERENCE_V3_BINDINGS: WorkflowBindings = {
   secondaryLoraNodeId: "401",
   primaryStyleLoraNodeId: "9200",
   secondaryStyleLoraNodeId: "9201",
+  primaryStyleLoraNodeIds: ["9200", "9500", "9502", "9504", "9506", "9508"],
+  secondaryStyleLoraNodeIds: ["9201", "9501", "9503", "9505", "9507", "9509"],
   primarySolAttnNodeId: "",
   secondarySolAttnNodeId: "9202",
   primarySamplerNodeId: "125",
@@ -1979,6 +1982,7 @@ function CanvasWorkspace() {
         secondaryLoraName: next.secondaryLoraName,
         secondaryLoraStrength: next.secondaryLoraStrength,
         secondaryLoraBypassed: next.secondaryLoraBypassed,
+        styleLoras: next.styleLoras,
         styleLoraName: next.styleLoraName,
         styleLoraStrength: next.styleLoraStrength,
         styleLoraBypassed: next.styleLoraBypassed,
@@ -1991,6 +1995,7 @@ function CanvasWorkspace() {
         secondaryLoraName: h3SecondaryLoraNameFromContent(content),
         secondaryLoraStrength: h3SecondaryLoraStrengthFromContent(content),
         secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(content),
+        styleLoras: h3StyleLorasFromContent(content),
         styleLoraName: h3StyleLoraNameFromContent(content),
         styleLoraStrength: h3StyleLoraStrengthFromContent(content),
         styleLoraBypassed: h3StyleLoraBypassedFromContent(content),
@@ -2015,7 +2020,7 @@ function CanvasWorkspace() {
       const secondaryNeedsReplacement = Boolean(currentSecondaryLoraName)
         && !h3SecondaryLoraBypassedFromContent(record.content)
         && !h3LoraOptions.some((lora) => sameH3LoraName(lora, currentSecondaryLoraName));
-      const styleNeedsReplacement = Boolean(currentStyleLoraName)
+      const styleNeedsReplacement = !Array.isArray(record.content.generationStyleLoras) && Boolean(currentStyleLoraName)
         && !h3StyleLoraBypassedFromContent(record.content)
         && !h3LoraOptions.some((lora) => sameH3LoraName(lora, currentStyleLoraName));
       if (!primaryNeedsReplacement && !secondaryNeedsReplacement && !styleNeedsReplacement) continue;
@@ -2242,6 +2247,10 @@ function CanvasWorkspace() {
       const storedManualHeight = typeof record.content.manualHeight === "number"
         ? record.content.manualHeight
         : null;
+      const currentStyleLoraCount = h3StyleLorasFromContent(record.content).length;
+      const storedLayoutStyleLoraCount = typeof record.content.layoutStyleLoraCount === "number"
+        ? record.content.layoutStyleLoraCount
+        : null;
       const currentTextInputCount = textInputCountByTarget.get(node.id) ?? 0;
       const storedLayoutTextInputCount = typeof record.content.layoutTextInputCount === "number"
         && Number.isFinite(record.content.layoutTextInputCount)
@@ -2272,6 +2281,7 @@ function CanvasWorkspace() {
         targetWidth,
         record.content.storyboardReferenceCompiler === true,
         supportsPrimaryUpscaleFactor,
+        h3StyleLorasFromContent(record.content).length,
       );
       // Media groups do not scroll: let a newly connected reference asset grow
       // the outer node until its complete group is visible. Text rows remain
@@ -2288,6 +2298,7 @@ function CanvasWorkspace() {
           targetWidth,
           record.content.storyboardReferenceCompiler === true,
           supportsPrimaryUpscaleFactor,
+          h3StyleLorasFromContent(record.content).length,
         );
         desiredHeight = Math.min(
           fullContentHeight,
@@ -2300,6 +2311,7 @@ function CanvasWorkspace() {
           targetWidth,
           record.content.storyboardReferenceCompiler === true,
           supportsPrimaryUpscaleFactor,
+          h3StyleLorasFromContent(record.content).length,
         );
         desiredHeight = Math.min(
           fullContentHeight,
@@ -2308,6 +2320,11 @@ function CanvasWorkspace() {
             record.height + fullContentHeight - previousContentHeight,
           ),
         );
+      }
+      // Slot removal must release the previous rows' space instead of keeping
+      // record.height as a permanent lower bound. Also normalize older nodes.
+      if (storedLayoutStyleLoraCount !== currentStyleLoraCount) {
+        desiredHeight = fullContentHeight;
       }
       const connectedTextRecords = (textInputIdsByTarget.get(node.id) ?? [])
         .map((inputId) => recordsById.get(inputId))
@@ -2331,6 +2348,7 @@ function CanvasWorkspace() {
         && Math.abs(storedManualHeight - desiredHeight) < 0.5
         && storedActiveTextId === activeTextInputId
         && storedLayoutTextInputCount === currentTextInputCount
+        && storedLayoutStyleLoraCount === currentStyleLoraCount
       ) continue;
       changeNode(node.id, {
         ...(shouldRenameStoryboardGenerator ? { title: "智能视频生成" } : {}),
@@ -2341,6 +2359,7 @@ function CanvasWorkspace() {
           manualHeight: desiredHeight,
           activeTextInputId,
           layoutTextInputCount: currentTextInputCount,
+          layoutStyleLoraCount: currentStyleLoraCount,
         },
       });
     }
@@ -3431,6 +3450,7 @@ function CanvasWorkspace() {
       secondaryLoraStrength: h3SecondaryLoraStrengthFromContent(generator.content),
       secondaryLoraStrengthRecorded: true,
       secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(generator.content),
+      styleLoras: h3StyleLorasFromContent(generator.content),
       styleLoraName: h3StyleLoraNameFromContent(generator.content),
       styleLoraStrength: h3StyleLoraStrengthFromContent(generator.content),
       styleLoraStrengthRecorded: true,
@@ -3739,6 +3759,7 @@ function CanvasWorkspace() {
     secondaryLoraName: "",
     secondaryLoraStrength: 1,
     secondaryLoraBypassed: true,
+    styleLoras: [],
     styleLoraName: "",
     styleLoraStrength: 1,
     styleLoraBypassed: true,
@@ -3942,7 +3963,7 @@ function CanvasWorkspace() {
       setNotice(message);
       return;
     }
-    const snapshot = regeneration?.snapshot
+    let snapshot = regeneration?.snapshot
       ?? options?.snapshot
       ?? generationSnapshotForGenerator(targetId);
     if (!snapshot?.prompt.trim()) {
@@ -4021,6 +4042,13 @@ function CanvasWorkspace() {
       setNotice(`无法执行：${message}`);
       return;
     }
+    snapshot = {
+      ...snapshot,
+      styleLorasRecorded: true,
+      primaryStyleLoras: usedStyleLoras(snapshot.styleLoras),
+      secondaryStyleLoras: undefined,
+      styleLoraHasSecondStage: Boolean(configuredModule.bindings.livePreviewNodeId),
+    };
     const livePreviewNodeId = livePreviewNodeIdForBindings(configuredModule.bindings);
 
     if (configuredModule.variant === "first-last-frame") {
@@ -4082,8 +4110,8 @@ function CanvasWorkspace() {
       setNotice(`无法执行：${message}`);
       return;
     }
-    if (!snapshot.styleLoraBypassed && !snapshot.styleLoraName) {
-      const message = "请先选择风格化 LoRA";
+    if (styleLoraValidationError(snapshot.styleLoras)) {
+      const message = styleLoraValidationError(snapshot.styleLoras)!;
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
@@ -4120,8 +4148,7 @@ function CanvasWorkspace() {
     }
     if (
       h3LoraCatalogLoaded
-      && !snapshot.styleLoraBypassed
-      && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.styleLoraName))
+      && snapshot.styleLoras.some((slot) => !slot.bypassed && !h3LoraOptions.some((lora) => sameH3LoraName(lora, slot.name)))
     ) {
       const message = h3LoraOptions.length
         ? "所选风格化 LoRA 已不在 MinimaxH3 目录中，请重新选择"
@@ -4258,6 +4285,7 @@ function CanvasWorkspace() {
           secondaryLoraName: snapshot.secondaryLoraName,
           secondaryLoraStrength: snapshot.secondaryLoraStrength,
           secondaryLoraBypassed: snapshot.secondaryLoraBypassed,
+          styleLoras: snapshot.styleLoras,
           styleLoraName: snapshot.styleLoraName,
           styleLoraStrength: snapshot.styleLoraStrength,
           styleLoraBypassed: snapshot.styleLoraBypassed,
@@ -5166,6 +5194,7 @@ function CanvasWorkspace() {
       secondaryLoraBypassed: sourceGenerator?.kind === "video-generation"
         ? h3SecondaryLoraBypassedFromContent(sourceGenerator.content)
         : baseSnapshot.secondaryLoraBypassed,
+      styleLoras: sourceGenerator?.kind === "video-generation" ? h3StyleLorasFromContent(sourceGenerator.content) : baseSnapshot.styleLoras,
       styleLoraName: sourceGenerator?.kind === "video-generation"
         ? h3StyleLoraNameFromContent(sourceGenerator.content)
         : baseSnapshot.styleLoraName,
@@ -5182,6 +5211,14 @@ function CanvasWorkspace() {
       ...overrides,
       ...(overrides ? { refImageSizeRecorded: true } : {}),
     };
+    const sourceStyleUsage = storedSnapshot
+      ? styleLoraUsageFromSnapshot({ ...storedSnapshot }, typeof preview.content.sourcePreviewId === "string")
+      : { primary: null };
+    snapshot.primaryStyleLoras = sourceStyleUsage.primary;
+    snapshot.secondaryStyleLoras = usedStyleLoras(snapshot.styleLoras, true);
+    snapshot.styleLorasRecorded = true;
+    snapshot.styleLoraHasSecondStage = storedSnapshot?.styleLoraHasSecondStage
+      ?? Boolean(workflowModule.bindings.livePreviewNodeId);
     if (!snapshot.secondaryLoraBypassed && !snapshot.secondaryLoraName) {
       const message = "请先选择2采 LoRA";
       changeNode(previewId, {
@@ -5190,8 +5227,8 @@ function CanvasWorkspace() {
       setNotice(`无法2采：${message}`);
       return;
     }
-    if (!snapshot.styleLoraBypassed && !snapshot.styleLoraName) {
-      const message = "请先选择风格化 LoRA";
+    if (styleLoraValidationError(snapshot.styleLoras)) {
+      const message = styleLoraValidationError(snapshot.styleLoras)!;
       changeNode(previewId, {
         content: { ...preview.content, status: "invalid", validationMessage: message },
       });
@@ -5214,8 +5251,7 @@ function CanvasWorkspace() {
     }
     if (
       h3LoraCatalogLoaded
-      && !snapshot.styleLoraBypassed
-      && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.styleLoraName))
+      && snapshot.styleLoras.some((slot) => !slot.bypassed && !h3LoraOptions.some((lora) => sameH3LoraName(lora, slot.name)))
     ) {
       const message = h3LoraOptions.length
         ? "所选风格化 LoRA 已不在 MinimaxH3 目录中，请重新选择"
@@ -5386,6 +5422,7 @@ function CanvasWorkspace() {
           secondaryLoraName: snapshot.secondaryLoraName,
           secondaryLoraStrength: snapshot.secondaryLoraStrength,
           secondaryLoraBypassed: snapshot.secondaryLoraBypassed,
+          styleLoras: snapshot.styleLoras,
           styleLoraName: snapshot.styleLoraName,
           styleLoraStrength: snapshot.styleLoraStrength,
           styleLoraBypassed: snapshot.styleLoraBypassed,

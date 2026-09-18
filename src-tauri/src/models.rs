@@ -626,6 +626,19 @@ pub struct SetAppLockInput {
     pub new_password: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct H3StyleLora {
+    pub name: String,
+    pub strength: f64,
+    #[serde(default)]
+    pub bypassed: bool,
+    #[serde(default)]
+    pub apply_to_secondary: bool,
+    #[serde(default)]
+    pub apply_to_second_pass: Option<bool>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComfySubmitInput {
@@ -678,6 +691,8 @@ pub struct ComfySubmitInput {
     pub secondary_lora_strength: Option<f64>,
     #[serde(default)]
     pub secondary_lora_bypassed: Option<bool>,
+    #[serde(default)]
+    pub style_loras: Option<Vec<H3StyleLora>>,
     #[serde(default)]
     pub style_lora_name: Option<String>,
     #[serde(default)]

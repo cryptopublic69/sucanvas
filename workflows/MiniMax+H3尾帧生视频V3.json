@@ -83,7 +83,7 @@
   "126": {
     "inputs": {
       "model": [
-        "141",
+        "9508",
         0
       ],
       "conditioning": [
@@ -227,7 +227,20 @@
       "title": "风格 LoRA（1采引导）"
     }
   },
-  "9201": { "inputs": { "lora_name": "", "strength_model": 1, "model": ["141", 0] }, "class_type": "LoraLoaderModelOnly", "_meta": { "title": "风格 LoRA（二段引导）" } },
+  "9201": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1,
+      "model": [
+        "141",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA（二段引导）"
+    }
+  },
   "149": {
     "inputs": {
       "shift_video": 12,
@@ -557,7 +570,7 @@
   "279": {
     "inputs": {
       "model": [
-        "141",
+        "9509",
         0
       ],
       "conditioning": [
@@ -577,6 +590,509 @@
     "class_type": "PrimitiveFloat",
     "_meta": {
       "title": "二段 latent 放大倍率"
+    }
+  },
+  "9500": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9200",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 2（1采）",
+      "sucanvasStyleSlot": 2
+    }
+  },
+  "9502": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9500",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 3（1采）",
+      "sucanvasStyleSlot": 3
+    }
+  },
+  "9504": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9502",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 4（1采）",
+      "sucanvasStyleSlot": 4
+    }
+  },
+  "9506": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9504",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 5（1采）",
+      "sucanvasStyleSlot": 5
+    }
+  },
+  "9508": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9506",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 6（1采）",
+      "sucanvasStyleSlot": 6
+    }
+  },
+  "9501": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9201",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 2（二段）",
+      "sucanvasStyleSlot": 2
+    }
+  },
+  "9503": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9501",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 3（二段）",
+      "sucanvasStyleSlot": 3
+    }
+  },
+  "9505": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9503",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 4（二段）",
+      "sucanvasStyleSlot": 4
+    }
+  },
+  "9507": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9505",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 5（二段）",
+      "sucanvasStyleSlot": 5
+    }
+  },
+  "9509": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9507",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 6（二段）",
+      "sucanvasStyleSlot": 6
+    }
+  },
+  "9300": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "selected-preview.mp4",
+      "force_rate": 24.0,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1
+    },
+    "_meta": {
+      "title": "独立2采 VHS_LoadVideo",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9398": {
+    "class_type": "ResolutionSelector",
+    "inputs": {
+      "aspect_ratio": "16:9 (Widescreen)",
+      "megapixels": 0.5,
+      "multiple": 32
+    },
+    "_meta": {
+      "title": "独立2采 ResolutionSelector",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9383": {
+    "class_type": "ImageResizeKJv2",
+    "inputs": {
+      "image": [
+        "259",
+        0
+      ],
+      "width": [
+        "9398",
+        0
+      ],
+      "height": [
+        "9398",
+        1
+      ],
+      "upscale_method": "nvidia_rtx_vsr",
+      "keep_proportion": "crop",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 32,
+      "device": "cpu"
+    },
+    "_meta": {
+      "title": "独立2采 ImageResizeKJv2",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9386": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": [
+        "9383",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "独立2采 VAEEncode",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9388": {
+    "class_type": "VAEEncodeAudio",
+    "inputs": {
+      "audio": [
+        "218",
+        0
+      ],
+      "vae": [
+        "120",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "独立2采 VAEEncodeAudio",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9390": {
+    "class_type": "PT_H3ConcatAVLatent",
+    "inputs": {
+      "video_latent": [
+        "9386",
+        0
+      ],
+      "audio_latent": [
+        "9388",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "独立2采 PT_H3ConcatAVLatent",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9391": {
+    "class_type": "BasicScheduler",
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 4,
+      "denoise": 0.2,
+      "model": [
+        "9605",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "独立2采 BasicScheduler",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9393": {
+    "class_type": "BasicGuider",
+    "inputs": {
+      "model": [
+        "9605",
+        0
+      ],
+      "conditioning": [
+        "9394",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "独立2采 BasicGuider",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9394": {
+    "inputs": {
+      "prompt": [
+        "138",
+        0
+      ],
+      "width": [
+        "9398",
+        0
+      ],
+      "height": [
+        "9398",
+        1
+      ],
+      "length": [
+        "131",
+        1
+      ],
+      "clip": [
+        "128",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ],
+      "last_frame": [
+        "139",
+        0
+      ],
+      "first_frame": [
+        "9383",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ImageToVideo",
+    "_meta": {
+      "title": "独立2采 MiniMaxH3ImageToVideo",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9387": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "129",
+        0
+      ],
+      "guider": [
+        "9393",
+        0
+      ],
+      "sampler": [
+        "123",
+        0
+      ],
+      "sigmas": [
+        "9391",
+        0
+      ],
+      "latent_image": [
+        "9390",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "独立2采 SamplerCustomAdvanced",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9395": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "9387",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "独立2采 VAEDecode",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9403": {
+    "class_type": "LayerColor: BrightnessContrastV2",
+    "inputs": {
+      "brightness": 1.0,
+      "contrast": 0.9,
+      "saturation": 1.0,
+      "image": [
+        "9395",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "独立2采 LayerColor: BrightnessContrastV2",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9404": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": [
+        "9403",
+        0
+      ],
+      "audio": [
+        "218",
+        0
+      ],
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "%date:yyyy-MM-dd%/Minimax_H3_2pass",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true
+    },
+    "_meta": {
+      "title": "独立2采 VHS_VideoCombine",
+      "sucanvasIndependentSecondary": true
+    }
+  },
+  "9600": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "141",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "风格 LoRA 1（独立2采）"
+    }
+  },
+  "9601": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "9600",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "风格 LoRA 2（独立2采）"
+    }
+  },
+  "9602": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "9601",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "风格 LoRA 3（独立2采）"
+    }
+  },
+  "9603": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "9602",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "风格 LoRA 4（独立2采）"
+    }
+  },
+  "9604": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "9603",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "风格 LoRA 5（独立2采）"
+    }
+  },
+  "9605": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "9604",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "风格 LoRA 6（独立2采）"
     }
   }
 }

@@ -1,3 +1,6 @@
+import { StyleLoraInfo, LoraNameWithStrength } from "./StyleLoraInfo";
+import { H3StyleLora, h3StyleLorasFromContent, recordedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
+import { StyleLoraEditor } from "./StyleLoraEditor";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { createPortal } from "react-dom";
 import {
@@ -697,6 +700,11 @@ interface GenerationSnapshot {
   secondaryLoraStrength: number;
   secondaryLoraStrengthRecorded?: boolean;
   secondaryLoraBypassed: boolean;
+  styleLoras: H3StyleLora[];
+  styleLorasRecorded?: boolean;
+  primaryStyleLoras?: H3StyleLora[] | null;
+  secondaryStyleLoras?: H3StyleLora[] | null;
+  styleLoraHasSecondStage?: boolean;
   styleLoraName: string;
   styleLoraStrength: number;
   styleLoraStrengthRecorded?: boolean;
@@ -889,6 +897,7 @@ interface H3LoraPreference {
   secondaryLoraName: string;
   secondaryLoraStrength: number;
   secondaryLoraBypassed: boolean;
+  styleLoras: H3StyleLora[];
   styleLoraName: string;
   styleLoraStrength: number;
   styleLoraBypassed: boolean;
@@ -925,6 +934,7 @@ interface VideoGenerationDefaults {
   generationSecondaryLoraName: string;
   generationSecondaryLoraStrength: number;
   generationSecondaryLoraBypassed: boolean;
+  generationStyleLoras: H3StyleLora[];
   generationStyleLoraName: string;
   generationStyleLoraStrength: number;
   generationStyleLoraBypassed: boolean;
@@ -964,6 +974,8 @@ interface WorkflowBindings {
   primaryLoraNodeId: string;
   secondaryLoraNodeId: string;
   primaryStyleLoraNodeId: string;
+  primaryStyleLoraNodeIds?: string[];
+  secondaryStyleLoraNodeIds?: string[];
   secondaryStyleLoraNodeId: string;
   primarySolAttnNodeId: string;
   secondarySolAttnNodeId: string;
@@ -2356,6 +2368,7 @@ function videoGenerationAutoHeight(
   nodeWidth = 360,
   storyboardReferenceCompiler = false,
   supportsPrimaryUpscaleFactor = false,
+  styleLoraCount = 1,
 ): number {
   const groupCount = new Set(mediaKinds).size;
   const imageCount = mediaKinds.filter((kind) => kind === "image").length;
@@ -2379,7 +2392,7 @@ function videoGenerationAutoHeight(
     1,
     Math.min(VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS, textInputCount),
   );
-  const contentHeight = 568
+  const contentHeight = 528 + Math.max(0, styleLoraCount) * 72
     + listMediaRows * 67
     + groupCount * 36
     + textRows * VIDEO_NODE_TEXT_ROW_HEIGHT
@@ -2806,6 +2819,14 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
     secondaryLoraStrengthRecorded: typeof snapshot.generationSecondaryLoraStrength === "number"
       || typeof snapshot.secondaryLoraStrength === "number",
     secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(snapshot),
+    styleLoras: h3StyleLorasFromContent(snapshot),
+    styleLorasRecorded: snapshot.styleLorasRecorded !== false && (
+      Array.isArray(snapshot.styleLoras) || Array.isArray(snapshot.generationStyleLoras)
+      || typeof snapshot.styleLoraName === "string" || typeof snapshot.generationStyleLoraName === "string"
+    ),
+    ...(snapshot.primaryStyleLoras !== undefined ? { primaryStyleLoras: recordedStyleLoras(snapshot.primaryStyleLoras) } : {}),
+    ...(snapshot.secondaryStyleLoras !== undefined ? { secondaryStyleLoras: recordedStyleLoras(snapshot.secondaryStyleLoras) } : {}),
+    ...(typeof snapshot.styleLoraHasSecondStage === "boolean" ? { styleLoraHasSecondStage: snapshot.styleLoraHasSecondStage } : {}),
     styleLoraName: h3StyleLoraNameFromContent(snapshot),
     styleLoraStrength: h3StyleLoraStrengthFromContent(snapshot),
     styleLoraStrengthRecorded: typeof snapshot.generationStyleLoraStrength === "number"
@@ -3270,27 +3291,16 @@ function h3SecondaryLoraBypassedFromContent(content: JsonObject): boolean {
 }
 
 function h3StyleLoraNameFromContent(content: JsonObject): string {
-  const value = content.generationStyleLoraName ?? content.styleLoraName;
-  return typeof value === "string" && isMinimaxH3AssetName(value)
-    ? value
-    : "";
+  return h3StyleLorasFromContent(content)[0]?.name ?? "";
 }
-
 function h3StyleLoraStrengthFromContent(content: JsonObject): number {
-  const value = content.generationStyleLoraStrength ?? content.styleLoraStrength;
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 10
-    ? Math.round(value * 100) / 100
-    : 1;
+  return h3StyleLorasFromContent(content)[0]?.strength ?? 1;
 }
-
 function h3StyleLoraBypassedFromContent(content: JsonObject): boolean {
-  const value = content.generationStyleLoraBypassed ?? content.styleLoraBypassed;
-  return typeof value === "boolean" ? value : !h3StyleLoraNameFromContent(content);
+  return h3StyleLorasFromContent(content)[0]?.bypassed ?? true;
 }
-
 function h3StyleLoraApplyToSecondaryFromContent(content: JsonObject): boolean {
-  const value = content.generationStyleLoraApplyToSecondary ?? content.styleLoraApplyToSecondary;
-  return value === true;
+  return h3StyleLorasFromContent(content)[0]?.applyToSecondary ?? false;
 }
 
 function h3LoraDisplayName(value: string): string {
@@ -3310,6 +3320,7 @@ function h3LoraPreferenceFromStorage(): H3LoraPreference {
       secondaryLoraName: h3SecondaryLoraNameFromContent(content),
       secondaryLoraStrength: h3SecondaryLoraStrengthFromContent(content),
       secondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(content),
+      styleLoras: h3StyleLorasFromContent(content),
       styleLoraName: h3StyleLoraNameFromContent(content),
       styleLoraStrength: h3StyleLoraStrengthFromContent(content),
       styleLoraBypassed: h3StyleLoraBypassedFromContent(content),
@@ -3323,6 +3334,7 @@ function h3LoraPreferenceFromStorage(): H3LoraPreference {
       secondaryLoraName: "",
       secondaryLoraStrength: 1,
       secondaryLoraBypassed: true,
+      styleLoras: [],
       styleLoraName: "",
       styleLoraStrength: 1,
       styleLoraBypassed: true,
@@ -3369,6 +3381,7 @@ function defaultVideoGenerationDefaults(): VideoGenerationDefaults {
     generationSecondaryLoraName: "",
     generationSecondaryLoraStrength: 1,
     generationSecondaryLoraBypassed: false,
+    generationStyleLoras: [],
     generationStyleLoraName: "",
     generationStyleLoraStrength: 1,
     generationStyleLoraBypassed: true,
@@ -3402,6 +3415,7 @@ function videoGenerationDefaultsFromContent(content: JsonObject): VideoGeneratio
     generationSecondaryLoraName: h3SecondaryLoraNameFromContent(content),
     generationSecondaryLoraStrength: h3SecondaryLoraStrengthFromContent(content),
     generationSecondaryLoraBypassed: h3SecondaryLoraBypassedFromContent(content),
+    generationStyleLoras: h3StyleLorasFromContent(content),
     generationStyleLoraName: h3StyleLoraNameFromContent(content),
     generationStyleLoraStrength: h3StyleLoraStrengthFromContent(content),
     generationStyleLoraBypassed: h3StyleLoraBypassedFromContent(content),
@@ -4542,7 +4556,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [workflowModuleMenuOpen, setWorkflowModuleMenuOpen] = useState(false);
   const [loraMenuOpen, setLoraMenuOpen] = useState(false);
   const [secondaryLoraMenuOpen, setSecondaryLoraMenuOpen] = useState(false);
-  const [styleLoraMenuOpen, setStyleLoraMenuOpen] = useState(false);
   const [promptVersionMenuOpen, setPromptVersionMenuOpen] = useState(false);
   const [contentTypeMenuOpen, setContentTypeMenuOpen] = useState(false);
   const [editingPromptVersionTitleId, setEditingPromptVersionTitleId] = useState<string | null>(null);
@@ -4623,7 +4636,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const workflowModuleControlRef = useRef<HTMLDivElement>(null);
   const loraControlRef = useRef<HTMLDivElement>(null);
   const secondaryLoraControlRef = useRef<HTMLDivElement>(null);
-  const styleLoraControlRef = useRef<HTMLDivElement>(null);
   const promptVersionControlRef = useRef<HTMLDivElement>(null);
   const contentTypeControlRef = useRef<HTMLDivElement>(null);
   const textInformationRef = useRef<HTMLDivElement>(null);
@@ -4794,7 +4806,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ?? availableWorkflowModules.find((module) => module.variant === videoGenerationMode)
     ?? availableWorkflowModules[0]
     ?? null;
-  const styleLoraSecondaryTargetLabel = selectedNodeWorkflowModule?.revision.trim().toUpperCase().startsWith("V3")
+  const styleLoraSecondaryTargetLabel = Boolean(selectedNodeWorkflowModule?.adapter.bindings.livePreviewNodeId)
     ? "二段"
     : "2采";
   const selectedImageWorkflowModule = allAvailableImageWorkflowModules.find(
@@ -4818,6 +4830,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         record.width,
         isStoryboardReferenceCompiler,
         supportsPrimaryUpscaleFactor,
+        h3StyleLorasFromContent(record.content).length,
       )
     : record.height;
   const activeTextInputId = activeTextInputFromContent(record.content, textInputs)?.id ?? "";
@@ -4853,13 +4866,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const availableH3SecondaryLoraName = h3LoraOptions.find(
     (lora) => sameH3LoraName(lora, h3SecondaryLoraName),
   );
-  const h3StyleLoraName = h3StyleLoraNameFromContent(record.content);
-  const h3StyleLoraStrength = h3StyleLoraStrengthFromContent(record.content);
-  const h3StyleLoraBypassed = h3StyleLoraBypassedFromContent(record.content);
-  const h3StyleLoraApplyToSecondary = h3StyleLoraApplyToSecondaryFromContent(record.content);
-  const availableH3StyleLoraName = h3LoraOptions.find(
-    (lora) => sameH3LoraName(lora, h3StyleLoraName),
-  );
+  const styleLoras = h3StyleLorasFromContent(record.content);
   const selectableH3Loras = h3LoraOptions;
   const imageLoraName = typeof record.content.imageLoraName === "string"
     ? record.content.imageLoraName.trim()
@@ -4927,6 +4934,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const generatedVideoWorkflowModule = generatedVideoSnapshot?.workflowModuleId
     ? workflowModules.find((module) => module.id === generatedVideoSnapshot.workflowModuleId) ?? null
     : null;
+  const generatedStyleUsage = generatedVideoSnapshot
+    ? styleLoraUsageFromSnapshot({ ...generatedVideoSnapshot }, isSecondaryPreview)
+    : { primary: null, secondary: null };
   const generatedVideoUsesReferenceImageSize = generatedVideoWorkflowModule?.variant === "reference-to-video";
   const generatedVideoWorkflowLabel = generatedVideoWorkflowModule
     ? `${generatedVideoWorkflowModule.name} · ${generatedVideoSnapshot?.workflowModuleRevision || generatedVideoWorkflowModule.revision}`
@@ -5392,16 +5402,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
   }, [secondaryLoraMenuOpen]);
 
-  useEffect(() => {
-    if (!styleLoraMenuOpen) return;
-    const closeOnOutsidePointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (target instanceof globalThis.Node && styleLoraControlRef.current?.contains(target)) return;
-      setStyleLoraMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
-  }, [styleLoraMenuOpen]);
 
   useEffect(() => {
     if (!promptVersionMenuOpen) return;
@@ -7478,16 +7478,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       <dd title={generatedVideoSnapshot.loraBypassed ? "—" : generatedVideoSnapshot.loraName}>
                         {generatedVideoSnapshot.loraBypassed
                           ? "—"
-                          : h3LoraDisplayName(generatedVideoSnapshot.loraName)}
+                          : <LoraNameWithStrength name={generatedVideoSnapshot.loraName}
+                            strength={generatedVideoSnapshot.loraStrength}
+                            recorded={generatedVideoSnapshot.loraStrengthRecorded !== false} />}
                       </dd>
-                      <dt>LoRA 强度</dt>
-                      <dd>
-                        {generatedVideoSnapshot.loraBypassed
-                          ? "—"
-                          : generatedVideoSnapshot.loraStrengthRecorded === false
-                            ? "未记录"
-                            : `×${generatedVideoSnapshot.loraStrength.toFixed(2)}`}
-                      </dd>
+                      <StyleLoraInfo slots={generatedStyleUsage.primary}
+                        hasSecondStage={generatedVideoSnapshot.styleLoraHasSecondStage ?? Boolean(generatedVideoWorkflowModule?.bindings.livePreviewNodeId)}
+                        strengthRecorded={generatedVideoSnapshot.primaryStyleLoras !== undefined || generatedVideoSnapshot.styleLoraStrengthRecorded !== false} />
                       <dt>亮度 / 对比度 / 饱和度</dt>
                       <dd>{generatedVideoSnapshot.primaryBrightness.toFixed(2)} / {generatedVideoSnapshot.primaryContrast.toFixed(2)} / {generatedVideoSnapshot.primarySaturation.toFixed(2)}</dd>
                     </dl>
@@ -7508,35 +7505,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                           : generatedVideoSnapshot.secondaryLoraName}>
                           {generatedVideoSnapshot.secondaryLoraBypassed
                             ? "—"
-                            : h3LoraDisplayName(generatedVideoSnapshot.secondaryLoraName)}
+                            : <LoraNameWithStrength name={generatedVideoSnapshot.secondaryLoraName}
+                              strength={generatedVideoSnapshot.secondaryLoraStrength}
+                              recorded={generatedVideoSnapshot.secondaryLoraStrengthRecorded !== false} />}
                         </dd>
-                        <dt>LoRA 强度</dt>
-                        <dd>
-                          {generatedVideoSnapshot.secondaryLoraBypassed
-                            ? "—"
-                            : generatedVideoSnapshot.secondaryLoraStrengthRecorded === false
-                              ? "未记录"
-                              : `×${generatedVideoSnapshot.secondaryLoraStrength.toFixed(2)}`}
-                        </dd>
+                        <StyleLoraInfo slots={generatedStyleUsage.secondary}
+                          strengthRecorded={generatedVideoSnapshot.secondaryStyleLoras !== undefined || generatedVideoSnapshot.styleLoraStrengthRecorded !== false} />
                         <dt>亮度 / 对比度 / 饱和度</dt>
                         <dd>{generatedVideoSnapshot.secondaryBrightness.toFixed(2)} / {generatedVideoSnapshot.secondaryContrast.toFixed(2)} / {generatedVideoSnapshot.secondarySaturation.toFixed(2)}</dd>
-                      </dl>
-                    </section>
-                  )}
-                  {!generatedVideoSnapshot.styleLoraBypassed && generatedVideoSnapshot.styleLoraName && (
-                    <section className="generated-video-stage-info">
-                      <h4>风格化 LoRA</h4>
-                      <dl>
-                        <dt>LoRA</dt>
-                        <dd title={generatedVideoSnapshot.styleLoraName}>
-                          {h3LoraDisplayName(generatedVideoSnapshot.styleLoraName)}
-                        </dd>
-                        <dt>LoRA 强度</dt>
-                        <dd>{generatedVideoSnapshot.styleLoraStrengthRecorded === false
-                          ? "未记录"
-                          : `×${generatedVideoSnapshot.styleLoraStrength.toFixed(2)}`}</dd>
-                        <dt>作用范围</dt>
-                        <dd>{generatedVideoSnapshot.styleLoraApplyToSecondary ? `1采、${styleLoraSecondaryTargetLabel}` : "仅1采"}</dd>
                       </dl>
                     </section>
                   )}
@@ -7986,6 +7962,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                               generationSecondarySchedulerSteps: module.defaults.secondarySchedulerSteps,
                               generationPrimaryUpscaleFactor: module.defaults.primaryUpscaleFactor,
                             }),
+                            // Style choices belong to this node, not the selected workflow preset.
+                            generationStyleLoras: h3StyleLorasFromContent(record.content),
+                            generationStyleLoraName: h3StyleLoraNameFromContent(record.content),
+                            generationStyleLoraStrength: h3StyleLoraStrengthFromContent(record.content),
+                            generationStyleLoraBypassed: h3StyleLoraBypassedFromContent(record.content),
+                            generationStyleLoraApplyToSecondary: h3StyleLoraApplyToSecondaryFromContent(record.content),
                             status: "idle",
                             validationMessage: "",
                           },
@@ -8171,7 +8153,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 onClick={() => {
                   setAspectRatioMenuOpen(false);
                   setSecondaryLoraMenuOpen(false);
-                  setStyleLoraMenuOpen(false);
                   setLoraMenuOpen((open) => !open);
                 }}
                 onPointerDown={(event) => event.stopPropagation()}
@@ -8317,7 +8298,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 onClick={() => {
                   setAspectRatioMenuOpen(false);
                   setLoraMenuOpen(false);
-                  setStyleLoraMenuOpen(false);
                   setSecondaryLoraMenuOpen((open) => !open);
                 }}
                 onPointerDown={(event) => event.stopPropagation()}
@@ -8453,160 +8433,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               />
             </label>
           </div>
-          <div className={`video-lora-control is-style ${h3StyleLoraBypassed ? "is-bypassed" : ""} ${styleLoraMenuOpen ? "is-menu-open" : ""}`}>
-            <span>风格LoRA</span>
-            <div ref={styleLoraControlRef} className="video-lora-select">
-              <button
-                type="button"
-                className="nodrag nowheel video-lora-select-toggle"
-                disabled={!selectableH3Loras.length}
-                aria-haspopup="menu"
-                aria-expanded={styleLoraMenuOpen}
-                title={availableH3StyleLoraName ?? (h3StyleLoraName
-                  ? "所选风格化 LoRA 已不在 MinimaxH3 目录中"
-                  : "风格化 LoRA 未设置")}
-                onClick={() => {
-                  setAspectRatioMenuOpen(false);
-                  setLoraMenuOpen(false);
-                  setSecondaryLoraMenuOpen(false);
-                  setStyleLoraMenuOpen((open) => !open);
-                }}
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                <span>{h3StyleLoraBypassed
-                  ? "不使用 LoRA"
-                  : availableH3StyleLoraName
-                    ? h3LoraDisplayName(availableH3StyleLoraName)
-                    : h3StyleLoraName ? "未找到 LoRA" : "未选择 LoRA"}</span>
-                <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
-              </button>
-              {styleLoraMenuOpen && (
-                <div className="video-lora-select-menu" role="menu" aria-label="MiniMax H3 风格化 LoRA">
-                  <button
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={h3StyleLoraBypassed}
-                    className={h3StyleLoraBypassed ? "is-active" : ""}
-                    onClick={() => {
-                      onH3LoraPreferenceChange({ styleLoraName: "", styleLoraBypassed: true });
-                      onChange(id, {
-                        content: {
-                          ...record.content,
-                          generationStyleLoraName: "",
-                          generationStyleLoraBypassed: true,
-                          status: "idle",
-                          validationMessage: "",
-                        },
-                      });
-                      setStyleLoraMenuOpen(false);
-                    }}
-                  >
-                    不使用 LoRA
-                  </button>
-                  {selectableH3Loras.map((lora) => (
-                    <button
-                      key={lora}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={!h3StyleLoraBypassed && sameH3LoraName(h3StyleLoraName, lora)}
-                      className={!h3StyleLoraBypassed && sameH3LoraName(h3StyleLoraName, lora) ? "is-active" : ""}
-                      title={lora}
-                      onClick={() => {
-                        onH3LoraPreferenceChange({
-                          styleLoraName: lora,
-                          styleLoraStrength: h3StyleLoraStrength,
-                          styleLoraBypassed: false,
-                        });
-                        onChange(id, {
-                          content: {
-                            ...record.content,
-                            generationStyleLoraName: lora,
-                            generationStyleLoraStrength: h3StyleLoraStrength,
-                            generationStyleLoraBypassed: false,
-                            status: "idle",
-                            validationMessage: "",
-                          },
-                        });
-                        setStyleLoraMenuOpen(false);
-                      }}
-                    >
-                      {h3LoraDisplayName(lora)}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            <input
-              className="video-parameter-range"
-              disabled={h3StyleLoraBypassed}
-              min="0"
-              max="10"
-              step="0.01"
-              type="range"
-              value={h3StyleLoraStrength}
-              title={`风格化 LoRA 权重：${h3StyleLoraStrength.toFixed(2)}`}
-              aria-label="风格化 LoRA 权重"
-              onChange={(event) => {
-                const styleLoraStrength = Number(event.currentTarget.value);
-                onH3LoraPreferenceChange({ styleLoraStrength });
-                onChange(id, {
-                  content: {
-                    ...record.content,
-                    generationStyleLoraStrength: styleLoraStrength,
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                });
-              }}
-              onPointerDown={(event) => event.stopPropagation()}
-            />
-            <label className="video-lora-strength is-plain-value" title="风格化 LoRA 权重">
-              <CompactDecimalInput
-                value={h3StyleLoraStrength}
-                min={0}
-                max={10}
-                disabled={h3StyleLoraBypassed}
-                displayDecimals={2}
-                ariaLabel="手动输入风格化 LoRA 权重"
-                onChange={(styleLoraStrength) => {
-                  onH3LoraPreferenceChange({ styleLoraStrength });
-                  onChange(id, {
-                    content: {
-                      ...record.content,
-                      generationStyleLoraStrength: styleLoraStrength,
-                      status: "idle",
-                      validationMessage: "",
-                    },
-                  });
-                }}
-              />
-            </label>
-            <label
-              className="nodrag nowheel video-style-lora-secondary-toggle"
-              title={`选择应用于${styleLoraSecondaryTargetLabel}`}
-              onPointerDown={(event) => event.stopPropagation()}
-            >
-              <input
-                type="checkbox"
-                checked={h3StyleLoraApplyToSecondary}
-                disabled={h3StyleLoraBypassed}
-                aria-label={`选择应用于${styleLoraSecondaryTargetLabel}`}
-                onChange={(event) => {
-                  const styleLoraApplyToSecondary = event.currentTarget.checked;
-                  onH3LoraPreferenceChange({ styleLoraApplyToSecondary });
-                  onChange(id, {
-                    content: {
-                      ...record.content,
-                      generationStyleLoraApplyToSecondary: styleLoraApplyToSecondary,
-                      status: "idle",
-                      validationMessage: "",
-                    },
-                  });
-                }}
-              />
-              <span>{styleLoraSecondaryTargetLabel}</span>
-            </label>
-          </div>
+          <StyleLoraEditor slots={styleLoras} options={selectableH3Loras} hasSecondStage={styleLoraSecondaryTargetLabel === "二段"}
+            onChange={(slots) => {
+              onH3LoraPreferenceChange({ styleLoras: slots });
+              onChange(id, { content: { ...record.content, generationStyleLoras: slots, status: "idle", validationMessage: "" } });
+            }}
+          />
           <div className="video-seed-control">
             <span>生成种子</span>
             <div className="video-seed-mode" aria-label="种子模式">

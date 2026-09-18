@@ -616,7 +616,7 @@
       "verbose": false,
       "dense_blocks": "0-2,-1",
       "model": [
-        "9200",
+        "9508",
         0
       ]
     },
@@ -668,13 +668,163 @@
       "verbose": false,
       "dense_blocks": "0-2,-1",
       "model": [
-        "9201",
+        "9509",
         0
       ]
     },
     "class_type": "SolAttnMiniMax",
     "_meta": {
       "title": "Patch Sol-Attn（2采）"
+    }
+  },
+  "9500": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9200",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 2（1采）",
+      "sucanvasStyleSlot": 2
+    }
+  },
+  "9502": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9500",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 3（1采）",
+      "sucanvasStyleSlot": 3
+    }
+  },
+  "9504": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9502",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 4（1采）",
+      "sucanvasStyleSlot": 4
+    }
+  },
+  "9506": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9504",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 5（1采）",
+      "sucanvasStyleSlot": 5
+    }
+  },
+  "9508": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9506",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 6（1采）",
+      "sucanvasStyleSlot": 6
+    }
+  },
+  "9501": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9201",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 2（二段）",
+      "sucanvasStyleSlot": 2
+    }
+  },
+  "9503": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9501",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 3（二段）",
+      "sucanvasStyleSlot": 3
+    }
+  },
+  "9505": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9503",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 4（二段）",
+      "sucanvasStyleSlot": 4
+    }
+  },
+  "9507": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9505",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 5（二段）",
+      "sucanvasStyleSlot": 5
+    }
+  },
+  "9509": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 1.0,
+      "model": [
+        "9507",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "风格 LoRA 6（二段）",
+      "sucanvasStyleSlot": 6
     }
   }
 }
