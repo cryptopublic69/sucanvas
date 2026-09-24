@@ -1024,6 +1024,15 @@ button { color: inherit; }
 .canvas-node.kind-generated-video > .media-node-body video { width: calc(100% + 2px); height: calc(100% + 2px); max-width: none; max-height: none; object-fit: cover; }
 .canvas-node.kind-generated-video > .media-node-body video:fullscreen { width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; background: #080a0f; }
 .media-node-body video { background: #080a0f; }
+.lazy-video-preview { position: relative; display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: #080a0f; }
+.lazy-video-preview > img, .lazy-video-preview > video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
+.lazy-video-preview > video { opacity: 0; }
+.lazy-video-preview > video.is-frame-ready, .lazy-video-preview > video:fullscreen { opacity: 1; }
+.lazy-video-placeholder { display: flex; width: 100%; height: 100%; align-items: center; justify-content: center; flex-direction: column; gap: 8px; color: #9399ac; }
+.lazy-video-placeholder small { font-size: 11px; }
+.video-input-preview .lazy-video-placeholder small { display: none; }
+.lazy-video-error { position: absolute; bottom: 6px; left: 0; right: 0; text-align: center; color: #e9e5ff; font-size: 11px; pointer-events: none; }
+.canvas-node.kind-generated-video > .media-node-body .lazy-video-preview > img { object-fit: cover; }
 .generated-video-new-badge { position: absolute; top: 8px; left: 8px; z-index: 4; display: inline-flex; height: 20px; align-items: center; padding: 0 7px; color: #f4f1ff; background: rgba(92, 78, 191, .88); border: 1px solid rgba(190, 181, 255, .58); border-radius: 6px; box-shadow: 0 3px 12px rgba(20, 13, 70, .35); backdrop-filter: blur(8px); font-size: calc(8px + var(--ui-font-adjust)); font-weight: 850; letter-spacing: .1em; line-height: 1; pointer-events: none; }
 .generated-video-placeholder { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; color: #e9f5ff; background: #07101a; }
 .generated-video-placeholder::after { position: absolute; inset: 0; z-index: 1; content: ""; pointer-events: none; background: linear-gradient(180deg, rgba(3, 8, 14, .08), transparent 42%, rgba(3, 8, 14, .28)); }

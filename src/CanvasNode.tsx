@@ -1,6 +1,7 @@
 import { StyleLoraInfo, LoraNameWithStrength } from "./StyleLoraInfo";
 import { H3StyleLora, h3StyleLorasFromContent, recordedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
 import { StyleLoraEditor } from "./StyleLoraEditor";
+import { LazyVideoPreview, VideoPreviewHandle } from "./LazyVideoPreview";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { createPortal } from "react-dom";
 import {
@@ -4484,7 +4485,6 @@ const edgeTypes = { canvasEdge: CanvasEdge };
 function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const { getViewport, getZoom, setNodes, setViewport } = useReactFlow<CanvasFlowNode, Edge>();
   const updateNodeInternals = useUpdateNodeInternals();
-  const viewportTransform = useStore((state) => state.transform);
   const ctrlSelectionPointerId = useRef<number | null>(null);
   const {
     record,
@@ -4601,6 +4601,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [connectedInformationMarkdownPreview, setConnectedInformationMarkdownPreview] = useState(true);
   const [connectedInformationHidden, setConnectedInformationHidden] = useState(false);
   const [generatedInfoOpen, setGeneratedInfoOpen] = useState(false);
+  const viewportTransform = useStore((state) => generatedInfoOpen ? state.transform : null);
   const [generatedInfoPosition, setGeneratedInfoPosition] = useState({ left: 16, top: 16 });
   const [generatedInfoPanning, setGeneratedInfoPanning] = useState(false);
   const [generatedPromptDialogOpen, setGeneratedPromptDialogOpen] = useState(false);
@@ -4673,7 +4674,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     viewport: { x: number; y: number; zoom: number };
   } | null>(null);
   const audioPreviewRefs = useRef(new Map<string, HTMLAudioElement>());
-  const generatedVideoRef = useRef<HTMLVideoElement | null>(null);
+  const generatedVideoRef = useRef<VideoPreviewHandle | null>(null);
   const videoResizeBaseRef = useRef<{
     x: number;
     y: number;
@@ -5105,25 +5106,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   useEffect(() => {
     if (!materialNoteFocused) setMaterialNoteDraft(materialNoteFromContent(record.content));
   }, [materialNoteFocused, record.content]);
-
-  useEffect(() => {
-    if (!isGeneratedVideo || !generatedVideoUrl) return;
-    const video = generatedVideoRef.current;
-    if (!video) return;
-    if (video.getAttribute("src") !== generatedVideoUrl) {
-      video.src = generatedVideoUrl;
-      video.load();
-    }
-    const handleFullscreenChange = () => {
-      if (document.fullscreenElement) return;
-      const body = video.closest(".media-node-body");
-      if (!body?.matches(":hover")) video.pause();
-    };
-    video.addEventListener("fullscreenchange", handleFullscreenChange);
-    return () => {
-      video.removeEventListener("fullscreenchange", handleFullscreenChange);
-    };
-  }, [generatedVideoUrl, isGeneratedVideo]);
 
   useEffect(() => () => {
     if (isGeneratedVideo) setGeneratedVideoPlaybackActive(id, false);
@@ -6485,26 +6467,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     }
   };
 
-  const playMediaVideoOnHover = (event: ReactMouseEvent<HTMLDivElement>) => {
-    const video = event.currentTarget.querySelector("video");
-    if (!video) return;
-    void video.play().catch(() => {
-      // Some system WebViews may block the first unmuted playback before user interaction.
-    });
-  };
-
-  const pauseMediaVideoOnLeave = (event: ReactMouseEvent<HTMLDivElement>) => {
-    const video = event.currentTarget.querySelector("video");
-    if (!video) return;
-    if (document.fullscreenElement === video) return;
-    video.pause();
-  };
-
   const playGeneratedVideoFullscreen = () => {
-    const video = generatedVideoRef.current;
-    if (!video) return;
-    void video.play().catch(() => {});
-    void video.requestFullscreen().catch(() => {});
+    generatedVideoRef.current?.playFullscreen();
   };
 
   const runImageResize = async (maxEdge: number, rememberDefault: boolean) => {
@@ -7108,8 +7072,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       {(isImage || isGeneratedImage || isAudioAsset || isVideoAsset || isGeneratedVideo) && (
         <div
           className={isVideoAsset ? "nodrag media-node-body" : "media-node-body"}
-          onMouseEnter={isVideoAsset || (isGeneratedVideo && !isGenerationPlaceholder) ? playMediaVideoOnHover : undefined}
-          onMouseLeave={isVideoAsset || (isGeneratedVideo && !isGenerationPlaceholder) ? pauseMediaVideoOnLeave : undefined}
         >
           {isGenerationPlaceholder ? (
             <div className={`generated-video-placeholder ${placeholderActive ? "is-active" : "is-stopped"}`}>
@@ -7188,14 +7150,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <audio className="nodrag nowheel" src={convertFileSrc(assetPath)} controls preload="metadata" />
             </div>
           ) : assetPath && isVideoAsset ? (
-            <video
+            <LazyVideoPreview
+              key={assetPath}
               src={convertFileSrc(assetPath)}
-              preload="metadata"
-              playsInline
-              onLoadedMetadata={(event) => applyNaturalMediaRatio(
-                event.currentTarget.videoWidth,
-                event.currentTarget.videoHeight,
-              )}
+              onDimensions={applyNaturalMediaRatio}
             />
           ) : generatedVideoUrl && isGeneratedVideo ? (
             <>
@@ -7204,22 +7162,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   NEW
                 </span>
               )}
-              <video
+              <LazyVideoPreview
+                key={generatedVideoUrl}
                 ref={generatedVideoRef}
                 src={generatedVideoUrl}
-                preload="metadata"
-                playsInline
-                onPlay={() => setGeneratedVideoPlaybackActive(id, true)}
-                onPause={() => setGeneratedVideoPlaybackActive(id, false)}
+                onPlayingChange={(playing) => setGeneratedVideoPlaybackActive(id, playing)}
                 onEnded={() => {
                   setGeneratedVideoPlaybackActive(id, false);
                   markGeneratedVideoFullyPlayed();
                 }}
-                onTimeUpdate={(event) => markGeneratedVideoAtPlaybackEnd(event.currentTarget)}
-                onLoadedMetadata={(event) => applyNaturalMediaRatio(
-                  event.currentTarget.videoWidth,
-                  event.currentTarget.videoHeight,
-                )}
+                onTimeUpdate={markGeneratedVideoAtPlaybackEnd}
+                onDimensions={applyNaturalMediaRatio}
               />
               {validationStatus && validationMessage && (
                 <div className={`generated-video-execution is-${validationStatus}`}>
@@ -8987,14 +8940,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                               {inputPreviewUrl && inputKind === "image" ? (
                                 <img src={inputPreviewUrl} alt="" draggable={false} />
                               ) : inputAssetPath && inputKind === "video" ? (
-                                <video
+                                <LazyVideoPreview
+                                  key={inputAssetPath}
                                   src={convertFileSrc(inputAssetPath)}
                                   muted
-                                  preload="metadata"
-                                  playsInline
-                                  draggable={false}
-                                  onMouseEnter={(event) => void event.currentTarget.play().catch(() => {})}
-                                  onMouseLeave={(event) => event.currentTarget.pause()}
                                 />
                               ) : inputKind === "image" ? (
                                 <ImageIcon size={16} />

@@ -1,0 +1,186 @@
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { flushSync } from "react-dom";
+import { Film } from "lucide-react";
+import { requestVideoPoster } from "./videoPosterCache";
+import { videoPreviewScheduler } from "./videoPreviewScheduler";
+
+export interface VideoPreviewHandle { playFullscreen(): void }
+interface Props {
+  src: string;
+  muted?: boolean;
+  onDimensions?: (width: number, height: number) => void;
+  onPlayingChange?: (playing: boolean) => void;
+  onEnded?: () => void;
+  onTimeUpdate?: (video: HTMLVideoElement) => void;
+}
+
+const positions = new Map<string, number>();
+
+export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function LazyVideoPreview(props, ref) {
+  const { src, muted = false } = props;
+  const callbacks = useRef(props);
+  callbacks.current = props;
+  const [mounted, setMounted] = useState(false);
+  const [frameReady, setFrameReady] = useState(false);
+  const [poster, setPoster] = useState("");
+  const [failed, setFailed] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const ownedVideo = useRef<HTMLVideoElement | null>(null);
+  const wrapperRef = useRef<HTMLSpanElement>(null);
+  const alive = useRef(true);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const unloadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const ownership = useRef<(() => void) | undefined>(undefined);
+  const pendingFrame = useRef<{ video: HTMLVideoElement; handle: number } | undefined>(undefined);
+
+  function cancelPendingFrame() {
+    if (!pendingFrame.current) return;
+    pendingFrame.current.video.cancelVideoFrameCallback(pendingFrame.current.handle);
+    pendingFrame.current = undefined;
+  }
+
+  function revealFallbackFrame(video: HTMLVideoElement) {
+    if (typeof video.requestVideoFrameCallback === "function") return;
+    if (alive.current && ownedVideo.current === video && video.readyState >= 2 && !video.seeking) {
+      setFrameReady(true);
+    }
+  }
+
+  function clearTimers() {
+    clearTimeout(hoverTimer.current);
+    clearTimeout(unloadTimer.current);
+  }
+
+  function release() {
+    clearTimers();
+    cancelPendingFrame();
+    const video = ownedVideo.current;
+    if (video) {
+      positions.delete(src);
+      positions.set(src, video.ended ? 0 : video.currentTime);
+      if (positions.size > 128) positions.delete(positions.keys().next().value!);
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      ownedVideo.current = null;
+    }
+    callbacks.current.onPlayingChange?.(false);
+    ownership.current?.();
+    ownership.current = undefined;
+    if (alive.current) {
+      setMounted(false);
+      setFrameReady(false);
+    }
+  }
+
+  function activate(fullscreen = false) {
+    clearTimers();
+    if (document.hidden || (document.fullscreenElement && document.fullscreenElement !== videoRef.current)) return;
+    if (!ownership.current) ownership.current = videoPreviewScheduler.claim(release);
+    // Mount synchronously so requestFullscreen keeps the button's user activation.
+    flushSync(() => {
+      if (videoRef.current?.getAttribute("src") !== src) setFrameReady(false);
+      setMounted(true);
+      setFailed(false);
+    });
+    const video = videoRef.current;
+    if (!video) { release(); return; }
+    ownedVideo.current = video;
+    if (video.getAttribute("src") !== src) video.src = src;
+    cancelPendingFrame();
+    if (typeof video.requestVideoFrameCallback === "function") {
+      pendingFrame.current = {
+        video,
+        handle: video.requestVideoFrameCallback(() => {
+          pendingFrame.current = undefined;
+          if (alive.current && ownedVideo.current === video && video.hasAttribute("src")) setFrameReady(true);
+        }),
+      };
+    } else {
+      revealFallbackFrame(video);
+    }
+    if (fullscreen) void video.requestFullscreen().catch(() => {});
+    void video.play().catch(() => {
+      if (alive.current && videoRef.current === video && video.hasAttribute("src")) setFailed(true);
+    });
+  }
+
+  useImperativeHandle(ref, () => ({ playFullscreen: () => activate(true) }));
+
+  useEffect(() => {
+    alive.current = true;
+    let posterUrl = "";
+    setPoster("");
+    const cancelPoster = requestVideoPoster(src, (result) => {
+      if (!result) return;
+      posterUrl = URL.createObjectURL(result.blob);
+      setPoster(posterUrl);
+      if (result.width && result.height) callbacks.current.onDimensions?.(result.width, result.height);
+    });
+    const visibility = () => { if (document.hidden) release(); };
+    const fullscreenChange = () => {
+      if (!document.fullscreenElement && !wrapperRef.current?.matches(":hover")) release();
+    };
+    document.addEventListener("visibilitychange", visibility);
+    document.addEventListener("fullscreenchange", fullscreenChange);
+    return () => {
+      alive.current = false;
+      cancelPoster();
+      release();
+      if (posterUrl) URL.revokeObjectURL(posterUrl);
+      document.removeEventListener("visibilitychange", visibility);
+      document.removeEventListener("fullscreenchange", fullscreenChange);
+    };
+  }, [src]);
+
+  return (
+    <span
+      ref={wrapperRef}
+      className="lazy-video-preview"
+      onMouseEnter={() => {
+        clearTimers();
+        hoverTimer.current = setTimeout(() => activate(), 250);
+      }}
+      onMouseLeave={() => {
+        clearTimers();
+        if (videoRef.current && document.fullscreenElement === videoRef.current) return;
+        videoRef.current?.pause();
+        unloadTimer.current = setTimeout(release, 1200);
+      }}
+      onClick={() => { if (!mounted || failed) activate(); }}
+      title={failed ? "预览未能播放，点击重试" : "悬停播放视频"}
+    >
+      {poster ? <img src={poster} alt="视频封面" draggable={false} /> : (
+        <span className="lazy-video-placeholder"><Film size={24} /><small>悬停播放</small></span>
+      )}
+      {mounted && (
+        <video
+          ref={videoRef}
+          className={frameReady ? "is-frame-ready" : undefined}
+          poster={poster || undefined}
+          muted={muted}
+          preload="none"
+          playsInline
+          onLoadedMetadata={(event) => {
+            const video = event.currentTarget;
+            callbacks.current.onDimensions?.(video.videoWidth, video.videoHeight);
+            const position = positions.get(src) ?? 0;
+            if (position > 0 && position < video.duration - 0.1) video.currentTime = position;
+          }}
+          onPlay={() => callbacks.current.onPlayingChange?.(true)}
+          onLoadedData={(event) => revealFallbackFrame(event.currentTarget)}
+          onPlaying={(event) => revealFallbackFrame(event.currentTarget)}
+          onSeeked={(event) => revealFallbackFrame(event.currentTarget)}
+          onPause={() => callbacks.current.onPlayingChange?.(false)}
+          onEnded={() => {
+            callbacks.current.onPlayingChange?.(false);
+            callbacks.current.onEnded?.();
+          }}
+          onTimeUpdate={(event) => callbacks.current.onTimeUpdate?.(event.currentTarget)}
+          onError={() => { setFailed(true); release(); }}
+        />
+      )}
+      {failed && <span className="lazy-video-error">点击重试播放</span>}
+    </span>
+  );
+});

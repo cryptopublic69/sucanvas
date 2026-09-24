@@ -9729,6 +9729,10 @@ function CanvasWorkspace() {
     return visibleIds;
   }, [edges, nodes]);
 
+  const suppressEdgeFlow = nodes.some(
+    (node) => node.selected && node.data.record.kind === "video-generation",
+  );
+
   const interactiveEdges = useMemo(
     () => edges.map((edge) => {
       const protectedRelationshipEdge = protectedGenerationEdgeIds.has(edge.id);
@@ -9741,14 +9745,14 @@ function CanvasWorkspace() {
         focusable: !protectedRelationshipEdge,
         data: {
           ...edge.data,
-          flowHighlighted: selectionVisibleEdgeIds.has(edge.id),
+          flowHighlighted: !suppressEdgeFlow && selectionVisibleEdgeIds.has(edge.id),
           onDisconnect: protectedRelationshipEdge
             ? undefined
             : (edgeId: string) => void disconnectEdge(edgeId),
         },
       };
     }),
-    [disconnectEdge, edges, hideUnselectedEdges, protectedGenerationEdgeIds, selectionVisibleEdgeIds],
+    [disconnectEdge, edges, hideUnselectedEdges, protectedGenerationEdgeIds, selectionVisibleEdgeIds, suppressEdgeFlow],
   );
 
   const visibleNodes = useMemo(

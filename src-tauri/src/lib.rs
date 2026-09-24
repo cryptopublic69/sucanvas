@@ -3,6 +3,7 @@ mod app_backup;
 mod commands;
 mod db;
 mod models;
+mod video_posters;
 mod workflow_modules;
 
 use std::{
@@ -294,6 +295,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            video_posters::capture_video_poster,
             commands::load_workspace,
             commands::inspect_workspace,
             commands::list_projects,
