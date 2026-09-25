@@ -2265,3 +2265,21 @@ button { color: inherit; }
 .style-lora-row input[type=number] { min-width: 0; width: 100%; height: 26px; box-sizing: border-box; background: #11151e; color: inherit; border: 1px solid #353b48; border-radius: 4px; }
 .style-lora-options { grid-column: 2 / -1; display: flex; gap: 12px; }
 .style-lora-options label { display: flex; align-items: center; gap: 4px; }
+
+.video-regeneration-style-loras { grid-column: 1 / -1; min-width: 0; margin-top: 16px; }
+.video-regeneration-style-loras .style-lora-heading { color: #aeb5c1; font-size: calc(11px + var(--ui-font-adjust)); }
+.video-regeneration-style-loras .style-lora-heading > button,
+.video-regeneration-style-loras .style-lora-row > button { color: #d8d3ff; cursor: pointer; }
+.video-regeneration-style-loras .style-lora-row { grid-template-columns: 18px minmax(0, 1fr) 76px 28px; padding: 8px; border-radius: 8px; }
+.video-regeneration-style-loras .style-lora-row input[type=number] { height: 33px; margin: 0; padding: 0 6px; }
+.video-regeneration-style-loras .style-lora-options { flex-wrap: wrap; gap: 8px 16px; }
+.video-regeneration-style-loras .style-lora-options label { margin: 0; cursor: pointer; }
+.video-regeneration-style-loras .style-lora-options input[type=checkbox] { width: 14px; height: 14px; margin: 0; padding: 0; accent-color: #7769d6; }
+.video-regeneration-style-loras .video-lora-select-menu { width: 100%; }
+:root[data-theme="light"] .video-regeneration-style-loras .style-lora-heading { color: #676f7f; }
+:root[data-theme="light"] .video-regeneration-style-loras .style-lora-row { border-color: #d7dbe4; }
+:root[data-theme="light"] .video-regeneration-style-loras .style-lora-heading > button,
+:root[data-theme="light"] .video-regeneration-style-loras .style-lora-row > button { color: #5145a8; background: #f2efff; border-color: #d8d2f2; }
+:root[data-theme="light"] .video-regeneration-style-loras .style-lora-row input[type=number] { color: #303747; background: #f6f7fa; border-color: #d7dbe4; }
+
+.video-regeneration-save-settings { margin-right: auto; }

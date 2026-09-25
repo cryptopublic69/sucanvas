@@ -686,6 +686,7 @@ interface GenerationSnapshot {
   primaryAudioSteps: number;
   secondarySchedulerSteps: number;
   primaryUpscaleFactor: number;
+  primaryUpscaleFactorRecorded?: boolean;
   primaryBrightness: number;
   primaryContrast: number;
   primarySaturation: number;
@@ -780,6 +781,8 @@ interface VideoRegenerationDraft {
   seed: string;
   durationSeconds: number;
   primaryResolutionMegapixels: number;
+  primaryUpscaleFactor: number;
+  styleLoras: H3StyleLora[];
   loraStrength: number;
   primaryVideoSteps: number;
   primaryAudioSteps: number;
@@ -790,6 +793,7 @@ interface VideoRegenerationDraft {
 }
 
 type VideoRegenerationNumericField = "primaryResolutionMegapixels"
+  | "primaryUpscaleFactor"
   | "durationSeconds"
   | "loraStrength"
   | "primaryVideoSteps"
@@ -803,6 +807,7 @@ const VIDEO_REGENERATION_NUMBER_CONFIG: Record<
   { min: number; max: number; step: number }
 > = {
   primaryResolutionMegapixels: { min: 0.2, max: 2, step: 0.1 },
+  primaryUpscaleFactor: { min: 1, max: 2, step: 0.1 },
   durationSeconds: { min: 2, max: 15, step: 1 },
   loraStrength: { min: 0, max: 10, step: 0.01 },
   primaryVideoSteps: { min: 1, max: 1000, step: 1 },
@@ -2810,6 +2815,9 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
       0.5,
     ),
     ...h3ModelParametersFromContent(snapshot),
+    primaryUpscaleFactorRecorded: snapshot.primaryUpscaleFactorRecorded !== false
+      && typeof snapshot.primaryUpscaleFactor === "number"
+      && Number.isFinite(snapshot.primaryUpscaleFactor),
     diffusionModelName: h3DiffusionModelNameFromContent(snapshot),
     loraName: h3LoraNameFromContent(snapshot),
     loraStrength: h3LoraStrengthFromContent(snapshot),
@@ -7447,6 +7455,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     <h4>1采</h4>
                     <dl>
                       <dt>分辨率</dt><dd>{generatedVideoSnapshot.primaryResolutionMegapixels.toFixed(1)} MP</dd>
+                      <dt>放大倍率</dt><dd>{generatedVideoSnapshot.primaryUpscaleFactorRecorded === false
+                        ? "未记录"
+                        : `${generatedVideoSnapshot.primaryUpscaleFactor.toFixed(1)}×`}</dd>
                       {generatedVideoUsesReferenceImageSize && <>
                         <dt>参考图模式</dt>
                         <dd>{generatedVideoSnapshot.refImageSizeRecorded === false ? "未记录" : generatedVideoSnapshot.refImageSize}</dd>

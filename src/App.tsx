@@ -1,3 +1,4 @@
+import { StyleLoraEditor } from "./StyleLoraEditor";
 import { h3StyleLorasFromContent, styleLoraValidationError, usedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -324,6 +325,39 @@ function livePreviewNodeIdForBindings(bindings: WorkflowBindings | undefined): s
 
 function workflowUsesSharedPrimarySteps(workflowModule: WorkflowModuleRecord | undefined): boolean {
   return Boolean(workflowModule && !workflowModule.bindings.primaryAudioStepsInputName.trim());
+}
+
+const VIDEO_REGENERATION_SETTINGS_STORAGE_KEY = "infinite-canvas:video-regeneration-settings:v1";
+type VideoRegenerationSettings = Pick<VideoRegenerationDraft,
+  VideoRegenerationNumericField | "styleLoras" | "refImageSize">;
+
+function videoRegenerationSettingsFromValue(value: unknown): VideoRegenerationSettings | null {
+  if (!value || typeof value !== "object") return null;
+  const source = value as Record<string, unknown>;
+  const numbers = {} as Record<VideoRegenerationNumericField, number>;
+  for (const field of Object.keys(VIDEO_REGENERATION_NUMBER_CONFIG) as VideoRegenerationNumericField[]) {
+    const number = source[field];
+    const { min, max, step } = VIDEO_REGENERATION_NUMBER_CONFIG[field];
+    if (typeof number !== "number" || !Number.isFinite(number) || number < min || number > max
+      || (step === 1 && !Number.isInteger(number))) return null;
+    numbers[field] = number;
+  }
+  if (numbers.primaryAudioSteps < numbers.primaryVideoSteps
+    || (source.refImageSize !== "max" && source.refImageSize !== "match")
+    || !Array.isArray(source.styleLoras)) return null;
+  const styleLoras = h3StyleLorasFromContent(source);
+  if (styleLoraValidationError(styleLoras)) return null;
+  return { ...numbers, refImageSize: source.refImageSize, styleLoras };
+}
+
+function loadVideoRegenerationSettings(): VideoRegenerationSettings | null {
+  try {
+    return videoRegenerationSettingsFromValue(JSON.parse(
+      window.localStorage.getItem(VIDEO_REGENERATION_SETTINGS_STORAGE_KEY) ?? "null",
+    ));
+  } catch {
+    return null;
+  }
 }
 
 function videoInputMediaKind(record: NodeRecord): "image" | "audio" | "video" | null {
@@ -4053,6 +4087,7 @@ function CanvasWorkspace() {
     }
     snapshot = {
       ...snapshot,
+      primaryUpscaleFactorRecorded: true,
       styleLorasRecorded: true,
       primaryStyleLoras: usedStyleLoras(snapshot.styleLoras),
       secondaryStyleLoras: undefined,
@@ -4889,6 +4924,7 @@ function CanvasWorkspace() {
         promptOptions.push(currentTextOption);
       }
     }
+    const savedSettings = loadVideoRegenerationSettings();
     setVideoRegenerationInformationOpen(false);
     setVideoRegenerationDraft({
       previewId,
@@ -4899,6 +4935,8 @@ function CanvasWorkspace() {
       seed,
       durationSeconds: snapshot.durationSeconds,
       primaryResolutionMegapixels: snapshot.primaryResolutionMegapixels,
+      primaryUpscaleFactor: snapshot.primaryUpscaleFactor,
+      styleLoras: snapshot.styleLoras.map((slot) => ({ ...slot })),
       loraStrength: snapshot.loraStrength,
       primaryVideoSteps: snapshot.primaryVideoSteps,
       primaryAudioSteps,
@@ -4906,8 +4944,27 @@ function CanvasWorkspace() {
       primaryContrast: snapshot.primaryContrast,
       primarySaturation: snapshot.primarySaturation,
       refImageSize: snapshot.refImageSize,
+      ...savedSettings,
+      ...(savedSettings && workflowUsesSharedPrimarySteps(workflowModule)
+        ? { primaryAudioSteps: savedSettings.primaryVideoSteps }
+        : {}),
     });
   }, [workflowModules]);
+
+  const saveVideoRegenerationSettings = useCallback(() => {
+    if (!videoRegenerationDraft) return;
+    const settings = videoRegenerationSettingsFromValue(videoRegenerationDraft);
+    if (!settings) {
+      setNotice("无法保存：请检查参数范围、采样步数和风格 LoRA 设置");
+      return;
+    }
+    try {
+      window.localStorage.setItem(VIDEO_REGENERATION_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+      setNotice("设置已保存，下次 Ctrl＋重新生成将自动套用；普通重新生成不受影响");
+    } catch {
+      setNotice("设置保存失败，请重试");
+    }
+  }, [videoRegenerationDraft]);
 
   const adjustVideoRegenerationNumber = useCallback((
     field: VideoRegenerationNumericField,
@@ -4997,6 +5054,15 @@ function CanvasWorkspace() {
       setNotice("亮度、对比度和饱和度必须在 0.00 到 3.00 之间");
       return;
     }
+    if (!Number.isFinite(draft.primaryUpscaleFactor) || draft.primaryUpscaleFactor < 1 || draft.primaryUpscaleFactor > 2) {
+      setNotice("放大倍率必须在 1.0 到 2.0 之间");
+      return;
+    }
+    const styleLoraError = styleLoraValidationError(draft.styleLoras);
+    if (styleLoraError) {
+      setNotice(styleLoraError);
+      return;
+    }
     const snapshot: GenerationSnapshot = {
       ...draft.originalSnapshot,
       prompt: selectedPrompt.prompt,
@@ -5009,6 +5075,9 @@ function CanvasWorkspace() {
       referenceSelection: selectedPrompt.referenceSelection,
       durationSeconds: draft.durationSeconds,
       primaryResolutionMegapixels: Math.round(draft.primaryResolutionMegapixels * 10) / 10,
+      primaryUpscaleFactor: Math.round(draft.primaryUpscaleFactor * 10) / 10,
+      styleLoras: draft.styleLoras.map((slot) => ({ ...slot })),
+      styleLorasRecorded: true,
       loraStrength: Math.round(draft.loraStrength * 100) / 100,
       loraStrengthRecorded: true,
       primaryVideoSteps: draft.primaryVideoSteps,
@@ -10229,13 +10298,12 @@ function CanvasWorkspace() {
     document.body,
   );
 
-  const videoRegenerationUsesSharedPrimarySteps = workflowUsesSharedPrimarySteps(
-    videoRegenerationDraft
-      ? workflowModules.find((module) => (
-        !module.deletedAt && module.id === videoRegenerationDraft.originalSnapshot.workflowModuleId
-      ))
-      : undefined,
-  );
+  const videoRegenerationWorkflowModule = videoRegenerationDraft
+    ? workflowModules.find((module) => (
+      !module.deletedAt && module.id === videoRegenerationDraft.originalSnapshot.workflowModuleId
+    ))
+    : undefined;
+  const videoRegenerationUsesSharedPrimarySteps = workflowUsesSharedPrimarySteps(videoRegenerationWorkflowModule);
 
   const appSettingsDialog = settingsOpen && createPortal(
     <>
@@ -11165,7 +11233,7 @@ function CanvasWorkspace() {
             <div className="project-dialog-icon"><RotateCcw size={21} /></div>
             <div>
               <h2>选择提示词并重新生成</h2>
-              <p>默认使用“{videoRegenerationDraft.previewTitle}”生成时保存的提示词版本与参数。</p>
+              <p>提示词与 Seed 来自“{videoRegenerationDraft.previewTitle}”；参数优先套用已保存设置，未保存时使用生成快照。</p>
             </div>
             <div className="video-regeneration-fields">
               <label className="video-regeneration-prompt-field">
@@ -11256,6 +11324,20 @@ function CanvasWorkspace() {
                   }))}
                 />
               </label>
+              {videoRegenerationWorkflowModule?.bindings.primaryUpscaleNodeId?.trim() && <label>
+                放大倍率（×）
+                <ModelParameterNumberInput
+                  regenerationField="primaryUpscaleFactor"
+                  min={1}
+                  max={2}
+                  step={0.1}
+                  value={videoRegenerationDraft.primaryUpscaleFactor}
+                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    primaryUpscaleFactor: value,
+                  }))}
+                />
+              </label>}
               <label>
                 1采 LoRA 强度
                 <ModelParameterNumberInput
@@ -11362,10 +11444,21 @@ function CanvasWorkspace() {
                 </div>
               </fieldset>
             </div>
+            <div className="video-regeneration-style-loras">
+              <StyleLoraEditor
+                slots={videoRegenerationDraft.styleLoras}
+                options={h3LoraOptions}
+                hasSecondStage={Boolean(videoRegenerationWorkflowModule?.adapter.bindings.livePreviewNodeId)}
+                onChange={(styleLoras) => setVideoRegenerationDraft((current) => current && ({ ...current, styleLoras }))}
+              />
+            </div>
             <p className="video-regeneration-note">
-              可临时选择关联提示词节点中的其他版本并调整时长；不会切换提示词节点的当前版本。参考图片及首尾帧角色始终读取原视频生成节点当前连接的最新状态；音频、视频、模型、LoRA 文件和画面比例仍使用当前视频的历史快照。Seed 默认保持不变，点击色子才会随机更换。
+              可临时选择关联提示词节点中的其他版本并调整时长；不会切换提示词节点的当前版本。参考图片及首尾帧角色始终读取原视频生成节点当前连接的最新状态；模型、基础 LoRA 和画面比例沿用当前视频的历史快照；点击“保存设置”可记住时长、分辨率、放大倍率、LoRA 强度、采样步数、色彩、参考图模式和风格 LoRA，供下次 Ctrl＋重新生成使用；普通重新生成不受影响。提示词与 Seed 不纳入保存，Seed 默认保持所选视频的值。
             </p>
             <div className="project-dialog-actions">
+              <button type="button" className="dialog-cancel video-regeneration-save-settings" onClick={saveVideoRegenerationSettings}>
+                保存设置
+              </button>
               <button type="button" className="dialog-cancel" onClick={() => setVideoRegenerationDraft(null)}>
                 取消
               </button>
