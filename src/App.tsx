@@ -1,6 +1,6 @@
 import { StyleLoraEditor } from "./StyleLoraEditor";
 import { h3StyleLorasFromContent, styleLoraValidationError, usedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -4301,7 +4301,14 @@ function CanvasWorkspace() {
           validationMessage: `ComfyUI 正在生成：当前步骤 ${update.value}/${update.maximum}`,
         });
       });
+      const onSubmitted = new Channel<null>();
+      onSubmitted.onmessage = () => {
+        if (!cancelledComfyClients.current.has(clientId)) {
+          showGlobalNotice("任务提交成功");
+        }
+      };
       const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow", {
+        onSubmitted,
         input: {
           serverUrl: comfyUiServerUrlRef.current,
           workflowModuleId: snapshot.workflowModuleId,
@@ -4561,7 +4568,7 @@ function CanvasWorkspace() {
       if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
       unregisterComfyTask(targetId, clientId);
     }
-  }, [changeNode, clearGenerationLivePreview, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, flushVideoGenerationInputs, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, showGenerationLivePreview, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
+  }, [changeNode, clearGenerationLivePreview, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, flushVideoGenerationInputs, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, showGenerationLivePreview, showGlobalNotice, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
 
   const executeVideoNodeBatch = useCallback(async (targetId: string) => {
     const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
@@ -5475,6 +5482,7 @@ function CanvasWorkspace() {
         }
       });
       const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow", {
+        onSubmitted: new Channel<null>(),
         input: {
           serverUrl: comfyUiServerUrlRef.current,
           workflowModuleId: snapshot.workflowModuleId,

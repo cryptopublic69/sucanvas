@@ -3728,6 +3728,7 @@ async fn submit_comfyui_workflow_inner(
     input: ComfySubmitInput,
     task: Arc<RunningComfyTask>,
     workflow_modules_dir: &Path,
+    on_submitted: &tauri::ipc::Channel<()>,
 ) -> Result<ComfySubmitResult, String> {
     ensure_comfy_task_active(&task.cancelled)?;
     let parsed_server = Url::parse(input.server_url.trim())
@@ -4057,6 +4058,8 @@ async fn submit_comfyui_workflow_inner(
         return Err("ComfyUI 生成已取消".to_owned());
     }
 
+    let _ = on_submitted.send(());
+
     for _ in 0..5400 {
         ensure_comfy_task_active(&task.cancelled)?;
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -4140,6 +4143,7 @@ async fn submit_comfyui_workflow_inner(
 pub async fn submit_comfyui_workflow(
     input: ComfySubmitInput,
     state: State<'_, ApplicationState>,
+    on_submitted: tauri::ipc::Channel<()>,
 ) -> Result<ComfySubmitResult, String> {
     let client_id = input.client_id.clone();
     let upload_subfolder = format!("infinite-canvas/{}", Uuid::new_v4().simple());
@@ -4159,7 +4163,8 @@ pub async fn submit_comfyui_workflow(
 
     let workflow_modules_dir = state.workflow_modules_dir.clone();
     let mut result =
-        submit_comfyui_workflow_inner(input, task.clone(), &workflow_modules_dir).await;
+        submit_comfyui_workflow_inner(input, task.clone(), &workflow_modules_dir, &on_submitted)
+            .await;
     if !task.submitted.load(Ordering::SeqCst) {
         if let Some(cleanup_warning) = cleanup_comfy_task_inputs(&task).await {
             result = match result {
