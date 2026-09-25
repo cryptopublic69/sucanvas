@@ -2,6 +2,11 @@
 
 ## 2026-09-25
 
+### H3 V3 默认文本编码器
+
+- Fla 全能参考、图生视频、尾帧生视频及首尾帧四份 V3 工作流，将节点 128 的默认文本编码器由 `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` 改为 `qwen3vl_32b_h3_ultra_uncensored_heretic_int8_convrot.safetensors`。
+- 四份工作流 JSON 解析与编码器字段校验、全部 108 项 Rust 单元测试及 `git diff --check` 通过；未执行 GUI 自动化或真实 ComfyUI 生成，新模型文件的可用性、实际加载与生成效果需人工确认。
+
 ### 放大倍率与全屏视频操作
 
 - 视频生成放大倍率范围由 1.0–2.0 扩展至 1.0–4.0，默认参数、节点滑块、重新生成窗口、保存设置校验和后端提交校验同步调整，滑块进度按新范围显示。
