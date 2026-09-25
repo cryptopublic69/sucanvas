@@ -4491,8 +4491,54 @@ function CanvasEdge({
 
 const edgeTypes = { canvasEdge: CanvasEdge };
 
+const submittingVideoBatches = new Set<string>();
+
+async function checkAndExecuteVideo(data: CanvasNodeData) {
+  const { record, mediaInputs, textInputs, onChange, onExecutionCheck, onExecute } = data;
+  const id = record.id;
+  const seedMode = seedModeFromContent(record.content);
+  const fixedSeed = fixedSeedFromContent(record.content);
+  const videoGenerationMode = videoGenerationModeFromContent(record.content);
+  if (submittingVideoBatches.has(id) || record.content.status === "cancelling"
+    || (seedMode === "fixed" && data.activeTaskCount > 0)) {
+    onExecutionCheck("当前任务正在提交、取消或固定种子任务正在执行，请稍后", false);
+    return;
+  }
+  const result = validateVideoExecution(
+    videoGenerationMode,
+    record.content,
+    mediaInputs,
+    textInputs,
+  );
+  const duplicateFixedSeed = result.valid
+    && seedMode === "fixed"
+    && generatedSeedsFromContent(record.content).includes(fixedSeed);
+  if (duplicateFixedSeed) {
+    const message = `固定种子 ${fixedSeed} 已经生成过，无需重复生成`;
+    onChange(id, {
+      content: {
+        ...record.content,
+        status: "warning",
+        validationMessage: message,
+      },
+    });
+    onExecutionCheck(message, true);
+    return;
+  }
+  onChange(id, {
+    content: {
+      ...record.content,
+      status: result.valid ? "ready" : "invalid",
+      validationMessage: result.message,
+    },
+  });
+  onExecutionCheck(result.message, result.valid);
+  if (!result.valid) return;
+  await onExecute(id);
+}
+
 function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
-  const { getViewport, getZoom, setNodes, setViewport } = useReactFlow<CanvasFlowNode, Edge>();
+  const { getNode, getEdges, getViewport, getZoom, setNodes, setViewport } = useReactFlow<CanvasFlowNode, Edge>();
   const updateNodeInternals = useUpdateNodeInternals();
   const ctrlSelectionPointerId = useRef<number | null>(null);
   const {
@@ -4519,7 +4565,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onSaveNode,
     onMarkGeneratedVideoFullyPlayed,
     onExecutionCheck,
-    onExecute,
     onExecuteImage,
     onBatchExecute,
     onSecondarySample,
@@ -6303,38 +6348,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     });
   };
 
-  const checkAndExecute = async () => {
-    const result = validateVideoExecution(
-      videoGenerationMode,
-      record.content,
-      mediaInputs,
-      textInputs,
-    );
-    const duplicateFixedSeed = result.valid
-      && seedMode === "fixed"
-      && generatedSeedsFromContent(record.content).includes(fixedSeed);
-    if (duplicateFixedSeed) {
-      const message = `固定种子 ${fixedSeed} 已经生成过，无需重复生成`;
-      onChange(id, {
-        content: {
-          ...record.content,
-          status: "warning",
-          validationMessage: message,
-        },
-      });
-      onExecutionCheck(message, true);
+  const checkAndExecute = () => checkAndExecuteVideo(data);
+
+  const executeConnectedVideo = async () => {
+    const targetIds = new Set(getEdges().filter((edge) => edge.source === id).map((edge) => edge.target));
+    const targets = [...targetIds].map((targetId) => getNode(targetId))
+      .filter((node): node is CanvasFlowNode => node?.data.record.kind === "video-generation");
+    if (targets.length !== 1) {
+      onExecutionCheck(targets.length
+        ? "当前节点连接了多个视频生成节点，请只保留一个后再播放"
+        : "请先连接一个视频生成或智能视频生成节点", false);
       return;
     }
-    onChange(id, {
-      content: {
-        ...record.content,
-        status: result.valid ? "ready" : "invalid",
-        validationMessage: result.message,
-      },
-    });
-    onExecutionCheck(result.message, result.valid);
-    if (!result.valid) return;
-    await onExecute(id);
+    await checkAndExecuteVideo(targets[0].data);
   };
 
   const checkAndExecuteImage = async () => {
@@ -6408,10 +6434,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onExecutionCheck(batchValidation.message, batchValidation.valid);
     if (!batchValidation.valid) return;
     if (batchSubmitting) return;
+    submittingVideoBatches.add(id);
     setBatchSubmitting(true);
     try {
       await onBatchExecute(id);
     } finally {
+      submittingVideoBatches.delete(id);
       setBatchSubmitting(false);
     }
   };
@@ -6679,6 +6707,20 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </span>
           )}
         </div>
+        {isText && (
+          <button
+            type="button"
+            className="nodrag node-action"
+            onClick={(event) => {
+              event.stopPropagation();
+              void executeConnectedVideo();
+            }}
+            title="执行相连的视频生成节点"
+            aria-label="执行相连的视频生成节点"
+          >
+            <Play size={13} fill="currentColor" />
+          </button>
+        )}
         {(isText || isNote) && (
           <button
             className="nodrag node-action"

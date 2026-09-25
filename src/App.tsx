@@ -9226,6 +9226,14 @@ function CanvasWorkspace() {
         return "只能连接到视频生成节点";
       }
 
+      if (source.kind === "text" && validationEdges.some((edge) => (
+        edge.source === source.id
+        && edge.target !== target.id
+        && contentNodes.some((node) => node.id === edge.target && node.data.record.kind === "video-generation")
+      ))) {
+        return "一个文本或内容迭代节点只能连接一个视频生成或智能视频生成节点";
+      }
+
       const mode = videoGenerationModeFromContent(target.content);
       if (mode === "text-to-video" && source.kind !== "text") {
         return "文生视频只允许连接文字节点";
@@ -10855,6 +10863,17 @@ function CanvasWorkspace() {
         onNodesChange={onNodesChange}
         onEdgesChange={handleEdgesChange}
         onConnect={connectNodes}
+        onConnectEnd={(_, state) => {
+          if (state.isValid || !state.fromNode || !state.toNode) return;
+          const fromSource = state.fromHandle?.type === "source";
+          const error = connectionValidationError({
+            source: fromSource ? state.fromNode.id : state.toNode.id,
+            target: fromSource ? state.toNode.id : state.fromNode.id,
+            sourceHandle: null,
+            targetHandle: null,
+          });
+          if (error) setNotice(error);
+        }}
         onNodeClick={(_, node) => {
           handleNodeRelationClick(node);
           restoreMultiSelectionOutline();

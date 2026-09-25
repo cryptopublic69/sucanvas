@@ -3237,6 +3237,23 @@ impl Database {
             return Ok((edge, false));
         }
 
+        if source.kind == "text" && target.kind == "video-generation" {
+            let has_other_video_target: bool = connection.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM edges JOIN nodes ON nodes.id = edges.target_node_id
+                   WHERE edges.source_node_id = ?1 AND edges.target_node_id != ?2
+                     AND nodes.kind = 'video-generation'
+                 )",
+                params![source.id, target.id],
+                |row| row.get(0),
+            )?;
+            if has_other_video_target {
+                return Err(CanvasError::Validation(
+                    "一个文本或内容迭代节点只能连接一个视频生成或智能视频生成节点".to_owned(),
+                ));
+            }
+        }
+
         let edge = EdgeRecord {
             id: format!("edge:{}", Uuid::new_v4()),
             canvas_id,
@@ -5288,6 +5305,70 @@ mod tests {
         }
     }
 
+    // Legacy canvases may contain shared prompts created before the single-target rule.
+    // Seed those historical edges directly so folder/undo compatibility remains covered.
+    fn insert_legacy_edge(database: &Database, input: CreateEdgeInput) {
+        database.lock().unwrap().execute(
+            "INSERT INTO edges (id, canvas_id, source_node_id, target_node_id, kind, metadata_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                format!("edge:{}", Uuid::new_v4()),
+                input.canvas_id.unwrap_or_else(|| DEFAULT_CANVAS_ID.to_owned()),
+                input.source_node_id,
+                input.target_node_id,
+                input.kind.unwrap_or_else(|| "flow".to_owned()),
+                serde_json::to_string(&input.metadata).unwrap(),
+                now(),
+            ],
+        ).unwrap();
+    }
+
+    #[test]
+    fn text_sources_allow_only_one_video_generator() {
+        for content_iteration in [false, true] {
+            for smart_first in [false, true] {
+                let database = Database::in_memory().unwrap();
+                let mut source_input = text_node("提示词", "single-video-source");
+                source_input.content =
+                    json!({ "text": "prompt", "contentNode": content_iteration });
+                let source = database.create_node(source_input).unwrap().node;
+                let mut first_input = text_node("视频一", "single-video-first");
+                first_input.kind = Some("video-generation".to_owned());
+                first_input.content = json!({ "storyboardReferenceCompiler": smart_first });
+                let first = database.create_node(first_input).unwrap().node;
+                let mut second_input = text_node("视频二", "single-video-second");
+                second_input.kind = Some("video-generation".to_owned());
+                second_input.content = json!({ "storyboardReferenceCompiler": !smart_first });
+                let second = database.create_node(second_input).unwrap().node;
+                let connect = |target: &str| CreateEdgeInput {
+                    canvas_id: None,
+                    source_node_id: source.id.clone(),
+                    target_node_id: target.to_owned(),
+                    kind: Some("input".to_owned()),
+                    metadata: json!({}),
+                };
+                let (edge, created) = database
+                    .create_edge_with_status(connect(&first.id))
+                    .unwrap();
+                assert!(created);
+                assert!(
+                    !database
+                        .create_edge_with_status(connect(&first.id))
+                        .unwrap()
+                        .1
+                );
+                let error = database.create_edge(connect(&second.id)).unwrap_err();
+                assert!(error.to_string().contains("只能连接一个"));
+                let mut image_input = text_node("图片生成", "single-video-image");
+                image_input.kind = Some("image-generation".to_owned());
+                let image = database.create_node(image_input).unwrap().node;
+                database.create_edge(connect(&image.id)).unwrap();
+                database.delete_edge(&edge.id).unwrap();
+                database.create_edge(connect(&second.id)).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn creates_an_empty_folder_at_the_requested_position() {
         let database = Database::in_memory().unwrap();
@@ -6111,15 +6192,16 @@ mod tests {
             (audio.id.clone(), generator.id.clone(), "input"),
             (generator.id.clone(), preview.id.clone(), "output"),
         ] {
-            database
-                .create_edge(CreateEdgeInput {
+            insert_legacy_edge(
+                &database,
+                CreateEdgeInput {
                     canvas_id: None,
                     source_node_id,
                     target_node_id,
                     kind: Some(kind.to_owned()),
                     metadata: json!({}),
-                })
-                .unwrap();
+                },
+            );
         }
 
         let grouped = database
@@ -6303,15 +6385,16 @@ mod tests {
 
         for source in [&shared_prompt, &shared_image, &shared_audio, &shared_video] {
             for target in [&generator_a, &generator_b] {
-                database
-                    .create_edge(CreateEdgeInput {
+                insert_legacy_edge(
+                    &database,
+                    CreateEdgeInput {
                         canvas_id: None,
                         source_node_id: source.id.clone(),
                         target_node_id: target.id.clone(),
                         kind: Some("input".to_owned()),
                         metadata: json!({ "sourceKind": source.kind.clone() }),
-                    })
-                    .unwrap();
+                    },
+                );
             }
         }
         database
