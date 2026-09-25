@@ -3536,6 +3536,7 @@ function CanvasWorkspace() {
     source,
     clientId,
     snapshot,
+    seed,
     secondary,
     sourceGeneratorId,
     edgeSourceId = source.id,
@@ -3545,6 +3546,7 @@ function CanvasWorkspace() {
     source: NodeRecord;
     clientId: string;
     snapshot: GenerationSnapshot;
+    seed?: string;
     secondary: boolean;
     sourceGeneratorId: string;
     edgeSourceId?: string;
@@ -3571,6 +3573,7 @@ function CanvasWorkspace() {
         : "正在上传素材并提交到远程 ComfyUI…",
       sourceGeneratorId,
       ...(secondary ? { sourcePreviewId: source.id } : {}),
+      ...(seed !== undefined ? { seed } : {}),
       generationSnapshot: snapshot,
     };
     const reservation: NodeRecord = {
@@ -4226,6 +4229,7 @@ function CanvasWorkspace() {
         source: regeneration?.sourcePreview ?? target,
         clientId,
         snapshot,
+        seed: requestedSeedMode === "fixed" ? requestedFixedSeed : undefined,
         secondary: false,
         sourceGeneratorId: targetId,
         edgeSourceId: targetId,
@@ -5364,6 +5368,7 @@ function CanvasWorkspace() {
         source: preview,
         clientId,
         snapshot,
+        seed: requestedSeed,
         secondary: true,
         sourceGeneratorId,
       });
@@ -6860,6 +6865,12 @@ function CanvasWorkspace() {
             if (!task || !persistedComfyTasks.current.some(
               (candidate) => candidate.clientId === task.clientId,
             )) continue;
+            const placeholder = nodesSnapshot.current.find(
+              (node) => node.id === task.placeholderNodeId,
+            )?.data.record;
+            if (recovered.seed && placeholder?.content.seed !== recovered.seed) {
+              updateGenerationPlaceholder(task.placeholderNodeId, { seed: recovered.seed });
+            }
             const current = activeByNode.get(task.nodeId);
             if (!current || (current.status === "pending" && recovered.status === "running")) {
               activeByNode.set(task.nodeId, { task, status: recovered.status });
