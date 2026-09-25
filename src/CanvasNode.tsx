@@ -773,6 +773,7 @@ interface VideoRegenerationPromptOption {
 }
 
 interface VideoRegenerationDraft {
+  useSnapshotSettings: boolean;
   previewId: string;
   previewTitle: string;
   originalSnapshot: GenerationSnapshot;
@@ -1524,7 +1525,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   onSecondarySample: (id: string) => Promise<void>;
   onConfigureSecondarySample: (id: string) => void;
   onRegenerateVideo: (id: string) => Promise<void>;
-  onConfigureRegenerateVideo: (id: string) => void;
+  onConfigureRegenerateVideo: (id: string, useSnapshotSettings?: boolean) => void;
   onLocatePrompt: (id: string, target?: "prompt" | "generator") => void;
   onUpscaleGeneratedImage: (id: string) => Promise<void>;
   onRegenerateGeneratedImage: (id: string) => Promise<void>;
@@ -7286,10 +7287,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 type="button"
                 className="nodrag node-action generated-video-regenerate-action"
                 onClick={(event) => {
-                  if (event.ctrlKey) onConfigureRegenerateVideo(id);
+                  if (event.shiftKey) onConfigureRegenerateVideo(id, true);
+                  else if (event.ctrlKey) onConfigureRegenerateVideo(id);
                   else void onRegenerateVideo(id);
                 }}
-                title="点击直接重新生成；Ctrl+点击可选择提示词版本并调整参数"
+                title="点击直接重新生成；Ctrl+点击优先套用已保存设置；Shift+点击使用这条视频生成时的参数"
                 aria-label="重新生成该视频"
               >
                 <RotateCcw size={12} />

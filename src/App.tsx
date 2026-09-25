@@ -4779,7 +4779,7 @@ function CanvasWorkspace() {
     });
   }, [executeVideoNode, generationSnapshotForGenerator]);
 
-  const configureGeneratedVideoRegeneration = useCallback((previewId: string) => {
+  const configureGeneratedVideoRegeneration = useCallback((previewId: string, useSnapshotSettings = false) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
     if (!previewNode || previewNode.data.record.kind !== "generated-video") {
       setNotice("无法设置重新生成参数：找不到视频预览节点");
@@ -4798,7 +4798,7 @@ function CanvasWorkspace() {
     const workflowModule = workflowModules.find((module) => (
       !module.deletedAt && module.id === snapshot.workflowModuleId
     ));
-    const primaryAudioSteps = workflowUsesSharedPrimarySteps(workflowModule)
+    const primaryAudioSteps = !useSnapshotSettings && workflowUsesSharedPrimarySteps(workflowModule)
       ? snapshot.primaryVideoSteps
       : snapshot.primaryAudioSteps;
     const seed = typeof preview.content.seed === "string" ? preview.content.seed.trim() : "";
@@ -4924,9 +4924,10 @@ function CanvasWorkspace() {
         promptOptions.push(currentTextOption);
       }
     }
-    const savedSettings = loadVideoRegenerationSettings();
+    const savedSettings = useSnapshotSettings ? null : loadVideoRegenerationSettings();
     setVideoRegenerationInformationOpen(false);
     setVideoRegenerationDraft({
+      useSnapshotSettings,
       previewId,
       previewTitle: preview.title || "视频预览",
       originalSnapshot: snapshot,
@@ -11233,7 +11234,9 @@ function CanvasWorkspace() {
             <div className="project-dialog-icon"><RotateCcw size={21} /></div>
             <div>
               <h2>选择提示词并重新生成</h2>
-              <p>提示词与 Seed 来自“{videoRegenerationDraft.previewTitle}”；参数优先套用已保存设置，未保存时使用生成快照。</p>
+              <p>{videoRegenerationDraft.useSnapshotSettings
+                ? `正在使用“${videoRegenerationDraft.previewTitle}”生成时记录的参数、提示词与 Seed，不套用已保存设置。`
+                : `提示词与 Seed 来自“${videoRegenerationDraft.previewTitle}”；参数优先套用已保存设置，未保存时使用生成快照。`}</p>
             </div>
             <div className="video-regeneration-fields">
               <label className="video-regeneration-prompt-field">
