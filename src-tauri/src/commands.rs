@@ -3810,9 +3810,9 @@ async fn submit_comfyui_workflow_inner(
     }
     if !input.primary_upscale_factor.is_finite()
         || input.primary_upscale_factor < 1.0
-        || input.primary_upscale_factor > 2.0
+        || input.primary_upscale_factor > 4.0
     {
-        return Err("1采放大倍率必须在1.0到2.0之间".to_owned());
+        return Err("1采放大倍率必须在1.0到4.0之间".to_owned());
     }
     let ref_image_size = ref_image_size_for_variant(&adapter_variant, input.ref_image_size.trim())?;
     for (label, value) in [

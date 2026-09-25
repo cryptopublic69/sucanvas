@@ -121,8 +121,25 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
     const fullscreenChange = () => {
       if (!document.fullscreenElement && !wrapperRef.current?.matches(":hover")) release();
     };
+    const fullscreenSpace = (event: KeyboardEvent) => {
+      const video = videoRef.current;
+      if (event.code !== "Space" || !video || document.fullscreenElement !== video) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.type !== "keydown" || event.repeat) return;
+      if (video.ended) {
+        video.currentTime = 0;
+        activate();
+      } else if (video.paused) {
+        activate();
+      } else {
+        video.pause();
+      }
+    };
     document.addEventListener("visibilitychange", visibility);
     document.addEventListener("fullscreenchange", fullscreenChange);
+    window.addEventListener("keydown", fullscreenSpace, true);
+    window.addEventListener("keyup", fullscreenSpace, true);
     return () => {
       alive.current = false;
       cancelPoster();
@@ -130,6 +147,8 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
       if (posterUrl) URL.revokeObjectURL(posterUrl);
       document.removeEventListener("visibilitychange", visibility);
       document.removeEventListener("fullscreenchange", fullscreenChange);
+      window.removeEventListener("keydown", fullscreenSpace, true);
+      window.removeEventListener("keyup", fullscreenSpace, true);
     };
   }, [src]);
 
@@ -148,7 +167,6 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
         unloadTimer.current = setTimeout(release, 1200);
       }}
       onClick={() => { if (!mounted || failed) activate(); }}
-      title={failed ? "预览未能播放，点击重试" : "悬停播放视频"}
     >
       {poster ? <img src={poster} alt="视频封面" draggable={false} /> : (
         <span className="lazy-video-placeholder"><Film size={24} /><small>悬停播放</small></span>
@@ -180,7 +198,6 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
           onError={() => { setFailed(true); release(); }}
         />
       )}
-      {failed && <span className="lazy-video-error">点击重试播放</span>}
     </span>
   );
 });

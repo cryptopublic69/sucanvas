@@ -5066,8 +5066,8 @@ function CanvasWorkspace() {
       setNotice("亮度、对比度和饱和度必须在 0.00 到 3.00 之间");
       return;
     }
-    if (!Number.isFinite(draft.primaryUpscaleFactor) || draft.primaryUpscaleFactor < 1 || draft.primaryUpscaleFactor > 2) {
-      setNotice("放大倍率必须在 1.0 到 2.0 之间");
+    if (!Number.isFinite(draft.primaryUpscaleFactor) || draft.primaryUpscaleFactor < 1 || draft.primaryUpscaleFactor > 4) {
+      setNotice("放大倍率必须在 1.0 到 4.0 之间");
       return;
     }
     const styleLoraError = styleLoraValidationError(draft.styleLoras);
@@ -11370,7 +11370,7 @@ function CanvasWorkspace() {
                 <ModelParameterNumberInput
                   regenerationField="primaryUpscaleFactor"
                   min={1}
-                  max={2}
+                  max={4}
                   step={0.1}
                   value={videoRegenerationDraft.primaryUpscaleFactor}
                   onChange={(value) => setVideoRegenerationDraft((current) => current && ({

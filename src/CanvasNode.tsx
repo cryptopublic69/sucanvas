@@ -808,7 +808,7 @@ const VIDEO_REGENERATION_NUMBER_CONFIG: Record<
   { min: number; max: number; step: number }
 > = {
   primaryResolutionMegapixels: { min: 0.2, max: 2, step: 0.1 },
-  primaryUpscaleFactor: { min: 1, max: 2, step: 0.1 },
+  primaryUpscaleFactor: { min: 1, max: 4, step: 0.1 },
   durationSeconds: { min: 2, max: 15, step: 1 },
   loraStrength: { min: 0, max: 10, step: 0.01 },
   primaryVideoSteps: { min: 1, max: 1000, step: 1 },
@@ -3132,7 +3132,7 @@ function validPrimaryUpscaleFactor(value: unknown, fallback = 1): number {
   return typeof value === "number"
     && Number.isFinite(value)
     && value >= 1
-    && value <= 2
+    && value <= 4
     ? Math.round(value * 10) / 10
     : fallback;
 }
@@ -3684,11 +3684,11 @@ function VideoGenerationDefaultsEditor({
                 className="video-parameter-range"
                 type="range"
                 min="1"
-                max="2"
+                max="4"
                 step="0.1"
                 value={value.generationPrimaryUpscaleFactor}
                 style={{
-                  "--video-range-progress": `${(value.generationPrimaryUpscaleFactor - 1) * 100}%`,
+                  "--video-range-progress": `${(value.generationPrimaryUpscaleFactor - 1) / 3 * 100}%`,
                 } as CSSProperties}
                 aria-label={`默认${upscaleStageLabel} latent 放大倍率`}
                 onChange={(event) => onChange({
@@ -8126,11 +8126,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     className="video-parameter-range"
                     type="range"
                     min="1"
-                    max="2"
+                    max="4"
                     step="0.1"
                     value={primaryUpscaleFactor}
                     style={{
-                      "--video-range-progress": `${(primaryUpscaleFactor - 1) * 100}%`,
+                      "--video-range-progress": `${(primaryUpscaleFactor - 1) / 3 * 100}%`,
                     } as CSSProperties}
                     aria-label="1采放大倍率"
                     onChange={(event) => {
