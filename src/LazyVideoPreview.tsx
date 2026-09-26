@@ -110,15 +110,28 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
   useLayoutEffect(() => {
     alive.current = true;
     let releasePoster: (() => void) | undefined;
+    let cancelPoster: (() => void) | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
+    let retries = 0;
+    const retryDelays = [2500, 10000];
     setPoster(posterMemoryCache.peek(src)?.url ?? "");
-    const cancelPoster = requestVideoPoster(src, (result) => {
-      if (!result) return;
-      releasePoster?.();
-      const cached = posterMemoryCache.retain(src);
-      releasePoster = cached?.release;
-      setPoster(cached?.url ?? "");
-      if (result.width && result.height) callbacks.current.onDimensions?.(result.width, result.height);
-    });
+    const loadPoster = () => {
+      cancelPoster?.();
+      cancelPoster = requestVideoPoster(src, (result) => {
+        if (disposed) return;
+        if (!result) {
+          if (retries < retryDelays.length) retryTimer = setTimeout(loadPoster, retryDelays[retries++]);
+          return;
+        }
+        releasePoster?.();
+        const cached = posterMemoryCache.retain(src);
+        releasePoster = cached?.release;
+        setPoster(cached?.url ?? "");
+        if (result.width && result.height) callbacks.current.onDimensions?.(result.width, result.height);
+      });
+    };
+    loadPoster();
     const visibility = () => { if (document.hidden) release(); };
     const fullscreenChange = () => {
       if (!document.fullscreenElement && !wrapperRef.current?.matches(":hover")) release();
@@ -144,7 +157,9 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
     window.addEventListener("keyup", fullscreenSpace, true);
     return () => {
       alive.current = false;
-      cancelPoster();
+      disposed = true;
+      clearTimeout(retryTimer);
+      cancelPoster?.();
       release();
       releasePoster?.();
       document.removeEventListener("visibilitychange", visibility);

@@ -183,6 +183,34 @@ test("native failure leaves a placeholder without a hidden WebView decoder", asy
   assert.equal(videos.length, start);
 });
 
+test("temporary native failures recover after cooldown and then use the cached poster", async (t) => {
+  let now = 10000;
+  t.mock.method(Date, "now", () => now);
+  let calls = 0;
+  const start = videos.length;
+  globalThis.nativePosterInvoke = async () => {
+    if (++calls === 1) throw new Error("file not ready");
+    return [255, 216, 255, 217];
+  };
+  const src = "http://example.test/retry-ready.mp4";
+  let result;
+  nativePosters.requestVideoPoster(src, (poster) => { result = poster; });
+  await tick();
+  assert.equal(result, null);
+  nativePosters.requestVideoPoster(src, () => {});
+  await tick();
+  assert.equal(calls, 1, "cooldown prevents repeated extraction");
+  now += 2500;
+  nativePosters.requestVideoPoster(src, (poster) => { result = poster; });
+  await tick();
+  assert.equal(calls, 2);
+  assert.equal(result.blob.size, 4);
+  nativePosters.requestVideoPoster(src, () => {});
+  await tick();
+  assert.equal(calls, 2, "successful retry is cached");
+  assert.equal(videos.length, start);
+});
+
 test("oversized native posters are discarded before blob conversion", async () => {
   const start = videos.length;
   let result = "pending";

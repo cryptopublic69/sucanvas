@@ -4,7 +4,8 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 export type VideoPoster = { src: string; blob: Blob; width: number; height: number; createdAt: number };
 const MAX_POSTERS = 300;
 const MAX_POSTER_BYTES = 1024 * 1024;
-const failedSources = new Set<string>();
+const FAILED_POSTER_COOLDOWN_MS = 2000;
+const failedSources = new Map<string, number>();
 const pending = new Map<string, { listeners: Set<(poster: VideoPoster | null) => void>; cancel: () => void }>();
 let database: Promise<IDBDatabase | null> | undefined;
 
@@ -201,14 +202,16 @@ export function requestVideoPoster(src: string, listener: (poster: VideoPoster |
   };
   void readPoster(src).then((poster) => {
     if (controller.signal.aborted) return;
-    if (poster || failedSources.has(src)) { finish(poster); return; }
+    const failedAt = failedSources.get(src);
+    if (poster || (failedAt !== undefined && Date.now() - failedAt < FAILED_POSTER_COOLDOWN_MS)) { finish(poster); return; }
+    failedSources.delete(src);
     cancelDecode = videoPreviewScheduler.enqueue(async (signal) => {
       const poster = await extractPoster(src, signal);
       if (signal.aborted || controller.signal.aborted) return;
       if (poster) await writePoster(poster);
       else {
-        failedSources.add(src);
-        if (failedSources.size > MAX_POSTERS) failedSources.delete(failedSources.values().next().value!);
+        failedSources.set(src, Date.now());
+        if (failedSources.size > MAX_POSTERS) failedSources.delete(failedSources.keys().next().value!);
       }
       if (!signal.aborted) finish(poster);
     });
