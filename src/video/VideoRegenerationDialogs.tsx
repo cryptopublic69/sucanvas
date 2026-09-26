@@ -25,6 +25,7 @@ type VideoRegenerationDialogsProps = {
   selectPreset: (id: string) => void;
   setDefaultPreset: () => void;
   deletePreset: () => void;
+  movePreset: (id: string, direction: -1 | 1) => void;
   selectedVideoRegenerationPrompt: VideoRegenerationPromptOption | null;
 };
 
@@ -48,6 +49,7 @@ export function VideoRegenerationDialogs({
   selectPreset,
   setDefaultPreset,
   deletePreset,
+  movePreset,
 }: VideoRegenerationDialogsProps) {
   const selectedModel = videoRegenerationDraft?.diffusionModelName ?? "";
   const catalogModel = h3DiffusionModelOptions.find((model) => sameH3DiffusionModelName(model, selectedModel));
@@ -69,7 +71,7 @@ export function VideoRegenerationDialogs({
           >
             <div className="project-dialog-icon"><RotateCcw size={21} /></div>
             <div>
-              <h2>选择提示词并重新生成</h2>
+              <h2>重新生成</h2>
               <p>{videoRegenerationDraft.useSnapshotSettings
                 ? `正在使用“${videoRegenerationDraft.previewTitle}”生成时记录的参数、提示词与 Seed，不套用已保存设置。`
                 : `提示词与 Seed 来自“${videoRegenerationDraft.previewTitle}”；参数优先套用默认预设，未设默认时使用生成快照。`}</p>
@@ -88,6 +90,7 @@ export function VideoRegenerationDialogs({
                     placeholder={presetCollection.presets.length ? "当前参数（未选择预设）" : "暂无预设，可保存当前参数"}
                     disabled={!presetCollection.presets.length}
                     onChange={selectPreset}
+                    onMoveOption={movePreset}
                     ariaLabel="重新生成参数预设槽位"
                   />
                 </label>

@@ -1,3 +1,5 @@
+import { withSubmissionWaitNotice } from "./video/submissionWait";
+import { generationQueuePositions } from "./generationQueuePositions";
 import { VideoPosterViewportCache } from "./VideoPosterViewportCache";
 import { summarizeProject } from "./projects/projectSummaries";
 import type { SetStateAction } from "react";
@@ -2578,6 +2580,7 @@ function CanvasWorkspace() {
     const uniqueTasks = [...new Map(tasks.map((task) => [task.clientId, task])).values()];
 
     for (const task of uniqueTasks) {
+
       cancelledComfyClients.current.add(task.clientId);
       try {
         await invoke<string | null>("cancel_comfyui_workflow", {
@@ -3495,7 +3498,7 @@ function CanvasWorkspace() {
     incomingPlacementReservations.current.push(reservation);
     let createdNodeId = "";
     try {
-      const result = await invoke<CreateNodeResult>("create_node", {
+      const result = await withSubmissionWaitNotice(() => invoke<CreateNodeResult>("create_node", {
         input: {
           canvasId: source.canvasId,
           kind: "generated-video",
@@ -3508,12 +3511,12 @@ function CanvasWorkspace() {
           width: previewWidth,
           height: previewHeight,
         },
-      });
+      }), "生成提交仍在等待：创建视频预览节点。请求尚未结束，请勿重复点击。", showGlobalNotice);
       createdNodeId = result.node.id;
       completedGenerationPlaceholders.current.delete(result.node.id);
       incomingPlacementReservations.current = incomingPlacementReservations.current
         .map((candidate) => candidate.id === reservationId ? result.node : candidate);
-      const edgeRecord = await invoke<EdgeRecord>("create_edge", {
+      const edgeRecord = await withSubmissionWaitNotice(() => invoke<EdgeRecord>("create_edge", {
         input: {
           canvasId: source.canvasId,
           sourceNodeId: edgeSourceId,
@@ -3527,7 +3530,7 @@ function CanvasWorkspace() {
             } : {}),
           },
         },
-      });
+      }), "生成提交仍在等待：创建视频预览连线。请求尚未结束，请勿重复点击。", showGlobalNotice);
       const flowNode = makeFlowNodeRef.current?.(result.node);
       if (flowNode) setNodes((current) => appendUniqueById(current, [flowNode]));
       setEdges((current) => appendUniqueById(current, [toFlowEdge(edgeRecord)]));
@@ -3549,7 +3552,7 @@ function CanvasWorkspace() {
           .filter((candidate) => candidate.id !== reservationId && candidate.id !== createdNodeId);
       }, 0);
     }
-  }, [generatedPreviewHeightForAspectRatio, setEdges, setNodes]);
+  }, [generatedPreviewHeightForAspectRatio, setEdges, setNodes, showGlobalNotice]);
 
   const createImageGenerationPlaceholder = useCallback(async ({
     source,
@@ -3867,16 +3870,22 @@ function CanvasWorkspace() {
     regeneration?: VideoRegenerationRequest,
     options?: VideoExecutionOptions,
   ) => {
+    const rejectSubmission = showGlobalNotice;
+
     try {
-      await flushVideoGenerationInputs(targetId);
+      await withSubmissionWaitNotice(
+        () => flushVideoGenerationInputs(targetId),
+        "生成提交仍在等待：保存提示词和节点参数。请求尚未结束，请勿重复点击。",
+        showGlobalNotice,
+      );
     } catch (error) {
       reportError(error);
-      setNotice("无法生成：提示词或节点参数保存失败");
+      rejectSubmission("无法生成：提示词或节点参数保存失败");
       return;
     }
     const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
     if (!targetNode) {
-      setNotice("无法执行：找不到视频生成节点");
+      rejectSubmission("无法执行：找不到视频生成节点");
       return;
     }
     const target = recordAtCurrentFlowPosition(targetNode);
@@ -3884,7 +3893,8 @@ function CanvasWorkspace() {
     const requestedFixedSeed = regeneration?.seed ?? fixedSeedFromContent(target.content);
     const activeClients = runningComfyClients.current.get(targetId);
     if (target.content.status === "cancelling") {
-      setNotice("当前任务正在取消，请稍后再提交");
+
+      rejectSubmission("当前任务正在取消，请稍后再提交");
       return;
     }
     if (
@@ -3900,14 +3910,14 @@ function CanvasWorkspace() {
       changeNode(targetId, {
         content: { ...target.content, status: "warning", validationMessage: message },
       });
-      setNotice(message);
+      rejectSubmission(message);
       return;
     }
     let snapshot = regeneration?.snapshot
       ?? options?.snapshot
       ?? generationSnapshotForGenerator(targetId);
     if (!snapshot?.prompt.trim()) {
-      setNotice("无法执行：找不到已保存的提示词与素材参数");
+      rejectSubmission("无法执行：找不到已保存的提示词与素材参数");
       return;
     }
     const referenceCompilerMode = target.content.storyboardReferenceCompiler === true
@@ -3918,7 +3928,7 @@ function CanvasWorkspace() {
         changeNode(targetId, {
           content: { ...target.content, status: "invalid", validationMessage: message },
         });
-        setNotice(`无法执行：${message}`);
+        rejectSubmission(`无法执行：${message}`);
         return;
       }
       const imageMappingCount = snapshot.referenceMappings?.filter(
@@ -3951,7 +3961,7 @@ function CanvasWorkspace() {
         changeNode(targetId, {
           content: { ...target.content, status: "invalid", validationMessage: referenceError },
         });
-        setNotice(`无法执行：${referenceError}`);
+        rejectSubmission(`无法执行：${referenceError}`);
         return;
       }
     }
@@ -3979,7 +3989,7 @@ function CanvasWorkspace() {
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法执行：${message}`);
+      rejectSubmission(`无法执行：${message}`);
       return;
     }
     snapshot = {
@@ -4002,7 +4012,7 @@ function CanvasWorkspace() {
         changeNode(targetId, {
           content: { ...target.content, status: "invalid", validationMessage: mediaError },
         });
-        setNotice(`无法执行：${mediaError}`);
+        rejectSubmission(`无法执行：${mediaError}`);
         return;
       }
     }
@@ -4016,7 +4026,7 @@ function CanvasWorkspace() {
         changeNode(targetId, {
           content: { ...target.content, status: "invalid", validationMessage: mediaError },
         });
-        setNotice(`无法执行：${mediaError}`);
+        rejectSubmission(`无法执行：${mediaError}`);
         return;
       }
     }
@@ -4030,7 +4040,7 @@ function CanvasWorkspace() {
         changeNode(targetId, {
           content: { ...target.content, status: "invalid", validationMessage: mediaError },
         });
-        setNotice(`无法执行：${mediaError}`);
+        rejectSubmission(`无法执行：${mediaError}`);
         return;
       }
     }
@@ -4040,7 +4050,7 @@ function CanvasWorkspace() {
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法执行：${message}`);
+      rejectSubmission(`无法执行：${message}`);
       return;
     }
     if (!snapshot.secondaryLoraBypassed && !snapshot.secondaryLoraName) {
@@ -4048,7 +4058,7 @@ function CanvasWorkspace() {
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法执行：${message}`);
+      rejectSubmission(`无法执行：${message}`);
       return;
     }
     if (styleLoraValidationError(snapshot.styleLoras)) {
@@ -4056,7 +4066,7 @@ function CanvasWorkspace() {
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法执行：${message}`);
+      rejectSubmission(`无法执行：${message}`);
       return;
     }
     if (
@@ -4070,7 +4080,7 @@ function CanvasWorkspace() {
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法执行：${message}`);
+      rejectSubmission(`无法执行：${message}`);
       return;
     }
     if (
@@ -4084,7 +4094,7 @@ function CanvasWorkspace() {
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法执行：${message}`);
+      rejectSubmission(`无法执行：${message}`);
       return;
     }
     if (
@@ -4097,7 +4107,7 @@ function CanvasWorkspace() {
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法执行：${message}`);
+      rejectSubmission(`无法执行：${message}`);
       return;
     }
     if (
@@ -4112,7 +4122,7 @@ function CanvasWorkspace() {
       changeNode(targetId, {
         content: { ...target.content, status: "invalid", validationMessage: message },
       });
-      setNotice(`无法执行：${message}`);
+      rejectSubmission(`无法执行：${message}`);
       return;
     }
     const clientId = options?.clientId ?? crypto.randomUUID();
@@ -4407,10 +4417,13 @@ function CanvasWorkspace() {
         : 0;
       if (cancelledComfyClients.current.has(clientId)) {
         const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
+
         changeNode(targetId, {
           content: {
             ...latest.content,
-            status: remainingTaskCount ? "cancelling" : "cancelled",
+            // This task has finished cancelling. Other queued/running tasks
+            // must not leave the whole generator stuck in the cancellation gate.
+            status: remainingTaskCount ? "running" : "cancelled",
             executionProgress: null,
             validationMessage: remainingTaskCount
               ? `已取消一个任务，仍有 ${remainingTaskCount} 个任务正在执行或排队`
@@ -4620,16 +4633,16 @@ function CanvasWorkspace() {
   ) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
     if (!previewNode || previewNode.data.record.kind !== "generated-video") {
-      setNotice("无法重新生成：找不到视频预览节点");
+      showGlobalNotice("无法重新生成：找不到视频预览节点");
       return;
     }
     const sourcePreview = recordAtCurrentFlowPosition(previewNode);
     if (typeof sourcePreview.content.sourcePreviewId === "string") {
-      setNotice("2采视频不支持重新生成");
+      showGlobalNotice("2采视频不支持重新生成");
       return;
     }
     if (sourcePreview.content.generationPlaceholder === true) {
-      setNotice("当前视频仍在生成中");
+      showGlobalNotice("当前视频仍在生成中");
       return;
     }
     const storedSnapshot = generationSnapshotFromContent(sourcePreview.content);
@@ -4641,7 +4654,7 @@ function CanvasWorkspace() {
       (node) => node.id === sourceGeneratorId && node.data.record.kind === "video-generation",
     )?.data.record;
     if (!snapshot || !sourceGenerator) {
-      setNotice("无法重新生成：该视频缺少历史参数快照或原视频生成节点");
+      showGlobalNotice("无法重新生成：该视频缺少历史参数快照或原视频生成节点");
       return;
     }
     const currentGeneratorSnapshot = generationSnapshotForGenerator(
@@ -4683,7 +4696,7 @@ function CanvasWorkspace() {
       snapshot: snapshotWithCurrentMedia,
       seed,
     });
-  }, [executeVideoNode, generationSnapshotForGenerator]);
+  }, [executeVideoNode, generationSnapshotForGenerator, showGlobalNotice]);
 
   const configureGeneratedVideoRegeneration = useCallback((previewId: string, useSnapshotSettings = false) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
@@ -4946,6 +4959,17 @@ function CanvasWorkspace() {
     setNotice(wasDefault ? "默认预设已删除，下次打开使用视频生成快照；可重新指定默认预设" : "预设已删除，当前编辑参数保留");
   }, [videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
 
+  const moveVideoRegenerationPreset = useCallback((id: string, direction: -1 | 1) => {
+    const index = videoRegenerationPresets.presets.findIndex((preset) => preset.id === id);
+    const destination = index + direction;
+    if (index < 0 || destination < 0 || destination >= videoRegenerationPresets.presets.length) return;
+    const presets = [...videoRegenerationPresets.presets];
+    [presets[index], presets[destination]] = [presets[destination], presets[index]];
+    if (persistVideoRegenerationPresets({ ...videoRegenerationPresets, presets })) {
+      setNotice("预设顺序已保存");
+    }
+  }, [videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
+
   const adjustVideoRegenerationNumber = useCallback((
     field: VideoRegenerationNumericField,
     deltaY: number,
@@ -4988,6 +5012,8 @@ function CanvasWorkspace() {
   const submitConfiguredVideoRegeneration = useCallback(async () => {
     const draft = videoRegenerationDraft;
     if (!draft) return;
+
+    const setNotice = showGlobalNotice;
     if (!/^\d+$/.test(draft.seed) || BigInt(draft.seed) > 18446744073709551615n) {
       setNotice("Seed 必须是 0 到 18446744073709551615 之间的整数");
       return;
@@ -5074,8 +5100,12 @@ function CanvasWorkspace() {
       refImageSizeRecorded: true,
     };
     setVideoRegenerationDraft(null);
-    await regenerateGeneratedVideo(draft.previewId, snapshot, draft.seed);
-  }, [regenerateGeneratedVideo, videoRegenerationDraft, workflowModules]);
+    try {
+      await regenerateGeneratedVideo(draft.previewId, snapshot, draft.seed);
+    } catch (error) {
+      reportError(error);
+    }
+  }, [regenerateGeneratedVideo, reportError, showGlobalNotice, videoRegenerationDraft, workflowModules]);
 
   const configureSecondarySample = useCallback((previewId: string) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
@@ -6653,6 +6683,7 @@ function CanvasWorkspace() {
     if (!activeProjectId) return;
     let disposed = false;
     let timer: number | null = null;
+    let consecutivePollFailures = 0;
     const closeRecoveredProgressSocket = (clientId: string) => {
       const socket = recoveredComfySockets.current.get(clientId);
       recoveredComfySockets.current.delete(clientId);
@@ -6891,11 +6922,20 @@ function CanvasWorkspace() {
                 : `已恢复 ComfyUI 排队中的${taskLabel}`,
             });
           }
+          consecutivePollFailures = 0;
         } catch (error) {
-          if (!disposed) reportError(error);
+          if (disposed) return;
+          consecutivePollFailures++;
+          if (consecutivePollFailures === 1) reportError(error);
         }
+      } else {
+        consecutivePollFailures = 0;
       }
-      if (!disposed) timer = window.setTimeout(() => void pollRecoveredTasks(), 2000);
+      // Background failures must not flood the UI or hammer an unreachable server.
+      const retryDelay = consecutivePollFailures
+        ? Math.min(30000, 2000 * 2 ** Math.min(consecutivePollFailures, 4))
+        : 2000;
+      if (!disposed) timer = window.setTimeout(() => void pollRecoveredTasks(), retryDelay);
     };
     void pollRecoveredTasks();
     return () => {
@@ -9841,6 +9881,7 @@ function CanvasWorkspace() {
 
   const visibleNodes = useMemo(
     () => {
+      const queuePositions = generationQueuePositions(nodes.map((node) => node.data.record));
       const recordsById = new Map(contentNodes.map((node) => [node.id, node.data.record]));
       const inputRecordsByTarget = new Map<string, NodeRecord[]>();
       const contentParentsByTarget = new Map<string, NodeRecord[]>();
@@ -9902,6 +9943,7 @@ function CanvasWorkspace() {
           ? relationPromptVersionLabels.get(node.id) ?? ""
           : "";
         const activeTaskCount = activeComfyTaskCounts[node.id] ?? 0;
+        const generationQueuePosition = queuePositions.get(node.id);
         const outputCount = outputCountBySource.get(node.id) ?? 0;
         const generationSnapshot = node.data.record.kind === "generated-video"
           ? generationSnapshotFromContent(node.data.record.content)
@@ -9919,6 +9961,7 @@ function CanvasWorkspace() {
           && previousData.relationHighlighted === relationHighlighted
           && previousData.relationPromptVersionLabel === relationPromptVersionLabel
           && previousData.activeTaskCount === activeTaskCount
+          && previousData.generationQueuePosition === generationQueuePosition
           && previousData.inputCount === inputRecords.length
           && previousData.outputCount === outputCount
           && previousData.contentParents === contentParents
@@ -9941,6 +9984,7 @@ function CanvasWorkspace() {
             relationHighlighted,
             relationPromptVersionLabel,
             activeTaskCount,
+            generationQueuePosition,
             inputCount: inputRecords.length,
             outputCount,
             contentParents,
@@ -11243,6 +11287,7 @@ function CanvasWorkspace() {
         selectPreset={selectVideoRegenerationPreset}
         setDefaultPreset={setDefaultVideoRegenerationPreset}
         deletePreset={deleteVideoRegenerationPreset}
+        movePreset={moveVideoRegenerationPreset}
         selectedVideoRegenerationPrompt={selectedVideoRegenerationPrompt}
       />
       <SecondarySampleDialog

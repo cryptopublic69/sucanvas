@@ -2298,7 +2298,20 @@ button { color: inherit; }
 .video-regeneration-preset-fields .settings-custom-select-menu > button { font-size: calc(11px + var(--ui-font-adjust)); }
 .video-regeneration-dialog .video-regeneration-preset-fields input { height: 36px; }
 .video-regeneration-preset-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.settings-sortable-option { display: flex; align-items: center; gap: 3px; }
+.settings-sortable-option > button { min-width: 0; min-height: 30px; margin: 0; padding: 5px 8px; border: 0; border-radius: 5px; background: transparent; color: inherit; font-size: calc(11px + var(--ui-font-adjust)); cursor: pointer; }
+.settings-sortable-option .settings-sortable-option-label { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-sortable-option .settings-sortable-option-move { display: flex; flex: 0 0 26px; align-items: center; justify-content: center; padding: 4px; }
+.settings-sortable-option > button:hover:not(:disabled), .settings-sortable-option > button.is-active { background: rgba(139, 124, 246, .16); color: #bdb3ff; }
+.settings-sortable-option > button:disabled { opacity: .3; cursor: default; }
+.settings-sortable-option > button:focus-visible { outline: 2px solid #8b7cf6; outline-offset: -2px; }
+:root[data-theme="light"] .settings-sortable-option > button { color: #596171; }
+:root[data-theme="light"] .settings-sortable-option > button:hover:not(:disabled), :root[data-theme="light"] .settings-sortable-option > button.is-active { color: #5145a8; background: #ece9ff; }
 .video-regeneration-preset-actions button:disabled { cursor: default; }
 .video-regeneration-preset-actions .video-regeneration-preset-delete { margin-left: auto; color: #d48b97; }
 :root[data-theme="light"] .video-regeneration-presets { border-color: #d8d2ed; }
 @media (max-width: 600px) { .video-regeneration-preset-fields { grid-template-columns: minmax(0, 1fr); } }
+
+.generated-placeholder-queue-number { position: absolute; top: 12px; left: 12px; z-index: 3; display: flex; align-items: baseline; gap: 7px; padding: 5px 10px; border: 1px solid rgba(185, 218, 243, .28); border-radius: 8px; color: #edf6ff; background: rgba(6, 16, 29, .72); pointer-events: none; font-variant-numeric: tabular-nums; }
+.generated-placeholder-queue-number small { font-size: 11px; opacity: .8; }
+.generated-placeholder-queue-number strong { font-size: 24px; line-height: 1.1; font-weight: 650; }

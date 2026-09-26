@@ -1409,6 +1409,7 @@ function SettingsSelect({
   ariaLabel,
   placeholder = "请选择",
   title,
+  onMoveOption,
 }: {
   value: string;
   options: SettingsSelectOption[];
@@ -1417,6 +1418,7 @@ function SettingsSelect({
   ariaLabel: string;
   placeholder?: string;
   title?: string;
+  onMoveOption?: (value: string, direction: -1 | 1) => void;
 }) {
   const [open, setOpen] = useState(false);
   const controlRef = useRef<HTMLDivElement>(null);
@@ -1451,7 +1453,7 @@ function SettingsSelect({
         type="button"
         className="settings-custom-select-toggle"
         aria-label={ariaLabel}
-        aria-haspopup="listbox"
+        aria-haspopup={onMoveOption ? "dialog" : "listbox"}
         aria-expanded={open}
         disabled={disabled}
         title={title ?? selectedOption?.title}
@@ -1469,10 +1471,28 @@ function SettingsSelect({
       {open && (
         <div
           className="settings-custom-select-menu nowheel"
-          role="listbox"
+          role={onMoveOption ? "dialog" : "listbox"}
           aria-label={ariaLabel}
         >
-          {options.map((option) => (
+          {options.map((option, index) => onMoveOption ? (
+            <div key={option.value} className="settings-sortable-option">
+              <button type="button" className={`settings-sortable-option-label ${option.value === value ? "is-active" : ""}`}
+                aria-pressed={option.value === value} disabled={option.disabled} title={option.title}
+                onClick={() => { onChange(option.value); setOpen(false); }}>
+                {option.label}
+              </button>
+              <button type="button" className="settings-sortable-option-move" disabled={index === 0 || option.disabled}
+                title="上移" aria-label={`上移预设：${option.label}`}
+                onClick={(event) => { event.stopPropagation(); onMoveOption(option.value, -1); }}>
+                <ChevronUp size={14} />
+              </button>
+              <button type="button" className="settings-sortable-option-move" disabled={index === options.length - 1 || option.disabled}
+                title="下移" aria-label={`下移预设：${option.label}`}
+                onClick={(event) => { event.stopPropagation(); onMoveOption(option.value, 1); }}>
+                <ChevronDown size={14} />
+              </button>
+            </div>
+          ) : (
             <button
               key={option.value}
               type="button"
@@ -1496,6 +1516,7 @@ function SettingsSelect({
 }
 
 interface CanvasNodeData extends Record<string, unknown> {
+  generationQueuePosition?: number;
   record: NodeRecord;
   matched: boolean;
   relationHighlighted: boolean;
@@ -7250,6 +7271,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     style={generatedPlaceholderPositionStyle(id, 3)}
                   />
                 </div>
+              )}
+              {data.generationQueuePosition !== undefined && (
+                <output className="generated-placeholder-queue-number" aria-label={`队列序号 ${data.generationQueuePosition}`}>
+                  <small>队列</small>
+                  <strong>{data.generationQueuePosition}</strong>
+                </output>
               )}
               <div className="generated-video-placeholder-status">
                 <span className="generated-video-placeholder-message" title={validationMessage}>
