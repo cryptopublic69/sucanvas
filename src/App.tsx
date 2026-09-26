@@ -1,11 +1,12 @@
 import { withSubmissionWaitNotice } from "./video/submissionWait";
+import { deduplicateRegenerationPromptOptions } from "./video/regenerationPromptOptions";
 import { generationQueuePositions } from "./generationQueuePositions";
 import { VideoPosterViewportCache } from "./VideoPosterViewportCache";
 import { summarizeProject } from "./projects/projectSummaries";
 import type { SetStateAction } from "react";
 import { ComfyStatusIndicators } from "./ComfyStatusIndicators";
 import { comfyStatusMessage, createComfyPreviewReceiver, livePreviewResources } from "./comfyLivePreview";
-import { loadVideoRegenerationPresets, matchingVideoRegenerationPreset, saveVideoRegenerationPresets } from "./video/videoRegenerationPresets";
+import { loadVideoRegenerationPresets, matchingVideoRegenerationPreset, saveVideoRegenerationPresets, videoNodeExtraParameters, videoNodeSecondaryColors } from "./video/videoRegenerationPresets";
 import type { VideoRegenerationPresetCollection, VideoRegenerationSettings } from "./video/videoRegenerationPresets";
 import { VideoRegenerationDialogs } from "./video/VideoRegenerationDialogs";
 import { SecondarySampleDialog } from "./video/SecondarySampleDialog";
@@ -49,6 +50,8 @@ import {
   Image as ImageIcon,
   Link2,
   LockKeyhole,
+  Map as MapIcon,
+  Minimize2,
   Moon,
   Palette,
   Pencil,
@@ -113,7 +116,6 @@ import type {
   RestoreNodeReplacementResult,
   RuntimeInfo,
   SecondarySampleDraft,
-  SecondarySampleNumericField,
   SecondarySampleOverrides,
   SpacingGuide,
   StoryboardReferenceSelection,
@@ -161,13 +163,13 @@ import {
   NODE_HANDLE_BASE_SIZE_PX,
   NODE_HANDLE_MIN_SCREEN_SIZE_PX,
   PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY,
-  SECONDARY_SAMPLE_NUMBER_CONFIG,
   SHOW_NODE_SEARCH,
   UI_FONT_SIZE_STORAGE_KEY,
   VIDEO_GENERATION_DEFAULTS_BY_WORKFLOW_STORAGE_KEY,
   VIDEO_GENERATION_DEFAULTS_STORAGE_KEY,
   VIDEO_GENERATION_NODE_WIDTH,
   VIDEO_NODE_BASE_HEIGHT,
+  VIDEO_NODE_COMPACT_BASE_HEIGHT,
   VIDEO_REGENERATION_NUMBER_CONFIG,
   WORKFLOW_MODULE_DEFAULTS_STORAGE_KEY,
   WORKFLOW_MODULE_SLOTS,
@@ -337,6 +339,7 @@ function videoRegenerationSettingsFromValue(value: unknown): VideoRegenerationSe
   const numbers = {} as Record<VideoRegenerationNumericField, number>;
   for (const field of Object.keys(VIDEO_REGENERATION_NUMBER_CONFIG) as VideoRegenerationNumericField[]) {
     const number = source[field];
+    if (field.startsWith("secondary") && number === undefined) continue;
     const { min, max, step } = VIDEO_REGENERATION_NUMBER_CONFIG[field];
     if (typeof number !== "number" || !Number.isFinite(number) || number < min || number > max
       || (step === 1 && !Number.isInteger(number))) return null;
@@ -347,11 +350,29 @@ function videoRegenerationSettingsFromValue(value: unknown): VideoRegenerationSe
     || !Array.isArray(source.styleLoras)) return null;
   const styleLoras = h3StyleLorasFromContent(source);
   if (styleLoraValidationError(styleLoras)) return null;
+  if (source.loraName !== undefined && typeof source.loraName !== "string") return null;
+  if (source.secondaryLoraName !== undefined && typeof source.secondaryLoraName !== "string") return null;
+  if (source.loraBypassed !== undefined && typeof source.loraBypassed !== "boolean") return null;
+  if (source.secondaryLoraBypassed !== undefined && typeof source.secondaryLoraBypassed !== "boolean") return null;
   return {
     ...numbers, refImageSize: source.refImageSize, styleLoras,
     ...(typeof source.diffusionModelName === "string" && source.diffusionModelName.trim()
       ? { diffusionModelName: source.diffusionModelName.trim() } : {}),
+    ...(typeof source.loraName === "string" ? { loraName: source.loraName.trim() } : {}),
+    ...(typeof source.secondaryLoraName === "string" ? { secondaryLoraName: source.secondaryLoraName.trim() } : {}),
+    ...(typeof source.loraBypassed === "boolean" ? { loraBypassed: source.loraBypassed } : {}),
+    ...(typeof source.secondaryLoraBypassed === "boolean" ? { secondaryLoraBypassed: source.secondaryLoraBypassed } : {}),
   };
+}
+
+function isHighlightedMinimapVideo(record: NodeRecord | undefined): boolean {
+  if (record?.kind !== "generated-video") return false;
+  if (record.content.generationPlaceholder === true) {
+    return ["running", "pending", "queued", "cancelling"].includes(String(record.content.status));
+  }
+  return typeof record.content.videoUrl === "string"
+    && Boolean(record.content.videoUrl)
+    && record.content.hasBeenPlayed === false;
 }
 
 function videoInputMediaKind(record: NodeRecord): "image" | "audio" | "video" | null {
@@ -368,6 +389,7 @@ function isKrea2DiffusionModelName(value: string): boolean {
 function CanvasWorkspace() {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasFlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [minimapHidden, setMinimapHidden] = useState(false);
   const [hideUnselectedEdges, setHideUnselectedEdges] = useState(
     () => window.localStorage.getItem("infinite-canvas:hide-unselected-edges") === "true",
   );
@@ -538,7 +560,9 @@ function CanvasWorkspace() {
   const [imageDeletionRequest, setImageDeletionRequest] = useState<ImageDeletionRequest | null>(null);
   const [videoRegenerationDraft, setVideoRegenerationDraft] = useState<VideoRegenerationDraft | null>(null);
   const [videoRegenerationInformationOpen, setVideoRegenerationInformationOpen] = useState(false);
-  const [videoRegenerationPresets, setVideoRegenerationPresets] = useState<VideoRegenerationPresetCollection>({ presets: [], defaultPresetId: "" });
+  const [videoRegenerationPresets, setVideoRegenerationPresets] = useState<VideoRegenerationPresetCollection>(
+    () => loadVideoRegenerationPresets(window.localStorage, videoRegenerationSettingsFromValue),
+  );
   const [selectedVideoRegenerationPresetId, setSelectedVideoRegenerationPresetId] = useState("");
   const [videoRegenerationPresetName, setVideoRegenerationPresetName] = useState("");
   const [secondarySampleDraft, setSecondarySampleDraft] = useState<SecondarySampleDraft | null>(null);
@@ -2194,6 +2218,10 @@ function CanvasWorkspace() {
         ? record.content.manualHeight
         : null;
       const currentStyleLoraCount = h3StyleLorasFromContent(record.content).length;
+      const detailsExpanded = record.content.videoDetailsExpanded === true;
+      const layoutDetailsChanged = record.content.layoutVideoDetailsExpanded !== detailsExpanded
+        || record.content.layoutVideoDetailsVersion !== 4;
+      const minimumHeight = detailsExpanded ? VIDEO_NODE_BASE_HEIGHT : VIDEO_NODE_COMPACT_BASE_HEIGHT;
       const storedLayoutStyleLoraCount = typeof record.content.layoutStyleLoraCount === "number"
         ? record.content.layoutStyleLoraCount
         : null;
@@ -2228,12 +2256,13 @@ function CanvasWorkspace() {
         record.content.storyboardReferenceCompiler === true,
         supportsPrimaryUpscaleFactor,
         h3StyleLorasFromContent(record.content).length,
+        detailsExpanded,
       );
       // Media groups do not scroll: let a newly connected reference asset grow
       // the outer node until its complete group is visible. Text rows remain
       // capped by videoGenerationAutoHeight at VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS.
       let desiredHeight = Math.max(
-        VIDEO_NODE_BASE_HEIGHT,
+        minimumHeight,
         record.height,
         fullContentHeight,
       );
@@ -2245,6 +2274,7 @@ function CanvasWorkspace() {
           record.content.storyboardReferenceCompiler === true,
           supportsPrimaryUpscaleFactor,
           h3StyleLorasFromContent(record.content).length,
+          detailsExpanded,
         );
         desiredHeight = Math.min(
           fullContentHeight,
@@ -2258,18 +2288,19 @@ function CanvasWorkspace() {
           record.content.storyboardReferenceCompiler === true,
           supportsPrimaryUpscaleFactor,
           h3StyleLorasFromContent(record.content).length,
+          detailsExpanded,
         );
         desiredHeight = Math.min(
           fullContentHeight,
           Math.max(
-            VIDEO_NODE_BASE_HEIGHT,
+            minimumHeight,
             record.height + fullContentHeight - previousContentHeight,
           ),
         );
       }
       // Slot removal must release the previous rows' space instead of keeping
       // record.height as a permanent lower bound. Also normalize older nodes.
-      if (storedLayoutStyleLoraCount !== currentStyleLoraCount) {
+      if (storedLayoutStyleLoraCount !== currentStyleLoraCount || layoutDetailsChanged) {
         desiredHeight = fullContentHeight;
       }
       const connectedTextRecords = (textInputIdsByTarget.get(node.id) ?? [])
@@ -2295,6 +2326,7 @@ function CanvasWorkspace() {
         && storedActiveTextId === activeTextInputId
         && storedLayoutTextInputCount === currentTextInputCount
         && storedLayoutStyleLoraCount === currentStyleLoraCount
+        && !layoutDetailsChanged
       ) continue;
       changeNode(node.id, {
         ...(shouldRenameStoryboardGenerator ? { title: "智能视频生成" } : {}),
@@ -2306,6 +2338,8 @@ function CanvasWorkspace() {
           activeTextInputId,
           layoutTextInputCount: currentTextInputCount,
           layoutStyleLoraCount: currentStyleLoraCount,
+          layoutVideoDetailsExpanded: detailsExpanded,
+          layoutVideoDetailsVersion: 4,
         },
       });
     }
@@ -3355,9 +3389,9 @@ function CanvasWorkspace() {
       generator.content,
       moduleParameters.primaryVideoSteps,
     );
-    const primaryAudioSteps = workflowUsesSharedPrimarySteps(workflowModule)
-      ? primaryVideoSteps
-      : Math.max(primaryVideoSteps, moduleParameters.primaryAudioSteps);
+    const extraParameters = videoNodeExtraParameters(
+      generator.content, moduleParameters, primaryVideoSteps, workflowUsesSharedPrimarySteps(workflowModule),
+    );
     return {
       prompt,
       promptInformation,
@@ -3373,7 +3407,7 @@ function CanvasWorkspace() {
       primaryResolutionMegapixels: primaryVideoResolutionFromContent(generator.content),
       secondaryResolutionMegapixels: secondaryVideoResolutionFromContent(generator.content),
       primaryVideoSteps,
-      primaryAudioSteps,
+      primaryAudioSteps: extraParameters.primaryAudioSteps,
       secondarySchedulerSteps: secondarySchedulerStepsFromContent(
         generator.content,
         moduleParameters.secondarySchedulerSteps,
@@ -3382,12 +3416,10 @@ function CanvasWorkspace() {
         generator.content,
         moduleParameters.primaryUpscaleFactor,
       ),
-      primaryBrightness: moduleParameters.primaryBrightness,
-      primaryContrast: moduleParameters.primaryContrast,
-      primarySaturation: moduleParameters.primarySaturation,
-      secondaryBrightness: moduleParameters.secondaryBrightness,
-      secondaryContrast: moduleParameters.secondaryContrast,
-      secondarySaturation: moduleParameters.secondarySaturation,
+      primaryBrightness: extraParameters.primaryBrightness,
+      primaryContrast: extraParameters.primaryContrast,
+      primarySaturation: extraParameters.primarySaturation,
+      ...videoNodeSecondaryColors(generator.content, moduleParameters),
       diffusionModelName: nodeH3DiffusionModelName(generator.content, moduleParameters.diffusionModelName),
       loraName: h3LoraNameFromContent(generator.content),
       loraStrength: h3LoraStrengthFromContent(generator.content),
@@ -3889,8 +3921,8 @@ function CanvasWorkspace() {
       return;
     }
     const target = recordAtCurrentFlowPosition(targetNode);
-    const requestedSeedMode = regeneration ? "fixed" : seedModeFromContent(target.content);
-    const requestedFixedSeed = regeneration?.seed ?? fixedSeedFromContent(target.content);
+    const requestedSeedMode = regeneration || options?.seed ? "fixed" : seedModeFromContent(target.content);
+    const requestedFixedSeed = regeneration?.seed ?? options?.seed ?? fixedSeedFromContent(target.content);
     const activeClients = runningComfyClients.current.get(targetId);
     if (target.content.status === "cancelling") {
 
@@ -4698,9 +4730,16 @@ function CanvasWorkspace() {
     });
   }, [executeVideoNode, generationSnapshotForGenerator, showGlobalNotice]);
 
-  const configureGeneratedVideoRegeneration = useCallback((previewId: string, useSnapshotSettings = false) => {
+  const configureGeneratedVideoRegeneration = useCallback(async (previewId: string, useSnapshotSettings = false, start?: { promptNodeId?: string }) => {
+    if (start) {
+      try { await flushVideoGenerationInputs(previewId); }
+      catch (error) { reportError(error); return; }
+    }
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
-    if (!previewNode || previewNode.data.record.kind !== "generated-video") {
+    const fromGenerator = previewNode?.data.record.kind === "video-generation";
+    const presetEditor = fromGenerator && !start;
+    if (presetEditor) useSnapshotSettings = true;
+    if (!previewNode || (!fromGenerator && previewNode.data.record.kind !== "generated-video")) {
       setNotice("无法设置重新生成参数：找不到视频预览节点");
       return;
     }
@@ -4709,7 +4748,7 @@ function CanvasWorkspace() {
       setNotice("2采视频不支持重新生成");
       return;
     }
-    const snapshot = generationSnapshotFromContent(preview.content);
+    const snapshot = fromGenerator ? generationSnapshotForGenerator(previewId, start?.promptNodeId) : generationSnapshotFromContent(preview.content);
     if (!snapshot) {
       setNotice("无法设置重新生成参数：该视频没有完整的历史参数快照");
       return;
@@ -4720,7 +4759,9 @@ function CanvasWorkspace() {
     const primaryAudioSteps = !useSnapshotSettings && workflowUsesSharedPrimarySteps(workflowModule)
       ? snapshot.primaryVideoSteps
       : snapshot.primaryAudioSteps;
-    const seed = typeof preview.content.seed === "string" ? preview.content.seed.trim() : "";
+    const seed = presetEditor ? "0" : fromGenerator
+      ? seedModeFromContent(preview.content) === "fixed" ? fixedSeedFromContent(preview.content) : randomFixedSeed()
+      : typeof preview.content.seed === "string" ? preview.content.seed.trim() : "";
     if (!/^\d+$/.test(seed)) {
       setNotice("无法设置重新生成参数：该视频没有有效的历史 Seed");
       return;
@@ -4843,6 +4884,9 @@ function CanvasWorkspace() {
         promptOptions.push(currentTextOption);
       }
     }
+    const deduplicatedPrompts = deduplicateRegenerationPromptOptions(promptOptions, selectedPromptKey);
+    promptOptions = deduplicatedPrompts.options;
+    selectedPromptKey = deduplicatedPrompts.selectedKey;
     const presetCollection = loadVideoRegenerationPresets(window.localStorage, videoRegenerationSettingsFromValue);
     const defaultPreset = useSnapshotSettings ? undefined : presetCollection.presets.find(
       (preset) => preset.id === presetCollection.defaultPresetId,
@@ -4851,6 +4895,18 @@ function CanvasWorkspace() {
     setVideoRegenerationPresets(presetCollection);
     setVideoRegenerationInformationOpen(false);
     const draft: VideoRegenerationDraft = {
+      presetEditor,
+      generatorId: start && fromGenerator ? previewId : undefined,
+      secondaryResolutionMegapixels: snapshot.secondaryResolutionMegapixels,
+      secondarySchedulerSteps: snapshot.secondarySchedulerSteps,
+      loraName: snapshot.loraName,
+      secondaryLoraName: snapshot.secondaryLoraName,
+      secondaryLoraStrength: snapshot.secondaryLoraStrength,
+      loraBypassed: snapshot.loraBypassed,
+      secondaryLoraBypassed: snapshot.secondaryLoraBypassed,
+      secondaryBrightness: snapshot.secondaryBrightness,
+      secondaryContrast: snapshot.secondaryContrast,
+      secondarySaturation: snapshot.secondarySaturation,
       diffusionModelName: snapshot.diffusionModelName,
       useSnapshotSettings,
       previewId,
@@ -4881,7 +4937,7 @@ function CanvasWorkspace() {
     setSelectedVideoRegenerationPresetId(selectedPreset?.id ?? "");
     setVideoRegenerationPresetName(selectedPreset?.name ?? "");
     setVideoRegenerationDraft(draft);
-  }, [workflowModules]);
+  }, [workflowModules, generationSnapshotForGenerator, flushVideoGenerationInputs, reportError]);
 
   const persistVideoRegenerationPresets = useCallback((collection: VideoRegenerationPresetCollection) => {
     try {
@@ -4905,6 +4961,16 @@ function CanvasWorkspace() {
       return {
         ...current,
         ...preset.settings,
+        secondaryResolutionMegapixels: preset.settings.secondaryResolutionMegapixels ?? current.originalSnapshot.secondaryResolutionMegapixels,
+        secondarySchedulerSteps: preset.settings.secondarySchedulerSteps ?? current.originalSnapshot.secondarySchedulerSteps,
+        loraName: preset.settings.loraName ?? current.originalSnapshot.loraName,
+        secondaryLoraName: preset.settings.secondaryLoraName ?? current.originalSnapshot.secondaryLoraName,
+        secondaryLoraStrength: preset.settings.secondaryLoraStrength ?? current.originalSnapshot.secondaryLoraStrength,
+        loraBypassed: preset.settings.loraBypassed ?? current.originalSnapshot.loraBypassed,
+        secondaryLoraBypassed: preset.settings.secondaryLoraBypassed ?? current.originalSnapshot.secondaryLoraBypassed,
+        secondaryBrightness: preset.settings.secondaryBrightness ?? current.originalSnapshot.secondaryBrightness,
+        secondaryContrast: preset.settings.secondaryContrast ?? current.originalSnapshot.secondaryContrast,
+        secondarySaturation: preset.settings.secondarySaturation ?? current.originalSnapshot.secondarySaturation,
         diffusionModelName: preset.settings.diffusionModelName ?? current.originalSnapshot.diffusionModelName,
         styleLoras: preset.settings.styleLoras.map((slot) => ({ ...slot })),
         primaryAudioSteps: workflowUsesSharedPrimarySteps(module)
@@ -4936,13 +5002,13 @@ function CanvasWorkspace() {
     if (!persistVideoRegenerationPresets(next)) return;
     setSelectedVideoRegenerationPresetId(id);
     setVideoRegenerationPresetName(name);
-    showGlobalNotice(`保存成功：预设“${name}”已保存${next.defaultPresetId === id ? "，下次 Ctrl＋重新生成自动套用" : ""}`);
+    showGlobalNotice(`保存成功：预设“${name}”已保存${next.defaultPresetId === id ? "，下次 Alt＋重新生成自动套用" : ""}`);
   }, [videoRegenerationDraft, selectedVideoRegenerationPresetId, videoRegenerationPresetName, videoRegenerationPresets, persistVideoRegenerationPresets, showGlobalNotice]);
 
   const setDefaultVideoRegenerationPreset = useCallback(() => {
     if (!videoRegenerationPresets.presets.some((preset) => preset.id === selectedVideoRegenerationPresetId)) return;
     if (persistVideoRegenerationPresets({ ...videoRegenerationPresets, defaultPresetId: selectedVideoRegenerationPresetId })) {
-      setNotice("已设为默认预设，下次 Ctrl＋重新生成自动套用其已保存参数");
+      setNotice("已设为默认预设，下次 Alt＋重新生成自动套用其已保存参数");
     }
   }, [videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
 
@@ -4970,50 +5036,25 @@ function CanvasWorkspace() {
     }
   }, [videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
 
-  const adjustVideoRegenerationNumber = useCallback((
-    field: VideoRegenerationNumericField,
-    deltaY: number,
-    min: number,
-    max: number,
-    step: number,
-  ) => {
-    if (!deltaY) return;
-    setVideoRegenerationDraft((current) => {
-      if (!current) return current;
-      const direction = deltaY < 0 ? 1 : -1;
-      const next = Math.min(max, Math.max(min, current[field] + direction * step));
-      const precision = step.toString().split(".")[1]?.length ?? 0;
-      return { ...current, [field]: Number(next.toFixed(precision)) };
-    });
-  }, []);
-
   useEffect(() => {
-    if (!videoRegenerationDraft) return;
-    const handleRegenerationDialogWheel = (event: WheelEvent) => {
-      const dialog = videoRegenerationDialogRef.current;
-      const target = event.target;
-      if (!dialog || !(target instanceof HTMLElement) || !dialog.contains(target)) return;
-      event.stopImmediatePropagation();
-      const input = target.closest<HTMLInputElement>("input[data-regeneration-field]");
-      if (!input) return;
-      event.preventDefault();
-      const field = input.dataset.regenerationField as VideoRegenerationNumericField | undefined;
-      if (!field || !(field in VIDEO_REGENERATION_NUMBER_CONFIG)) return;
-      const { min, max, step } = VIDEO_REGENERATION_NUMBER_CONFIG[field];
-      adjustVideoRegenerationNumber(field, event.deltaY, min, max, step);
+    // Blur number inputs before the browser can step them, without blocking page scrolling.
+    const preventWheelNumberChanges = () => {
+      const focused = document.activeElement;
+      if (focused instanceof HTMLInputElement && focused.type === "number") focused.blur();
     };
-    window.addEventListener("wheel", handleRegenerationDialogWheel, {
-      capture: true,
-      passive: false,
-    });
-    return () => window.removeEventListener("wheel", handleRegenerationDialogWheel, true);
-  }, [adjustVideoRegenerationNumber, videoRegenerationDraft]);
+    window.addEventListener("wheel", preventWheelNumberChanges, { capture: true, passive: true });
+    return () => window.removeEventListener("wheel", preventWheelNumberChanges, true);
+  }, []);
 
   const submitConfiguredVideoRegeneration = useCallback(async () => {
     const draft = videoRegenerationDraft;
-    if (!draft) return;
+    if (!draft || draft.presetEditor) return;
 
     const setNotice = showGlobalNotice;
+    if (!videoRegenerationSettingsFromValue(draft)) {
+      setNotice("生成参数无效，请检查1采和2采参数范围及采样步数");
+      return;
+    }
     if (!/^\d+$/.test(draft.seed) || BigInt(draft.seed) > 18446744073709551615n) {
       setNotice("Seed 必须是 0 到 18446744073709551615 之间的整数");
       return;
@@ -5071,6 +5112,17 @@ function CanvasWorkspace() {
     }
     const snapshot: GenerationSnapshot = {
       ...draft.originalSnapshot,
+      secondaryResolutionMegapixels: draft.secondaryResolutionMegapixels,
+      secondarySchedulerSteps: draft.secondarySchedulerSteps,
+      loraName: draft.loraName,
+      secondaryLoraName: draft.secondaryLoraName,
+      secondaryLoraStrength: draft.secondaryLoraStrength,
+      secondaryLoraStrengthRecorded: true,
+      loraBypassed: draft.loraBypassed,
+      secondaryLoraBypassed: draft.secondaryLoraBypassed,
+      secondaryBrightness: draft.secondaryBrightness,
+      secondaryContrast: draft.secondaryContrast,
+      secondarySaturation: draft.secondarySaturation,
       diffusionModelName: draft.diffusionModelName,
       prompt: selectedPrompt.prompt,
       promptInformation: selectedPrompt.information,
@@ -5101,11 +5153,15 @@ function CanvasWorkspace() {
     };
     setVideoRegenerationDraft(null);
     try {
-      await regenerateGeneratedVideo(draft.previewId, snapshot, draft.seed);
+      if (draft.generatorId) {
+        await executeVideoNode(draft.generatorId, undefined, { snapshot, seed: draft.seed });
+      } else {
+        await regenerateGeneratedVideo(draft.previewId, snapshot, draft.seed);
+      }
     } catch (error) {
       reportError(error);
     }
-  }, [regenerateGeneratedVideo, reportError, showGlobalNotice, videoRegenerationDraft, workflowModules]);
+  }, [executeVideoNode, regenerateGeneratedVideo, reportError, showGlobalNotice, videoRegenerationDraft, workflowModules]);
 
   const configureSecondarySample = useCallback((previewId: string) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
@@ -5159,51 +5215,10 @@ function CanvasWorkspace() {
         )
         : baseSnapshot.secondarySchedulerSteps,
       secondaryLoraStrength: 0,
-      secondaryBrightness: workflowModule.defaults.secondaryBrightness,
-      secondaryContrast: workflowModule.defaults.secondaryContrast,
-      secondarySaturation: workflowModule.defaults.secondarySaturation,
+      ...videoNodeSecondaryColors(sourceGenerator?.kind === "video-generation" ? sourceGenerator.content : {}, workflowModule.defaults),
       refImageSize: baseSnapshot.refImageSize,
     });
   }, [generationSnapshotForGenerator, workflowModules]);
-
-  const adjustSecondarySampleNumber = useCallback((
-    field: SecondarySampleNumericField,
-    deltaY: number,
-    min: number,
-    max: number,
-    step: number,
-  ) => {
-    if (!deltaY) return;
-    setSecondarySampleDraft((current) => {
-      if (!current) return current;
-      const direction = deltaY < 0 ? 1 : -1;
-      const next = Math.min(max, Math.max(min, current[field] + direction * step));
-      const precision = step.toString().split(".")[1]?.length ?? 0;
-      return { ...current, [field]: Number(next.toFixed(precision)) };
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!secondarySampleDraft) return;
-    const handleSecondarySampleDialogWheel = (event: WheelEvent) => {
-      const dialog = secondarySampleDialogRef.current;
-      const target = event.target;
-      if (!dialog || !(target instanceof HTMLElement) || !dialog.contains(target)) return;
-      event.stopImmediatePropagation();
-      const input = target.closest<HTMLInputElement>("input[data-secondary-sample-field]");
-      if (!input) return;
-      event.preventDefault();
-      const field = input.dataset.secondarySampleField as SecondarySampleNumericField | undefined;
-      if (!field || !(field in SECONDARY_SAMPLE_NUMBER_CONFIG)) return;
-      const { min, max, step } = SECONDARY_SAMPLE_NUMBER_CONFIG[field];
-      adjustSecondarySampleNumber(field, event.deltaY, min, max, step);
-    };
-    window.addEventListener("wheel", handleSecondarySampleDialogWheel, {
-      capture: true,
-      passive: false,
-    });
-    return () => window.removeEventListener("wheel", handleSecondarySampleDialogWheel, true);
-  }, [adjustSecondarySampleNumber, secondarySampleDraft]);
 
   const executeSecondarySample = useCallback(async (
     previewId: string,
@@ -5267,9 +5282,7 @@ function CanvasWorkspace() {
           workflowModule.defaults.secondarySchedulerSteps,
         )
         : baseSnapshot.secondarySchedulerSteps,
-      secondaryBrightness: workflowModule.defaults.secondaryBrightness,
-      secondaryContrast: workflowModule.defaults.secondaryContrast,
-      secondarySaturation: workflowModule.defaults.secondarySaturation,
+      ...videoNodeSecondaryColors(sourceGenerator?.kind === "video-generation" ? sourceGenerator.content : {}, workflowModule.defaults),
       secondaryLoraName: sourceGenerator?.kind === "video-generation"
         ? h3SecondaryLoraNameFromContent(sourceGenerator.content)
         : baseSnapshot.secondaryLoraName,
@@ -6193,6 +6206,7 @@ function CanvasWorkspace() {
           textInputCount: 0,
           textInputs: [],
           promptNodeTitle: "",
+          videoRegenerationPresets,
           h3LoraOptions,
           h3DiffusionModelOptions,
           krea2LoraOptions,
@@ -6233,7 +6247,7 @@ function CanvasWorkspace() {
         },
       };
     },
-    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -9970,6 +9984,7 @@ function CanvasWorkspace() {
           && previousData.textInputs === textInputs
           && previousData.promptNodeTitle === promptNodeTitle
           && previousData.h3DiffusionModelOptions === h3DiffusionModelOptions
+          && previousData.videoRegenerationPresets === videoRegenerationPresets
           && previousData.h3LoraOptions === h3LoraOptions
           && previousData.krea2LoraOptions === krea2LoraOptions
           && previousData.workflowModules === workflowModules
@@ -9992,6 +10007,7 @@ function CanvasWorkspace() {
             textInputCount: connectedText.length,
             textInputs,
             promptNodeTitle,
+            videoRegenerationPresets,
             h3LoraOptions,
             h3DiffusionModelOptions,
             krea2LoraOptions,
@@ -10008,7 +10024,7 @@ function CanvasWorkspace() {
       visibleNodeCache.current = nextCache;
       return results;
     },
-    [activeComfyTaskCounts, contentNodes, edges, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [activeComfyTaskCounts, contentNodes, edges, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
   );
 
   const updateGuideOverlays = useCallback((nextAlignment: AlignmentGuide[], nextSpacing: SpacingGuide[]) => {
@@ -10996,11 +11012,17 @@ function CanvasWorkspace() {
             {hideUnselectedEdges ? <Unlink2 size={14} /> : <Link2 size={14} />}
           </ControlButton>
         </Controls>
-        <MiniMap
+        <Panel position="bottom-right" className="canvas-minimap-panel">
+        {!minimapHidden && <MiniMap
           position="bottom-right"
           pannable
           zoomable
-          nodeColor={(node) =>
+          nodeClassName={(node) => isHighlightedMinimapVideo((node.data as CanvasNodeData | undefined)?.record)
+            ? "minimap-video-pulse" : ""}
+          nodeColor={(node) => {
+            const record = (node.data as CanvasNodeData | undefined)?.record;
+            if (isHighlightedMinimapVideo(record)) return "#ffffff";
+            return (
             (node.data as CanvasNodeData | undefined)?.record.kind === "image"
               ? "#4eb9c8"
               : (node.data as CanvasNodeData | undefined)?.record.kind === "audio"
@@ -11014,9 +11036,27 @@ function CanvasWorkspace() {
                       : (node.data as CanvasNodeData | undefined)?.record.kind === "generated-video"
                         ? "#6fb5df"
                         : "#8b7cf6"
-          }
+            );
+          }}
           maskColor={theme === "light" ? "rgba(238, 240, 245, 0.72)" : "rgba(9, 11, 17, 0.75)"}
-        />
+          maskStrokeColor={theme === "light" ? "#6d5bd0" : "#b6a7ff"}
+          maskStrokeWidth={2}
+        />}
+          <button
+            type="button"
+            className={`nodrag nopan canvas-minimap-toggle${minimapHidden ? " is-collapsed" : ""}`}
+            title={minimapHidden ? "显示全局图" : "隐藏全局图"}
+            aria-label={minimapHidden ? "显示全局图" : "隐藏全局图"}
+            aria-expanded={!minimapHidden}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              setMinimapHidden((hidden) => !hidden);
+            }}
+          >
+            {minimapHidden ? <MapIcon size={17} /> : <Minimize2 size={14} />}
+          </button>
+        </Panel>
 
         <Panel
           position="top-left"

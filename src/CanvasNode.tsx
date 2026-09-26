@@ -1,4 +1,7 @@
+import { Settings as PresetSettingsIcon } from "lucide-react";
 import { useDropdownWheel } from "./useDropdownWheel";
+import { matchingVideoRegenerationPreset, videoPresetNodePatch, videoNodeExtraParameters, videoNodeSecondaryColors } from "./video/videoRegenerationPresets";
+import type { VideoRegenerationPresetCollection } from "./video/videoRegenerationPresets";
 import { comfyStatusMessage, livePreviewResources } from "./comfyLivePreview";
 import { StyleLoraInfo, LoraNameWithStrength } from "./StyleLoraInfo";
 import { H3StyleLora, h3StyleLorasFromContent, recordedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
@@ -755,6 +758,7 @@ interface VideoRegenerationRequest {
 }
 
 interface VideoExecutionOptions {
+  seed?: string;
   clientId?: string;
   snapshot?: GenerationSnapshot;
   placeholderPosition?: { x: number; y: number };
@@ -775,8 +779,20 @@ interface VideoRegenerationPromptOption {
 }
 
 interface VideoRegenerationDraft {
+  loraName: string;
+  loraBypassed: boolean;
+  secondaryResolutionMegapixels: number;
+  secondarySchedulerSteps: number;
+  secondaryLoraName: string;
+  secondaryLoraStrength: number;
+  secondaryLoraBypassed: boolean;
+  secondaryBrightness: number;
+  secondaryContrast: number;
+  secondarySaturation: number;
   diffusionModelName: string;
   useSnapshotSettings: boolean;
+  presetEditor?: boolean;
+  generatorId?: string;
   previewId: string;
   previewTitle: string;
   originalSnapshot: GenerationSnapshot;
@@ -804,7 +820,13 @@ type VideoRegenerationNumericField = "primaryResolutionMegapixels"
   | "primaryAudioSteps"
   | "primaryBrightness"
   | "primaryContrast"
-  | "primarySaturation";
+  | "primarySaturation"
+  | "secondaryResolutionMegapixels"
+  | "secondarySchedulerSteps"
+  | "secondaryLoraStrength"
+  | "secondaryBrightness"
+  | "secondaryContrast"
+  | "secondarySaturation";
 
 const VIDEO_REGENERATION_NUMBER_CONFIG: Record<
   VideoRegenerationNumericField,
@@ -819,6 +841,12 @@ const VIDEO_REGENERATION_NUMBER_CONFIG: Record<
   primaryBrightness: { min: 0, max: 3, step: 0.01 },
   primaryContrast: { min: 0, max: 3, step: 0.01 },
   primarySaturation: { min: 0, max: 3, step: 0.01 },
+  secondaryResolutionMegapixels: { min: 0.2, max: 2, step: 0.1 },
+  secondarySchedulerSteps: { min: 1, max: 1000, step: 1 },
+  secondaryLoraStrength: { min: 0, max: 10, step: 0.01 },
+  secondaryBrightness: { min: 0, max: 3, step: 0.01 },
+  secondaryContrast: { min: 0, max: 3, step: 0.01 },
+  secondarySaturation: { min: 0, max: 3, step: 0.01 },
 };
 
 type SecondarySampleOverrides = Pick<
@@ -1085,6 +1113,7 @@ interface WorkflowModuleValidation {
 }
 
 interface ModelParameterNumberInputProps {
+  ariaLabel?: string;
   value: number;
   min: number;
   max: number;
@@ -1097,6 +1126,7 @@ interface ModelParameterNumberInputProps {
 }
 
 function ModelParameterNumberInput({
+  ariaLabel,
   value,
   min,
   max,
@@ -1116,6 +1146,7 @@ function ModelParameterNumberInput({
   return (
     <div className="model-parameter-number-input">
       <input
+        aria-label={ariaLabel}
         autoFocus={autoFocus}
         disabled={disabled}
         data-regeneration-field={regenerationField}
@@ -1529,6 +1560,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   textInputCount: number;
   textInputs: NodeRecord[];
   promptNodeTitle: string;
+  videoRegenerationPresets: VideoRegenerationPresetCollection;
   h3LoraOptions: string[];
   h3DiffusionModelOptions: string[];
   krea2LoraOptions: string[];
@@ -1548,7 +1580,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   onSecondarySample: (id: string) => Promise<void>;
   onConfigureSecondarySample: (id: string) => void;
   onRegenerateVideo: (id: string) => Promise<void>;
-  onConfigureRegenerateVideo: (id: string, useSnapshotSettings?: boolean) => void;
+  onConfigureRegenerateVideo: (id: string, useSnapshotSettings?: boolean, start?: { promptNodeId?: string }) => void;
   onLocatePrompt: (id: string, target?: "prompt" | "generator") => void;
   onUpscaleGeneratedImage: (id: string) => Promise<void>;
   onRegenerateGeneratedImage: (id: string) => Promise<void>;
@@ -1982,6 +2014,7 @@ const AUDIO_NODE_MIN_HEIGHT = 240;
 const LEGACY_VIDEO_GENERATION_NODE_WIDTH = 360;
 const VIDEO_GENERATION_NODE_WIDTH = 460;
 const VIDEO_NODE_BASE_HEIGHT = 696;
+const VIDEO_NODE_COMPACT_BASE_HEIGHT = 500;
 // Image nodes use a compact baseline: all controls are visible without
 // retaining the large blank area from the former, video-sized baseline.
 const IMAGE_GENERATION_NODE_BASE_HEIGHT = 624;
@@ -2342,6 +2375,7 @@ function videoGenerationAutoHeight(
   storyboardReferenceCompiler = false,
   supportsPrimaryUpscaleFactor = false,
   styleLoraCount = 1,
+  detailsExpanded = false,
 ): number {
   const groupCount = new Set(mediaKinds).size;
   const imageCount = mediaKinds.filter((kind) => kind === "image").length;
@@ -2365,18 +2399,18 @@ function videoGenerationAutoHeight(
     1,
     Math.min(VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS, textInputCount),
   );
-  const contentHeight = 583 + Math.max(0, styleLoraCount) * 72
+  const contentHeight = (detailsExpanded ? 650 + Math.max(0, styleLoraCount) * 72 : 254)
     + listMediaRows * 67
     + groupCount * 36
     + textRows * VIDEO_NODE_TEXT_ROW_HEIGHT
     + (storyboardReferenceCompiler ? 190 : 0)
-    + (supportsPrimaryUpscaleFactor ? 48 : 0)
+    + (detailsExpanded && supportsPrimaryUpscaleFactor ? 48 : 0)
     + VIDEO_NODE_EXECUTION_AREA_HEIGHT
     + imageRows * Math.ceil(imageTileWidth);
   return Math.min(
     2400,
     Math.max(
-      VIDEO_NODE_BASE_HEIGHT,
+      detailsExpanded ? VIDEO_NODE_BASE_HEIGHT : VIDEO_NODE_COMPACT_BASE_HEIGHT,
       Math.ceil(contentHeight / CANVAS_GRID_SIZE) * CANVAS_GRID_SIZE,
     ),
   );
@@ -4520,7 +4554,7 @@ async function checkAndExecuteVideo(data: CanvasNodeData) {
 }
 
 function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
-  const { getNode, getEdges, getViewport, getZoom, setNodes, setViewport } = useReactFlow<CanvasFlowNode, Edge>();
+  const { getNode, getEdges, getViewport, getZoom, setCenter, setNodes, setViewport } = useReactFlow<CanvasFlowNode, Edge>();
   const updateNodeInternals = useUpdateNodeInternals();
   const ctrlSelectionPointerId = useRef<number | null>(null);
   const {
@@ -4536,6 +4570,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     textInputCount,
     textInputs,
     promptNodeTitle,
+    videoRegenerationPresets,
     h3LoraOptions,
     h3DiffusionModelOptions,
     krea2LoraOptions,
@@ -4905,6 +4940,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ? mediaInputs.filter((input) => videoInputMediaKind(input) === "image")
     : [];
   const videoDuration = videoDurationFromContent(record.content);
+  const videoDetailsExpanded = record.content.videoDetailsExpanded === true;
   const videoAspectRatio = videoAspectRatioFromContent(record.content);
   const refImageSize = refImageSizeFromContent(record.content);
   const supportsPrimaryUpscaleFactor = Boolean(
@@ -4972,6 +5008,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         isStoryboardReferenceCompiler,
         supportsPrimaryUpscaleFactor,
         h3StyleLorasFromContent(record.content).length,
+        videoDetailsExpanded,
       )
     : record.height;
   const activeTextInputId = activeTextInputFromContent(record.content, textInputs)?.id ?? "";
@@ -5008,6 +5045,39 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     (lora) => sameH3LoraName(lora, h3SecondaryLoraName),
   );
   const styleLoras = h3StyleLorasFromContent(record.content);
+  const sharedPrimarySteps = Boolean(selectedNodeWorkflowModule
+    && !selectedNodeWorkflowModule.bindings.primaryAudioStepsInputName.trim());
+  const currentPresetSettings = {
+    secondaryResolutionMegapixels: secondaryVideoResolution,
+    secondarySchedulerSteps,
+    secondaryLoraName: h3SecondaryLoraName,
+    secondaryLoraStrength: h3SecondaryLoraStrength,
+    secondaryLoraBypassed: h3SecondaryLoraBypassed,
+    ...videoNodeSecondaryColors(record.content, selectedNodeWorkflowModule?.defaults ?? DEFAULT_H3_MODEL_PARAMETERS),
+    durationSeconds: videoDuration,
+    primaryResolutionMegapixels: primaryVideoResolution,
+    primaryUpscaleFactor,
+    loraName: h3LoraName,
+    loraBypassed: h3LoraBypassed,
+    loraStrength: h3LoraStrength,
+    primaryVideoSteps,
+    ...videoNodeExtraParameters(record.content,
+      selectedNodeWorkflowModule?.defaults ?? DEFAULT_H3_MODEL_PARAMETERS, primaryVideoSteps, sharedPrimarySteps),
+    styleLoras,
+    refImageSize,
+    diffusionModelName: nodeDiffusionModelName,
+  };
+  const matchedVideoPreset = isVideoGeneration ? matchingVideoRegenerationPreset({
+    ...videoRegenerationPresets,
+    presets: videoRegenerationPresets.presets.map((preset) => ({
+      ...preset,
+      settings: {
+        ...preset.settings,
+        diffusionModelName: preset.settings.diffusionModelName ?? nodeDiffusionModelName,
+        primaryAudioSteps: sharedPrimarySteps ? preset.settings.primaryVideoSteps : preset.settings.primaryAudioSteps,
+      },
+    })),
+  }, currentPresetSettings) : undefined;
   const selectableH3Loras = h3LoraOptions;
   const imageLoraName = typeof record.content.imageLoraName === "string"
     ? record.content.imageLoraName.trim()
@@ -6425,7 +6495,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     setAspectRatioMenuOpen(false);
   };
 
-  const executeConnectedVideo = async () => {
+  const executeConnectedVideo = async (configure = false) => {
     const targetIds = new Set(getEdges().filter((edge) => edge.source === id).map((edge) => edge.target));
     const targets = [...targetIds].map((targetId) => getNode(targetId))
       .filter((node): node is CanvasFlowNode => node?.data.record.kind === "video-generation");
@@ -6433,6 +6503,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       onExecutionCheck(targets.length
         ? "当前节点连接了多个视频生成节点，请只保留一个后再播放"
         : "请先连接一个视频生成或智能视频生成节点", false);
+      return;
+    }
+    if (configure) {
+      onConfigureRegenerateVideo(targets[0].id, true, { promptNodeId: id });
       return;
     }
     await checkAndExecuteVideo(targets[0].data);
@@ -6688,14 +6762,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           });
         }}
       />
-      {selected && isVideoGeneration && videoGenerationFullHeight > VIDEO_NODE_BASE_HEIGHT && (
+      {selected && isVideoGeneration && videoGenerationFullHeight > (videoDetailsExpanded ? VIDEO_NODE_BASE_HEIGHT : VIDEO_NODE_COMPACT_BASE_HEIGHT) && (
         <NodeResizeControl
           position="bottom"
           variant={ResizeControlVariant.Line}
           resizeDirection="vertical"
           minWidth={record.width}
           maxWidth={record.width}
-          minHeight={VIDEO_NODE_BASE_HEIGHT}
+          minHeight={videoDetailsExpanded ? VIDEO_NODE_BASE_HEIGHT : VIDEO_NODE_COMPACT_BASE_HEIGHT}
           maxHeight={Math.max(videoGenerationFullHeight, record.height)}
           className="video-generation-height-resizer nodrag"
           onResizeEnd={(_, params) => {
@@ -6788,9 +6862,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             className="nodrag node-action"
             onClick={(event) => {
               event.stopPropagation();
-              void executeConnectedVideo();
+              void executeConnectedVideo(event.altKey);
             }}
-            title="执行相连的视频生成节点"
+            title="执行相连的视频生成节点；Alt＋点击调整生成参数"
             aria-label="执行相连的视频生成节点"
           >
             <Play size={13} fill="currentColor" />
@@ -7451,10 +7525,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 className="nodrag node-action generated-video-regenerate-action"
                 onClick={(event) => {
                   if (event.shiftKey) onConfigureRegenerateVideo(id, true);
-                  else if (event.ctrlKey) onConfigureRegenerateVideo(id);
+                  else if (event.altKey) onConfigureRegenerateVideo(id);
                   else void onRegenerateVideo(id);
                 }}
-                title="点击直接重新生成；Ctrl+点击优先套用已保存设置；Shift+点击使用这条视频生成时的参数"
+                title="点击直接重新生成；Alt+点击优先套用已保存设置；Shift+点击使用这条视频生成时的参数"
                 aria-label="重新生成该视频"
               >
                 <RotateCcw size={12} />
@@ -8175,84 +8249,46 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               ]}
             />
           </div>
-          <div className="video-duration-control">
-            <label className="video-duration-inline">
-              <span>时长</span>
-              <input
-                className="video-parameter-range"
-                type="range"
-                min="2"
-                max="15"
-                step="1"
-                value={displayedVideoDuration ?? 2}
-                disabled={isStoryboardReferenceCompiler}
-                onChange={(event) => {
-                  if (isStoryboardReferenceCompiler) return;
-                  onChange(id, {
-                    content: {
-                      ...record.content,
-                      generationDuration: Number(event.currentTarget.value),
-                      status: "idle",
-                      validationMessage: "",
-                    },
-                  });
-                }}
-                onPointerDown={(event) => event.stopPropagation()}
-                aria-label={isStoryboardReferenceCompiler ? "当前分镜提示词时长，只读" : "生成时长"}
-              />
-              <output title={isStoryboardReferenceCompiler
-                ? "由当前高亮的生成提示词决定；请在生成提示词节点中调整"
-                : undefined}
-              >{`${displayedVideoDuration ?? 0} 秒`}</output>
-            </label>
-            <div ref={aspectRatioControlRef} className={`video-aspect-ratio-inline ${aspectRatioMenuOpen ? "nowheel is-menu-open" : ""}`}>
-              <button
-                type="button"
-                className="nodrag video-aspect-ratio-toggle"
-                aria-haspopup="menu"
-                aria-expanded={aspectRatioMenuOpen}
-                onClick={() => {
-                  setLoraMenuOpen(false);
-                  setSecondaryLoraMenuOpen(false);
-                  setAspectRatioMenuOpen((open) => !open);
-                }}
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                <span className="video-aspect-ratio-label">画面比例</span>
-                <span className="video-aspect-ratio-value">{videoAspectRatio}</span>
-                <span className="video-aspect-ratio-arrow" aria-hidden="true">▾</span>
-              </button>
-              {aspectRatioMenuOpen && (
-                <div className="video-aspect-ratio-menu" role="menu" aria-label="画面比例">
-                  {VIDEO_ASPECT_RATIO_OPTIONS.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={videoAspectRatio === option.value}
-                      className={videoAspectRatio === option.value ? "is-active" : ""}
-                      onClick={() => {
-                        onChange(id, {
-                          content: {
-                            ...record.content,
-                            generationAspectRatio: option.value,
-                            status: "idle",
-                            validationMessage: "",
-                          },
-                        });
-                        setAspectRatioMenuOpen(false);
-                      }}
-                    >
-                      {option.value}
-                    </button>
-                  ))}
-                </div>
-              )}
-              {/* Native select option fonts are ignored by Windows WebView2, so this menu is custom. */}
-            </div>
-          </div>
-          <div className="video-resolution-pair" aria-label="1采和2采分辨率">
-            <div className="video-resolution-column">
+          <div className="video-workflow-module-select video-node-preset-select" onPointerDown={(event) => event.stopPropagation()}>
+            <span>参数预设</span>
+            <SettingsSelect
+              value={matchedVideoPreset?.id ?? ""}
+              options={videoRegenerationPresets.presets.map((preset) => ({
+                value: preset.id,
+                label: `${preset.name}${preset.id === videoRegenerationPresets.defaultPresetId ? "（默认）" : ""}`,
+              }))}
+              placeholder={videoRegenerationPresets.presets.length ? "自定义参数" : "暂无预设，请点击齿轮添加"}
+              disabled={!videoRegenerationPresets.presets.length}
+              ariaLabel="视频生成参数预设"
+              title="与 Alt＋重新生成共用保存的预设"
+              onChange={(presetId) => {
+                const preset = videoRegenerationPresets.presets.find((entry) => entry.id === presetId);
+                if (!preset) return;
+                onChange(id, {
+                  content: {
+                    ...record.content,
+                    ...videoPresetNodePatch(preset.settings, sharedPrimarySteps),
+                    ...(activeTaskCount === 0 ? { status: "idle", validationMessage: "" } : {}),
+                  },
+                });
+              }}
+            />
+            <button type="button" className="nodrag video-details-toggle" title="预设编辑" aria-label="预设编辑" onClick={() => onConfigureRegenerateVideo(id)}><PresetSettingsIcon size={16} /></button>
+            <button type="button" className="nodrag video-details-toggle"
+              aria-expanded={videoDetailsExpanded}
+              aria-label={videoDetailsExpanded ? "收起详细设置" : "展开详细设置"}
+              title={videoDetailsExpanded ? "收起详细设置" : "展开详细设置"}
+              onClick={(event) => {
+                event.stopPropagation();
+                setLoraMenuOpen(false);
+                setSecondaryLoraMenuOpen(false);
+                onChange(id, { content: { ...record.content, videoDetailsExpanded: !videoDetailsExpanded } });
+              }}>
+              {videoDetailsExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+            </button>
+          {videoDetailsExpanded && <section className="video-details-section">
+            <div className="video-details-fields">
+              <div className="video-sampling-row" role="group" aria-label="1采尺寸和 LoRA">
               <label className="video-resolution-inline">
                 <span>1采</span>
                 <input
@@ -8275,69 +8311,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 />
                 <output>{primaryVideoResolution.toFixed(1)} MP</output>
               </label>
-              {supportsPrimaryUpscaleFactor && (
-                <label
-                  className="nodrag nowheel video-primary-upscale-control"
-                  title={`1采放大倍率：${primaryUpscaleFactor.toFixed(1)}×`}
-                  onPointerDown={(event) => event.stopPropagation()}
-                >
-                  <span>放大</span>
-                  <input
-                    className="video-parameter-range"
-                    type="range"
-                    min="1"
-                    max="4"
-                    step="0.1"
-                    value={primaryUpscaleFactor}
-                    style={{
-                      "--video-range-progress": `${(primaryUpscaleFactor - 1) / 3 * 100}%`,
-                    } as CSSProperties}
-                    aria-label="1采放大倍率"
-                    onChange={(event) => {
-                      onChange(id, {
-                        content: {
-                          ...record.content,
-                          generationPrimaryUpscaleFactor: Number(event.currentTarget.value),
-                          status: "idle",
-                          validationMessage: "",
-                        },
-                      });
-                    }}
-                  />
-                  <output>{primaryUpscaleFactor.toFixed(1)}×</output>
-                </label>
-              )}
-            </div>
-            <label className="video-resolution-inline">
-              <span>2采</span>
-              <input
-                className="video-parameter-range"
-                type="range"
-                min="0.2"
-                max="2.0"
-                step="0.1"
-                value={secondaryVideoResolution}
-                onChange={(event) => onChange(id, {
-                  content: {
-                    ...record.content,
-                    generationSecondaryResolution: Number(event.currentTarget.value),
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                })}
-                onPointerDown={(event) => event.stopPropagation()}
-                aria-label="2采分辨率"
-              />
-              <output>{secondaryVideoResolution.toFixed(1)} MP</output>
-            </label>
-          </div>
           <div className={`video-lora-control is-primary ${h3LoraBypassed ? "is-bypassed" : ""} ${loraMenuOpen ? "is-menu-open" : ""}`}>
-            <span>1采 LoRA</span>
+            <span>LoRA</span>
             <div ref={loraControlRef} className={`video-lora-select ${loraMenuOpen ? "nowheel" : ""}`}>
               <button
                 type="button"
                 className="nodrag video-lora-select-toggle"
               disabled={!selectableH3Loras.length}
+                aria-label="1采 LoRA"
                 aria-haspopup="menu"
                 aria-expanded={loraMenuOpen}
                 title={availableH3LoraName ?? (h3LoraName
@@ -8412,30 +8393,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 </div>
               )}
             </div>
-            <input
-              className="video-parameter-range"
-              type="range"
-              disabled={h3LoraBypassed}
-              min="0"
-              max="10"
-              step="0.01"
-              value={h3LoraStrength}
-              title={`LoRA 权重：${h3LoraStrength.toFixed(2)}`}
-              aria-label="LoRA 权重"
-              onChange={(event) => {
-                const loraStrength = Number(event.currentTarget.value);
-                onH3LoraPreferenceChange({ loraName: h3LoraName, loraStrength });
-                onChange(id, {
-                  content: {
-                    ...record.content,
-                    generationLoraStrength: loraStrength,
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                });
-              }}
-              onPointerDown={(event) => event.stopPropagation()}
-            />
             <label className="video-lora-strength is-plain-value" title="LoRA 权重">
               <CompactDecimalInput
                 value={h3LoraStrength}
@@ -8480,13 +8437,38 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               />
             </label>
           </div>
+              </div>
+              <div className="video-sampling-row" role="group" aria-label="2采尺寸和 LoRA">
+            <label className="video-resolution-inline">
+              <span>2采</span>
+              <input
+                className="video-parameter-range"
+                type="range"
+                min="0.2"
+                max="2.0"
+                step="0.1"
+                value={secondaryVideoResolution}
+                onChange={(event) => onChange(id, {
+                  content: {
+                    ...record.content,
+                    generationSecondaryResolution: Number(event.currentTarget.value),
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                })}
+                onPointerDown={(event) => event.stopPropagation()}
+                aria-label="2采分辨率"
+              />
+              <output>{secondaryVideoResolution.toFixed(1)} MP</output>
+            </label>
           <div className={`video-lora-control is-secondary ${h3SecondaryLoraBypassed ? "is-bypassed" : ""} ${secondaryLoraMenuOpen ? "is-menu-open" : ""}`}>
-            <span>2采 LoRA</span>
+            <span>LoRA</span>
             <div ref={secondaryLoraControlRef} className={`video-lora-select ${secondaryLoraMenuOpen ? "nowheel" : ""}`}>
               <button
                 type="button"
                 className="nodrag video-lora-select-toggle"
                 disabled={!selectableH3Loras.length}
+                aria-label="2采 LoRA"
                 aria-haspopup="menu"
                 aria-expanded={secondaryLoraMenuOpen}
                 title={availableH3SecondaryLoraName ?? (h3SecondaryLoraName
@@ -8566,30 +8548,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 </div>
               )}
             </div>
-            <input
-              className="video-parameter-range"
-              type="range"
-              disabled={h3SecondaryLoraBypassed}
-              min="0"
-              max="10"
-              step="0.01"
-              value={h3SecondaryLoraStrength}
-              title={`2采 LoRA 权重：${h3SecondaryLoraStrength.toFixed(2)}`}
-              aria-label="2采 LoRA 权重"
-              onChange={(event) => {
-                const secondaryLoraStrength = Number(event.currentTarget.value);
-                onH3LoraPreferenceChange({ secondaryLoraStrength });
-                onChange(id, {
-                  content: {
-                    ...record.content,
-                    generationSecondaryLoraStrength: secondaryLoraStrength,
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                });
-              }}
-              onPointerDown={(event) => event.stopPropagation()}
-            />
             <label className="video-lora-strength is-plain-value" title="2采 LoRA 权重">
               <CompactDecimalInput
                 value={h3SecondaryLoraStrength}
@@ -8634,12 +8592,125 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               />
             </label>
           </div>
+              </div>
+              {supportsPrimaryUpscaleFactor && (
+                <label
+                  className="nodrag nowheel video-primary-upscale-control"
+                  title={`1采放大倍率：${primaryUpscaleFactor.toFixed(1)}×`}
+                  onPointerDown={(event) => event.stopPropagation()}
+                >
+                  <span>放大</span>
+                  <input
+                    className="video-parameter-range"
+                    type="range"
+                    min="1"
+                    max="4"
+                    step="0.1"
+                    value={primaryUpscaleFactor}
+                    style={{
+                      "--video-range-progress": `${(primaryUpscaleFactor - 1) / 3 * 100}%`,
+                    } as CSSProperties}
+                    aria-label="1采放大倍率"
+                    onChange={(event) => {
+                      onChange(id, {
+                        content: {
+                          ...record.content,
+                          generationPrimaryUpscaleFactor: Number(event.currentTarget.value),
+                          status: "idle",
+                          validationMessage: "",
+                        },
+                      });
+                    }}
+                  />
+                  <output>{primaryUpscaleFactor.toFixed(1)}×</output>
+                </label>
+              )}
           <StyleLoraEditor slots={styleLoras} options={selectableH3Loras} hasSecondStage={styleLoraSecondaryTargetLabel === "二段"}
             onChange={(slots) => {
               onH3LoraPreferenceChange({ styleLoras: slots });
               onChange(id, { content: { ...record.content, generationStyleLoras: slots, status: "idle", validationMessage: "" } });
             }}
           />
+            </div>
+          </section>}
+          </div>
+          <div className="video-duration-control">
+            <label className="video-duration-inline">
+              <span>时长</span>
+              <input
+                className="video-parameter-range"
+                type="range"
+                min="2"
+                max="15"
+                step="1"
+                value={displayedVideoDuration ?? 2}
+                disabled={isStoryboardReferenceCompiler}
+                onChange={(event) => {
+                  if (isStoryboardReferenceCompiler) return;
+                  onChange(id, {
+                    content: {
+                      ...record.content,
+                      generationDuration: Number(event.currentTarget.value),
+                      status: "idle",
+                      validationMessage: "",
+                    },
+                  });
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+                aria-label={isStoryboardReferenceCompiler ? "当前分镜提示词时长，只读" : "生成时长"}
+              />
+              <output title={isStoryboardReferenceCompiler
+                ? "由当前高亮的生成提示词决定；请在生成提示词节点中调整"
+                : undefined}
+              >{`${displayedVideoDuration ?? 0} 秒`}</output>
+            </label>
+            <div ref={aspectRatioControlRef} className={`video-aspect-ratio-inline ${aspectRatioMenuOpen ? "nowheel is-menu-open" : ""}`}>
+              <button
+                type="button"
+                className="nodrag video-aspect-ratio-toggle"
+                aria-haspopup="menu"
+                aria-expanded={aspectRatioMenuOpen}
+                onClick={() => {
+                  setLoraMenuOpen(false);
+                  setSecondaryLoraMenuOpen(false);
+                  setAspectRatioMenuOpen((open) => !open);
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <span className="video-aspect-ratio-label">画面比例</span>
+                <span className="video-aspect-ratio-value">{videoAspectRatio}</span>
+                <span className="video-aspect-ratio-arrow" aria-hidden="true">▾</span>
+              </button>
+              {aspectRatioMenuOpen && (
+                <div className="video-aspect-ratio-menu" role="menu" aria-label="画面比例">
+                  {VIDEO_ASPECT_RATIO_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={videoAspectRatio === option.value}
+                      className={videoAspectRatio === option.value ? "is-active" : ""}
+                      onClick={() => {
+                        onChange(id, {
+                          content: {
+                            ...record.content,
+                            generationAspectRatio: option.value,
+                            status: "idle",
+                            validationMessage: "",
+                          },
+                        });
+                        setAspectRatioMenuOpen(false);
+                      }}
+                    >
+                      {option.value}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Native select option fonts are ignored by Windows WebView2, so this menu is custom. */}
+            </div>
+          </div>
+
           <div className="video-seed-control">
             <span>生成种子</span>
             <div className="video-seed-mode" aria-label="种子模式">
@@ -8902,6 +8973,26 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                           {inputText || "空文本"}
                         </span>
                       </span>
+                      <button
+                        type="button"
+                        className="nodrag video-input-expand"
+                        aria-label={"定位提示词：" + (input.title || "未命名文本")}
+                        title="定位提示词所在位置"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          const promptNode = getNode(input.id);
+                          if (!promptNode) return;
+                          const bounds = canvasNodeBounds(promptNode);
+                          void setCenter(
+                            (bounds.left + bounds.right) / 2,
+                            (bounds.top + bounds.bottom) / 2,
+                            { zoom: 1, duration: 350 },
+                          );
+                        }}
+                      >
+                        <LocateFixed size={13} aria-hidden="true" />
+                      </button>
                       <button
                         type="button"
                         className="nodrag video-input-expand"
@@ -9388,13 +9479,16 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   ? "批量任务正在按顺序提交，请稍后"
                   : seedMode === "fixed" && executionRunning
                   ? "固定种子已有任务正在执行，不能重复排队"
-                  : "提交一个新的生成任务"}
+                  : "提交一个新的生成任务；Alt＋点击调整生成参数"}
                 aria-label={batchSubmitting
                   ? "批量任务正在按顺序提交，请稍后"
                   : seedMode === "fixed" && executionRunning
                   ? "固定种子已有任务正在执行，不能重复排队"
                   : "开始执行"}
-                onClick={() => void checkAndExecute()}
+                onClick={(event) => {
+                  if (event.altKey) onConfigureRegenerateVideo(id, true, {});
+                  else void checkAndExecute();
+                }}
               >
                 <Play size={15} fill="currentColor" />
               </button>
@@ -10736,6 +10830,7 @@ export {
   LEGACY_VIDEO_GENERATION_NODE_WIDTH,
   VIDEO_GENERATION_NODE_WIDTH,
   VIDEO_NODE_BASE_HEIGHT,
+  VIDEO_NODE_COMPACT_BASE_HEIGHT,
   VIDEO_REGENERATION_NUMBER_CONFIG,
   VideoGenerationDefaultsEditor,
   WORKFLOW_CAPABILITIES,
@@ -10808,6 +10903,7 @@ export {
   refImageSizeFromContent,
   sameH3DiffusionModelName,
   sameH3LoraName,
+  h3LoraDisplayName,
   secondarySchedulerStepsFromContent,
   secondaryVideoResolutionFromContent,
   seedModeFromContent,

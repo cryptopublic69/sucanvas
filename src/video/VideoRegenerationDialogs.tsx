@@ -1,9 +1,10 @@
 import type { VideoRegenerationPresetCollection } from "./videoRegenerationPresets";
+import { useEffect, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { createPortal } from "react-dom";
-import { Dices, FileText, RotateCcw, StickyNote, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Dices, FileText, RotateCcw, Settings, StickyNote, X } from "lucide-react";
 import { StyleLoraEditor } from "../StyleLoraEditor";
-import { ModelParameterNumberInput, REF_IMAGE_SIZE_OPTIONS, SettingsSelect, randomFixedSeed, h3DiffusionModelDisplayName, sameH3DiffusionModelName } from "../CanvasNode";
+import { ModelParameterNumberInput, REF_IMAGE_SIZE_OPTIONS, VIDEO_REGENERATION_NUMBER_CONFIG, SettingsSelect, randomFixedSeed, h3DiffusionModelDisplayName, sameH3DiffusionModelName, h3LoraDisplayName, sameH3LoraName } from "../CanvasNode";
 import type { VideoRegenerationDraft, VideoRegenerationPromptOption, WorkflowModuleRecord } from "../CanvasNode";
 
 type VideoRegenerationDialogsProps = {
@@ -51,8 +52,38 @@ export function VideoRegenerationDialogs({
   deletePreset,
   movePreset,
 }: VideoRegenerationDialogsProps) {
+  const [secondaryExpanded, setSecondaryExpanded] = useState(false);
+  useEffect(() => { setSecondaryExpanded(false); }, [videoRegenerationDraft?.previewId]);
+  const dialogOpen = videoRegenerationDraft !== null;
+  useEffect(() => {
+    if (!dialogOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (videoRegenerationInformationOpen) {
+        setVideoRegenerationInformationOpen(false);
+        return;
+      }
+      const openMenu = videoRegenerationDialogRef.current?.querySelector<HTMLButtonElement>(
+        "button[aria-haspopup][aria-expanded='true']",
+      );
+      if (openMenu) {
+        openMenu.click();
+        openMenu.focus();
+        return;
+      }
+      setVideoRegenerationDraft(null);
+    };
+    window.addEventListener("keydown", closeOnEscape, true);
+    return () => window.removeEventListener("keydown", closeOnEscape, true);
+  }, [dialogOpen, videoRegenerationInformationOpen, videoRegenerationDialogRef, setVideoRegenerationInformationOpen, setVideoRegenerationDraft]);
   const selectedModel = videoRegenerationDraft?.diffusionModelName ?? "";
   const catalogModel = h3DiffusionModelOptions.find((model) => sameH3DiffusionModelName(model, selectedModel));
+  const selectedPrimaryLora = videoRegenerationDraft?.loraName ?? "";
+  const catalogPrimaryLora = h3LoraOptions.find((name) => sameH3LoraName(name, selectedPrimaryLora));
+  const selectedSecondaryLora = videoRegenerationDraft?.secondaryLoraName ?? "";
+  const catalogSecondaryLora = h3LoraOptions.find((name) => sameH3LoraName(name, selectedSecondaryLora));
   return (
     <>
       {videoRegenerationDraft && createPortal(
@@ -65,14 +96,14 @@ export function VideoRegenerationDialogs({
             className="project-dialog video-regeneration-dialog"
             onSubmit={(event) => {
               event.preventDefault();
-              void submitConfiguredVideoRegeneration();
+              if (!videoRegenerationDraft.presetEditor) void submitConfiguredVideoRegeneration();
             }}
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <div className="project-dialog-icon"><RotateCcw size={21} /></div>
+            <div className="project-dialog-icon">{videoRegenerationDraft.presetEditor ? <Settings size={21} /> : <RotateCcw size={21} />}</div>
             <div>
-              <h2>重新生成</h2>
-              <p>{videoRegenerationDraft.useSnapshotSettings
+              <div className="video-preset-editor-title"><h2>{videoRegenerationDraft.presetEditor ? "预设编辑" : "视频生成"}</h2>{!videoRegenerationDraft.presetEditor && <button type="submit" className="primary-button video-regeneration-header-generate"><RotateCcw size={13} />生成</button>}{videoRegenerationDraft.presetEditor && <button type="button" className="video-details-toggle" aria-label="关闭预设编辑" title="关闭" onClick={() => setVideoRegenerationDraft(null)}><X size={18} /></button>}</div>
+              <p>{videoRegenerationDraft.presetEditor ? "编辑并保存共用参数预设，供视频生成节点和 Alt＋重新生成使用。" : videoRegenerationDraft.generatorId ? "使用当前节点的提示词与参数，调整后点击生成。" : videoRegenerationDraft.useSnapshotSettings
                 ? `正在使用“${videoRegenerationDraft.previewTitle}”生成时记录的参数、提示词与 Seed，不套用已保存设置。`
                 : `提示词与 Seed 来自“${videoRegenerationDraft.previewTitle}”；参数优先套用默认预设，未设默认时使用生成快照。`}</p>
             </div>
@@ -123,7 +154,7 @@ export function VideoRegenerationDialogs({
               </div>
             </section>
             <div className="video-regeneration-fields">
-              <label className="video-regeneration-prompt-field">
+              {!videoRegenerationDraft.presetEditor && <label className="video-regeneration-prompt-field">
                 H3 模型
                 <SettingsSelect
                   value={catalogModel ?? selectedModel}
@@ -145,7 +176,8 @@ export function VideoRegenerationDialogs({
                   }))}
                   ariaLabel="重新生成 H3 模型"
                 />
-              </label>
+              </label>}
+              {!videoRegenerationDraft.presetEditor && <>
               <label className="video-regeneration-prompt-field">
                 提示词版本
                 <div className="video-regeneration-prompt-controls">
@@ -206,7 +238,8 @@ export function VideoRegenerationDialogs({
                   </button>
                 </div>
               </label>
-              <label>
+              </>}
+              {!videoRegenerationDraft.presetEditor && <label>
                 时长（秒）
                 <ModelParameterNumberInput
                   regenerationField="durationSeconds"
@@ -219,9 +252,46 @@ export function VideoRegenerationDialogs({
                     durationSeconds: value,
                   }))}
                 />
+              </label>}
+              <section className="video-regeneration-group" aria-label="1采参数">
+                <header className="video-regeneration-group-header">
+                  <h3>1采参数</h3>
+              <div className="video-regeneration-header-lora">
+                <SettingsSelect
+                  title={selectedPrimaryLora || "不使用 LoRA"}
+                  value={videoRegenerationDraft.loraBypassed ? "" : catalogPrimaryLora ?? selectedPrimaryLora}
+                  ariaLabel="重新生成1采 LoRA"
+                  options={[
+                    { value: "", label: "不使用 LoRA" },
+                    ...(selectedPrimaryLora && !catalogPrimaryLora ? [{
+                      value: selectedPrimaryLora,
+                      label: `${h3LoraDisplayName(selectedPrimaryLora)}（当前目录未找到）`,
+                    }] : []),
+                    ...h3LoraOptions.map((name) => ({ value: name, label: h3LoraDisplayName(name), title: name })),
+                  ]}
+                  onChange={(name) => setVideoRegenerationDraft((current) => current && ({
+                    ...current, loraName: name || current.loraName, loraBypassed: !name,
+                  }))}
+                />
+              </div>
+<label className="video-regeneration-header-strength" aria-label="1采 LoRA 权重">
+                <span>权重</span>
+                <ModelParameterNumberInput
+                  regenerationField="loraStrength"
+                  min={0}
+                  max={10}
+                  step={0.01}
+                  value={videoRegenerationDraft.loraStrength}
+                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    loraStrength: value,
+                  }))}
+                />
               </label>
+                </header>
+                <div className="video-regeneration-fields video-regeneration-group-fields">
               <label>
-                1采分辨率（MP）
+                分辨率（MP）
                 <ModelParameterNumberInput
                   regenerationField="primaryResolutionMegapixels"
                   min={0.2}
@@ -248,20 +318,6 @@ export function VideoRegenerationDialogs({
                   }))}
                 />
               </label>}
-              <label>
-                1采 LoRA 强度
-                <ModelParameterNumberInput
-                  regenerationField="loraStrength"
-                  min={0}
-                  max={10}
-                  step={0.01}
-                  value={videoRegenerationDraft.loraStrength}
-                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    loraStrength: value,
-                  }))}
-                />
-              </label>
               <label>
                 Video Steps
                 <ModelParameterNumberInput
@@ -293,7 +349,7 @@ export function VideoRegenerationDialogs({
                   }))}
                 />
               </label>}
-              <label>
+              <label className="video-regeneration-row-start">
                 亮度
                 <ModelParameterNumberInput
                   regenerationField="primaryBrightness"
@@ -335,6 +391,62 @@ export function VideoRegenerationDialogs({
                   }))}
                 />
               </label>
+                </div>
+              </section>
+              <section className="video-regeneration-group" aria-label="2采参数">
+                <header className="video-regeneration-group-header video-regeneration-secondary-header">
+                  <h3><button type="button" className="video-regeneration-group-toggle" aria-expanded={secondaryExpanded} aria-controls="video-regeneration-secondary-fields" onClick={() => setSecondaryExpanded((expanded) => !expanded)}>{secondaryExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}2采参数</button></h3>
+              <div className="video-regeneration-header-lora">
+                <SettingsSelect
+                  title={selectedSecondaryLora || "不使用 LoRA"}
+                  value={videoRegenerationDraft.secondaryLoraBypassed ? "" : catalogSecondaryLora ?? selectedSecondaryLora}
+                  ariaLabel="重新生成2采 LoRA"
+                  options={[
+                    { value: "", label: "不使用 LoRA" },
+                    ...(selectedSecondaryLora && !catalogSecondaryLora ? [{
+                      value: selectedSecondaryLora,
+                      label: `${h3LoraDisplayName(selectedSecondaryLora)}（当前目录未找到）`,
+                    }] : []),
+                    ...h3LoraOptions.map((name) => ({ value: name, label: h3LoraDisplayName(name), title: name })),
+                  ]}
+                  onChange={(name) => setVideoRegenerationDraft((current) => current && ({
+                    ...current, secondaryLoraName: name || current.secondaryLoraName, secondaryLoraBypassed: !name,
+                  }))}
+                />
+              </div>
+<label className="video-regeneration-header-strength" aria-label="2采 LoRA 权重">
+                <span>权重</span>
+                <ModelParameterNumberInput
+                  regenerationField="secondaryLoraStrength"
+                  {...VIDEO_REGENERATION_NUMBER_CONFIG.secondaryLoraStrength}
+                  value={videoRegenerationDraft.secondaryLoraStrength}
+                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({ ...current, secondaryLoraStrength: value }))}
+                />
+              </label>
+                </header>
+                {secondaryExpanded && <div id="video-regeneration-secondary-fields" className="video-regeneration-fields video-regeneration-group-fields">
+              {([
+                ["secondaryResolutionMegapixels", "分辨率（MP）"],
+                ["secondarySchedulerSteps", "Steps"],
+                ["secondaryBrightness", "亮度"],
+                ["secondaryContrast", "对比度"],
+                ["secondarySaturation", "饱和度"],
+              ] as const).map(([field, label]) => (
+                <label key={field} className={field === "secondaryBrightness" ? "video-regeneration-row-start" : undefined}>
+                  {label}
+                  <ModelParameterNumberInput
+                    regenerationField={field}
+                    {...VIDEO_REGENERATION_NUMBER_CONFIG[field]}
+                    value={videoRegenerationDraft[field]}
+                    onChange={(value) => setVideoRegenerationDraft((current) => current && ({ ...current, [field]: value }))}
+                  />
+                </label>
+              ))}
+                </div>}
+              </section>
+              <section className="video-regeneration-group video-regeneration-shared-group" aria-label="共用设置">
+                <h3>共用设置</h3>
+                <div className="video-regeneration-fields video-regeneration-group-fields">
               <fieldset className="video-regeneration-ref-mode">
                 <legend>参考图模式</legend>
                 <div>
@@ -353,24 +465,19 @@ export function VideoRegenerationDialogs({
                   ))}
                 </div>
               </fieldset>
-            </div>
             <div className="video-regeneration-style-loras">
               <StyleLoraEditor
+                renderStrengthInput={(props) => <ModelParameterNumberInput {...props} min={0} max={10} step={0.01} />}
                 slots={videoRegenerationDraft.styleLoras}
                 options={h3LoraOptions}
                 hasSecondStage={Boolean(videoRegenerationWorkflowModule?.adapter.bindings.livePreviewNodeId)}
                 onChange={(styleLoras) => setVideoRegenerationDraft((current) => current && ({ ...current, styleLoras }))}
               />
             </div>
-            <div className="project-dialog-actions">
-              <button type="button" className="dialog-cancel" onClick={() => setVideoRegenerationDraft(null)}>
-                取消
-              </button>
-              <button type="submit" className="primary-button">
-                <RotateCcw size={13} />
-                生成
-              </button>
+                </div>
+              </section>
             </div>
+
           </form>
         </div>,
         document.body,

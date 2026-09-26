@@ -1,7 +1,9 @@
 import type { VideoRegenerationDraft, VideoRegenerationNumericField } from "../CanvasNode";
 
 export type VideoRegenerationSettings = Pick<VideoRegenerationDraft,
-  VideoRegenerationNumericField | "styleLoras" | "refImageSize"> & Partial<Pick<VideoRegenerationDraft, "diffusionModelName">>;
+  Exclude<VideoRegenerationNumericField, `secondary${string}`> | "styleLoras" | "refImageSize">
+  & Partial<Pick<VideoRegenerationDraft, Extract<VideoRegenerationNumericField, `secondary${string}`>
+    | "loraName" | "loraBypassed" | "diffusionModelName" | "secondaryLoraName" | "secondaryLoraBypassed">>;
 export interface VideoRegenerationPreset {
   id: string;
   name: string;
@@ -10,6 +12,69 @@ export interface VideoRegenerationPreset {
 export interface VideoRegenerationPresetCollection {
   presets: VideoRegenerationPreset[];
   defaultPresetId: string;
+}
+
+export function videoPresetNodePatch(settings: VideoRegenerationSettings, sharedSteps: boolean) {
+  return {
+    generationDuration: settings.durationSeconds,
+    generationPrimaryResolution: settings.primaryResolutionMegapixels,
+    generationPrimaryUpscaleFactor: settings.primaryUpscaleFactor,
+    generationLoraStrength: settings.loraStrength,
+    ...(settings.loraName !== undefined ? { generationLoraName: settings.loraName } : {}),
+    ...(settings.loraBypassed !== undefined ? { generationLoraBypassed: settings.loraBypassed } : {}),
+    generationPrimaryVideoSteps: settings.primaryVideoSteps,
+    generationPrimaryAudioSteps: sharedSteps ? settings.primaryVideoSteps : settings.primaryAudioSteps,
+    generationPrimaryBrightness: settings.primaryBrightness,
+    generationPrimaryContrast: settings.primaryContrast,
+    generationPrimarySaturation: settings.primarySaturation,
+    generationRefImageSize: settings.refImageSize,
+    generationStyleLoras: settings.styleLoras.map((slot) => ({ ...slot })),
+    ...(settings.diffusionModelName ? { generationDiffusionModelOverride: settings.diffusionModelName } : {}),
+    ...(settings.secondaryResolutionMegapixels !== undefined ? { generationSecondaryResolution: settings.secondaryResolutionMegapixels } : {}),
+    ...(settings.secondarySchedulerSteps !== undefined ? { generationSecondarySchedulerSteps: settings.secondarySchedulerSteps } : {}),
+    ...(settings.secondaryLoraName !== undefined ? { generationSecondaryLoraName: settings.secondaryLoraName } : {}),
+    ...(settings.secondaryLoraStrength !== undefined ? { generationSecondaryLoraStrength: settings.secondaryLoraStrength } : {}),
+    ...(settings.secondaryLoraBypassed !== undefined ? { generationSecondaryLoraBypassed: settings.secondaryLoraBypassed } : {}),
+    ...(settings.secondaryBrightness !== undefined ? { generationSecondaryBrightness: settings.secondaryBrightness } : {}),
+    ...(settings.secondaryContrast !== undefined ? { generationSecondaryContrast: settings.secondaryContrast } : {}),
+    ...(settings.secondarySaturation !== undefined ? { generationSecondarySaturation: settings.secondarySaturation } : {}),
+  };
+}
+
+export function videoNodeExtraParameters(
+  content: Record<string, unknown>,
+  defaults: Pick<VideoRegenerationSettings, "primaryAudioSteps" | "primaryBrightness" | "primaryContrast" | "primarySaturation">,
+  primaryVideoSteps: number,
+  sharedSteps: boolean,
+) {
+  const audio = content.generationPrimaryAudioSteps;
+  const color = (key: string, fallback: number) => {
+    const value = content[key];
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 3 ? value : fallback;
+  };
+  return {
+    primaryAudioSteps: sharedSteps ? primaryVideoSteps : Math.max(primaryVideoSteps,
+      typeof audio === "number" && Number.isInteger(audio) && audio >= 1 && audio <= 1000
+        ? audio : defaults.primaryAudioSteps),
+    primaryBrightness: color("generationPrimaryBrightness", defaults.primaryBrightness),
+    primaryContrast: color("generationPrimaryContrast", defaults.primaryContrast),
+    primarySaturation: color("generationPrimarySaturation", defaults.primarySaturation),
+  };
+}
+
+export function videoNodeSecondaryColors(
+  content: Record<string, unknown>,
+  defaults: { secondaryBrightness: number; secondaryContrast: number; secondarySaturation: number },
+) {
+  const color = (key: string, fallback: number) => {
+    const value = content[key];
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 3 ? value : fallback;
+  };
+  return {
+    secondaryBrightness: color("generationSecondaryBrightness", defaults.secondaryBrightness),
+    secondaryContrast: color("generationSecondaryContrast", defaults.secondaryContrast),
+    secondarySaturation: color("generationSecondarySaturation", defaults.secondarySaturation),
+  };
 }
 
 export function matchingVideoRegenerationPreset(
@@ -21,6 +86,7 @@ export function matchingVideoRegenerationPreset(
     const { styleLoras, ...parameters } = settings;
     if (!Object.entries(parameters).every(([key, value]) => {
       const saved = preset.settings[key as keyof typeof parameters];
+      if ((key.startsWith("secondary") || key === "loraName" || key === "loraBypassed") && saved === undefined) return true;
       return typeof value === "number" && typeof saved === "number"
         ? Math.abs(value - saved) < 1e-9
         : value === saved;

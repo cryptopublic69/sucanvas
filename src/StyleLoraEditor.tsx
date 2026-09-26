@@ -1,12 +1,15 @@
 import { useDropdownWheel } from "./useDropdownWheel";
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { Trash2 } from "lucide-react";
 import { H3StyleLora, MAX_STYLE_LORAS } from "./styleLoras";
 
-export function StyleLoraEditor({ slots, options, hasSecondStage, onChange }: {
+export function StyleLoraEditor({ slots, options, hasSecondStage, onChange, renderStrengthInput }: {
   slots: H3StyleLora[];
   options: string[];
   hasSecondStage: boolean;
   onChange: (slots: H3StyleLora[]) => void;
+  renderStrengthInput?: (props: { value: number; disabled: boolean; ariaLabel: string; onChange: (value: number) => void }) => ReactNode;
 }) {
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -57,11 +60,13 @@ export function StyleLoraEditor({ slots, options, hasSecondStage, onChange }: {
             title={name} onClick={() => choose(index, name)}>{name.split(/[\\/]/).pop()}</button>)}
         </div>}
       </div>
-      <input className="nowheel" type="number" min={0} max={10} step={0.01} value={slot.strength} disabled={slot.bypassed} aria-label={`风格 LoRA ${index + 1} 权重`} onChange={(event) => {
+      {renderStrengthInput ? renderStrengthInput({ value: slot.strength, disabled: slot.bypassed, ariaLabel: `风格 LoRA ${index + 1} 权重`, onChange: (strength) => {
+        if (Number.isFinite(strength)) update(index, { strength: Math.max(0, Math.min(10, strength)) });
+      } }) : <input className="nowheel" type="number" min={0} max={10} step={0.01} value={slot.strength} disabled={slot.bypassed} aria-label={`风格 LoRA ${index + 1} 权重`} onChange={(event) => {
         const strength = event.currentTarget.valueAsNumber;
         if (Number.isFinite(strength)) update(index, { strength: Math.max(0, Math.min(10, strength)) });
-      }} />
-      <button type="button" aria-label={`删除风格 LoRA ${index + 1}`} onClick={() => { setOpenIndex(null); onChange(slots.filter((_, i) => i !== index)); }}>×</button>
+      }} />}
+      <button type="button" aria-label={`删除风格 LoRA ${index + 1}`} title="删除风格 LoRA" onClick={() => { setOpenIndex(null); onChange(slots.filter((_, i) => i !== index)); }}><Trash2 size={18} aria-hidden="true" /></button>
       <div className="style-lora-options">
         <label><input type="checkbox" checked={slot.bypassed} onChange={(event) => update(index, { bypassed: event.currentTarget.checked })} />Bypass</label>
         {hasSecondStage && <label><input type="checkbox" checked={slot.applyToSecondary} onChange={(event) => update(index, { applyToSecondary: event.currentTarget.checked })} />应用到二段</label>}
