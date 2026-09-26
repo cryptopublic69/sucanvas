@@ -775,6 +775,7 @@ interface VideoRegenerationPromptOption {
 }
 
 interface VideoRegenerationDraft {
+  diffusionModelName: string;
   useSnapshotSettings: boolean;
   previewId: string;
   previewTitle: string;
@@ -4617,6 +4618,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [connectedInformationHidden, setConnectedInformationHidden] = useState(false);
   const [generatedInfoOpen, setGeneratedInfoOpen] = useState(false);
   const viewportTransform = useStore((state) => generatedInfoOpen ? state.transform : null);
+  const connectedVideoAspectRatio = useStore((state) => {
+    if (record.kind !== "text") return "";
+    const targetIds = new Set(state.edges.filter((edge) => edge.source === id).map((edge) => edge.target));
+    const ratios = new Set(state.nodes
+      .filter((node) => targetIds.has(node.id) && (node.data as CanvasNodeData).record.kind === "video-generation")
+      .map((node) => videoAspectRatioFromContent((node.data as CanvasNodeData).record.content)));
+    return ratios.size > 1 ? "混合" : [...ratios][0] ?? "";
+  });
   const [generatedInfoPosition, setGeneratedInfoPosition] = useState({ left: 16, top: 16 });
   const [generatedInfoPanning, setGeneratedInfoPanning] = useState(false);
   const [generatedPromptDialogOpen, setGeneratedPromptDialogOpen] = useState(false);
@@ -6383,6 +6392,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
 
   const checkAndExecute = () => checkAndExecuteVideo(data);
 
+  const changeConnectedVideoAspectRatio = (generationAspectRatio: VideoAspectRatio) => {
+    const targetIds = new Set(getEdges().filter((edge) => edge.source === id).map((edge) => edge.target));
+    for (const targetId of targetIds) {
+      const target = getNode(targetId)?.data.record;
+      if (target?.kind !== "video-generation") continue;
+      onChange(targetId, {
+        content: { ...target.content, generationAspectRatio, status: "idle", validationMessage: "" },
+      });
+    }
+    setAspectRatioMenuOpen(false);
+  };
+
   const executeConnectedVideo = async () => {
     const targetIds = new Set(getEdges().filter((edge) => edge.source === id).map((edge) => edge.target));
     const targets = [...targetIds].map((targetId) => getNode(targetId))
@@ -6753,6 +6774,46 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           >
             <Play size={13} fill="currentColor" />
           </button>
+        )}
+        {isText && (
+          <div ref={aspectRatioControlRef} className={`text-aspect-ratio-control ${aspectRatioMenuOpen ? "nowheel" : ""}`}>
+            <button
+              type="button"
+              className="nodrag node-action text-aspect-ratio-toggle"
+              title={connectedVideoAspectRatio ? "切换相连视频生成节点的画面比例" : "请先连接视频生成节点"}
+              aria-label="切换画面比例"
+              aria-haspopup="menu"
+              aria-expanded={aspectRatioMenuOpen}
+              disabled={!connectedVideoAspectRatio}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                setAspectRatioMenuOpen((open) => !open);
+              }}
+            >
+              {connectedVideoAspectRatio || "比例"}
+            </button>
+            {aspectRatioMenuOpen && (
+              <div className="video-aspect-ratio-menu" role="menu" aria-label="画面比例">
+                {VIDEO_ASPECT_RATIO_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`nodrag ${connectedVideoAspectRatio === option.value ? "is-active" : ""}`}
+                    role="menuitemradio"
+                    aria-checked={connectedVideoAspectRatio === option.value}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      changeConnectedVideoAspectRatio(option.value);
+                    }}
+                  >
+                    {option.value}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
         {(isText || isNote) && (
           <button
@@ -7376,9 +7437,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <button
                 type="button"
                 className="nodrag node-action generated-video-locate-prompt-action"
-                onClick={(event) => onLocatePrompt(id, event.ctrlKey ? "generator" : "prompt")}
-                title="点击定位提示词；Ctrl+点击定位关联的视频生成节点"
-                aria-label="定位提示词或视频生成节点"
+                onClick={(event) => onLocatePrompt(id, event.shiftKey ? "prompt" : "generator")}
+                title="点击定位关联的视频生成节点；Shift+点击定位提示词"
+                aria-label="定位视频生成节点；Shift+点击定位提示词"
               >
                 <LocateFixed size={12} />
               </button>
@@ -7720,9 +7781,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <button
                 type="button"
                 className="nodrag node-action generated-video-locate-prompt-action"
-                onClick={(event) => onLocateGeneratedImage(id, event.ctrlKey ? "generator" : "prompt")}
-                title="点击定位提示词；Ctrl+点击定位关联的图片生成节点"
-                aria-label="定位提示词或图片生成节点"
+                onClick={(event) => onLocateGeneratedImage(id, event.shiftKey ? "prompt" : "generator")}
+                title="点击定位关联的图片生成节点；Shift+点击定位提示词"
+                aria-label="定位图片生成节点；Shift+点击定位提示词"
               >
                 <LocateFixed size={12} />
               </button>
@@ -8117,7 +8178,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 : undefined}
               >{`${displayedVideoDuration ?? 0} 秒`}</output>
             </label>
-            <div ref={aspectRatioControlRef} className={`video-aspect-ratio-inline ${aspectRatioMenuOpen ? "nowheel" : ""}`}>
+            <div ref={aspectRatioControlRef} className={`video-aspect-ratio-inline ${aspectRatioMenuOpen ? "nowheel is-menu-open" : ""}`}>
               <button
                 type="button"
                 className="nodrag video-aspect-ratio-toggle"

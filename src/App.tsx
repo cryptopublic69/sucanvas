@@ -345,7 +345,11 @@ function videoRegenerationSettingsFromValue(value: unknown): VideoRegenerationSe
     || !Array.isArray(source.styleLoras)) return null;
   const styleLoras = h3StyleLorasFromContent(source);
   if (styleLoraValidationError(styleLoras)) return null;
-  return { ...numbers, refImageSize: source.refImageSize, styleLoras };
+  return {
+    ...numbers, refImageSize: source.refImageSize, styleLoras,
+    ...(typeof source.diffusionModelName === "string" && source.diffusionModelName.trim()
+      ? { diffusionModelName: source.diffusionModelName.trim() } : {}),
+  };
 }
 
 function videoInputMediaKind(record: NodeRecord): "image" | "audio" | "video" | null {
@@ -978,7 +982,7 @@ function CanvasWorkspace() {
     return () => {
       disposed = true;
     };
-  }, [activeSettingsSection, comfyUiServerUrl, settingsOpen, showGlobalNotice, workflowModulesReady]);
+  }, [activeProjectId, activeSettingsSection, comfyUiServerUrl, settingsOpen, showGlobalNotice, workflowModulesReady]);
 
   useEffect(() => {
     if (!workflowModulesReady) return;
@@ -1002,7 +1006,7 @@ function CanvasWorkspace() {
     };
     void refresh();
     return () => { disposed = true; };
-  }, [comfyUiServerUrl, workflowModulesReady]);
+  }, [activeProjectId, comfyUiServerUrl, workflowModulesReady]);
 
   useEffect(() => {
     if (!workflowModulesReady) return;
@@ -4834,6 +4838,7 @@ function CanvasWorkspace() {
     setVideoRegenerationPresets(presetCollection);
     setVideoRegenerationInformationOpen(false);
     const draft: VideoRegenerationDraft = {
+      diffusionModelName: snapshot.diffusionModelName,
       useSnapshotSettings,
       previewId,
       previewTitle: preview.title || "视频预览",
@@ -4887,6 +4892,7 @@ function CanvasWorkspace() {
       return {
         ...current,
         ...preset.settings,
+        diffusionModelName: preset.settings.diffusionModelName ?? current.originalSnapshot.diffusionModelName,
         styleLoras: preset.settings.styleLoras.map((slot) => ({ ...slot })),
         primaryAudioSteps: workflowUsesSharedPrimarySteps(module)
           ? preset.settings.primaryVideoSteps : preset.settings.primaryAudioSteps,
@@ -4917,8 +4923,8 @@ function CanvasWorkspace() {
     if (!persistVideoRegenerationPresets(next)) return;
     setSelectedVideoRegenerationPresetId(id);
     setVideoRegenerationPresetName(name);
-    setNotice(`预设“${name}”已保存${next.defaultPresetId === id ? "，下次 Ctrl＋重新生成自动套用" : ""}`);
-  }, [videoRegenerationDraft, selectedVideoRegenerationPresetId, videoRegenerationPresetName, videoRegenerationPresets, persistVideoRegenerationPresets]);
+    showGlobalNotice(`保存成功：预设“${name}”已保存${next.defaultPresetId === id ? "，下次 Ctrl＋重新生成自动套用" : ""}`);
+  }, [videoRegenerationDraft, selectedVideoRegenerationPresetId, videoRegenerationPresetName, videoRegenerationPresets, persistVideoRegenerationPresets, showGlobalNotice]);
 
   const setDefaultVideoRegenerationPreset = useCallback(() => {
     if (!videoRegenerationPresets.presets.some((preset) => preset.id === selectedVideoRegenerationPresetId)) return;
@@ -5039,6 +5045,7 @@ function CanvasWorkspace() {
     }
     const snapshot: GenerationSnapshot = {
       ...draft.originalSnapshot,
+      diffusionModelName: draft.diffusionModelName,
       prompt: selectedPrompt.prompt,
       promptInformation: selectedPrompt.information,
       promptNodeId: selectedPrompt.promptNodeId,
@@ -11226,6 +11233,7 @@ function CanvasWorkspace() {
         setVideoRegenerationInformationOpen={setVideoRegenerationInformationOpen}
         videoRegenerationWorkflowModule={videoRegenerationWorkflowModule}
         videoRegenerationUsesSharedPrimarySteps={videoRegenerationUsesSharedPrimarySteps}
+        h3DiffusionModelOptions={h3DiffusionModelOptions}
         h3LoraOptions={h3LoraOptions}
         saveVideoRegenerationSettings={saveVideoRegenerationSettings}
         presetCollection={videoRegenerationPresets}

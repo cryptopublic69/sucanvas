@@ -3,7 +3,7 @@ import type { Dispatch, RefObject, SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import { Dices, FileText, RotateCcw, StickyNote, X } from "lucide-react";
 import { StyleLoraEditor } from "../StyleLoraEditor";
-import { ModelParameterNumberInput, REF_IMAGE_SIZE_OPTIONS, SettingsSelect, randomFixedSeed } from "../CanvasNode";
+import { ModelParameterNumberInput, REF_IMAGE_SIZE_OPTIONS, SettingsSelect, randomFixedSeed, h3DiffusionModelDisplayName, sameH3DiffusionModelName } from "../CanvasNode";
 import type { VideoRegenerationDraft, VideoRegenerationPromptOption, WorkflowModuleRecord } from "../CanvasNode";
 
 type VideoRegenerationDialogsProps = {
@@ -16,6 +16,7 @@ type VideoRegenerationDialogsProps = {
   videoRegenerationWorkflowModule: WorkflowModuleRecord | undefined;
   videoRegenerationUsesSharedPrimarySteps: boolean;
   h3LoraOptions: string[];
+  h3DiffusionModelOptions: string[];
   saveVideoRegenerationSettings: (asNew?: boolean) => void;
   presetCollection: VideoRegenerationPresetCollection;
   selectedPresetId: string;
@@ -37,6 +38,7 @@ export function VideoRegenerationDialogs({
   videoRegenerationWorkflowModule,
   videoRegenerationUsesSharedPrimarySteps,
   h3LoraOptions,
+  h3DiffusionModelOptions,
   saveVideoRegenerationSettings,
   selectedVideoRegenerationPrompt,
   presetCollection,
@@ -47,6 +49,8 @@ export function VideoRegenerationDialogs({
   setDefaultPreset,
   deletePreset,
 }: VideoRegenerationDialogsProps) {
+  const selectedModel = videoRegenerationDraft?.diffusionModelName ?? "";
+  const catalogModel = h3DiffusionModelOptions.find((model) => sameH3DiffusionModelName(model, selectedModel));
   return (
     <>
       {videoRegenerationDraft && createPortal(
@@ -116,6 +120,29 @@ export function VideoRegenerationDialogs({
               </div>
             </section>
             <div className="video-regeneration-fields">
+              <label className="video-regeneration-prompt-field">
+                H3 模型
+                <SettingsSelect
+                  value={catalogModel ?? selectedModel}
+                  options={[
+                    ...(selectedModel && !catalogModel ? [{
+                      value: selectedModel,
+                      label: `${h3DiffusionModelDisplayName(selectedModel)}（当前目录未找到）`,
+                      title: selectedModel,
+                    }] : []),
+                    ...h3DiffusionModelOptions.map((model) => ({
+                      value: model,
+                      label: h3DiffusionModelDisplayName(model),
+                      title: model,
+                    })),
+                  ]}
+                  onChange={(diffusionModelName) => setVideoRegenerationDraft((current) => current && ({
+                    ...current,
+                    diffusionModelName,
+                  }))}
+                  ariaLabel="重新生成 H3 模型"
+                />
+              </label>
               <label className="video-regeneration-prompt-field">
                 提示词版本
                 <div className="video-regeneration-prompt-controls">

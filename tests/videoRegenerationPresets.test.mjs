@@ -56,6 +56,19 @@ test("multiple presets and chosen default survive reload with independent parame
   assert.equal(loaded.presets[0].settings.primaryVideoSteps, 20);
 });
 
+test("H3 model selection survives saving and distinguishes otherwise identical presets", () => {
+  const db = storage();
+  const first = { ...settings, diffusionModelName: "MinimaxH3/model-a.safetensors" };
+  const second = { ...settings, diffusionModelName: "MinimaxH3/model-b.safetensors" };
+  save(db, { presets: [
+    { id: "a", name: "A", settings: first },
+    { id: "b", name: "B", settings: second },
+  ], defaultPresetId: "a" });
+  const loaded = load(db, parse);
+  assert.deepEqual(loaded.presets[1].settings, second);
+  assert.equal(match(loaded, second)?.id, "b");
+});
+
 test("deleting every preset does not resurrect legacy saved settings", () => {
   const db = storage({ [legacyKey]: JSON.stringify(settings) });
   save(db, { presets: [], defaultPresetId: "" });

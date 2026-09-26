@@ -1,7 +1,7 @@
 import type { VideoRegenerationDraft, VideoRegenerationNumericField } from "../CanvasNode";
 
 export type VideoRegenerationSettings = Pick<VideoRegenerationDraft,
-  VideoRegenerationNumericField | "styleLoras" | "refImageSize">;
+  VideoRegenerationNumericField | "styleLoras" | "refImageSize"> & Partial<Pick<VideoRegenerationDraft, "diffusionModelName">>;
 export interface VideoRegenerationPreset {
   id: string;
   name: string;
