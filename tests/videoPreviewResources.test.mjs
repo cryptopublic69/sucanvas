@@ -172,3 +172,114 @@ test("unmounting during native extraction discards the result", async () => {
   await tick();
   assert.equal(delivered, false);
 });
+
+test("native failure leaves a placeholder without a hidden WebView decoder", async () => {
+  const start = videos.length;
+  let result = "pending";
+  globalThis.nativePosterInvoke = async () => { throw new Error("file not ready"); };
+  nativePosters.requestVideoPoster("http://example.test/not-ready.mp4", (poster) => { result = poster; });
+  await tick();
+  assert.equal(result, null);
+  assert.equal(videos.length, start);
+});
+
+test("oversized native posters are discarded before blob conversion", async () => {
+  const start = videos.length;
+  let result = "pending";
+  globalThis.nativePosterInvoke = async () => new Array(1024 * 1024 + 1).fill(0);
+  nativePosters.requestVideoPoster("http://example.test/oversized.mp4", (poster) => { result = poster; });
+  await tick();
+  assert.equal(result, null);
+  assert.equal(videos.length, start);
+});
+
+test("a failing consumer does not prevent delivery to other consumers", async () => {
+  let delivered = 0;
+  globalThis.nativePosterInvoke = async () => [255, 216, 255, 217];
+  const cancelOne = nativePosters.requestVideoPoster("http://example.test/listeners.mp4", () => { throw new Error("consumer failed"); });
+  const cancelTwo = nativePosters.requestVideoPoster("http://example.test/listeners.mp4", () => { delivered++; });
+  await tick();
+  assert.equal(delivered, 1);
+  cancelOne(); cancelTwo();
+});
+
+test("completed and cancelled jobs release their work closures while unsubscribe stays alive", async () => {
+  const scheduler = new VideoPreviewScheduler();
+  const releasePlayer = scheduler.claim(() => {});
+  const cancelCompleted = scheduler.enqueue(async () => {});
+  const completedJob = scheduler.queue[0];
+  const cancelQueued = scheduler.enqueue(async () => {});
+  const cancelledJob = scheduler.queue[1];
+  cancelQueued();
+  assert.equal(cancelledJob.run, undefined);
+  releasePlayer();
+  await tick();
+  assert.equal(completedJob.run, undefined);
+  cancelCompleted();
+});
+
+
+test("warm memory covers are delivered immediately while a player owns the decoder", async () => {
+  const { videoPreviewScheduler } = await import(schedulerUrl);
+  const release = videoPreviewScheduler.claim(() => {});
+  try {
+    let result;
+    const before = videos.length;
+    requestVideoPoster("same-video", (poster) => { result = poster; });
+    assert.ok(result, "memory hits must not wait for a queue tick");
+    assert.equal(videos.length, before);
+  } finally { release(); }
+});
+
+test("memory cache shares URLs, evicts unused covers, and protects mounted covers", async () => {
+  const { PosterMemoryCache } = await import(posterUrl);
+  const cache = new PosterMemoryCache(6, 2);
+  const poster = (src) => ({ src, blob: new Blob(["abc"]), width: 480, height: 270, createdAt: 0 });
+  cache.put(poster("a")); cache.put(poster("b"));
+  const a = cache.retain("a");
+  const secondA = cache.retain("a");
+  assert.equal(a.url, secondA.url);
+  cache.put(poster("c"));
+  assert.ok(cache.peek("a"));
+  assert.equal(cache.peek("b"), undefined);
+  secondA.release(); a.release(); a.release();
+  cache.put(poster("d"));
+  assert.equal(cache.peek("a"), undefined);
+  assert.ok(cache.peek("c"));
+});
+
+test("disk cache hits bypass the decoder queue and prewarming never extracts misses", async () => {
+  const { videoPreviewScheduler } = await import(schedulerUrl);
+  const cached = { src: "disk-video", blob: new Blob(["jpeg"]), width: 480, height: 270, createdAt: 0 };
+  globalThis.indexedDB = {
+    open() {
+      const request = {};
+      queueMicrotask(() => {
+        request.result = { transaction: () => ({ objectStore: () => ({ get(src) {
+          const read = {};
+          queueMicrotask(() => { read.result = src === cached.src ? cached : undefined; read.onsuccess(); });
+          return read;
+        } }) }) };
+        request.onsuccess();
+      });
+      return request;
+    },
+  };
+  const diskPosters = await import(posterUrl + "#disk-test");
+  const release = videoPreviewScheduler.claim(() => {});
+  try {
+    let result;
+    const before = videos.length;
+    diskPosters.requestVideoPoster(cached.src, (poster) => { result = poster; });
+    await tick();
+    assert.equal(result, cached);
+    const cancelWarm = diskPosters.preloadCachedVideoPosters(["uncached-neighbor"]);
+    await tick();
+    cancelWarm();
+    assert.equal(videos.length, before);
+    assert.ok(diskPosters.posterMemoryCache.peek(cached.src));
+  } finally {
+    release();
+    delete globalThis.indexedDB;
+  }
+});

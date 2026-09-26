@@ -312,6 +312,26 @@ impl Database {
             .collect()
     }
 
+    pub fn list_project_summaries(&self) -> CanvasResult<Vec<WorkspaceSnapshot>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT canvases.id
+                 FROM canvases
+                 LEFT JOIN canvas_folders ON canvas_folders.child_canvas_id = canvases.id
+                 WHERE canvas_folders.child_canvas_id IS NULL
+                 ORDER BY canvases.updated_at DESC, canvases.created_at DESC",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                load_workspace_from_connection(&connection, &id)
+                    .map(WorkspaceSnapshot::into_summary)
+            })
+            .collect()
+    }
+
     pub fn list_all_projects(&self) -> CanvasResult<Vec<WorkspaceSnapshot>> {
         let connection = self.lock()?;
         let mut statement = connection
@@ -6021,6 +6041,39 @@ mod tests {
         assert!(error
             .to_string()
             .contains("must connect two content iteration nodes"));
+    }
+
+    #[test]
+    fn project_summaries_omit_payloads_without_changing_stored_content() {
+        let database = Database::in_memory().unwrap();
+        let mut input = text_node("Summary", "summary-test");
+        input.content = json!({
+            "text": "large prompt".repeat(1000),
+            "assetPath": "D:/cover.png",
+            "generationMode": "reference-to-video",
+            "workflowModuleId": "module-a",
+            "generationSnapshot": { "workflowModuleId": "module-b", "prompt": "keep in DB" }
+        });
+        let record = database.create_node(input).unwrap().node;
+        let summaries = database.list_project_summaries().unwrap();
+        let summary = summaries
+            .iter()
+            .flat_map(|project| &project.nodes)
+            .find(|node| node.id == record.id)
+            .unwrap();
+        assert!(summary.content.get("text").is_none());
+        assert_eq!(summary.content["assetPath"], "D:/cover.png");
+        assert_eq!(
+            summary.content["generationSnapshot"],
+            json!({"workflowModuleId": "module-b"})
+        );
+        let full = database.list_projects().unwrap();
+        let stored = full
+            .iter()
+            .flat_map(|project| &project.nodes)
+            .find(|node| node.id == record.id)
+            .unwrap();
+        assert_eq!(stored.content, record.content);
     }
 
     #[test]

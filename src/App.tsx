@@ -1,4 +1,12 @@
-import { StyleLoraEditor } from "./StyleLoraEditor";
+import { VideoPosterViewportCache } from "./VideoPosterViewportCache";
+import { summarizeProject } from "./projects/projectSummaries";
+import type { SetStateAction } from "react";
+import { ComfyStatusIndicators } from "./ComfyStatusIndicators";
+import { comfyStatusMessage, createComfyPreviewReceiver, livePreviewResources } from "./comfyLivePreview";
+import { loadVideoRegenerationPresets, matchingVideoRegenerationPreset, saveVideoRegenerationPresets } from "./video/videoRegenerationPresets";
+import type { VideoRegenerationPresetCollection, VideoRegenerationSettings } from "./video/videoRegenerationPresets";
+import { VideoRegenerationDialogs } from "./video/VideoRegenerationDialogs";
+import { SecondarySampleDialog } from "./video/SecondarySampleDialog";
 import { h3StyleLorasFromContent, styleLoraValidationError, usedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -30,7 +38,6 @@ import {
   Clapperboard,
   Copy,
   DatabaseBackup,
-  Dices,
   Download,
   FileText,
   FolderKanban,
@@ -51,7 +58,6 @@ import {
   Sparkles,
   StickyNote,
   Sun,
-  Thermometer,
   Trash2,
   Upload,
   Unlink2,
@@ -83,7 +89,6 @@ import type {
   CanvasRecord,
   CanvasUndoEntry,
   ComfyClientTaskStatus,
-  ComfyQueueSummary,
   ComfySubmitResult,
   CreateEmptyFolderResult,
   CreateNodeResult,
@@ -151,14 +156,11 @@ import {
   IMAGE_NODE_CHROME_HEIGHT,
   LEGACY_VIDEO_GENERATION_NODE_WIDTH,
   LIVE_COMFY_PREVIEW_EVENT,
-  ModelParameterNumberInput,
   NODE_HANDLE_BASE_SIZE_PX,
   NODE_HANDLE_MIN_SCREEN_SIZE_PX,
   PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY,
-  REF_IMAGE_SIZE_OPTIONS,
   SECONDARY_SAMPLE_NUMBER_CONFIG,
   SHOW_NODE_SEARCH,
-  SettingsSelect,
   UI_FONT_SIZE_STORAGE_KEY,
   VIDEO_GENERATION_DEFAULTS_BY_WORKFLOW_STORAGE_KEY,
   VIDEO_GENERATION_DEFAULTS_STORAGE_KEY,
@@ -178,7 +180,6 @@ import {
   canvasGridColor,
   canvasNodeBounds,
   comfyOutputFromContent,
-  comfyPreviewImageBlobFromSocketData,
   comfyPreviewRequestId,
   comfyProgressFromSocketData,
   copiedNodeContentForProject,
@@ -196,6 +197,7 @@ import {
   generationSnapshotFromContent,
   guidesEqual,
   h3DiffusionModelNameFromContent,
+  nodeH3DiffusionModelName,
   h3LoraBypassedFromContent,
   h3LoraNameFromContent,
   h3LoraPreferenceFromStorage,
@@ -327,10 +329,6 @@ function workflowUsesSharedPrimarySteps(workflowModule: WorkflowModuleRecord | u
   return Boolean(workflowModule && !workflowModule.bindings.primaryAudioStepsInputName.trim());
 }
 
-const VIDEO_REGENERATION_SETTINGS_STORAGE_KEY = "infinite-canvas:video-regeneration-settings:v1";
-type VideoRegenerationSettings = Pick<VideoRegenerationDraft,
-  VideoRegenerationNumericField | "styleLoras" | "refImageSize">;
-
 function videoRegenerationSettingsFromValue(value: unknown): VideoRegenerationSettings | null {
   if (!value || typeof value !== "object") return null;
   const source = value as Record<string, unknown>;
@@ -350,16 +348,6 @@ function videoRegenerationSettingsFromValue(value: unknown): VideoRegenerationSe
   return { ...numbers, refImageSize: source.refImageSize, styleLoras };
 }
 
-function loadVideoRegenerationSettings(): VideoRegenerationSettings | null {
-  try {
-    return videoRegenerationSettingsFromValue(JSON.parse(
-      window.localStorage.getItem(VIDEO_REGENERATION_SETTINGS_STORAGE_KEY) ?? "null",
-    ));
-  } catch {
-    return null;
-  }
-}
-
 function videoInputMediaKind(record: NodeRecord): "image" | "audio" | "video" | null {
   if (record.kind === "image" || record.kind === "generated-image") return "image";
   if (record.kind === "audio" || record.kind === "video") return record.kind;
@@ -370,36 +358,6 @@ function isKrea2DiffusionModelName(value: string): boolean {
   const normalized = value.trim().replace(/\//g, "\\");
   return normalized.startsWith("Krea2\\") || normalized.startsWith("Kera2\\");
 }
-
-type ComfyGpuMonitor = {
-  temperatureCelsius: number;
-  vramUsedBytes: number;
-  vramTotalBytes: number;
-};
-
-function comfyGpuMonitorFromSocketData(data: unknown): ComfyGpuMonitor | null {
-  if (typeof data !== "string") return null;
-  try {
-    const message = JSON.parse(data) as JsonObject;
-    if (message.type !== "crystools.monitor" || !message.data || typeof message.data !== "object") {
-      return null;
-    }
-    const gpu = (message.data as JsonObject).gpus;
-    if (!Array.isArray(gpu) || !gpu.length || !gpu[0] || typeof gpu[0] !== "object") return null;
-    const values = gpu[0] as JsonObject;
-    const temperatureCelsius = Number(values.gpu_temperature);
-    const vramUsedBytes = Number(values.vram_used);
-    const vramTotalBytes = Number(values.vram_total);
-    if (![temperatureCelsius, vramUsedBytes, vramTotalBytes].every(Number.isFinite)) {
-      return null;
-    }
-    return { temperatureCelsius, vramUsedBytes, vramTotalBytes };
-  } catch {
-    return null;
-  }
-}
-
-
 
 function CanvasWorkspace() {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasFlowNode>([]);
@@ -414,7 +372,13 @@ function CanvasWorkspace() {
   const [canvasName, setCanvasName] = useState("SuCanvas");
   const [editingProjectName, setEditingProjectName] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
-  const [projects, setProjects] = useState<WorkspaceSnapshot[]>([]);
+  const [projects, setProjectSummaries] = useState<WorkspaceSnapshot[]>([]);
+  const setProjects = useCallback((update: SetStateAction<WorkspaceSnapshot[]>) => {
+    setProjectSummaries((current) => {
+      const next = typeof update === "function" ? update(current) : update;
+      return next.map(summarizeProject);
+    });
+  }, []);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [canvasPath, setCanvasPath] = useState<CanvasRecord[]>([]);
   const [canvasBackground, setCanvasBackground] = useState<string | null>(null);
@@ -501,12 +465,6 @@ function CanvasWorkspace() {
     setNoticeToastMessage(message);
     setNoticeToastSequence((current) => current + 1);
   }, []);
-  const [comfyQueueCounts, setComfyQueueCounts] = useState<ComfyQueueSummary>({
-    runningCount: 0,
-    pendingCount: 0,
-    totalCount: 0,
-  });
-  const [comfyGpuMonitor, setComfyGpuMonitor] = useState<ComfyGpuMonitor | null>(null);
   const [h3LoraOptions, setH3LoraOptions] = useState<string[]>([]);
   const [krea2LoraOptions, setKrea2LoraOptions] = useState<string[]>([]);
   const [h3LoraCatalogLoaded, setH3LoraCatalogLoaded] = useState(false);
@@ -574,6 +532,9 @@ function CanvasWorkspace() {
   const [imageDeletionRequest, setImageDeletionRequest] = useState<ImageDeletionRequest | null>(null);
   const [videoRegenerationDraft, setVideoRegenerationDraft] = useState<VideoRegenerationDraft | null>(null);
   const [videoRegenerationInformationOpen, setVideoRegenerationInformationOpen] = useState(false);
+  const [videoRegenerationPresets, setVideoRegenerationPresets] = useState<VideoRegenerationPresetCollection>({ presets: [], defaultPresetId: "" });
+  const [selectedVideoRegenerationPresetId, setSelectedVideoRegenerationPresetId] = useState("");
+  const [videoRegenerationPresetName, setVideoRegenerationPresetName] = useState("");
   const [secondarySampleDraft, setSecondarySampleDraft] = useState<SecondarySampleDraft | null>(null);
   const selectedVideoRegenerationPrompt = videoRegenerationDraft?.promptOptions.find(
     (option) => option.key === videoRegenerationDraft.selectedPromptKey,
@@ -600,7 +561,6 @@ function CanvasWorkspace() {
   const recoveredNodeActiveKeys = useRef(new Map<string, string>());
   const completedGenerationPlaceholders = useRef(new Set<string>());
   const liveComfyPreviews = useRef(new Map<string, { url: string; mimeType: string }>());
-  const staleLiveComfyPreviewUrls = useRef(new Map<string, string[]>());
   const persistedComfyTasks = useRef<PersistedComfyTask[]>(persistedComfyTasksFromStorage());
   const comfyOutputRootRef = useRef(comfyOutputRoot);
   const comfyInputRootRef = useRef(comfyInputRoot);
@@ -753,12 +713,8 @@ function CanvasWorkspace() {
   }, [edges, nodes]);
 
   useEffect(() => () => {
-    for (const preview of liveComfyPreviews.current.values()) URL.revokeObjectURL(preview.url);
     liveComfyPreviews.current.clear();
-    for (const urls of staleLiveComfyPreviewUrls.current.values()) {
-      for (const url of urls) URL.revokeObjectURL(url);
-    }
-    staleLiveComfyPreviewUrls.current.clear();
+    livePreviewResources.clear();
   }, []);
 
   const contentNodes = useMemo(() => {
@@ -963,67 +919,6 @@ function CanvasWorkspace() {
   useEffect(() => {
     h3WorkflowPathRef.current = h3WorkflowPath;
   }, [h3WorkflowPath]);
-
-  useEffect(() => {
-    let disposed = false;
-    let timer: number | null = null;
-    const poll = async () => {
-      try {
-        const summary = await invoke<ComfyQueueSummary>("get_comfyui_queue_summary", {
-          serverUrl: comfyUiServerUrl,
-        });
-        if (!disposed) setComfyQueueCounts(summary);
-      } catch {
-        // Global queue visibility is supplemental and must not interrupt editing or generation.
-      }
-      if (!disposed) timer = window.setTimeout(() => void poll(), 1200);
-    };
-    void poll();
-    return () => {
-      disposed = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [comfyUiServerUrl]);
-
-  useEffect(() => {
-    let disposed = false;
-    let socket: WebSocket | null = null;
-    let reconnectTimer: number | null = null;
-    const monitorClientId = `infinite-canvas-gpu-monitor-${crypto.randomUUID()}`;
-
-    const reconnect = () => {
-      if (disposed) return;
-      reconnectTimer = window.setTimeout(() => void connect(), 3000);
-    };
-    const connect = async () => {
-      const nextSocket = await openComfyProgressSocket(monitorClientId, comfyUiServerUrl);
-      if (disposed) {
-        nextSocket?.close();
-        return;
-      }
-      if (!nextSocket) {
-        reconnect();
-        return;
-      }
-      socket = nextSocket;
-      nextSocket.addEventListener("message", (event) => {
-        const nextMonitor = comfyGpuMonitorFromSocketData(event.data);
-        if (nextMonitor) setComfyGpuMonitor(nextMonitor);
-      });
-      nextSocket.addEventListener("close", () => {
-        if (socket === nextSocket) socket = null;
-        reconnect();
-      }, { once: true });
-    };
-
-    setComfyGpuMonitor(null);
-    void connect();
-    return () => {
-      disposed = true;
-      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-      if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
-    };
-  }, [comfyUiServerUrl]);
 
   const defaultH3WorkflowModuleId = workflowModuleDefaults["video-generation:reference-to-video"] ?? "";
 
@@ -1623,7 +1518,9 @@ function CanvasWorkspace() {
     replacement: WorkflowModuleRecord,
   ) => {
     const records = new Map<string, NodeRecord>();
-    for (const project of projects) {
+    // Summary content is deliberately incomplete; writes require fresh full records.
+    const fullProjects = await invoke<WorkspaceSnapshot[]>("list_projects");
+    for (const project of fullProjects) {
       for (const record of project.nodes) records.set(record.id, record);
     }
     for (const node of nodesSnapshot.current) records.set(node.id, node.data.record);
@@ -3484,7 +3381,7 @@ function CanvasWorkspace() {
       secondaryBrightness: moduleParameters.secondaryBrightness,
       secondaryContrast: moduleParameters.secondaryContrast,
       secondarySaturation: moduleParameters.secondarySaturation,
-      diffusionModelName: moduleParameters.diffusionModelName,
+      diffusionModelName: nodeH3DiffusionModelName(generator.content, moduleParameters.diffusionModelName),
       loraName: h3LoraNameFromContent(generator.content),
       loraStrength: h3LoraStrengthFromContent(generator.content),
       loraStrengthRecorded: true,
@@ -3844,26 +3741,19 @@ function CanvasWorkspace() {
     window.dispatchEvent(new CustomEvent(LIVE_COMFY_PREVIEW_EVENT, {
       detail: { nodeId: placeholderNodeId },
     }));
-    if (previousPreview) URL.revokeObjectURL(previousPreview.url);
-    for (const url of staleLiveComfyPreviewUrls.current.get(placeholderNodeId) ?? []) {
-      URL.revokeObjectURL(url);
-    }
-    staleLiveComfyPreviewUrls.current.delete(placeholderNodeId);
+    if (previousPreview) livePreviewResources.retire(previousPreview.url);
   }, []);
 
   const showGenerationLivePreview = useCallback((placeholderNodeId: string, image: Blob) => {
     if (completedGenerationPlaceholders.current.has(placeholderNodeId)) return;
     const previousPreview = liveComfyPreviews.current.get(placeholderNodeId);
-    const nextUrl = URL.createObjectURL(image);
+    const nextUrl = livePreviewResources.create(image);
+    if (!nextUrl) return;
     liveComfyPreviews.current.set(placeholderNodeId, { url: nextUrl, mimeType: image.type });
     window.dispatchEvent(new CustomEvent(LIVE_COMFY_PREVIEW_EVENT, {
       detail: { nodeId: placeholderNodeId, url: nextUrl, mimeType: image.type },
     }));
-    if (previousPreview) {
-      const staleUrls = staleLiveComfyPreviewUrls.current.get(placeholderNodeId) ?? [];
-      staleUrls.push(previousPreview.url);
-      staleLiveComfyPreviewUrls.current.set(placeholderNodeId, staleUrls);
-    }
+    if (previousPreview) livePreviewResources.retire(previousPreview.url);
   }, []);
 
   const finalizeGenerationPlaceholder = useCallback(async (
@@ -4274,15 +4164,16 @@ function CanvasWorkspace() {
       if (cancelledComfyClients.current.has(clientId)) {
         throw new Error("ComfyUI 生成已取消");
       }
+      const receivePreview = createComfyPreviewReceiver(
+        livePreviewNodeId,
+        () => Boolean(livePreviewNodeId) && activeProjectIdRef.current === target.canvasId
+          && !document.hidden && !cancelledComfyClients.current.has(clientId)
+          && !completedGenerationPlaceholders.current.has(placeholder.id),
+        (image) => showGenerationLivePreview(placeholder.id, image),
+      );
       progressSocket?.addEventListener("message", (event) => {
         if (cancelledComfyClients.current.has(clientId)) return;
-        if (livePreviewNodeId) {
-          void comfyPreviewImageBlobFromSocketData(event.data, livePreviewNodeId).then((image) => {
-            if (image && !cancelledComfyClients.current.has(clientId)) {
-              showGenerationLivePreview(placeholder.id, image);
-            }
-          });
-        }
+        receivePreview(event.data);
         if (typeof event.data !== "string") return;
         const update = comfyProgressFromSocketData(event.data);
         if (!update) return;
@@ -4935,9 +4826,14 @@ function CanvasWorkspace() {
         promptOptions.push(currentTextOption);
       }
     }
-    const savedSettings = useSnapshotSettings ? null : loadVideoRegenerationSettings();
+    const presetCollection = loadVideoRegenerationPresets(window.localStorage, videoRegenerationSettingsFromValue);
+    const defaultPreset = useSnapshotSettings ? undefined : presetCollection.presets.find(
+      (preset) => preset.id === presetCollection.defaultPresetId,
+    );
+    const savedSettings = defaultPreset?.settings;
+    setVideoRegenerationPresets(presetCollection);
     setVideoRegenerationInformationOpen(false);
-    setVideoRegenerationDraft({
+    const draft: VideoRegenerationDraft = {
       useSnapshotSettings,
       previewId,
       previewTitle: preview.title || "视频预览",
@@ -4960,23 +4856,89 @@ function CanvasWorkspace() {
       ...(savedSettings && workflowUsesSharedPrimarySteps(workflowModule)
         ? { primaryAudioSteps: savedSettings.primaryVideoSteps }
         : {}),
-    });
+    };
+    const selectedPreset = useSnapshotSettings
+      ? matchingVideoRegenerationPreset(presetCollection, videoRegenerationSettingsFromValue(draft))
+      : defaultPreset;
+    setSelectedVideoRegenerationPresetId(selectedPreset?.id ?? "");
+    setVideoRegenerationPresetName(selectedPreset?.name ?? "");
+    setVideoRegenerationDraft(draft);
   }, [workflowModules]);
 
-  const saveVideoRegenerationSettings = useCallback(() => {
+  const persistVideoRegenerationPresets = useCallback((collection: VideoRegenerationPresetCollection) => {
+    try {
+      saveVideoRegenerationPresets(window.localStorage, collection);
+      setVideoRegenerationPresets(collection);
+      return true;
+    } catch {
+      setNotice("预设保存失败，请重试");
+      return false;
+    }
+  }, []);
+
+  const selectVideoRegenerationPreset = useCallback((id: string) => {
+    const preset = videoRegenerationPresets.presets.find((entry) => entry.id === id);
+    if (!preset) return;
+    setSelectedVideoRegenerationPresetId(id);
+    setVideoRegenerationPresetName(preset.name);
+    setVideoRegenerationDraft((current) => {
+      if (!current) return current;
+      const module = workflowModules.find((entry) => entry.id === current.originalSnapshot.workflowModuleId);
+      return {
+        ...current,
+        ...preset.settings,
+        styleLoras: preset.settings.styleLoras.map((slot) => ({ ...slot })),
+        primaryAudioSteps: workflowUsesSharedPrimarySteps(module)
+          ? preset.settings.primaryVideoSteps : preset.settings.primaryAudioSteps,
+        useSnapshotSettings: false,
+      };
+    });
+  }, [videoRegenerationPresets, workflowModules]);
+
+  const saveVideoRegenerationSettings = useCallback((asNew = false) => {
     if (!videoRegenerationDraft) return;
     const settings = videoRegenerationSettingsFromValue(videoRegenerationDraft);
     if (!settings) {
       setNotice("无法保存：请检查参数范围、采样步数和风格 LoRA 设置");
       return;
     }
-    try {
-      window.localStorage.setItem(VIDEO_REGENERATION_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-      setNotice("设置已保存，下次 Ctrl＋重新生成将自动套用；普通重新生成不受影响");
-    } catch {
-      setNotice("设置保存失败，请重试");
+    const id = asNew || !selectedVideoRegenerationPresetId
+      ? crypto.randomUUID() : selectedVideoRegenerationPresetId;
+    const name = videoRegenerationPresetName.trim() || `预设 ${videoRegenerationPresets.presets.length + 1}`;
+    const preset = { id, name, settings };
+    const existing = videoRegenerationPresets.presets.some((entry) => entry.id === id);
+    const next = {
+      presets: existing
+        ? videoRegenerationPresets.presets.map((entry) => entry.id === id ? preset : entry)
+        : [...videoRegenerationPresets.presets, preset],
+      defaultPresetId: videoRegenerationPresets.presets.length
+        ? videoRegenerationPresets.defaultPresetId : id,
+    };
+    if (!persistVideoRegenerationPresets(next)) return;
+    setSelectedVideoRegenerationPresetId(id);
+    setVideoRegenerationPresetName(name);
+    setNotice(`预设“${name}”已保存${next.defaultPresetId === id ? "，下次 Ctrl＋重新生成自动套用" : ""}`);
+  }, [videoRegenerationDraft, selectedVideoRegenerationPresetId, videoRegenerationPresetName, videoRegenerationPresets, persistVideoRegenerationPresets]);
+
+  const setDefaultVideoRegenerationPreset = useCallback(() => {
+    if (!videoRegenerationPresets.presets.some((preset) => preset.id === selectedVideoRegenerationPresetId)) return;
+    if (persistVideoRegenerationPresets({ ...videoRegenerationPresets, defaultPresetId: selectedVideoRegenerationPresetId })) {
+      setNotice("已设为默认预设，下次 Ctrl＋重新生成自动套用其已保存参数");
     }
-  }, [videoRegenerationDraft]);
+  }, [videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
+
+  const deleteVideoRegenerationPreset = useCallback(() => {
+    if (!selectedVideoRegenerationPresetId) return;
+    const wasDefault = videoRegenerationPresets.defaultPresetId === selectedVideoRegenerationPresetId;
+    const next = {
+      presets: videoRegenerationPresets.presets.filter((preset) => preset.id !== selectedVideoRegenerationPresetId),
+      defaultPresetId: wasDefault ? "" : videoRegenerationPresets.defaultPresetId,
+    };
+    if (!persistVideoRegenerationPresets(next)) return;
+    setSelectedVideoRegenerationPresetId("");
+    setVideoRegenerationPresetName("");
+    setNotice(wasDefault ? "默认预设已删除，下次打开使用视频生成快照；可重新指定默认预设" : "预设已删除，当前编辑参数保留");
+  }, [videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
 
   const adjustVideoRegenerationNumber = useCallback((
     field: VideoRegenerationNumericField,
@@ -5159,10 +5121,7 @@ function CanvasWorkspace() {
           workflowModule.defaults.secondarySchedulerSteps,
         )
         : baseSnapshot.secondarySchedulerSteps,
-      secondaryLoraStrength: sourceGenerator?.kind === "video-generation"
-        ? h3SecondaryLoraStrengthFromContent(sourceGenerator.content)
-        : baseSnapshot.secondaryLoraStrength,
-      secondaryLoraBypassed: true,
+      secondaryLoraStrength: 0,
       secondaryBrightness: workflowModule.defaults.secondaryBrightness,
       secondaryContrast: workflowModule.defaults.secondaryContrast,
       secondarySaturation: workflowModule.defaults.secondarySaturation,
@@ -5261,7 +5220,7 @@ function CanvasWorkspace() {
     }
     const snapshot: GenerationSnapshot = {
       ...baseSnapshot,
-      diffusionModelName: workflowModule.defaults.diffusionModelName,
+      diffusionModelName: baseSnapshot.diffusionModelName,
       secondaryResolutionMegapixels: sourceGenerator?.kind === "video-generation"
         ? secondaryVideoResolutionFromContent(sourceGenerator.content)
         : baseSnapshot.secondaryResolutionMegapixels,
@@ -5417,8 +5376,8 @@ function CanvasWorkspace() {
       progressSocket?.addEventListener("message", (event) => {
         if (cancelledComfyClients.current.has(clientId) || typeof event.data !== "string") return;
         try {
-          const message = JSON.parse(event.data) as JsonObject;
-          if (!message.data || typeof message.data !== "object") return;
+          const message = comfyStatusMessage(event.data);
+          if (!message || !message.data || typeof message.data !== "object") return;
           const data = message.data as JsonObject;
           const updateProgress = (progress: number | null, validationMessage: string) => {
             const latest = nodesSnapshot.current.find(
@@ -5719,14 +5678,15 @@ function CanvasWorkspace() {
       setNotice("2采亮度、对比度和饱和度必须在 0.00 到 3.00 之间");
       return;
     }
+    const secondaryLoraStrength = Math.round(draft.secondaryLoraStrength * 100) / 100;
     const overrides: SecondarySampleOverrides = {
       secondaryResolutionMegapixels: Math.round(draft.secondaryResolutionMegapixels * 10) / 10,
-      secondaryLoraStrength: Math.round(draft.secondaryLoraStrength * 100) / 100,
+      secondaryLoraStrength,
       secondarySchedulerSteps: draft.secondarySchedulerSteps,
       secondaryBrightness: Math.round(draft.secondaryBrightness * 100) / 100,
       secondaryContrast: Math.round(draft.secondaryContrast * 100) / 100,
       secondarySaturation: Math.round(draft.secondarySaturation * 100) / 100,
-      secondaryLoraBypassed: draft.secondaryLoraBypassed,
+      secondaryLoraBypassed: secondaryLoraStrength === 0,
       refImageSize: draft.refImageSize,
     };
     setSecondarySampleDraft(null);
@@ -6197,6 +6157,7 @@ function CanvasWorkspace() {
           textInputs: [],
           promptNodeTitle: "",
           h3LoraOptions,
+          h3DiffusionModelOptions,
           krea2LoraOptions,
           workflowModules,
           workflowModuleDefaults,
@@ -6235,7 +6196,7 @@ function CanvasWorkspace() {
         },
       };
     },
-    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -6713,13 +6674,17 @@ function CanvasWorkspace() {
         const livePreviewNodeId = !isImageComfyTask(task) && !isSecondaryComfyTask(task)
           ? livePreviewNodeIdForBindings(workflowModule?.bindings)
           : "";
+        const receivePreview = createComfyPreviewReceiver(
+          livePreviewNodeId,
+          () => Boolean(livePreviewNodeId && task.placeholderNodeId) && !disposed
+            && !document.hidden && activeProjectIdRef.current === task.canvasId
+            && !completedGenerationPlaceholders.current.has(task.placeholderNodeId!)
+            && !cancelledComfyClients.current.has(task.clientId),
+          (image) => showGenerationLivePreview(task.placeholderNodeId!, image),
+        );
         socket.addEventListener("message", (event) => {
           if (disposed) return;
-          if (livePreviewNodeId && task.placeholderNodeId) {
-            void comfyPreviewImageBlobFromSocketData(event.data, livePreviewNodeId).then((image) => {
-              if (!disposed && image) showGenerationLivePreview(task.placeholderNodeId!, image);
-            });
-          }
+          receivePreview(event.data);
           if (typeof event.data !== "string") return;
           const update = comfyProgressFromSocketData(event.data);
           if (!update) return;
@@ -7419,7 +7384,7 @@ function CanvasWorkspace() {
   const returnToProjects = useCallback(async () => {
     try {
       await flushPendingPatches();
-      const snapshots = await invoke<WorkspaceSnapshot[]>("list_projects");
+      const snapshots = await invoke<WorkspaceSnapshot[]>("list_project_summaries");
       undoStack.current = [];
       try {
         await invoke<number>("cleanup_resize_images");
@@ -7539,7 +7504,13 @@ function CanvasWorkspace() {
     }
   }, [deletingProjectId, projectToDelete, reportError]);
 
+  const canvasEventHandlers = useRef({ makeFlowNode, reportError, scheduleContentGraphReconciliation, screenToFlowPosition });
+  canvasEventHandlers.current = { makeFlowNode, reportError, scheduleContentGraphReconciliation, screenToFlowPosition };
   useEffect(() => {
+    const makeFlowNode = (...args: Parameters<typeof canvasEventHandlers.current.makeFlowNode>) => canvasEventHandlers.current.makeFlowNode(...args);
+    const reportError = (error: unknown) => canvasEventHandlers.current.reportError(error);
+    const scheduleContentGraphReconciliation = (canvasId: string) => canvasEventHandlers.current.scheduleContentGraphReconciliation(canvasId);
+    const screenToFlowPosition = (...args: Parameters<typeof canvasEventHandlers.current.screenToFlowPosition>) => canvasEventHandlers.current.screenToFlowPosition(...args);
     let mounted = true;
     let unlistenCreated: (() => void) | undefined;
     let unlistenCreatedBatch: (() => void) | undefined;
@@ -7550,7 +7521,7 @@ function CanvasWorkspace() {
     const load = async () => {
       try {
         const [snapshots, runtimeInfo] = await Promise.all([
-          invoke<WorkspaceSnapshot[]>("list_projects"),
+          invoke<WorkspaceSnapshot[]>("list_project_summaries"),
           invoke<RuntimeInfo>("get_runtime_info"),
         ]);
         if (!mounted) return;
@@ -7559,6 +7530,7 @@ function CanvasWorkspace() {
         setProjectHomeReady(true);
 
         unlistenCreated = await listen<NodeRecord>("canvas://node-created", (event) => {
+          if (!mounted) return;
           void (async () => {
             let record = event.payload;
             if (activeProjectIdRef.current === record.canvasId) {
@@ -7606,6 +7578,7 @@ function CanvasWorkspace() {
             setNotice(`已接收来自 ${record.source} 的新节点`);
           })();
         });
+        if (!mounted) { unlistenCreated(); return; }
         unlistenCreatedBatch = await listen<NodeRecord[]>("canvas://nodes-created", (event) => {
           void (async () => {
             if (!mounted || !event.payload.length) return;
@@ -7712,6 +7685,7 @@ function CanvasWorkspace() {
             setNotice(`已接收 ${visibleRecords.length} 个内容节点`);
           })();
         });
+        if (!mounted) { unlistenCreatedBatch(); return; }
         unlistenUpdated = await listen<NodeRecord>("canvas://node-updated", (event) => {
           if (!mounted) return;
           const record = event.payload;
@@ -7744,6 +7718,7 @@ function CanvasWorkspace() {
           });
           setNotice(`已接收来自 ${record.source} 的提示词新版本`);
         });
+        if (!mounted) { unlistenUpdated(); return; }
         unlistenEdgeCreated = await listen<EdgeRecord>("canvas://edge-created", (event) => {
           if (!mounted) return;
           const record = event.payload;
@@ -7762,6 +7737,7 @@ function CanvasWorkspace() {
           scheduleContentGraphReconciliation(record.canvasId);
           setNotice("内容关系已连接");
         });
+        if (!mounted) { unlistenEdgeCreated(); return; }
         unlistenEdgeDeleted = await listen<string>("canvas://edge-deleted", (event) => {
           if (!mounted) return;
           const edgeId = event.payload;
@@ -7776,6 +7752,7 @@ function CanvasWorkspace() {
           if (deletedCanvasId) scheduleContentGraphReconciliation(deletedCanvasId);
           setNotice("内容关系已断开");
         });
+        if (!mounted) { unlistenEdgeDeleted(); return; }
       } catch (error) {
         reportError(error);
       }
@@ -7790,7 +7767,7 @@ function CanvasWorkspace() {
       unlistenEdgeCreated?.();
       unlistenEdgeDeleted?.();
     };
-  }, [makeFlowNode, reportError, scheduleContentGraphReconciliation, screenToFlowPosition, setEdges, setNodes]);
+  }, [setEdges, setNodes]);
 
   const addTextNode = useCallback(async (position?: { x: number; y: number }) => {
     if (!activeProjectId) return;
@@ -9136,6 +9113,8 @@ function CanvasWorkspace() {
     [activeProjectId, finishNodePlacementReservation, makeFlowNode, reserveNodePlacement, screenToFlowPosition, setNodes],
   );
 
+  const dropEventHandlers = useRef({ importMedia, reportError });
+  dropEventHandlers.current = { importMedia, reportError };
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -9163,19 +9142,20 @@ function CanvasWorkspace() {
         setDropActive(false);
         if (!paths.length) return;
         const ratio = window.devicePixelRatio || 1;
-        void importMedia(paths, {
+        void dropEventHandlers.current.importMedia(paths, {
           x: event.payload.position.x / ratio,
           y: event.payload.position.y / ratio,
         });
       });
+      if (disposed) unlisten();
     };
 
-    void registerDropHandler().catch(reportError);
+    void registerDropHandler().catch((error) => dropEventHandlers.current.reportError(error));
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, [importMedia, reportError]);
+  }, []);
 
   const connectionValidationError = useCallback(
     (
@@ -9939,6 +9919,7 @@ function CanvasWorkspace() {
           && previousData.textInputCount === connectedText.length
           && previousData.textInputs === textInputs
           && previousData.promptNodeTitle === promptNodeTitle
+          && previousData.h3DiffusionModelOptions === h3DiffusionModelOptions
           && previousData.h3LoraOptions === h3LoraOptions
           && previousData.krea2LoraOptions === krea2LoraOptions
           && previousData.workflowModules === workflowModules
@@ -9961,6 +9942,7 @@ function CanvasWorkspace() {
             textInputs,
             promptNodeTitle,
             h3LoraOptions,
+            h3DiffusionModelOptions,
             krea2LoraOptions,
             workflowModules,
             workflowModuleDefaults,
@@ -9975,7 +9957,7 @@ function CanvasWorkspace() {
       visibleNodeCache.current = nextCache;
       return results;
     },
-    [activeComfyTaskCounts, contentNodes, edges, h3LoraOptions, krea2LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [activeComfyTaskCounts, contentNodes, edges, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
   );
 
   const updateGuideOverlays = useCallback((nextAlignment: AlignmentGuide[], nextSpacing: SpacingGuide[]) => {
@@ -10196,27 +10178,7 @@ function CanvasWorkspace() {
     setSettingsOpen(true);
   };
 
-  const comfyQueueIndicator = comfyQueueCounts.totalCount > 0 ? (
-    <span
-      className="comfy-queue-summary"
-      title={`当前 ${comfyQueueCounts.totalCount} 个任务，${comfyQueueCounts.runningCount} 个正在执行，${comfyQueueCounts.pendingCount} 个等待中`}
-      aria-label={`当前 ${comfyQueueCounts.totalCount} 个任务，${comfyQueueCounts.runningCount} 个正在执行，${comfyQueueCounts.pendingCount} 个等待中`}
-    >
-      <span aria-hidden="true" />
-      {comfyQueueCounts.totalCount}
-    </span>
-  ) : null;
-
-  const comfyGpuIndicator = comfyGpuMonitor ? (
-    <span
-      className="comfy-gpu-summary"
-      aria-label={`ComfyUI GPU 温度 ${Math.round(comfyGpuMonitor.temperatureCelsius)} 摄氏度，显存占用 ${(comfyGpuMonitor.vramUsedBytes / 1024 ** 3).toFixed(1)}/${(comfyGpuMonitor.vramTotalBytes / 1024 ** 3).toFixed(1)} GiB`}
-    >
-      <Thermometer size={14} aria-hidden="true" />
-      <strong>{Math.round(comfyGpuMonitor.temperatureCelsius)}°C</strong>
-      <span>VRAM {(comfyGpuMonitor.vramUsedBytes / 1024 ** 3).toFixed(1)}/{(comfyGpuMonitor.vramTotalBytes / 1024 ** 3).toFixed(1)} GiB</span>
-    </span>
-  ) : null;
+  const comfyQueueIndicator = <ComfyStatusIndicators serverUrl={comfyUiServerUrl} showGpu={Boolean(activeProjectId)} />;
 
   const privateProjectCount = projects.filter((project) => project.canvas.isPrivate).length;
   const normalizedPrivateProjectSearch = privateProjectSearch.trim().toLocaleLowerCase();
@@ -10421,7 +10383,7 @@ function CanvasWorkspace() {
                 }}
               >
                 <SlidersHorizontal size={16} />
-                <span><strong>视频模型参数</strong><small>模型、音频与画面</small></span>
+                <span><strong>默认模型设置</strong><small>模型、音频与画面</small></span>
               </button>
               <button
                 type="button"
@@ -10626,7 +10588,7 @@ function CanvasWorkspace() {
                 )}
                 {activeSettingsSection === "video-model" && (
                   <button type="submit" className="primary-button">
-                    保存视频模型参数
+                    保存默认参数
                   </button>
                 )}
                 {activeSettingsSection === "image-model" && (
@@ -10927,6 +10889,7 @@ function CanvasWorkspace() {
         proOptions={{ hideAttribution: true }}
         fitView
       >
+        <VideoPosterViewportCache />
         <Background
           variant={BackgroundVariant.Dots}
           gap={CANVAS_GRID_SIZE}
@@ -11082,7 +11045,6 @@ function CanvasWorkspace() {
 
         <Panel position="top-right" className="api-panel">
           {comfyQueueIndicator}
-          {comfyGpuIndicator}
           <span className="live-indicator"><Radio size={14} /> 本地 API</span>
           <label className="canvas-color-picker" title="选择当前项目的画布背景颜色">
             <Palette size={14} />
@@ -11255,514 +11217,32 @@ function CanvasWorkspace() {
         </div>,
         document.body,
       )}
-      {videoRegenerationDraft && createPortal(
-        <div
-          className="project-dialog-backdrop"
-          onMouseDown={() => setVideoRegenerationDraft(null)}
-        >
-          <form
-            ref={videoRegenerationDialogRef}
-            className="project-dialog video-regeneration-dialog"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void submitConfiguredVideoRegeneration();
-            }}
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <div className="project-dialog-icon"><RotateCcw size={21} /></div>
-            <div>
-              <h2>选择提示词并重新生成</h2>
-              <p>{videoRegenerationDraft.useSnapshotSettings
-                ? `正在使用“${videoRegenerationDraft.previewTitle}”生成时记录的参数、提示词与 Seed，不套用已保存设置。`
-                : `提示词与 Seed 来自“${videoRegenerationDraft.previewTitle}”；参数优先套用已保存设置，未保存时使用生成快照。`}</p>
-            </div>
-            <div className="video-regeneration-fields">
-              <label className="video-regeneration-prompt-field">
-                提示词版本
-                <div className="video-regeneration-prompt-controls">
-                  <SettingsSelect
-                    value={videoRegenerationDraft.selectedPromptKey}
-                    options={videoRegenerationDraft.promptOptions.map((option) => ({
-                      value: option.key,
-                      label: option.label,
-                    }))}
-                    onChange={(selectedPromptKey) => {
-                      setVideoRegenerationInformationOpen(false);
-                      setVideoRegenerationDraft((current) => current && ({
-                        ...current,
-                        selectedPromptKey,
-                      }));
-                    }}
-                    ariaLabel="重新生成提示词版本"
-                  />
-                  <button
-                    type="button"
-                    className="video-regeneration-information-button"
-                    onClick={() => setVideoRegenerationInformationOpen(true)}
-                    title="查看当前提示词版本的备注"
-                    aria-label="查看当前提示词版本的备注"
-                  >
-                    <StickyNote size={14} />
-                    <span>查看备注</span>
-                  </button>
-                </div>
-              </label>
-              <label>
-                Seed
-                <div className="video-regeneration-seed">
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={20}
-                    value={videoRegenerationDraft.seed}
-                    onChange={(event) => setVideoRegenerationDraft((current) => current && ({
-                      ...current,
-                      seed: event.currentTarget.value.replace(/\D/g, ""),
-                    }))}
-                    aria-label="重新生成 Seed"
-                    spellCheck={false}
-                  />
-                  <button
-                    type="button"
-                    title="随机生成新 Seed"
-                    aria-label="随机生成新 Seed"
-                    onClick={() => setVideoRegenerationDraft((current) => {
-                      if (!current) return current;
-                      let seed = randomFixedSeed();
-                      while (seed === current.seed) seed = randomFixedSeed();
-                      return { ...current, seed };
-                    })}
-                  >
-                    <Dices size={14} />
-                  </button>
-                </div>
-              </label>
-              <label>
-                时长（秒）
-                <ModelParameterNumberInput
-                  regenerationField="durationSeconds"
-                  min={2}
-                  max={15}
-                  step={1}
-                  value={videoRegenerationDraft.durationSeconds}
-                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    durationSeconds: value,
-                  }))}
-                />
-              </label>
-              <label>
-                1采分辨率（MP）
-                <ModelParameterNumberInput
-                  regenerationField="primaryResolutionMegapixels"
-                  min={0.2}
-                  max={2}
-                  step={0.1}
-                  value={videoRegenerationDraft.primaryResolutionMegapixels}
-                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    primaryResolutionMegapixels: value,
-                  }))}
-                />
-              </label>
-              {videoRegenerationWorkflowModule?.bindings.primaryUpscaleNodeId?.trim() && <label>
-                放大倍率（×）
-                <ModelParameterNumberInput
-                  regenerationField="primaryUpscaleFactor"
-                  min={1}
-                  max={4}
-                  step={0.1}
-                  value={videoRegenerationDraft.primaryUpscaleFactor}
-                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    primaryUpscaleFactor: value,
-                  }))}
-                />
-              </label>}
-              <label>
-                1采 LoRA 强度
-                <ModelParameterNumberInput
-                  regenerationField="loraStrength"
-                  min={0}
-                  max={10}
-                  step={0.01}
-                  value={videoRegenerationDraft.loraStrength}
-                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    loraStrength: value,
-                  }))}
-                />
-              </label>
-              <label>
-                Video Steps
-                <ModelParameterNumberInput
-                  regenerationField="primaryVideoSteps"
-                  min={1}
-                  max={1000}
-                  step={1}
-                  value={videoRegenerationDraft.primaryVideoSteps}
-                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    primaryVideoSteps: value,
-                    primaryAudioSteps: videoRegenerationUsesSharedPrimarySteps
-                      ? value
-                      : current.primaryAudioSteps,
-                  }))}
-                />
-              </label>
-              {!videoRegenerationUsesSharedPrimarySteps && <label>
-                Audio Steps
-                <ModelParameterNumberInput
-                  regenerationField="primaryAudioSteps"
-                  min={1}
-                  max={1000}
-                  step={1}
-                  value={videoRegenerationDraft.primaryAudioSteps}
-                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    primaryAudioSteps: value,
-                  }))}
-                />
-              </label>}
-              <label>
-                亮度
-                <ModelParameterNumberInput
-                  regenerationField="primaryBrightness"
-                  min={0}
-                  max={3}
-                  step={0.05}
-                  value={videoRegenerationDraft.primaryBrightness}
-                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    primaryBrightness: value,
-                  }))}
-                />
-              </label>
-              <label>
-                对比度
-                <ModelParameterNumberInput
-                  regenerationField="primaryContrast"
-                  min={0}
-                  max={3}
-                  step={0.05}
-                  value={videoRegenerationDraft.primaryContrast}
-                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    primaryContrast: value,
-                  }))}
-                />
-              </label>
-              <label>
-                饱和度
-                <ModelParameterNumberInput
-                  regenerationField="primarySaturation"
-                  min={0}
-                  max={3}
-                  step={0.05}
-                  value={videoRegenerationDraft.primarySaturation}
-                  onChange={(value) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    primarySaturation: value,
-                  }))}
-                />
-              </label>
-              <fieldset className="video-regeneration-ref-mode">
-                <legend>参考图模式</legend>
-                <div>
-                  {REF_IMAGE_SIZE_OPTIONS.map((option) => (
-                    <button
-                      key={option}
-                      type="button"
-                      className={videoRegenerationDraft.refImageSize === option ? "is-active" : ""}
-                      onClick={() => setVideoRegenerationDraft((current) => current && ({
-                        ...current,
-                        refImageSize: option,
-                      }))}
-                    >
-                      {option}
-                    </button>
-                  ))}
-                </div>
-              </fieldset>
-            </div>
-            <div className="video-regeneration-style-loras">
-              <StyleLoraEditor
-                slots={videoRegenerationDraft.styleLoras}
-                options={h3LoraOptions}
-                hasSecondStage={Boolean(videoRegenerationWorkflowModule?.adapter.bindings.livePreviewNodeId)}
-                onChange={(styleLoras) => setVideoRegenerationDraft((current) => current && ({ ...current, styleLoras }))}
-              />
-            </div>
-            <p className="video-regeneration-note">
-              可临时选择关联提示词节点中的其他版本并调整时长；不会切换提示词节点的当前版本。参考图片及首尾帧角色始终读取原视频生成节点当前连接的最新状态；模型、基础 LoRA 和画面比例沿用当前视频的历史快照；点击“保存设置”可记住时长、分辨率、放大倍率、LoRA 强度、采样步数、色彩、参考图模式和风格 LoRA，供下次 Ctrl＋重新生成使用；普通重新生成不受影响。提示词与 Seed 不纳入保存，Seed 默认保持所选视频的值。
-            </p>
-            <div className="project-dialog-actions">
-              <button type="button" className="dialog-cancel video-regeneration-save-settings" onClick={saveVideoRegenerationSettings}>
-                保存设置
-              </button>
-              <button type="button" className="dialog-cancel" onClick={() => setVideoRegenerationDraft(null)}>
-                取消
-              </button>
-              <button type="submit" className="primary-button">
-                <RotateCcw size={13} />
-                生成
-              </button>
-            </div>
-          </form>
-        </div>,
-        document.body,
-      )}
-      {videoRegenerationInformationOpen && videoRegenerationDraft && createPortal(
-        <div
-          className="expanded-editor-backdrop"
-          onMouseDown={() => setVideoRegenerationInformationOpen(false)}
-        >
-          <section
-            className="expanded-editor-dialog is-prompt-version is-readonly"
-            role="dialog"
-            aria-modal="true"
-            aria-label="重新生成提示词与备注"
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <header className="expanded-editor-header">
-              <span className="node-kind-icon"><FileText size={15} /></span>
-              <div>
-                <strong>{selectedVideoRegenerationPrompt?.label ?? "提示词版本"}</strong>
-                <span>当前选择版本 · 只读</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setVideoRegenerationInformationOpen(false)}
-                title="关闭"
-                aria-label="关闭提示词与备注查看窗口"
-              >
-                <X size={17} />
-              </button>
-            </header>
-            <div className="expanded-prompt-layout">
-              <section className="expanded-prompt-pane is-prompt">
-                <header>
-                  <strong>提示词</strong>
-                  <span>{(selectedVideoRegenerationPrompt?.prompt ?? "").length.toLocaleString()} 字符</span>
-                </header>
-                <textarea
-                  className="expanded-text-editor"
-                  value={selectedVideoRegenerationPrompt?.prompt ?? ""}
-                  readOnly
-                  spellCheck={false}
-                  placeholder="未记录提示词"
-                  aria-label="当前提示词版本的提示词，只读"
-                />
-              </section>
-              <section className="expanded-prompt-pane is-information">
-                <header>
-                  <strong>备注</strong>
-                  <span>{(selectedVideoRegenerationPrompt?.information ?? "").length.toLocaleString()} 字符</span>
-                </header>
-                <textarea
-                  className="expanded-text-editor"
-                  value={selectedVideoRegenerationPrompt?.information ?? ""}
-                  readOnly
-                  spellCheck={false}
-                  placeholder="该提示词版本未填写备注"
-                  aria-label="当前提示词版本的备注，只读"
-                />
-              </section>
-            </div>
-          </section>
-        </div>,
-        document.body,
-      )}
-      {secondarySampleDraft && createPortal(
-        <div
-          className="project-dialog-backdrop"
-          onMouseDown={() => setSecondarySampleDraft(null)}
-        >
-          <form
-            ref={secondarySampleDialogRef}
-            className="project-dialog video-regeneration-dialog secondary-sample-dialog"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void submitConfiguredSecondarySample();
-            }}
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <div className="project-dialog-icon"><Sparkles size={21} /></div>
-            <div>
-              <h2>调整2采参数</h2>
-              <p>默认使用“{secondarySampleDraft.previewTitle}”当前可用的2采设置，只覆盖下列项目。</p>
-            </div>
-            <div className="video-regeneration-fields">
-              <label>
-                Seed
-                <div className="video-regeneration-seed">
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={20}
-                    value={secondarySampleDraft.seed}
-                    onChange={(event) => setSecondarySampleDraft((current) => current && ({
-                      ...current,
-                      seed: event.currentTarget.value.replace(/\D/g, ""),
-                    }))}
-                    aria-label="2采 Seed"
-                    spellCheck={false}
-                  />
-                  <button
-                    type="button"
-                    title="点击色子随机生成新 Seed"
-                    aria-label="随机生成新 Seed"
-                    onClick={() => setSecondarySampleDraft((current) => {
-                      if (!current) return current;
-                      let seed = randomFixedSeed();
-                      while (seed === current.seed) seed = randomFixedSeed();
-                      return { ...current, seed };
-                    })}
-                  >
-                    <Dices size={14} />
-                  </button>
-                </div>
-              </label>
-              <label>
-                2采分辨率（MP）
-                <ModelParameterNumberInput
-                  secondarySampleField="secondaryResolutionMegapixels"
-                  min={0.2}
-                  max={2}
-                  step={0.1}
-                  value={secondarySampleDraft.secondaryResolutionMegapixels}
-                  onChange={(value) => setSecondarySampleDraft((current) => current && ({
-                    ...current,
-                    secondaryResolutionMegapixels: value,
-                  }))}
-                />
-              </label>
-              <label>
-                2采 LoRA 强度
-                <div className={`secondary-sample-lora-control ${secondarySampleDraft.secondaryLoraBypassed ? "is-bypassed" : "is-enabled"}`}>
-                  <ModelParameterNumberInput
-                    secondarySampleField="secondaryLoraStrength"
-                    min={0}
-                    max={10}
-                    step={0.01}
-                    disabled={secondarySampleDraft.secondaryLoraBypassed}
-                    value={secondarySampleDraft.secondaryLoraStrength}
-                    onChange={(value) => setSecondarySampleDraft((current) => current && ({
-                      ...current,
-                      secondaryLoraStrength: value,
-                    }))}
-                  />
-                  <div className="secondary-sample-lora-inline-switch">
-                    <button
-                      type="button"
-                      className="video-lora-bypass-switch"
-                      role="switch"
-                      aria-checked={!secondarySampleDraft.secondaryLoraBypassed}
-                      aria-label="启用2采 LoRA"
-                      title={secondarySampleDraft.secondaryLoraBypassed
-                        ? "2采 LoRA 已关闭，点击启用"
-                        : "2采 LoRA 已启用，点击关闭"}
-                      onClick={() => setSecondarySampleDraft((current) => current && ({
-                        ...current,
-                        secondaryLoraBypassed: !current.secondaryLoraBypassed,
-                      }))}
-                    >
-                      <span aria-hidden="true" />
-                    </button>
-                  </div>
-                </div>
-              </label>
-              <label>
-                Scheduler Steps
-                <ModelParameterNumberInput
-                  secondarySampleField="secondarySchedulerSteps"
-                  min={1}
-                  max={10000}
-                  step={1}
-                  value={secondarySampleDraft.secondarySchedulerSteps}
-                  onChange={(value) => setSecondarySampleDraft((current) => current && ({
-                    ...current,
-                    secondarySchedulerSteps: value,
-                  }))}
-                />
-              </label>
-              <label>
-                亮度
-                <ModelParameterNumberInput
-                  secondarySampleField="secondaryBrightness"
-                  min={0}
-                  max={3}
-                  step={0.05}
-                  value={secondarySampleDraft.secondaryBrightness}
-                  onChange={(value) => setSecondarySampleDraft((current) => current && ({
-                    ...current,
-                    secondaryBrightness: value,
-                  }))}
-                />
-              </label>
-              <label>
-                对比度
-                <ModelParameterNumberInput
-                  secondarySampleField="secondaryContrast"
-                  min={0}
-                  max={3}
-                  step={0.05}
-                  value={secondarySampleDraft.secondaryContrast}
-                  onChange={(value) => setSecondarySampleDraft((current) => current && ({
-                    ...current,
-                    secondaryContrast: value,
-                  }))}
-                />
-              </label>
-              <label>
-                饱和度
-                <ModelParameterNumberInput
-                  secondarySampleField="secondarySaturation"
-                  min={0}
-                  max={3}
-                  step={0.05}
-                  value={secondarySampleDraft.secondarySaturation}
-                  onChange={(value) => setSecondarySampleDraft((current) => current && ({
-                    ...current,
-                    secondarySaturation: value,
-                  }))}
-                />
-              </label>
-              <fieldset className="video-regeneration-ref-mode">
-                <legend>参考图模式</legend>
-                <div>
-                  {REF_IMAGE_SIZE_OPTIONS.map((option) => (
-                    <button
-                      key={option}
-                      type="button"
-                      className={secondarySampleDraft.refImageSize === option ? "is-active" : ""}
-                      onClick={() => setSecondarySampleDraft((current) => current && ({
-                        ...current,
-                        refImageSize: option,
-                      }))}
-                    >
-                      {option}
-                    </button>
-                  ))}
-                </div>
-              </fieldset>
-            </div>
-            <p className="video-regeneration-note">
-              Seed 默认保持原视频数值，点击色子才会随机更换。2采 LoRA 默认关闭，其余提示词、素材、模型及 LoRA 文件保持原2采逻辑。
-            </p>
-            <div className="project-dialog-actions">
-              <button type="button" className="dialog-cancel" onClick={() => setSecondarySampleDraft(null)}>
-                取消
-              </button>
-              <button type="submit" className="primary-button">
-                <Sparkles size={13} />
-                开始2采
-              </button>
-            </div>
-          </form>
-        </div>,
-        document.body,
-      )}
+      <VideoRegenerationDialogs
+        videoRegenerationDraft={videoRegenerationDraft}
+        setVideoRegenerationDraft={setVideoRegenerationDraft}
+        videoRegenerationDialogRef={videoRegenerationDialogRef}
+        submitConfiguredVideoRegeneration={submitConfiguredVideoRegeneration}
+        videoRegenerationInformationOpen={videoRegenerationInformationOpen}
+        setVideoRegenerationInformationOpen={setVideoRegenerationInformationOpen}
+        videoRegenerationWorkflowModule={videoRegenerationWorkflowModule}
+        videoRegenerationUsesSharedPrimarySteps={videoRegenerationUsesSharedPrimarySteps}
+        h3LoraOptions={h3LoraOptions}
+        saveVideoRegenerationSettings={saveVideoRegenerationSettings}
+        presetCollection={videoRegenerationPresets}
+        selectedPresetId={selectedVideoRegenerationPresetId}
+        presetName={videoRegenerationPresetName}
+        setPresetName={setVideoRegenerationPresetName}
+        selectPreset={selectVideoRegenerationPreset}
+        setDefaultPreset={setDefaultVideoRegenerationPreset}
+        deletePreset={deleteVideoRegenerationPreset}
+        selectedVideoRegenerationPrompt={selectedVideoRegenerationPrompt}
+      />
+      <SecondarySampleDialog
+        secondarySampleDraft={secondarySampleDraft}
+        setSecondarySampleDraft={setSecondarySampleDraft}
+        secondarySampleDialogRef={secondarySampleDialogRef}
+        submitConfiguredSecondarySample={submitConfiguredSecondarySample}
+      />
       {canvasContextMenu && createPortal(
         <div
           className={`canvas-context-menu ${canvasContextMenu.nodeIds ? "is-node-menu" : ""}`}

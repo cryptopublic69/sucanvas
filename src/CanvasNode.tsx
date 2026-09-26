@@ -1,3 +1,5 @@
+import { useDropdownWheel } from "./useDropdownWheel";
+import { comfyStatusMessage, livePreviewResources } from "./comfyLivePreview";
 import { StyleLoraInfo, LoraNameWithStrength } from "./StyleLoraInfo";
 import { H3StyleLora, h3StyleLorasFromContent, recordedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
 import { StyleLoraEditor } from "./StyleLoraEditor";
@@ -813,9 +815,9 @@ const VIDEO_REGENERATION_NUMBER_CONFIG: Record<
   loraStrength: { min: 0, max: 10, step: 0.01 },
   primaryVideoSteps: { min: 1, max: 1000, step: 1 },
   primaryAudioSteps: { min: 1, max: 1000, step: 1 },
-  primaryBrightness: { min: 0, max: 3, step: 0.05 },
-  primaryContrast: { min: 0, max: 3, step: 0.05 },
-  primarySaturation: { min: 0, max: 3, step: 0.05 },
+  primaryBrightness: { min: 0, max: 3, step: 0.01 },
+  primaryContrast: { min: 0, max: 3, step: 0.01 },
+  primarySaturation: { min: 0, max: 3, step: 0.01 },
 };
 
 type SecondarySampleOverrides = Pick<
@@ -830,7 +832,7 @@ type SecondarySampleOverrides = Pick<
   | "refImageSize"
 >;
 
-interface SecondarySampleDraft extends SecondarySampleOverrides {
+interface SecondarySampleDraft extends Omit<SecondarySampleOverrides, "secondaryLoraBypassed"> {
   previewId: string;
   previewTitle: string;
   seed: string;
@@ -1418,6 +1420,7 @@ function SettingsSelect({
   const [open, setOpen] = useState(false);
   const controlRef = useRef<HTMLDivElement>(null);
   const selectedOption = options.find((option) => option.value === value);
+  useDropdownWheel(controlRef, open, ".settings-custom-select-menu");
 
   useEffect(() => {
     if (!open) return;
@@ -1442,7 +1445,7 @@ function SettingsSelect({
   }, [disabled]);
 
   return (
-    <div ref={controlRef} className="settings-custom-select">
+    <div ref={controlRef} className={`settings-custom-select ${open ? "nowheel" : ""}`}>
       <button
         type="button"
         className="settings-custom-select-toggle"
@@ -1467,9 +1470,6 @@ function SettingsSelect({
           className="settings-custom-select-menu nowheel"
           role="listbox"
           aria-label={ariaLabel}
-          onWheelCapture={(event) => {
-            if (!event.ctrlKey) event.stopPropagation();
-          }}
         >
           {options.map((option) => (
             <button
@@ -1508,6 +1508,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   textInputs: NodeRecord[];
   promptNodeTitle: string;
   h3LoraOptions: string[];
+  h3DiffusionModelOptions: string[];
   krea2LoraOptions: string[];
   workflowModules: WorkflowModuleRecord[];
   workflowModuleDefaults: WorkflowModuleDefaultMap;
@@ -2204,8 +2205,8 @@ function comfyProgressFromSocketData(data: unknown): {
 } | null {
   if (typeof data !== "string") return null;
   try {
-    const message = JSON.parse(data) as JsonObject;
-    if (message.type !== "progress" || !message.data || typeof message.data !== "object") return null;
+    const message = comfyStatusMessage(data);
+    if (!message || message.type !== "progress" || !message.data || typeof message.data !== "object") return null;
     const progressData = message.data as JsonObject;
     const value = typeof progressData.value === "number" ? progressData.value : null;
     const maximum = typeof progressData.max === "number" ? progressData.max : null;
@@ -2219,64 +2220,6 @@ function comfyProgressFromSocketData(data: unknown): {
     // ComfyUI also sends binary previews; they are intentionally ignored here.
     return null;
   }
-}
-
-function blobFromBase64(base64: string, mimeType: string): Blob | null {
-  try {
-    const decoded = window.atob(base64);
-    const bytes = new Uint8Array(decoded.length);
-    for (let index = 0; index < decoded.length; index += 1) {
-      bytes[index] = decoded.charCodeAt(index);
-    }
-    return new Blob([bytes], { type: mimeType });
-  } catch {
-    return null;
-  }
-}
-
-async function comfyPreviewImageBlobFromSocketData(
-  data: unknown,
-  expectedNodeId = "",
-): Promise<Blob | null> {
-  if (typeof data === "string") {
-    try {
-      const message = JSON.parse(data) as JsonObject;
-      if (message.type !== "kj_preview_override" || !message.data || typeof message.data !== "object") {
-        return null;
-      }
-      const previewData = message.data as JsonObject;
-      const rawNodeId = previewData.node_id ?? previewData.node;
-      const nodeId = typeof rawNodeId === "string" || typeof rawNodeId === "number"
-        ? String(rawNodeId)
-        : "";
-      // ModelPreviewOverrideKJ versions differ on whether they include an ID,
-      // whether it is numeric, and whether it is named `node` or `node_id`.
-      // The socket is already scoped to the active ComfyUI client, so a preview
-      // event without an ID remains safe to display for this generation.
-      if (expectedNodeId && nodeId && nodeId !== expectedNodeId) return null;
-      const base64 = typeof previewData.image === "string" ? previewData.image : "";
-      const mimeType = typeof previewData.mime === "string"
-        ? previewData.mime.toLowerCase()
-        : "image/jpeg";
-      if (!base64 || !["image/jpeg", "image/png", "image/webp", "video/mp4"].includes(mimeType)) {
-        return null;
-      }
-      return blobFromBase64(base64, mimeType);
-    } catch {
-      return null;
-    }
-  }
-  const buffer = data instanceof ArrayBuffer
-    ? data
-    : data instanceof Blob
-      ? await data.arrayBuffer()
-      : null;
-  if (!buffer || buffer.byteLength <= 8) return null;
-  const header = new DataView(buffer, 0, 8);
-  if (header.getUint32(0, false) !== 1) return null;
-  const imageType = header.getUint32(4, false);
-  const mimeType = imageType === 2 ? "image/png" : "image/jpeg";
-  return new Blob([buffer.slice(8)], { type: mimeType });
 }
 
 function comfyPreviewRequestId(
@@ -2400,7 +2343,7 @@ function videoGenerationAutoHeight(
     1,
     Math.min(VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS, textInputCount),
   );
-  const contentHeight = 528 + Math.max(0, styleLoraCount) * 72
+  const contentHeight = 583 + Math.max(0, styleLoraCount) * 72
     + listMediaRows * 67
     + groupCount * 36
     + textRows * VIDEO_NODE_TEXT_ROW_HEIGHT
@@ -2934,6 +2877,16 @@ function LiveComfyVideoPreview({ src, paused }: { src: string; paused: boolean }
   const previewRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
+    const video = previewRef.current;
+    return () => {
+      if (!video) return;
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    };
+  }, []);
+
+  useEffect(() => {
     const preview = previewRef.current;
     if (!preview) return;
     let disposed = false;
@@ -3244,6 +3197,13 @@ function h3DiffusionModelNameFromContent(content: JsonObject): string {
   return typeof value === "string" && isMinimaxH3AssetName(value)
     ? value
     : DEFAULT_H3_DIFFUSION_MODEL_NAME;
+}
+
+function nodeH3DiffusionModelName(content: JsonObject, defaultModelName?: string): string {
+  const override = content.generationDiffusionModelOverride;
+  return typeof override === "string" && isMinimaxH3AssetName(override)
+    ? override
+    : defaultModelName ?? h3DiffusionModelNameFromContent(content);
 }
 
 function sameH3DiffusionModelName(left: string, right: string): boolean {
@@ -4555,6 +4515,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     textInputs,
     promptNodeTitle,
     h3LoraOptions,
+    h3DiffusionModelOptions,
     krea2LoraOptions,
     workflowModules,
     workflowModuleVisibleIds,
@@ -4743,6 +4704,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     direction: readonly [number, number];
   } | null>(null);
   const videoResizeFrameRef = useRef<number | null>(null);
+  useDropdownWheel(workflowModuleControlRef, workflowModuleMenuOpen, ".video-workflow-module-menu");
+  useDropdownWheel(aspectRatioControlRef, aspectRatioMenuOpen, ".video-aspect-ratio-menu");
+  useDropdownWheel(loraControlRef, loraMenuOpen, ".video-lora-select-menu");
+  useDropdownWheel(secondaryLoraControlRef, secondaryLoraMenuOpen, ".video-lora-select-menu");
   const isText = record.kind === "text";
   const isContentIterationNode = isText && isContentIterationContent(record.content);
   const contentNodeType = contentNodeTypeFromContent(record.content);
@@ -4886,6 +4851,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ?? availableWorkflowModules.find((module) => module.variant === videoGenerationMode)
     ?? availableWorkflowModules[0]
     ?? null;
+  const defaultNodeDiffusionModelName = selectedNodeWorkflowModule?.defaults.diffusionModelName
+    ?? h3DiffusionModelNameFromContent(record.content);
+  const nodeDiffusionModelName = nodeH3DiffusionModelName(
+    record.content,
+    selectedNodeWorkflowModule?.defaults.diffusionModelName,
+  );
+  const nodeDiffusionModelOverride = typeof record.content.generationDiffusionModelOverride === "string"
+    ? record.content.generationDiffusionModelOverride
+    : "";
+  const selectedDiffusionModelOption = h3DiffusionModelOptions.find(
+    (model) => sameH3DiffusionModelName(model, nodeDiffusionModelOverride),
+  );
   const styleLoraSecondaryTargetLabel = Boolean(selectedNodeWorkflowModule?.adapter.bindings.livePreviewNodeId)
     ? "二段"
     : "2采";
@@ -4903,6 +4880,60 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const supportsPrimaryUpscaleFactor = Boolean(
     selectedNodeWorkflowModule?.bindings.primaryUpscaleNodeId?.trim(),
   );
+  const videoNodeBodyRef = useRef<HTMLDivElement>(null);
+  const videoLayoutRecordRef = useRef(record);
+  videoLayoutRecordRef.current = record;
+  useEffect(() => {
+    if (!isVideoGeneration) return;
+    const body = videoNodeBodyRef.current;
+    const article = body?.parentElement;
+    if (!body || !article) return;
+    let frame = 0;
+    const number = (value: string) => Number.parseFloat(value) || 0;
+    const measure = () => {
+      frame = 0;
+      const style = getComputedStyle(body);
+      // Measure normal-flow rows only: dropdown popovers must not grow the node.
+      const rows = Array.from(body.children).filter((child): child is HTMLElement => (
+        child instanceof HTMLElement && getComputedStyle(child).display !== "none"
+        && !["absolute", "fixed"].includes(getComputedStyle(child).position)
+      ));
+      const contentHeight = rows.reduce((height, row) => {
+        const rowStyle = getComputedStyle(row);
+        const rowHeight = row.classList.contains("video-node-empty")
+          ? Math.max(row.offsetHeight, row.scrollHeight) : row.offsetHeight;
+        return height + rowHeight + number(rowStyle.marginTop) + number(rowStyle.marginBottom);
+      }, number(style.paddingTop) + number(style.paddingBottom))
+        + Math.max(0, rows.length - 1) * number(style.rowGap);
+      const overflow = contentHeight - body.clientHeight;
+      if (overflow <= 1) return;
+      const current = videoLayoutRecordRef.current;
+      const height = Math.ceil((article.offsetHeight + overflow + 2) / CANVAS_GRID_SIZE) * CANVAS_GRID_SIZE;
+      if (height > current.height + 1) onChange(id, { height });
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    const observer = new ResizeObserver(schedule);
+    const observeRows = () => {
+      observer.disconnect();
+      observer.observe(body);
+      for (const row of Array.from(body.children)) observer.observe(row);
+      for (const chrome of article.querySelectorAll(":scope > .node-header, :scope > .node-footer")) {
+        observer.observe(chrome);
+      }
+      schedule();
+    };
+    // Reconnect when adding/removing a LoRA row or changing the reference groups.
+    const mutationObserver = new MutationObserver(observeRows);
+    mutationObserver.observe(body, { childList: true });
+    observeRows();
+    return () => {
+      observer.disconnect();
+      mutationObserver.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [id, isVideoGeneration, onChange]);
   const videoGenerationFullHeight = isVideoGeneration
     ? videoGenerationAutoHeight(
         mediaInputs.map((input) => videoInputMediaKind(input) ?? input.kind),
@@ -5123,6 +5154,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   useEffect(() => {
     if (!editingTitle) setTitleDraft(record.title);
   }, [editingTitle, record.title]);
+
+  useEffect(() => livePreviewResources.retain(liveComfyPreview.url), [liveComfyPreview.url]);
 
   useEffect(() => {
     const nextPreview = {
@@ -6621,7 +6654,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           minWidth={record.width}
           maxWidth={record.width}
           minHeight={VIDEO_NODE_BASE_HEIGHT}
-          maxHeight={videoGenerationFullHeight}
+          maxHeight={Math.max(videoGenerationFullHeight, record.height)}
           className="video-generation-height-resizer nodrag"
           onResizeEnd={(_, params) => {
             onChange(id, {
@@ -7940,13 +7973,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         </footer>
       )}
       {isVideoGeneration && (
-        <div className="nodrag video-node-body has-media">
+        <div ref={videoNodeBodyRef} className="nodrag video-node-body has-media">
           <div className="video-workflow-module-select">
             <span>生成方案</span>
-            <div ref={workflowModuleControlRef} className="video-lora-select video-workflow-module-dropdown">
+            <div ref={workflowModuleControlRef} className={`video-lora-select video-workflow-module-dropdown ${workflowModuleMenuOpen ? "nowheel" : ""}`}>
               <button
                 type="button"
-                className="nodrag nowheel video-lora-select-toggle"
+                className="nodrag video-lora-select-toggle"
                 disabled={!availableWorkflowModules.length}
                 aria-haspopup="menu"
                 aria-expanded={workflowModuleMenuOpen}
@@ -8015,6 +8048,45 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               )}
             </div>
           </div>
+          <div className="video-workflow-module-select video-h3-model-select" onPointerDown={(event) => event.stopPropagation()}>
+            <span>选择模型</span>
+            <SettingsSelect
+              value={sameH3DiffusionModelName(nodeDiffusionModelName, defaultNodeDiffusionModelName)
+                ? ""
+                : selectedDiffusionModelOption ?? nodeDiffusionModelOverride}
+              ariaLabel="当前节点的模型选择"
+              title={nodeDiffusionModelName}
+              onChange={(value) => onChange(id, {
+                content: {
+                  ...record.content,
+                  generationDiffusionModelOverride: value,
+                  status: "idle",
+                  validationMessage: "",
+                },
+              })}
+              options={[
+                {
+                  value: "",
+                  label: `(Default) ${h3DiffusionModelDisplayName(defaultNodeDiffusionModelName)}`,
+                  title: "使用设置中绑定的默认模型；在此选择其他模型仅对当前节点生效",
+                },
+                ...(nodeDiffusionModelOverride
+                  && !sameH3DiffusionModelName(nodeDiffusionModelOverride, defaultNodeDiffusionModelName)
+                  && !selectedDiffusionModelOption ? [{
+                  value: nodeDiffusionModelOverride,
+                  label: `${h3DiffusionModelDisplayName(nodeDiffusionModelOverride)}（当前目录未找到）`,
+                  disabled: true,
+                }] : []),
+                ...h3DiffusionModelOptions.filter((model) => (
+                  !sameH3DiffusionModelName(model, defaultNodeDiffusionModelName)
+                )).map((model) => ({
+                  value: model,
+                  label: h3DiffusionModelDisplayName(model),
+                  title: model,
+                })),
+              ]}
+            />
+          </div>
           <div className="video-duration-control">
             <label className="video-duration-inline">
               <span>时长</span>
@@ -8045,10 +8117,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 : undefined}
               >{`${displayedVideoDuration ?? 0} 秒`}</output>
             </label>
-            <div ref={aspectRatioControlRef} className="video-aspect-ratio-inline">
+            <div ref={aspectRatioControlRef} className={`video-aspect-ratio-inline ${aspectRatioMenuOpen ? "nowheel" : ""}`}>
               <button
                 type="button"
-                className="nodrag nowheel video-aspect-ratio-toggle"
+                className="nodrag video-aspect-ratio-toggle"
                 aria-haspopup="menu"
                 aria-expanded={aspectRatioMenuOpen}
                 onClick={() => {
@@ -8173,10 +8245,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           </div>
           <div className={`video-lora-control is-primary ${h3LoraBypassed ? "is-bypassed" : ""} ${loraMenuOpen ? "is-menu-open" : ""}`}>
             <span>1采 LoRA</span>
-            <div ref={loraControlRef} className="video-lora-select">
+            <div ref={loraControlRef} className={`video-lora-select ${loraMenuOpen ? "nowheel" : ""}`}>
               <button
                 type="button"
-                className="nodrag nowheel video-lora-select-toggle"
+                className="nodrag video-lora-select-toggle"
               disabled={!selectableH3Loras.length}
                 aria-haspopup="menu"
                 aria-expanded={loraMenuOpen}
@@ -8198,7 +8270,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
               </button>
               {loraMenuOpen && (
-                <div className="video-lora-select-menu" role="menu" aria-label="MiniMax H3 LoRA">
+                <div
+                  className="video-lora-select-menu nowheel"
+                  role="menu"
+                  aria-label="MiniMax H3 LoRA"
+                >
                   <button
                     type="button"
                     role="menuitemradio"
@@ -8318,10 +8394,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           </div>
           <div className={`video-lora-control is-secondary ${h3SecondaryLoraBypassed ? "is-bypassed" : ""} ${secondaryLoraMenuOpen ? "is-menu-open" : ""}`}>
             <span>2采 LoRA</span>
-            <div ref={secondaryLoraControlRef} className="video-lora-select">
+            <div ref={secondaryLoraControlRef} className={`video-lora-select ${secondaryLoraMenuOpen ? "nowheel" : ""}`}>
               <button
                 type="button"
-                className="nodrag nowheel video-lora-select-toggle"
+                className="nodrag video-lora-select-toggle"
                 disabled={!selectableH3Loras.length}
                 aria-haspopup="menu"
                 aria-expanded={secondaryLoraMenuOpen}
@@ -8343,7 +8419,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
               </button>
               {secondaryLoraMenuOpen && (
-                <div className="video-lora-select-menu" role="menu" aria-label="MiniMax H3 2采 LoRA">
+                <div
+                  className="video-lora-select-menu nowheel"
+                  role="menu"
+                  aria-label="MiniMax H3 2采 LoRA"
+                >
                   <button
                     type="button"
                     role="menuitemradio"
@@ -10585,7 +10665,6 @@ export {
   canvasNodeBounds,
   comfyOutputFromContent,
   comfyPreviewRequestId,
-  comfyPreviewImageBlobFromSocketData,
   comfyProgressFromSocketData,
   copiedNodeContentForProject,
   copiedPromptVersionContent,
@@ -10603,6 +10682,7 @@ export {
   guidesEqual,
   h3DiffusionModelDisplayName,
   h3DiffusionModelNameFromContent,
+  nodeH3DiffusionModelName,
   h3LoraBypassedFromContent,
   h3LoraNameFromContent,
   h3LoraPreferenceFromStorage,

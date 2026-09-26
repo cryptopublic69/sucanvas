@@ -317,6 +317,16 @@ pub fn list_projects(state: State<'_, ApplicationState>) -> Result<Vec<Workspace
 }
 
 #[tauri::command]
+pub fn list_project_summaries(
+    state: State<'_, ApplicationState>,
+) -> Result<Vec<WorkspaceSnapshot>, String> {
+    state
+        .database
+        .list_project_summaries()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn create_project(
     input: CreateProjectInput,
     state: State<'_, ApplicationState>,
@@ -4804,7 +4814,7 @@ mod tests {
             )
             .is_err());
         }
-        assert_eq!(count, 8);
+        assert_eq!(count, 9);
     }
 
     #[test]

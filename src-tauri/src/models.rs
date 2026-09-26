@@ -307,6 +307,45 @@ pub struct WorkspaceSnapshot {
     pub edges: Vec<EdgeRecord>,
 }
 
+impl WorkspaceSnapshot {
+    // Keep layout and workflow usage metadata, never prompts or generation payloads.
+    pub fn into_summary(mut self) -> Self {
+        for node in &mut self.nodes {
+            let mut content = serde_json::Map::new();
+            for key in ["assetPath", "workflowModuleId", "generationMode"] {
+                if let Some(value) = node.content.get(key).and_then(|value| value.as_str()) {
+                    content.insert(key.into(), serde_json::Value::String(value.into()));
+                }
+            }
+            if let Some(snapshot) = node
+                .content
+                .get("generationSnapshot")
+                .and_then(|value| value.as_object())
+            {
+                let mut metadata = serde_json::Map::new();
+                if let Some(id) = snapshot
+                    .get("workflowModuleId")
+                    .and_then(|value| value.as_str())
+                {
+                    metadata.insert(
+                        "workflowModuleId".into(),
+                        serde_json::Value::String(id.into()),
+                    );
+                }
+                content.insert(
+                    "generationSnapshot".into(),
+                    serde_json::Value::Object(metadata),
+                );
+            }
+            node.content = serde_json::Value::Object(content);
+        }
+        for edge in &mut self.edges {
+            edge.metadata = serde_json::json!({});
+        }
+        self
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateProjectInput {

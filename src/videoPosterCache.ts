@@ -3,6 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 
 export type VideoPoster = { src: string; blob: Blob; width: number; height: number; createdAt: number };
 const MAX_POSTERS = 300;
+const MAX_POSTER_BYTES = 1024 * 1024;
 const failedSources = new Set<string>();
 const pending = new Map<string, { listeners: Set<(poster: VideoPoster | null) => void>; cancel: () => void }>();
 let database: Promise<IDBDatabase | null> | undefined;
@@ -110,42 +111,108 @@ async function extractPoster(src: string, signal: AbortSignal): Promise<VideoPos
   if (isTauri() && /^https?:\/\//.test(src) && new URL(src).hostname !== "asset.localhost") {
     try {
       const bytes = await invoke<number[]>("capture_video_poster", { source: src });
-      if (signal.aborted) return null;
+      if (signal.aborted || !bytes.length || bytes.length > MAX_POSTER_BYTES) return null;
       return { src, blob: new Blob([new Uint8Array(bytes)], { type: "image/jpeg" }), width: 0, height: 0, createdAt: Date.now() };
     } catch {
-      if (signal.aborted) return null;
-      // FFmpeg is optional. Try browser extraction before leaving a placeholder.
+      // Never decode a remote source in a hidden WebView player after native
+      // extraction fails. Newly generated files may not be readable yet.
+      return null;
     }
   }
   return capturePoster(src, signal);
 }
 
-// Requests are deduplicated, cancellable, and decoded serially. Only mounted
-// previews request posters; unmounting the last consumer releases the decoder.
+// Keep compressed posters and stable URLs across node unmounts. Active images
+// are pinned; only unused entries participate in eviction.
+export class PosterMemoryCache {
+  private entries = new Map<string, { poster: VideoPoster; url: string; users: number }>();
+  private bytes = 0;
+  constructor(private maxBytes = 16 * 1024 * 1024, private maxEntries = 300) {}
+
+  peek(src: string) { return this.entries.get(src); }
+
+  put(poster: VideoPoster): void {
+    if (this.entries.has(poster.src)) return;
+    this.entries.set(poster.src, { poster, url: URL.createObjectURL(poster.blob), users: 0 });
+    this.bytes += poster.blob.size;
+    // Allow the requesting component to pin the new cover before eviction.
+    this.trim(poster.src);
+    queueMicrotask(() => this.trim());
+  }
+
+  retain(src: string) {
+    const entry = this.entries.get(src);
+    if (!entry) return null;
+    this.entries.delete(src);
+    this.entries.set(src, entry);
+    entry.users++;
+    let released = false;
+    return { poster: entry.poster, url: entry.url, release: () => {
+      if (released) return;
+      released = true;
+      entry.users--;
+      this.trim();
+    } };
+  }
+
+  private trim(protectedSrc?: string) {
+    for (const [src, entry] of this.entries) {
+      if (this.bytes <= this.maxBytes && this.entries.size <= this.maxEntries) break;
+      if (entry.users || src === protectedSrc) continue;
+      URL.revokeObjectURL(entry.url);
+      this.entries.delete(src);
+      this.bytes -= entry.poster.blob.size;
+    }
+  }
+}
+
+export const posterMemoryCache = new PosterMemoryCache();
+
+// Cached reads never wait for the video decoder. Only cache misses enter the
+// serial extraction queue, so playing a video cannot block existing covers.
 export function requestVideoPoster(src: string, listener: (poster: VideoPoster | null) => void): () => void {
+  const cached = posterMemoryCache.peek(src);
+  if (cached) {
+    listener(cached.poster);
+    return () => {};
+  }
   const existing = pending.get(src);
   if (existing) {
     existing.listeners.add(listener);
     return () => unsubscribe(src, existing, listener);
   }
-  const entry = { listeners: new Set([listener]), cancel: () => {} };
+  const controller = new AbortController();
+  let cancelDecode = () => {};
+  const entry = { listeners: new Set([listener]), cancel: () => {
+    controller.abort(); cancelDecode();
+  } };
   pending.set(src, entry);
-  entry.cancel = videoPreviewScheduler.enqueue(async (signal) => {
-    let poster = await readPoster(src);
-    if (signal.aborted) return;
-    if (!poster && !failedSources.has(src)) {
-      poster = await extractPoster(src, signal);
-      if (signal.aborted) return;
+  const finish = (poster: VideoPoster | null) => {
+    if (controller.signal.aborted) return;
+    if (pending.get(src) === entry) pending.delete(src);
+    if (poster) posterMemoryCache.put(poster);
+    const listeners = [...entry.listeners];
+    entry.listeners.clear();
+    entry.cancel = () => {};
+    cancelDecode = () => {};
+    for (const callback of listeners) {
+      try { callback(poster); } catch { /* Keep other consumers working. */ }
+    }
+  };
+  void readPoster(src).then((poster) => {
+    if (controller.signal.aborted) return;
+    if (poster || failedSources.has(src)) { finish(poster); return; }
+    cancelDecode = videoPreviewScheduler.enqueue(async (signal) => {
+      const poster = await extractPoster(src, signal);
+      if (signal.aborted || controller.signal.aborted) return;
       if (poster) await writePoster(poster);
       else {
         failedSources.add(src);
         if (failedSources.size > MAX_POSTERS) failedSources.delete(failedSources.values().next().value!);
       }
-    }
-    if (signal.aborted) return;
-    pending.delete(src);
-    entry.listeners.forEach((callback) => callback(poster));
-  });
+      if (!signal.aborted) finish(poster);
+    });
+  }).catch(() => finish(null));
   return () => unsubscribe(src, entry, listener);
 }
 
@@ -155,4 +222,20 @@ function unsubscribe(src: string, entry: { listeners: Set<(poster: VideoPoster |
     entry.cancel();
     if (pending.get(src) === entry) pending.delete(src);
   }
+}
+
+// Warm disk hits near the viewport, with bounded I/O and no video extraction.
+export function preloadCachedVideoPosters(sources: string[]): () => void {
+  let cancelled = false;
+  let index = 0;
+  const worker = async () => {
+    while (!cancelled && index < sources.length) {
+      const src = sources[index++];
+      if (posterMemoryCache.peek(src)) continue;
+      const poster = await readPoster(src);
+      if (!cancelled && poster) posterMemoryCache.put(poster);
+    }
+  };
+  void Promise.all([worker(), worker()]).catch(() => {});
+  return () => { cancelled = true; };
 }

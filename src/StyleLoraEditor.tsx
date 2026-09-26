@@ -1,3 +1,4 @@
+import { useDropdownWheel } from "./useDropdownWheel";
 import { useEffect, useRef, useState } from "react";
 import { H3StyleLora, MAX_STYLE_LORAS } from "./styleLoras";
 
@@ -9,6 +10,7 @@ export function StyleLoraEditor({ slots, options, hasSecondStage, onChange }: {
 }) {
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  useDropdownWheel(menuRef, openIndex !== null, ".video-lora-select-menu", openIndex);
   useEffect(() => {
     if (openIndex === null) return;
     const closeOutside = (event: PointerEvent) => {
@@ -24,14 +26,14 @@ export function StyleLoraEditor({ slots, options, hasSecondStage, onChange }: {
     update(index, { name, bypassed: !name });
     setOpenIndex(null);
   };
-  return <section className={`style-lora-editor nodrag nowheel ${openIndex !== null ? "is-menu-open" : ""}`} onPointerDown={(event) => event.stopPropagation()}>
+  return <section className={`style-lora-editor nodrag ${openIndex !== null ? "is-menu-open" : ""}`} onPointerDown={(event) => event.stopPropagation()}>
     <div className="style-lora-heading">
       <span>风格 LoRA {slots.length}/{MAX_STYLE_LORAS}</span>
       <button type="button" disabled={slots.length >= MAX_STYLE_LORAS} onClick={() => onChange([...slots, { name: "", strength: 1, bypassed: true, applyToSecondary: false, applyToSecondPass: false }])}>＋添加</button>
     </div>
     {slots.map((slot, index) => <div className={`style-lora-row ${openIndex === index ? "is-menu-open" : ""}`} key={index}>
       <span>{index + 1}</span>
-      <div className="video-lora-select" ref={openIndex === index ? menuRef : undefined}
+      <div className={`video-lora-select ${openIndex === index ? "nowheel" : ""}`} ref={openIndex === index ? menuRef : undefined}
         onKeyDown={(event) => {
           if (event.key === "Escape" && openIndex === index) {
             event.stopPropagation();
@@ -39,7 +41,7 @@ export function StyleLoraEditor({ slots, options, hasSecondStage, onChange }: {
             setOpenIndex(null);
           }
         }}>
-        <button type="button" className="nodrag nowheel video-lora-select-toggle"
+        <button type="button" className="nodrag video-lora-select-toggle"
           disabled={!options.length} aria-label={`风格 LoRA ${index + 1}`} aria-haspopup="menu" aria-expanded={openIndex === index}
           title={slot.name || "风格化 LoRA 未设置"}
           onClick={() => setOpenIndex((current) => current === index ? null : index)}>
@@ -55,7 +57,7 @@ export function StyleLoraEditor({ slots, options, hasSecondStage, onChange }: {
             title={name} onClick={() => choose(index, name)}>{name.split(/[\\/]/).pop()}</button>)}
         </div>}
       </div>
-      <input type="number" min={0} max={10} step={0.01} value={slot.strength} disabled={slot.bypassed} aria-label={`风格 LoRA ${index + 1} 权重`} onChange={(event) => {
+      <input className="nowheel" type="number" min={0} max={10} step={0.01} value={slot.strength} disabled={slot.bypassed} aria-label={`风格 LoRA ${index + 1} 权重`} onChange={(event) => {
         const strength = event.currentTarget.valueAsNumber;
         if (Number.isFinite(strength)) update(index, { strength: Math.max(0, Math.min(10, strength)) });
       }} />

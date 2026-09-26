@@ -1,7 +1,7 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Film } from "lucide-react";
-import { requestVideoPoster } from "./videoPosterCache";
+import { posterMemoryCache, requestVideoPoster } from "./videoPosterCache";
 import { videoPreviewScheduler } from "./videoPreviewScheduler";
 
 export interface VideoPreviewHandle { playFullscreen(): void }
@@ -22,7 +22,7 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
   callbacks.current = props;
   const [mounted, setMounted] = useState(false);
   const [frameReady, setFrameReady] = useState(false);
-  const [poster, setPoster] = useState("");
+  const [poster, setPoster] = useState(() => posterMemoryCache.peek(src)?.url ?? "");
   const [failed, setFailed] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const ownedVideo = useRef<HTMLVideoElement | null>(null);
@@ -107,14 +107,16 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
 
   useImperativeHandle(ref, () => ({ playFullscreen: () => activate(true) }));
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     alive.current = true;
-    let posterUrl = "";
-    setPoster("");
+    let releasePoster: (() => void) | undefined;
+    setPoster(posterMemoryCache.peek(src)?.url ?? "");
     const cancelPoster = requestVideoPoster(src, (result) => {
       if (!result) return;
-      posterUrl = URL.createObjectURL(result.blob);
-      setPoster(posterUrl);
+      releasePoster?.();
+      const cached = posterMemoryCache.retain(src);
+      releasePoster = cached?.release;
+      setPoster(cached?.url ?? "");
       if (result.width && result.height) callbacks.current.onDimensions?.(result.width, result.height);
     });
     const visibility = () => { if (document.hidden) release(); };
@@ -144,7 +146,7 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
       alive.current = false;
       cancelPoster();
       release();
-      if (posterUrl) URL.revokeObjectURL(posterUrl);
+      releasePoster?.();
       document.removeEventListener("visibilitychange", visibility);
       document.removeEventListener("fullscreenchange", fullscreenChange);
       window.removeEventListener("keydown", fullscreenSpace, true);

@@ -39,7 +39,7 @@ export function VideoModelSettingsPanel({
   return (
     <section className="settings-pane model-settings-pane" aria-labelledby="model-settings-title">
       <div className="settings-pane-heading">
-        <h3 id="model-settings-title">视频模型参数</h3>
+        <h3 id="model-settings-title">默认模型设置</h3>
         <p>参数独立保存在所选工作流方案中，不会影响其他并存方案。</p>
       </div>
       <div className="model-workflow-module-select">

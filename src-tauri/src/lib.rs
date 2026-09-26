@@ -299,6 +299,7 @@ pub fn run() {
             commands::load_workspace,
             commands::inspect_workspace,
             commands::list_projects,
+            commands::list_project_summaries,
             commands::create_project,
             commands::create_empty_folder,
             commands::group_nodes_into_folder,
