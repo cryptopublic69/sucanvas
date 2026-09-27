@@ -306,6 +306,14 @@ test("disk cache hits bypass the decoder queue and prewarming never extracts mis
     cancelWarm();
     assert.equal(videos.length, before);
     assert.ok(diskPosters.posterMemoryCache.peek(cached.src));
+    let overviewDelivered = 0;
+    diskPosters.requestCachedVideoPoster(cached.src, () => { overviewDelivered++; });
+    diskPosters.requestCachedVideoPoster("overview-miss", () => { overviewDelivered++; });
+    const cancelledRead = diskPosters.requestCachedVideoPoster("overview-cancelled", () => { overviewDelivered++; });
+    cancelledRead();
+    await tick();
+    assert.equal(overviewDelivered, 1);
+    assert.equal(videos.length, before, "overview cache misses must not start a video decoder");
   } finally {
     release();
     delete globalThis.indexedDB;

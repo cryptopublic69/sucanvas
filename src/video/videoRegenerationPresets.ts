@@ -20,6 +20,27 @@ function presetOnlySettings(settings: VideoRegenerationSettings): VideoRegenerat
   return parameters;
 }
 
+export function orderedVideoRegenerationPresets(collection: VideoRegenerationPresetCollection) {
+  return [
+    ...collection.presets.filter((preset) => preset.id === collection.defaultPresetId),
+    ...collection.presets.filter((preset) => preset.id !== collection.defaultPresetId),
+  ];
+}
+
+export function reorderVideoRegenerationPresets(collection: VideoRegenerationPresetCollection, id: string, destination: number) {
+  const displayed = orderedVideoRegenerationPresets(collection);
+  const pinned = displayed[0]?.id === collection.defaultPresetId;
+  if (id === collection.defaultPresetId || !Number.isInteger(destination)
+    || destination < 0 || destination >= displayed.length) return collection.presets;
+  const movable = displayed.filter((preset) => preset.id !== collection.defaultPresetId);
+  const index = movable.findIndex((preset) => preset.id === id);
+  if (index < 0) return collection.presets;
+  const [moved] = movable.splice(index, 1);
+  movable.splice(Math.max(0, destination - (pinned ? 1 : 0)), 0, moved);
+  let next = 0;
+  return collection.presets.map((preset) => preset.id === collection.defaultPresetId ? preset : movable[next++]);
+}
+
 export function videoPresetNodePatch(settings: VideoRegenerationSettings, sharedSteps: boolean) {
   return {
     generationPrimaryResolution: settings.primaryResolutionMegapixels,

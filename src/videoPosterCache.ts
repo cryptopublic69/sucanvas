@@ -169,6 +169,18 @@ export class PosterMemoryCache {
 
 export const posterMemoryCache = new PosterMemoryCache();
 
+// Overview nodes may read existing covers, but must never start video decoding.
+export function requestCachedVideoPoster(src: string, listener: () => void): () => void {
+  let cancelled = false;
+  if (posterMemoryCache.peek(src)) listener();
+  else void readPoster(src).then((poster) => {
+    if (cancelled || !poster) return;
+    posterMemoryCache.put(poster);
+    listener();
+  }).catch(() => undefined);
+  return () => { cancelled = true; };
+}
+
 // Cached reads never wait for the video decoder. Only cache misses enter the
 // serial extraction queue, so playing a video cannot block existing covers.
 export function requestVideoPoster(src: string, listener: (poster: VideoPoster | null) => void): () => void {

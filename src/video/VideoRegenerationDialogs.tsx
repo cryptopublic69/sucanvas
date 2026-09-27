@@ -1,4 +1,5 @@
 import type { VideoRegenerationPresetCollection } from "./videoRegenerationPresets";
+import { orderedVideoRegenerationPresets } from "./videoRegenerationPresets";
 import { useEffect, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { createPortal } from "react-dom";
@@ -26,7 +27,7 @@ type VideoRegenerationDialogsProps = {
   selectPreset: (id: string) => void;
   setDefaultPreset: () => void;
   deletePreset: () => void;
-  movePreset: (id: string, direction: -1 | 1) => void;
+  movePreset: (id: string, destination: number) => void;
   selectedVideoRegenerationPrompt: VideoRegenerationPromptOption | null;
 };
 
@@ -102,21 +103,33 @@ export function VideoRegenerationDialogs({
           >
             <div className="project-dialog-icon">{videoRegenerationDraft.presetEditor ? <Settings size={21} /> : <RotateCcw size={21} />}</div>
             <div>
-              <div className="video-preset-editor-title"><h2>{videoRegenerationDraft.presetEditor ? "预设编辑" : "视频生成"}</h2>{!videoRegenerationDraft.presetEditor && <button type="submit" className="primary-button video-regeneration-header-generate"><RotateCcw size={13} />生成</button>}{videoRegenerationDraft.presetEditor && <button type="button" className="video-details-toggle" aria-label="关闭预设编辑" title="关闭" onClick={() => setVideoRegenerationDraft(null)}><X size={18} /></button>}</div>
+              <div className="video-preset-editor-title">
+                <h2>{videoRegenerationDraft.presetEditor ? "预设编辑" : "视频生成"}</h2>
+                {!videoRegenerationDraft.presetEditor && <>
+                  <button type="button" className="video-regeneration-header-notes"
+                    onClick={() => setVideoRegenerationInformationOpen(true)} title="查看当前提示词的备注">
+                    <StickyNote size={14} />查看备注
+                  </button>
+                  <button type="submit" className="primary-button video-regeneration-header-generate"><RotateCcw size={13} />生成</button>
+                </>}
+                {videoRegenerationDraft.presetEditor && <button type="button" className="video-details-toggle" aria-label="关闭预设编辑" title="关闭" onClick={() => setVideoRegenerationDraft(null)}><X size={18} /></button>}
+              </div>
               <p>{videoRegenerationDraft.presetEditor ? "编辑并保存共用参数预设，供视频生成节点和 Alt＋重新生成使用。" : videoRegenerationDraft.generatorId ? "使用当前节点的提示词与参数，调整后点击生成。" : videoRegenerationDraft.useSnapshotSettings
                 ? `正在使用“${videoRegenerationDraft.previewTitle}”生成时记录的参数、提示词与 Seed，不套用已保存设置。`
                 : `提示词与 Seed 来自“${videoRegenerationDraft.previewTitle}”；参数优先套用默认预设，未设默认时使用生成快照。`}</p>
             </div>
             <section className="video-regeneration-presets" aria-label="重新生成参数预设">
+              <h3>参数预设</h3>
               <div className="video-regeneration-preset-fields">
                 <label>
                   预设槽位
                   <SettingsSelect
                     value={selectedPresetId}
-                    options={presetCollection.presets.map((preset) => ({
+                    options={orderedVideoRegenerationPresets(presetCollection).map((preset) => ({
                       value: preset.id,
                       label: `${preset.id === presetCollection.defaultPresetId ? "(Default) " : ""}${preset.name}`,
                       title: preset.name,
+                      reorderDisabled: preset.id === presetCollection.defaultPresetId,
                     }))}
                     placeholder={videoRegenerationDraft.presetEditor
                       ? (presetCollection.presets.length ? "当前参数（未选择预设）" : "暂无预设，可保存当前参数")
@@ -139,24 +152,24 @@ export function VideoRegenerationDialogs({
                 </label>
               </div>
               <div className="video-regeneration-preset-actions">
-                <button type="button" className="dialog-cancel" onClick={() => saveVideoRegenerationSettings()}>
+                <button type="button" className="dialog-cancel video-preset-save" onClick={() => saveVideoRegenerationSettings()}>
                   {selectedPresetId ? "保存当前预设" : "保存为预设"}
                 </button>
                 <button type="button" className="dialog-cancel" onClick={() => saveVideoRegenerationSettings(true)}>
                   另存为新预设
                 </button>
                 <button type="button" className="dialog-cancel" onClick={setDefaultPreset}
-                  disabled={!selectedPresetId || selectedPresetId === presetCollection.defaultPresetId}>
-                  {selectedPresetId && selectedPresetId === presetCollection.defaultPresetId ? "已是默认" : "设为默认"}
-                </button>
-                <button type="button" className="dialog-cancel video-regeneration-preset-delete" onClick={deletePreset}
                   disabled={!selectedPresetId}>
-                  删除预设
+                  {selectedPresetId && selectedPresetId === presetCollection.defaultPresetId ? "取消默认" : "设为默认"}
                 </button>
+                <button type="button" className="dialog-cancel video-regeneration-preset-delete"
+                  onClick={deletePreset} disabled={!selectedPresetId}>删除预设</button>
               </div>
             </section>
             <div className="video-regeneration-fields">
-              {!videoRegenerationDraft.presetEditor && <label className="video-regeneration-prompt-field">
+              {!videoRegenerationDraft.presetEditor && <div className="video-regeneration-basic-fields">
+              <h3>基础参数</h3>
+              {!videoRegenerationDraft.presetEditor && <label className="video-regeneration-model-field">
                 H3 模型
                 <SettingsSelect
                   value={catalogModel ?? selectedModel}
@@ -180,36 +193,6 @@ export function VideoRegenerationDialogs({
                 />
               </label>}
               {!videoRegenerationDraft.presetEditor && <>
-              <label className="video-regeneration-prompt-field">
-                提示词版本
-                <div className="video-regeneration-prompt-controls">
-                  <SettingsSelect
-                    value={videoRegenerationDraft.selectedPromptKey}
-                    options={videoRegenerationDraft.promptOptions.map((option) => ({
-                      value: option.key,
-                      label: option.label,
-                    }))}
-                    onChange={(selectedPromptKey) => {
-                      setVideoRegenerationInformationOpen(false);
-                      setVideoRegenerationDraft((current) => current && ({
-                        ...current,
-                        selectedPromptKey,
-                      }));
-                    }}
-                    ariaLabel="重新生成提示词版本"
-                  />
-                  <button
-                    type="button"
-                    className="video-regeneration-information-button"
-                    onClick={() => setVideoRegenerationInformationOpen(true)}
-                    title="查看当前提示词版本的备注"
-                    aria-label="查看当前提示词版本的备注"
-                  >
-                    <StickyNote size={14} />
-                    <span>查看备注</span>
-                  </button>
-                </div>
-              </label>
               <label>
                 Seed
                 <div className="video-regeneration-seed">
@@ -255,6 +238,7 @@ export function VideoRegenerationDialogs({
                   }))}
                 />
               </label>}
+              </div>}
               <section className="video-regeneration-group" aria-label="1采参数">
                 <header className="video-regeneration-group-header">
                   <h3>1采参数</h3>
@@ -291,7 +275,7 @@ export function VideoRegenerationDialogs({
                 />
               </label>
                 </header>
-                <div className="video-regeneration-fields video-regeneration-group-fields">
+                <div className="video-regeneration-fields video-regeneration-group-fields video-regeneration-sampling-fields">
               <label>
                 分辨率（MP）
                 <ModelParameterNumberInput
@@ -321,7 +305,7 @@ export function VideoRegenerationDialogs({
                 />
               </label>}
               <label>
-                Video Steps
+                视频步数
                 <ModelParameterNumberInput
                   regenerationField="primaryVideoSteps"
                   min={1}
@@ -338,7 +322,7 @@ export function VideoRegenerationDialogs({
                 />
               </label>
               {!videoRegenerationUsesSharedPrimarySteps && <label>
-                Audio Steps
+                音频步数
                 <ModelParameterNumberInput
                   regenerationField="primaryAudioSteps"
                   min={1}
@@ -397,7 +381,17 @@ export function VideoRegenerationDialogs({
               </section>
               <section className="video-regeneration-group" aria-label="2采参数">
                 <header className="video-regeneration-group-header video-regeneration-secondary-header">
-                  <h3><button type="button" className="video-regeneration-group-toggle" aria-expanded={secondaryExpanded} aria-controls="video-regeneration-secondary-fields" onClick={() => setSecondaryExpanded((expanded) => !expanded)}>{secondaryExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}2采参数</button></h3>
+                  <h3>2采参数</h3>
+                  <button type="button" className="video-regeneration-group-toggle" aria-expanded={secondaryExpanded}
+                    aria-controls="video-regeneration-secondary-fields" aria-label={secondaryExpanded ? "收起2采参数" : "展开2采参数"}
+                    onClick={() => setSecondaryExpanded((expanded) => !expanded)}>
+                    {secondaryExpanded ? "收起" : "展开"}{secondaryExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  </button>
+                  {!secondaryExpanded && <p className="video-regeneration-secondary-summary" title={videoRegenerationDraft.secondaryLoraBypassed ? "不使用 LoRA" : selectedSecondaryLora}>
+                    {videoRegenerationDraft.secondaryLoraBypassed ? "不使用 LoRA" : h3LoraDisplayName(selectedSecondaryLora)}
+                    {` · ${videoRegenerationDraft.secondaryResolutionMegapixels} MP · ${videoRegenerationDraft.secondarySchedulerSteps} 步`}
+                  </p>}
+                  {secondaryExpanded && <>
               <div className="video-regeneration-header-lora">
                 <SettingsSelect
                   title={selectedSecondaryLora || "不使用 LoRA"}
@@ -425,11 +419,12 @@ export function VideoRegenerationDialogs({
                   onChange={(value) => setVideoRegenerationDraft((current) => current && ({ ...current, secondaryLoraStrength: value }))}
                 />
               </label>
+                  </>}
                 </header>
-                {secondaryExpanded && <div id="video-regeneration-secondary-fields" className="video-regeneration-fields video-regeneration-group-fields">
+                {secondaryExpanded && <div id="video-regeneration-secondary-fields" className="video-regeneration-fields video-regeneration-group-fields video-regeneration-sampling-fields">
               {([
                 ["secondaryResolutionMegapixels", "分辨率（MP）"],
-                ["secondarySchedulerSteps", "Steps"],
+                ["secondarySchedulerSteps", "采样步数"],
                 ["secondaryBrightness", "亮度"],
                 ["secondaryContrast", "对比度"],
                 ["secondarySaturation", "饱和度"],

@@ -1,6 +1,8 @@
 import { Settings as PresetSettingsIcon } from "lucide-react";
 import { useDropdownWheel } from "./useDropdownWheel";
-import { matchingVideoRegenerationPreset, videoPresetNodePatch, videoNodeExtraParameters, videoNodeSecondaryColors } from "./video/videoRegenerationPresets";
+import { CanvasNodePresentation } from "./canvas/CanvasNodePresentation";
+import { useBatchedNodeInternals } from "./canvas/useBatchedNodeInternals";
+import { matchingVideoRegenerationPreset, orderedVideoRegenerationPresets, videoPresetNodePatch, videoNodeExtraParameters, videoNodeSecondaryColors } from "./video/videoRegenerationPresets";
 import type { VideoRegenerationPresetCollection } from "./video/videoRegenerationPresets";
 import { comfyStatusMessage, livePreviewResources } from "./comfyLivePreview";
 import { StyleLoraInfo, LoraNameWithStrength } from "./StyleLoraInfo";
@@ -24,7 +26,6 @@ import {
   getBezierPath,
   useReactFlow,
   useStore,
-  useUpdateNodeInternals,
 } from "@xyflow/react";
 import {
   ArrowLeftRight,
@@ -1429,6 +1430,7 @@ function CompactDecimalInput({
 }
 
 interface SettingsSelectOption {
+  reorderDisabled?: boolean;
   value: string;
   label: string;
   title?: string;
@@ -1452,10 +1454,18 @@ function SettingsSelect({
   ariaLabel: string;
   placeholder?: string;
   title?: string;
-  onMoveOption?: (value: string, direction: -1 | 1) => void;
+  onMoveOption?: (value: string, destination: number) => void;
 }) {
   const [open, setOpen] = useState(false);
   const controlRef = useRef<HTMLDivElement>(null);
+  const reorderRef = useRef<{ value: string; destination: number } | null>(null);
+  const [reorder, setReorder] = useState<{ value: string; destination: number } | null>(null);
+  useEffect(() => {
+    if (!open) {
+      reorderRef.current = null;
+      setReorder(null);
+    }
+  }, [open]);
   const selectedOption = options.find((option) => option.value === value);
   useDropdownWheel(controlRef, open, ".settings-custom-select-menu");
 
@@ -1509,21 +1519,58 @@ function SettingsSelect({
           aria-label={ariaLabel}
         >
           {options.map((option, index) => onMoveOption ? (
-            <div key={option.value} className="settings-sortable-option">
+            <div key={option.value} data-sort-index={index}
+              className={`settings-sortable-option ${reorder?.value === option.value ? "is-dragging" : ""} ${reorder?.destination === index && reorder.value !== option.value ? "is-drop-target" : ""}`}>
               <button type="button" className={`settings-sortable-option-label ${option.value === value ? "is-active" : ""}`}
                 aria-pressed={option.value === value} disabled={option.disabled} title={option.title}
                 onClick={() => { onChange(option.value); setOpen(false); }}>
                 {option.label}
               </button>
-              <button type="button" className="settings-sortable-option-move" disabled={index === 0 || option.disabled}
-                title="上移" aria-label={`上移预设：${option.label}`}
-                onClick={(event) => { event.stopPropagation(); onMoveOption(option.value, -1); }}>
-                <ChevronUp size={14} />
-              </button>
-              <button type="button" className="settings-sortable-option-move" disabled={index === options.length - 1 || option.disabled}
-                title="下移" aria-label={`下移预设：${option.label}`}
-                onClick={(event) => { event.stopPropagation(); onMoveOption(option.value, 1); }}>
-                <ChevronDown size={14} />
+              <button type="button" className="settings-sortable-option-drag" disabled={options.length < 2 || option.disabled || option.reorderDisabled}
+                title="拖动排序；也可用上下方向键移动" aria-label={`拖动排序：${option.label}`}
+                onClick={(event) => event.stopPropagation()}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  event.stopPropagation();
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  reorderRef.current = { value: option.value, destination: index };
+                  setReorder(reorderRef.current);
+                }}
+                onPointerMove={(event) => {
+                  const current = reorderRef.current;
+                  if (!current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                  event.stopPropagation();
+                  const menu = controlRef.current?.querySelector<HTMLElement>(".settings-custom-select-menu");
+                  if (!menu) return;
+                  const bounds = menu.getBoundingClientRect();
+                  if (event.clientY < bounds.top + 24) menu.scrollTop -= 12;
+                  else if (event.clientY > bounds.bottom - 24) menu.scrollTop += 12;
+                  const row = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-sort-index]");
+                  if (!row || !menu.contains(row)) return;
+                  const destination = Number(row.dataset.sortIndex);
+                  reorderRef.current = { ...current, destination };
+                  setReorder(reorderRef.current);
+                }}
+                onPointerUp={(event) => {
+                  const current = reorderRef.current;
+                  if (!current) return;
+                  event.stopPropagation();
+                  const menu = controlRef.current?.querySelector(".settings-custom-select-menu");
+                  const hit = document.elementFromPoint(event.clientX, event.clientY);
+                  reorderRef.current = null;
+                  setReorder(null);
+                  if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+                  if (hit && menu?.contains(hit) && current.destination !== index) onMoveOption(current.value, current.destination);
+                }}
+                onLostPointerCapture={() => { reorderRef.current = null; setReorder(null); }}
+                onKeyDown={(event) => {
+                  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const destination = index + (event.key === "ArrowUp" ? -1 : 1);
+                  if (destination >= 0 && destination < options.length) onMoveOption(option.value, destination);
+                }}>
+                <GripVertical size={15} />
               </button>
             </div>
           ) : (
@@ -1641,6 +1688,8 @@ interface SpacingAxisMatch {
 interface VisibleNodeCacheEntry {
   source: CanvasFlowNode;
   result: CanvasFlowNode;
+  inputRecords: NodeRecord[];
+  generationSnapshot: GenerationSnapshot | null;
 }
 
 interface CanvasNodeBounds {
@@ -4541,7 +4590,7 @@ async function checkAndExecuteVideo(data: CanvasNodeData, options?: VideoExecuti
 
 function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const { getNode, getEdges, getViewport, getZoom, setCenter, setNodes, setViewport } = useReactFlow<CanvasFlowNode, Edge>();
-  const updateNodeInternals = useUpdateNodeInternals();
+  const updateNodeInternals = useBatchedNodeInternals();
   const ctrlSelectionPointerId = useRef<number | null>(null);
   const {
     record,
@@ -4664,10 +4713,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const viewportTransform = useStore((state) => generatedInfoOpen ? state.transform : null);
   const connectedVideoAspectRatio = useStore((state) => {
     if (record.kind !== "text") return "";
-    const targetIds = new Set(state.edges.filter((edge) => edge.source === id).map((edge) => edge.target));
-    const ratios = new Set(state.nodes
-      .filter((node) => targetIds.has(node.id) && (node.data as CanvasNodeData).record.kind === "video-generation")
-      .map((node) => videoAspectRatioFromContent((node.data as CanvasNodeData).record.content)));
+    const ratios = new Set<string>();
+    for (const connection of state.connectionLookup.get(`${id}-source`)?.values() ?? []) {
+      const target = state.nodeLookup.get(connection.target)?.data as CanvasNodeData | undefined;
+      if (target?.record.kind === "video-generation") ratios.add(videoAspectRatioFromContent(target.record.content));
+    }
     return ratios.size > 1 ? "混合" : [...ratios][0] ?? "";
   });
   const [generatedInfoPosition, setGeneratedInfoPosition] = useState({ left: 16, top: 16 });
@@ -8295,7 +8345,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             <span>参数预设</span>
             <SettingsSelect
               value={matchedVideoPreset?.id ?? ""}
-              options={videoRegenerationPresets.presets.map((preset) => ({
+              options={orderedVideoRegenerationPresets(videoRegenerationPresets).map((preset) => ({
                 value: preset.id,
                 label: `${preset.name}${preset.id === videoRegenerationPresets.defaultPresetId ? "（默认）" : ""}`,
               }))}
@@ -10829,7 +10879,8 @@ const MemoizedCanvasNode = memo(
     && previous.selected === next.selected
     && previous.data === next.data,
 );
-const nodeTypes = { canvasNode: MemoizedCanvasNode };
+const ProgressiveCanvasNode = memo((props: NodeProps<CanvasFlowNode>) => <CanvasNodePresentation {...props} detail={MemoizedCanvasNode} />);
+const nodeTypes = { canvasNode: ProgressiveCanvasNode };
 
 export {
   ALIGNMENT_SNAP_TOLERANCE_PX,

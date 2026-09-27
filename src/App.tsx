@@ -3,10 +3,12 @@ import { deduplicateRegenerationPromptOptions } from "./video/regenerationPrompt
 import { generationQueuePositions } from "./generationQueuePositions";
 import { VideoPosterViewportCache } from "./VideoPosterViewportCache";
 import { summarizeProject } from "./projects/projectSummaries";
+import { GraphRelations } from "./canvas/graphRelations";
+import { initialCanvasViewport, readCanvasViewport, saveCanvasViewport } from "./canvas/viewport";
 import type { SetStateAction } from "react";
 import { ComfyStatusIndicators } from "./ComfyStatusIndicators";
 import { comfyStatusMessage, createComfyPreviewReceiver, livePreviewResources } from "./comfyLivePreview";
-import { loadVideoRegenerationPresets, matchingVideoRegenerationPreset, saveVideoRegenerationPresets, videoNodeExtraParameters, videoNodeSecondaryColors } from "./video/videoRegenerationPresets";
+import { loadVideoRegenerationPresets, matchingVideoRegenerationPreset, reorderVideoRegenerationPresets, saveVideoRegenerationPresets, videoNodeExtraParameters, videoNodeSecondaryColors } from "./video/videoRegenerationPresets";
 import type { VideoRegenerationPresetCollection, VideoRegenerationSettings } from "./video/videoRegenerationPresets";
 import { findDuplicateVideoRequest } from "./video/activeVideoSeed";
 import { VideoRegenerationDialogs } from "./video/VideoRegenerationDialogs";
@@ -578,6 +580,9 @@ function CanvasWorkspace() {
   const edgesSnapshot = useRef<Edge[]>([]);
   const contentNodesCache = useRef<CanvasFlowNode[]>([]);
   const visibleNodeCache = useRef(new Map<string, VisibleNodeCacheEntry>());
+  const graphRelations = useRef(new GraphRelations<NodeRecord>());
+  const openProjectSequence = useRef(0);
+  const [initialViewport, setInitialViewport] = useState({ x: 0, y: 0, zoom: 1 });
   const alignmentGuidesSnapshot = useRef<AlignmentGuide[]>([]);
   const spacingGuidesSnapshot = useRef<SpacingGuide[]>([]);
   const incomingPlacementReservations = useRef<NodeRecord[]>([]);
@@ -610,7 +615,7 @@ function CanvasWorkspace() {
   const nodeDeletionInProgress = useRef(false);
   const nodeClipboard = useRef<NodeClipboard | null>(null);
   const alignedDragPositions = useRef(new Map<string, { x: number; y: number }>());
-  const { setCenter, fitView, screenToFlowPosition, getViewport } = useReactFlow<CanvasFlowNode, Edge>();
+  const { setCenter, screenToFlowPosition, getViewport } = useReactFlow<CanvasFlowNode, Edge>();
   const flowStore = useStoreApi<CanvasFlowNode, Edge>();
   const canvasZoom = useStore((state) => state.transform[2]);
   const nodeHandleScreenScale = Math.max(
@@ -5058,8 +5063,9 @@ function CanvasWorkspace() {
 
   const setDefaultVideoRegenerationPreset = useCallback(() => {
     if (!videoRegenerationPresets.presets.some((preset) => preset.id === selectedVideoRegenerationPresetId)) return;
-    if (persistVideoRegenerationPresets({ ...videoRegenerationPresets, defaultPresetId: selectedVideoRegenerationPresetId })) {
-      setNotice("已设为默认预设，下次 Alt＋重新生成自动套用其已保存参数");
+    const defaultPresetId = videoRegenerationPresets.defaultPresetId === selectedVideoRegenerationPresetId ? "" : selectedVideoRegenerationPresetId;
+    if (persistVideoRegenerationPresets({ ...videoRegenerationPresets, defaultPresetId })) {
+      setNotice(defaultPresetId ? "已设为默认预设，下次 Alt＋重新生成自动套用其已保存参数" : "已取消默认预设，恢复原有排序");
     }
   }, [videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
 
@@ -5076,12 +5082,9 @@ function CanvasWorkspace() {
     setNotice(wasDefault ? "默认预设已删除，下次打开使用视频生成快照；可重新指定默认预设" : "预设已删除，当前编辑参数保留");
   }, [videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
 
-  const moveVideoRegenerationPreset = useCallback((id: string, direction: -1 | 1) => {
-    const index = videoRegenerationPresets.presets.findIndex((preset) => preset.id === id);
-    const destination = index + direction;
-    if (index < 0 || destination < 0 || destination >= videoRegenerationPresets.presets.length) return;
-    const presets = [...videoRegenerationPresets.presets];
-    [presets[index], presets[destination]] = [presets[destination], presets[index]];
+  const moveVideoRegenerationPreset = useCallback((id: string, destination: number) => {
+    const presets = reorderVideoRegenerationPresets(videoRegenerationPresets, id, destination);
+    if (presets.every((preset, index) => preset.id === videoRegenerationPresets.presets[index]?.id)) return;
     if (persistVideoRegenerationPresets({ ...videoRegenerationPresets, presets })) {
       setNotice("预设顺序已保存");
     }
@@ -7430,11 +7433,20 @@ function CanvasWorkspace() {
       preserveFolderUndo = false,
     ) => {
       try {
+        const sequence = ++openProjectSequence.current;
+        const started = performance.now();
+        if (activeProjectIdRef.current) saveCanvasViewport(window.localStorage, activeProjectIdRef.current, getViewport());
         await flushPendingPatches();
+        if (sequence !== openProjectSequence.current) return;
+        const savedAt = performance.now();
         setNotice("正在打开项目…");
         const snapshot = await invoke<WorkspaceSnapshot>("load_workspace", {
           canvasId: projectId,
         });
+        if (sequence !== openProjectSequence.current) return;
+        const loadedAt = performance.now();
+        const viewport = readCanvasViewport(window.localStorage, projectId)
+          ?? initialCanvasViewport(snapshot.nodes, window.innerWidth, window.innerHeight);
         const savedBackground = validCanvasColor(
           window.localStorage.getItem(`infinite-canvas:canvas-background:${projectId}`),
         );
@@ -7456,6 +7468,9 @@ function CanvasWorkspace() {
           undoStack.current = [];
         }
         resetReactFlowGraphState();
+        visibleNodeCache.current.clear();
+        graphRelations.current = new GraphRelations<NodeRecord>();
+        setInitialViewport(viewport);
         activeProjectIdRef.current = projectId;
         setActiveProjectId(projectId);
         setCanvasBackground(savedBackground);
@@ -7468,16 +7483,18 @@ function CanvasWorkspace() {
         setSearch("");
         setRelationAnchorId(null);
         setNotice(snapshot.nodes.length ? "所有更改已保存" : "空白画布，创建第一个节点吧");
-        window.setTimeout(() => {
-          if (snapshot.nodes.length) {
-            void fitView({ padding: 0.25, duration: 350, maxZoom: 1 });
-          }
-        }, 80);
+        const preparedAt = performance.now();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (sequence !== openProjectSequence.current) return;
+          console.info("[canvas-load]", { projectId, nodes: snapshot.nodes.length, edges: snapshot.edges.length,
+            saveMs: Math.round(savedAt - started), readMs: Math.round(loadedAt - savedAt),
+            prepareMs: Math.round(preparedAt - loadedAt), firstPaintMs: Math.round(performance.now() - preparedAt) });
+        }));
       } catch (error) {
         reportError(error);
       }
     },
-    [fitView, flushPendingPatches, makeFlowNode, reportError, resetReactFlowGraphState, setEdges, setNodes],
+    [getViewport, flushPendingPatches, makeFlowNode, reportError, resetReactFlowGraphState, setEdges, setNodes],
   );
 
   const openFolder = useCallback((nodeId: string) => {
@@ -7501,6 +7518,8 @@ function CanvasWorkspace() {
 
   const returnToProjects = useCallback(async () => {
     try {
+      ++openProjectSequence.current;
+      if (activeProjectIdRef.current) saveCanvasViewport(window.localStorage, activeProjectIdRef.current, getViewport());
       await flushPendingPatches();
       const snapshots = await invoke<WorkspaceSnapshot[]>("list_project_summaries");
       undoStack.current = [];
@@ -7522,7 +7541,7 @@ function CanvasWorkspace() {
     } catch (error) {
       reportError(error);
     }
-  }, [flushPendingPatches, reportError, resetReactFlowGraphState, setEdges, setNodes]);
+  }, [getViewport, flushPendingPatches, reportError, resetReactFlowGraphState, setEdges, setNodes]);
 
   const togglePrivateProjectVisibility = useCallback(() => {
     if (showPrivateProjects) {
@@ -9950,27 +9969,21 @@ function CanvasWorkspace() {
     [disconnectEdge, edges, hideUnselectedEdges, protectedGenerationEdgeIds, selectionVisibleEdgeIds, suppressEdgeFlow],
   );
 
+  const queuePositions = useMemo(() => generationQueuePositions(contentNodes.map((node) => node.data.record)), [contentNodes]);
+  const relations = useMemo(() => {
+    const index = graphRelations.current;
+    index.update(contentNodes.map((node) => node.data.record), edges.map((edge) => ({
+      id: edge.id, source: edge.source, target: edge.target,
+      kind: (edge.data as CanvasEdgeData | undefined)?.record?.kind,
+    })));
+    return index;
+  }, [contentNodes, edges]);
   const visibleNodes = useMemo(
     () => {
-      const queuePositions = generationQueuePositions(nodes.map((node) => node.data.record));
-      const recordsById = new Map(contentNodes.map((node) => [node.id, node.data.record]));
-      const inputRecordsByTarget = new Map<string, NodeRecord[]>();
-      const contentParentsByTarget = new Map<string, NodeRecord[]>();
-      const outputCountBySource = new Map<string, number>();
-      edges.forEach((edge) => {
-        outputCountBySource.set(edge.source, (outputCountBySource.get(edge.source) ?? 0) + 1);
-        const source = recordsById.get(edge.source);
-        if (!source) return;
-        const edgeKind = (edge.data as CanvasEdgeData | undefined)?.record?.kind;
-        if (edgeKind === "content-derivation" || edgeKind === "scene-branch") {
-          const parents = contentParentsByTarget.get(edge.target) ?? [];
-          parents.push(source);
-          contentParentsByTarget.set(edge.target, parents);
-        }
-        const inputRecords = inputRecordsByTarget.get(edge.target);
-        if (inputRecords) inputRecords.push(source);
-        else inputRecordsByTarget.set(edge.target, [source]);
-      });
+      const recordsById = relations.records;
+      const inputRecordsByTarget = relations.inputs;
+      const contentParentsByTarget = relations.parents;
+      const outputCountBySource = relations.outputCounts;
       const previousCache = visibleNodeCache.current;
       const nextCache = new Map<string, VisibleNodeCacheEntry>();
       const results = nodes.map((node) => {
@@ -9978,26 +9991,23 @@ function CanvasWorkspace() {
         const inputRecords = (node.data.record.kind === "video-generation" || node.data.record.kind === "image-generation")
           ? inputRecordsByTarget.get(node.id) ?? EMPTY_NODE_RECORDS
           : EMPTY_NODE_RECORDS;
-        const connectedMedia = inputRecords.filter((record) => videoInputMediaKind(record) !== null);
-        const connectedText = inputRecords.filter((record) => record.kind === "text");
-        const orderedText = orderedNodeRecordsFromContent(
-          node.data.record.content,
-          "textInputOrder",
-          connectedText,
-        );
-        const connectedMediaById = new Map(connectedMedia.map((record) => [record.id, record]));
-        const savedOrder = Array.isArray(node.data.record.content.mediaInputOrder)
-          ? node.data.record.content.mediaInputOrder.filter(
-            (inputId): inputId is string => typeof inputId === "string",
-          )
-          : [];
-        const orderedMedia = savedOrder
-          .map((inputId) => connectedMediaById.get(inputId))
-          .filter((record): record is NodeRecord => Boolean(record));
-        const orderedIds = new Set(orderedMedia.map((record) => record.id));
-        orderedMedia.push(...connectedMedia.filter((record) => !orderedIds.has(record.id)));
-
         const previousData = previous?.result.data;
+        const inputsUnchanged = previous?.source.data.record.content === node.data.record.content
+          && previous.inputRecords === inputRecords;
+        let orderedMedia = previousData?.mediaInputs ?? EMPTY_NODE_RECORDS;
+        let orderedText = previousData?.textInputs ?? EMPTY_NODE_RECORDS;
+        if (!inputsUnchanged) {
+          const connectedMedia = inputRecords.filter((record) => videoInputMediaKind(record) !== null);
+          orderedText = orderedNodeRecordsFromContent(node.data.record.content, "textInputOrder",
+            inputRecords.filter((record) => record.kind === "text"));
+          const connectedMediaById = new Map(connectedMedia.map((record) => [record.id, record]));
+          const savedOrder = Array.isArray(node.data.record.content.mediaInputOrder)
+            ? node.data.record.content.mediaInputOrder.filter((inputId): inputId is string => typeof inputId === "string") : [];
+          orderedMedia = savedOrder.map((inputId) => connectedMediaById.get(inputId))
+            .filter((record): record is NodeRecord => Boolean(record));
+          const orderedIds = new Set(orderedMedia.map((record) => record.id));
+          orderedMedia.push(...connectedMedia.filter((record) => !orderedIds.has(record.id)));
+        }
         const rawContentParents = contentParentsByTarget.get(node.id) ?? EMPTY_NODE_RECORDS;
         const contentParents = previousData && nodeRecordArraysEqual(previousData.contentParents, rawContentParents)
           ? previousData.contentParents
@@ -10016,9 +10026,9 @@ function CanvasWorkspace() {
         const activeTaskCount = activeComfyTaskCounts[node.id] ?? 0;
         const generationQueuePosition = queuePositions.get(node.id);
         const outputCount = outputCountBySource.get(node.id) ?? 0;
-        const generationSnapshot = node.data.record.kind === "generated-video"
-          ? generationSnapshotFromContent(node.data.record.content)
-          : null;
+        const generationSnapshot = previous?.source.data.record.content === node.data.record.content
+          ? previous.generationSnapshot
+          : node.data.record.kind === "generated-video" ? generationSnapshotFromContent(node.data.record.content) : null;
         const linkedPromptNode = generationSnapshot?.promptNodeId
           ? recordsById.get(generationSnapshot.promptNodeId)
           : null;
@@ -10037,7 +10047,7 @@ function CanvasWorkspace() {
           && previousData.outputCount === outputCount
           && previousData.contentParents === contentParents
           && previousData.mediaInputs === mediaInputs
-          && previousData.textInputCount === connectedText.length
+          && previousData.textInputCount === orderedText.length
           && previousData.textInputs === textInputs
           && previousData.promptNodeTitle === promptNodeTitle
           && previousData.h3DiffusionModelOptions === h3DiffusionModelOptions
@@ -10061,7 +10071,7 @@ function CanvasWorkspace() {
             outputCount,
             contentParents,
             mediaInputs,
-            textInputCount: connectedText.length,
+            textInputCount: orderedText.length,
             textInputs,
             promptNodeTitle,
             videoRegenerationPresets,
@@ -10075,13 +10085,13 @@ function CanvasWorkspace() {
         const result = previous?.source === node && previous.result.data === data
           ? previous.result
           : { ...node, data };
-        nextCache.set(node.id, { source: node, result });
+        nextCache.set(node.id, { source: node, result, inputRecords, generationSnapshot });
         return result;
       });
       visibleNodeCache.current = nextCache;
       return results;
     },
-    [activeComfyTaskCounts, contentNodes, edges, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [activeComfyTaskCounts, contentNodes, edges, relations, queuePositions, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
   );
 
   const updateGuideOverlays = useCallback((nextAlignment: AlignmentGuide[], nextSpacing: SpacingGuide[]) => {
@@ -10996,6 +11006,10 @@ function CanvasWorkspace() {
         minZoom={0.12}
         maxZoom={2.2}
         onlyRenderVisibleElements
+        defaultViewport={initialViewport}
+        onMoveEnd={(_, viewport) => {
+          if (activeProjectId) saveCanvasViewport(window.localStorage, activeProjectId, viewport);
+        }}
         defaultEdgeOptions={{ type: "canvasEdge", animated: false }}
         connectionLineStyle={{
           stroke: "#646d82",
@@ -11011,7 +11025,6 @@ function CanvasWorkspace() {
         panOnDrag={[1]}
         panOnScroll
         proOptions={{ hideAttribution: true }}
-        fitView
       >
         <VideoPosterViewportCache />
         <Background

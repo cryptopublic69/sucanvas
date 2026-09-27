@@ -8,7 +8,8 @@ const transpile = (source) => ts.transpileModule(source, {
 }).outputText;
 const importSource = (source) => import(`data:text/javascript;base64,${Buffer.from(transpile(source)).toString("base64")}`);
 const { loadVideoRegenerationPresets: load, saveVideoRegenerationPresets: save, matchingVideoRegenerationPreset: match,
-  videoPresetNodePatch, videoNodeExtraParameters, videoNodeSecondaryColors } = await importSource(
+  videoPresetNodePatch, videoNodeExtraParameters, videoNodeSecondaryColors,
+  orderedVideoRegenerationPresets, reorderVideoRegenerationPresets } = await importSource(
   await readFile(new URL("../src/video/videoRegenerationPresets.ts", import.meta.url), "utf8"),
 );
 const style = await importSource(await readFile(new URL("../src/styleLoras.ts", import.meta.url), "utf8"));
@@ -42,6 +43,22 @@ const secondarySettings = {
   secondaryLoraName: "MinimaxH3/secondary.safetensors", secondaryLoraStrength: 0.65, secondaryLoraBypassed: false,
   secondaryBrightness: 1.1, secondaryContrast: 0.85, secondarySaturation: 0.9,
 };
+
+test("default is pinned for display without changing the saved order", () => {
+  const presets = ["a", "b", "c", "d"].map((id) => ({ id, name: id, settings }));
+  const collection = { presets, defaultPresetId: "c" };
+  const ids = (items) => items.map((item) => item.id);
+  assert.deepEqual(ids(orderedVideoRegenerationPresets(collection)), ["c", "a", "b", "d"]);
+  assert.deepEqual(ids(orderedVideoRegenerationPresets({ ...collection, defaultPresetId: "" })), ["a", "b", "c", "d"]);
+  assert.deepEqual(ids(orderedVideoRegenerationPresets({ ...collection, defaultPresetId: "b" })), ["b", "a", "c", "d"]);
+  const reordered = reorderVideoRegenerationPresets(collection, "d", 1);
+  assert.deepEqual(ids(reordered), ["d", "a", "c", "b"]);
+  assert.deepEqual(ids(orderedVideoRegenerationPresets({ presets: reordered, defaultPresetId: "" })), ["d", "a", "c", "b"]);
+  assert.equal(reorderVideoRegenerationPresets(collection, "c", 3), presets);
+  const db = storage();
+  save(db, { ...collection, presets: reordered });
+  assert.deepEqual(ids(load(db, parse).presets), ["d", "a", "c", "b"]);
+});
 
 test("secondary parameters survive preset reload and apply to node and generation colors", () => {
   const db = storage();

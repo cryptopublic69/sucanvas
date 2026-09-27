@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useStore } from "@xyflow/react";
+import { useStore, useStoreApi } from "@xyflow/react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { preloadCachedVideoPosters } from "./videoPosterCache";
 import type { CanvasFlowNode } from "./CanvasNode";
@@ -7,7 +7,13 @@ import type { CanvasFlowNode } from "./CanvasNode";
 // Prewarm covers 320 screen pixels beyond the viewport. Keep React Flow's
 // node virtualization; moving the canvas must not mount distant players.
 export function VideoPosterViewportCache() {
-  const sources = useStore((state) => {
+  const store = useStoreApi();
+  const changes = useStore((state) => [state.nodes, state.transform, state.width, state.height] as const,
+    (a, b) => a.every((value, index) => value === b[index]));
+  useEffect(() => {
+    let release: (() => void) | undefined;
+    const timer = window.setTimeout(() => {
+    const state = store.getState();
     const [tx, ty, zoom] = state.transform;
     const candidates: { src: string; distance: number }[] = [];
     for (const node of state.nodeLookup.values()) {
@@ -25,8 +31,10 @@ export function VideoPosterViewportCache() {
           ? convertFileSrc(record.content.assetPath) : "";
       if (src) candidates.push({ src, distance: Math.abs(x + w / 2 - state.width / 2) + Math.abs(y + h / 2 - state.height / 2) });
     }
-    return [...new Set(candidates.sort((a, b) => a.distance - b.distance).map((item) => item.src))].slice(0, 100).sort();
-  }, (a, b) => a.length === b.length && a.every((src, index) => src === b[index]));
-  useEffect(() => preloadCachedVideoPosters(sources), [sources]);
+    const sources = [...new Set(candidates.sort((a, b) => a.distance - b.distance).map((item) => item.src))].slice(0, 100);
+    release = preloadCachedVideoPosters(sources);
+    }, 160);
+    return () => { window.clearTimeout(timer); release?.(); };
+  }, [changes, store]);
   return null;
 }
