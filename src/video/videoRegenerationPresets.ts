@@ -1,7 +1,7 @@
 import type { VideoRegenerationDraft, VideoRegenerationNumericField } from "../CanvasNode";
 
 export type VideoRegenerationSettings = Pick<VideoRegenerationDraft,
-  Exclude<VideoRegenerationNumericField, `secondary${string}` | "durationSeconds"> | "styleLoras" | "refImageSize">
+  Exclude<VideoRegenerationNumericField, `secondary${string}` | "durationSeconds"> | "styleLoras">
   & Partial<Pick<VideoRegenerationDraft, Extract<VideoRegenerationNumericField, `secondary${string}`>
     | "loraName" | "loraBypassed" | "diffusionModelName" | "secondaryLoraName" | "secondaryLoraBypassed">>;
 export interface VideoRegenerationPreset {
@@ -15,8 +15,8 @@ export interface VideoRegenerationPresetCollection {
 }
 
 function presetOnlySettings(settings: VideoRegenerationSettings): VideoRegenerationSettings {
-  const { durationSeconds: _duration, seed: _seed, ...parameters } = settings as
-    VideoRegenerationSettings & { durationSeconds?: unknown; seed?: unknown };
+  const { durationSeconds: _duration, seed: _seed, refImageSize: _refImageSize, ...parameters } = settings as
+    VideoRegenerationSettings & { durationSeconds?: unknown; seed?: unknown; refImageSize?: unknown };
   return parameters;
 }
 
@@ -32,7 +32,6 @@ export function videoPresetNodePatch(settings: VideoRegenerationSettings, shared
     generationPrimaryBrightness: settings.primaryBrightness,
     generationPrimaryContrast: settings.primaryContrast,
     generationPrimarySaturation: settings.primarySaturation,
-    generationRefImageSize: settings.refImageSize,
     generationStyleLoras: settings.styleLoras.map((slot) => ({ ...slot })),
     ...(settings.diffusionModelName ? { generationDiffusionModelOverride: settings.diffusionModelName } : {}),
     ...(settings.secondaryResolutionMegapixels !== undefined ? { generationSecondaryResolution: settings.secondaryResolutionMegapixels } : {}),

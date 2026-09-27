@@ -118,7 +118,9 @@ export function VideoRegenerationDialogs({
                       label: `${preset.id === presetCollection.defaultPresetId ? "(Default) " : ""}${preset.name}`,
                       title: preset.name,
                     }))}
-                    placeholder={presetCollection.presets.length ? "当前参数（未选择预设）" : "暂无预设，可保存当前参数"}
+                    placeholder={videoRegenerationDraft.presetEditor
+                      ? (presetCollection.presets.length ? "当前参数（未选择预设）" : "暂无预设，可保存当前参数")
+                      : "自定义参数"}
                     disabled={!presetCollection.presets.length}
                     onChange={selectPreset}
                     onMoveOption={movePreset}
@@ -447,7 +449,7 @@ export function VideoRegenerationDialogs({
               <section className="video-regeneration-group video-regeneration-shared-group" aria-label="共用设置">
                 <h3>共用设置</h3>
                 <div className="video-regeneration-fields video-regeneration-group-fields">
-              <fieldset className="video-regeneration-ref-mode">
+              {!videoRegenerationDraft.presetEditor && <fieldset className="video-regeneration-ref-mode">
                 <legend>参考图模式</legend>
                 <div>
                   {REF_IMAGE_SIZE_OPTIONS.map((option) => (
@@ -464,7 +466,7 @@ export function VideoRegenerationDialogs({
                     </button>
                   ))}
                 </div>
-              </fieldset>
+              </fieldset>}
             <div className="video-regeneration-style-loras">
               <StyleLoraEditor
                 renderStrengthInput={(props) => <ModelParameterNumberInput {...props} min={0} max={10} step={0.01} />}

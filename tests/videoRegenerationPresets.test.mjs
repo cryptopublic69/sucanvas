@@ -30,7 +30,7 @@ const settings = {
   primaryResolutionMegapixels: 0.4, primaryUpscaleFactor: 1,
   loraStrength: 1, primaryVideoSteps: 20, primaryAudioSteps: 20,
   primaryBrightness: 1, primaryContrast: 1, primarySaturation: 1,
-  styleLoras: [], refImageSize: "max",
+  styleLoras: [],
 };
 function storage(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -86,7 +86,8 @@ test("shared preset updates node generation parameters without changing seed, in
     primaryAudioSteps: 30, primaryBrightness: 1.2, primaryContrast: 0.8, primarySaturation: 0.7,
     styleLoras: [{ name: "style.safetensors", strength: 0.5, bypassed: false, applyToSecondary: true, applyToSecondPass: false }] };
   const original = { generationDuration: 12, generationSeed: "123", seedMode: "fixed", workflowModuleId: "workflow",
-    activeTextInputId: "prompt", generationAspectRatio: "9:16", generationSecondaryResolution: 1.2 };
+    activeTextInputId: "prompt", generationAspectRatio: "9:16", generationSecondaryResolution: 1.2,
+    generationRefImageSize: "match" };
   const content = { ...original, ...videoPresetNodePatch(preset, false) };
   for (const [key, value] of Object.entries(original)) assert.equal(content[key], value);
   assert.equal(content.generationDuration, 12);
@@ -94,7 +95,7 @@ test("shared preset updates node generation parameters without changing seed, in
   assert.equal(content.generationPrimaryResolution, preset.primaryResolutionMegapixels);
   assert.equal(content.generationPrimaryUpscaleFactor, preset.primaryUpscaleFactor);
   assert.equal(content.generationLoraStrength, preset.loraStrength);
-  assert.equal(content.generationRefImageSize, preset.refImageSize);
+  assert.equal(content.generationRefImageSize, "match");
   assert.deepEqual(videoNodeExtraParameters(content, settings, preset.primaryVideoSteps, false), {
     primaryAudioSteps: 30, primaryBrightness: 1.2, primaryContrast: 0.8, primarySaturation: 0.7,
   });
@@ -184,7 +185,7 @@ test("snapshot matching identifies equal parameters and prefers matching default
   for (const key of Object.keys(settings).filter((key) => typeof settings[key] === "number")) {
     assert.equal(match(collection, { ...settings, [key]: settings[key] + 0.1 }), undefined, key);
   }
-  assert.equal(match(collection, { ...settings, refImageSize: "match" }), undefined);
+  assert.equal(match(collection, { ...settings, refImageSize: "match" })?.id, "two");
   assert.equal(match(collection, null), undefined);
 });
 
@@ -226,8 +227,8 @@ test("primary LoRA selection and bypass survive save, reload and node applicatio
 });
 
 
-test("duration and seed are excluded from old and new presets and matching", () => {
-  const legacy = { ...settings, durationSeconds: 8, seed: "123" };
+test("duration, seed and reference mode are excluded from old and new presets and matching", () => {
+  const legacy = { ...settings, durationSeconds: 8, seed: "123", refImageSize: "max" };
   assert.deepEqual(parse(legacy), settings);
   assert.deepEqual(parse({ ...legacy, durationSeconds: "invalid" }), settings);
   for (const db of [
@@ -236,10 +237,11 @@ test("duration and seed are excluded from old and new presets and matching", () 
   ]) {
     const loaded = load(db, parse);
     assert.deepEqual(loaded.presets[0].settings, settings);
-    assert.equal(match(loaded, { ...settings, durationSeconds: 15, seed: "999" })?.id, loaded.presets[0].id);
-    const draft = { durationSeconds: 12, seed: "456", ...loaded.presets[0].settings };
+    assert.equal(match(loaded, { ...settings, durationSeconds: 15, seed: "999", refImageSize: "match" })?.id, loaded.presets[0].id);
+    const draft = { durationSeconds: 12, seed: "456", refImageSize: "match", ...loaded.presets[0].settings };
     assert.equal(draft.durationSeconds, 12);
     assert.equal(draft.seed, "456");
+    assert.equal(draft.refImageSize, "match");
   }
   const db = storage();
   save(db, { presets: [{ id: "new", name: "New", settings: legacy }], defaultPresetId: "new" });
@@ -247,4 +249,6 @@ test("duration and seed are excluded from old and new presets and matching", () 
   const patch = videoPresetNodePatch(legacy, false);
   assert.equal(Object.hasOwn(patch, "generationDuration"), false);
   assert.equal(Object.hasOwn(patch, "generationSeed"), false);
+  assert.equal(Object.hasOwn(patch, "generationRefImageSize"), false);
+  assert.deepEqual(load(db, parse).presets[0].settings, settings);
 });

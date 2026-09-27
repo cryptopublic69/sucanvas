@@ -676,6 +676,7 @@ interface StoryboardReferenceResolution {
 }
 
 interface GenerationSnapshot {
+  presetName?: string;
   prompt: string;
   promptInformation: string;
   promptNodeId: string;
@@ -758,6 +759,7 @@ interface VideoRegenerationRequest {
 }
 
 interface VideoExecutionOptions {
+  placementSourceNodeId?: string;
   seed?: string;
   clientId?: string;
   snapshot?: GenerationSnapshot;
@@ -793,6 +795,7 @@ interface VideoRegenerationDraft {
   useSnapshotSettings: boolean;
   presetEditor?: boolean;
   generatorId?: string;
+  placementSourceNodeId?: string;
   previewId: string;
   previewTitle: string;
   originalSnapshot: GenerationSnapshot;
@@ -1574,7 +1577,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   onSaveNode: (id: string) => Promise<void>;
   onMarkGeneratedVideoFullyPlayed: (id: string) => void;
   onExecutionCheck: (message: string, valid: boolean) => void;
-  onExecute: (id: string) => Promise<void>;
+  onExecute: (id: string, regeneration?: VideoRegenerationRequest, options?: VideoExecutionOptions) => Promise<void>;
   onExecuteImage: (id: string) => Promise<void>;
   onBatchExecute: (id: string) => Promise<void>;
   onSecondarySample: (id: string) => Promise<void>;
@@ -2796,6 +2799,7 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
       || snapshot.promptNodeIdSource === "verified"
       ? snapshot.promptNodeIdSource
       : "",
+    presetName: typeof snapshot.presetName === "string" ? snapshot.presetName : undefined,
     promptVersionId: typeof snapshot.promptVersionId === "string" ? snapshot.promptVersionId : "",
     promptVersionLabel: typeof snapshot.promptVersionLabel === "string"
       ? snapshot.promptVersionLabel
@@ -4509,15 +4513,12 @@ const edgeTypes = { canvasEdge: CanvasEdge };
 
 const submittingVideoBatches = new Set<string>();
 
-async function checkAndExecuteVideo(data: CanvasNodeData) {
+async function checkAndExecuteVideo(data: CanvasNodeData, options?: VideoExecutionOptions) {
   const { record, mediaInputs, textInputs, onChange, onExecutionCheck, onExecute } = data;
   const id = record.id;
-  const seedMode = seedModeFromContent(record.content);
-  const fixedSeed = fixedSeedFromContent(record.content);
   const videoGenerationMode = videoGenerationModeFromContent(record.content);
-  if (submittingVideoBatches.has(id) || record.content.status === "cancelling"
-    || (seedMode === "fixed" && data.activeTaskCount > 0)) {
-    onExecutionCheck("当前任务正在提交、取消或固定种子任务正在执行，请稍后", false);
+  if (submittingVideoBatches.has(id) || record.content.status === "cancelling") {
+    onExecutionCheck("当前任务正在提交或取消，请稍后", false);
     return;
   }
   const result = validateVideoExecution(
@@ -4526,21 +4527,6 @@ async function checkAndExecuteVideo(data: CanvasNodeData) {
     mediaInputs,
     textInputs,
   );
-  const duplicateFixedSeed = result.valid
-    && seedMode === "fixed"
-    && generatedSeedsFromContent(record.content).includes(fixedSeed);
-  if (duplicateFixedSeed) {
-    const message = `固定种子 ${fixedSeed} 已经生成过，无需重复生成`;
-    onChange(id, {
-      content: {
-        ...record.content,
-        status: "warning",
-        validationMessage: message,
-      },
-    });
-    onExecutionCheck(message, true);
-    return;
-  }
   onChange(id, {
     content: {
       ...record.content,
@@ -4550,7 +4536,7 @@ async function checkAndExecuteVideo(data: CanvasNodeData) {
   });
   onExecutionCheck(result.message, result.valid);
   if (!result.valid) return;
-  await onExecute(id);
+  await onExecute(id, undefined, options);
 }
 
 function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
@@ -5064,7 +5050,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ...videoNodeExtraParameters(record.content,
       selectedNodeWorkflowModule?.defaults ?? DEFAULT_H3_MODEL_PARAMETERS, primaryVideoSteps, sharedPrimarySteps),
     styleLoras,
-    refImageSize,
     diffusionModelName: nodeDiffusionModelName,
   };
   const matchedVideoPreset = isVideoGeneration ? matchingVideoRegenerationPreset({
@@ -6538,7 +6523,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       onConfigureRegenerateVideo(targets[0].id, true, { promptNodeId: id });
       return;
     }
-    await checkAndExecuteVideo(targets[0].data);
+    await checkAndExecuteVideo(targets[0].data, { placementSourceNodeId: id });
   };
 
   const checkAndExecuteImage = async () => {
@@ -7729,6 +7714,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       <strong title={generatedVideoWorkflowModule?.id ?? generatedVideoSnapshot.workflowModuleId ?? "未记录"}>
                         {generatedVideoWorkflowLabel}
                       </strong>
+                    </div>
+                    <div>
+                      <span>参数预设</span>
+                      <strong>{generatedVideoSnapshot.presetName ?? "未记录"}</strong>
                     </div>
                   </section>
                   <section className="generated-video-stage-info">
@@ -9527,16 +9516,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <button
                 type="button"
                 className="video-execute-button"
-                disabled={batchSubmitting || executionCancelling || (seedMode === "fixed" && executionRunning)}
+                disabled={batchSubmitting || executionCancelling}
                 title={batchSubmitting
                   ? "批量任务正在按顺序提交，请稍后"
-                  : seedMode === "fixed" && executionRunning
-                  ? "固定种子已有任务正在执行，不能重复排队"
                   : "提交一个新的生成任务；Alt＋点击调整生成参数"}
                 aria-label={batchSubmitting
                   ? "批量任务正在按顺序提交，请稍后"
-                  : seedMode === "fixed" && executionRunning
-                  ? "固定种子已有任务正在执行，不能重复排队"
                   : "开始执行"}
                 onClick={(event) => {
                   if (event.altKey) onConfigureRegenerateVideo(id, true, {});

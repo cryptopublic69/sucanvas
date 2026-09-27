@@ -8,6 +8,7 @@ import { ComfyStatusIndicators } from "./ComfyStatusIndicators";
 import { comfyStatusMessage, createComfyPreviewReceiver, livePreviewResources } from "./comfyLivePreview";
 import { loadVideoRegenerationPresets, matchingVideoRegenerationPreset, saveVideoRegenerationPresets, videoNodeExtraParameters, videoNodeSecondaryColors } from "./video/videoRegenerationPresets";
 import type { VideoRegenerationPresetCollection, VideoRegenerationSettings } from "./video/videoRegenerationPresets";
+import { findDuplicateVideoRequest } from "./video/activeVideoSeed";
 import { VideoRegenerationDialogs } from "./video/VideoRegenerationDialogs";
 import { SecondarySampleDialog } from "./video/SecondarySampleDialog";
 import { h3StyleLorasFromContent, styleLoraValidationError, usedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
@@ -347,7 +348,6 @@ function videoRegenerationSettingsFromValue(value: unknown): VideoRegenerationSe
     numbers[field] = number;
   }
   if (numbers.primaryAudioSteps < numbers.primaryVideoSteps
-    || (source.refImageSize !== "max" && source.refImageSize !== "match")
     || !Array.isArray(source.styleLoras)) return null;
   const styleLoras = h3StyleLorasFromContent(source);
   if (styleLoraValidationError(styleLoras)) return null;
@@ -356,7 +356,7 @@ function videoRegenerationSettingsFromValue(value: unknown): VideoRegenerationSe
   if (source.loraBypassed !== undefined && typeof source.loraBypassed !== "boolean") return null;
   if (source.secondaryLoraBypassed !== undefined && typeof source.secondaryLoraBypassed !== "boolean") return null;
   return {
-    ...numbers, refImageSize: source.refImageSize, styleLoras,
+    ...numbers, styleLoras,
     ...(typeof source.diffusionModelName === "string" && source.diffusionModelName.trim()
       ? { diffusionModelName: source.diffusionModelName.trim() } : {}),
     ...(typeof source.loraName === "string" ? { loraName: source.loraName.trim() } : {}),
@@ -3925,25 +3925,16 @@ function CanvasWorkspace() {
     const requestedSeedMode = regeneration || options?.seed ? "fixed" : seedModeFromContent(target.content);
     const requestedFixedSeed = regeneration?.seed ?? options?.seed ?? fixedSeedFromContent(target.content);
     const activeClients = runningComfyClients.current.get(targetId);
+    const reservations = incomingPlacementReservations.current.filter(
+      (record) => record.content.sourceGeneratorId === targetId && record.content.generationPlaceholder === true,
+    );
+    const activeSeedClients = new Set(activeClients);
+    for (const record of reservations) {
+      if (typeof record.content.placeholderClientId === "string") activeSeedClients.add(record.content.placeholderClientId);
+    }
     if (target.content.status === "cancelling") {
 
       rejectSubmission("当前任务正在取消，请稍后再提交");
-      return;
-    }
-    if (
-      !regeneration
-      && !options?.allowFixedSeedRepeat
-      && requestedSeedMode === "fixed"
-      && (generatedSeedsFromContent(target.content).includes(requestedFixedSeed)
-        || Boolean(activeClients?.size))
-    ) {
-      const message = activeClients?.size
-        ? `固定种子 ${requestedFixedSeed} 已有任务正在执行，不能重复排队`
-        : `固定种子 ${requestedFixedSeed} 已经生成过，无需重复生成`;
-      changeNode(targetId, {
-        content: { ...target.content, status: "warning", validationMessage: message },
-      });
-      rejectSubmission(message);
       return;
     }
     let snapshot = regeneration?.snapshot
@@ -4033,6 +4024,21 @@ function CanvasWorkspace() {
       secondaryStyleLoras: undefined,
       styleLoraHasSecondStage: Boolean(configuredModule.bindings.livePreviewNodeId),
     };
+    const currentPresets = loadVideoRegenerationPresets(window.localStorage, videoRegenerationSettingsFromValue);
+    const submittedModelName = snapshot.diffusionModelName;
+    const matchedPreset = matchingVideoRegenerationPreset({
+      ...currentPresets,
+      presets: currentPresets.presets.map((preset) => ({
+        ...preset,
+        settings: {
+          ...preset.settings,
+          diffusionModelName: preset.settings.diffusionModelName ?? submittedModelName,
+          primaryAudioSteps: workflowUsesSharedPrimarySteps(configuredModule)
+            ? preset.settings.primaryVideoSteps : preset.settings.primaryAudioSteps,
+        },
+      })),
+    }, videoRegenerationSettingsFromValue(snapshot));
+    snapshot = { ...snapshot, presetName: matchedPreset?.name ?? "自定义参数" };
     const livePreviewNodeId = livePreviewNodeIdForBindings(configuredModule.bindings);
 
     if (configuredModule.variant === "first-last-frame") {
@@ -4158,19 +4164,36 @@ function CanvasWorkspace() {
       rejectSubmission(`无法执行：${message}`);
       return;
     }
+    if (!regeneration && !options?.allowFixedSeedRepeat && requestedSeedMode === "fixed") {
+      const duplicate = findDuplicateVideoRequest([
+        ...nodesSnapshot.current.map((node) => node.data.record.content),
+        ...reservations.map((record) => record.content),
+      ], activeSeedClients, requestedFixedSeed, snapshot, targetId);
+      if (duplicate) {
+        rejectSubmission(duplicate === "active"
+          ? `种子 ${requestedFixedSeed} 和生成参数完全相同的任务正在执行，不能重复排队`
+          : `种子 ${requestedFixedSeed} 和生成参数完全相同的视频已经生成过，无需重复生成`);
+        return;
+      }
+    }
     const clientId = options?.clientId ?? crypto.randomUUID();
     const taskSubmittedAt = Date.now();
+    const placementSourceNode = options?.placementSourceNodeId
+      ? nodesSnapshot.current.find((node) => node.id === options.placementSourceNodeId)
+      : undefined;
+    const placementSource = placementSourceNode ? recordAtCurrentFlowPosition(placementSourceNode)
+      : regeneration?.sourcePreview;
     let placeholder: NodeRecord;
     try {
       placeholder = await createGenerationPlaceholder({
-        source: regeneration?.sourcePreview ?? target,
+        source: placementSource ?? target,
         clientId,
         snapshot,
         seed: requestedSeedMode === "fixed" ? requestedFixedSeed : undefined,
         secondary: false,
         sourceGeneratorId: targetId,
         edgeSourceId: targetId,
-        placeBelowSource: Boolean(regeneration),
+        placeBelowSource: Boolean(placementSource),
         positionOverride: options?.placeholderPosition,
       });
     } catch (error) {
@@ -4337,9 +4360,9 @@ function CanvasWorkspace() {
               continue;
             }
           }
-          const position = regeneration
+          const position = placementSource
             ? generatedPreviewPositionBelow(
-              regeneration.sourcePreview,
+              placementSource,
               placementRecords,
               previewWidth,
               previewHeight,
@@ -4898,6 +4921,7 @@ function CanvasWorkspace() {
     const draft: VideoRegenerationDraft = {
       presetEditor,
       generatorId: start && fromGenerator ? previewId : undefined,
+      placementSourceNodeId: start?.promptNodeId,
       secondaryResolutionMegapixels: snapshot.secondaryResolutionMegapixels,
       secondarySchedulerSteps: snapshot.secondarySchedulerSteps,
       loraName: snapshot.loraName,
@@ -4939,6 +4963,28 @@ function CanvasWorkspace() {
     setVideoRegenerationPresetName(selectedPreset?.name ?? "");
     setVideoRegenerationDraft(draft);
   }, [workflowModules, generationSnapshotForGenerator, flushVideoGenerationInputs, reportError]);
+
+  useEffect(() => {
+    if (!videoRegenerationDraft || videoRegenerationDraft.presetEditor) return;
+    const module = workflowModules.find((entry) => entry.id === videoRegenerationDraft.originalSnapshot.workflowModuleId);
+    const sharedSteps = workflowUsesSharedPrimarySteps(module);
+    const matchedPreset = matchingVideoRegenerationPreset({
+      ...videoRegenerationPresets,
+      presets: videoRegenerationPresets.presets.map((preset) => ({
+        ...preset,
+        settings: {
+          ...preset.settings,
+          diffusionModelName: preset.settings.diffusionModelName ?? videoRegenerationDraft.diffusionModelName,
+          primaryAudioSteps: sharedSteps ? preset.settings.primaryVideoSteps : preset.settings.primaryAudioSteps,
+        },
+      })),
+    }, videoRegenerationSettingsFromValue(videoRegenerationDraft));
+    const matchedId = matchedPreset?.id ?? "";
+    if (matchedId !== selectedVideoRegenerationPresetId) {
+      setSelectedVideoRegenerationPresetId(matchedId);
+      setVideoRegenerationPresetName(matchedPreset?.name ?? "");
+    }
+  }, [videoRegenerationDraft, videoRegenerationPresets, workflowModules, selectedVideoRegenerationPresetId]);
 
   const persistVideoRegenerationPresets = useCallback((collection: VideoRegenerationPresetCollection) => {
     try {
@@ -4991,6 +5037,10 @@ function CanvasWorkspace() {
     const id = asNew || !selectedVideoRegenerationPresetId
       ? crypto.randomUUID() : selectedVideoRegenerationPresetId;
     const name = videoRegenerationPresetName.trim() || `预设 ${videoRegenerationPresets.presets.length + 1}`;
+    if (videoRegenerationPresets.presets.some((entry) => entry.id !== id && entry.name.trim() === name)) {
+      showGlobalNotice(`无法保存：预设名称“${name}”已存在，请使用其他名称`);
+      return;
+    }
     const preset = { id, name, settings };
     const existing = videoRegenerationPresets.presets.some((entry) => entry.id === id);
     const next = {
@@ -5155,7 +5205,9 @@ function CanvasWorkspace() {
     setVideoRegenerationDraft(null);
     try {
       if (draft.generatorId) {
-        await executeVideoNode(draft.generatorId, undefined, { snapshot, seed: draft.seed });
+        await executeVideoNode(draft.generatorId, undefined, {
+          snapshot, seed: draft.seed, placementSourceNodeId: draft.placementSourceNodeId,
+        });
       } else {
         await regenerateGeneratedVideo(draft.previewId, snapshot, draft.seed);
       }
