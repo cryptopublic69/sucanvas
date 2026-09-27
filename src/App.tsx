@@ -6304,10 +6304,11 @@ function CanvasWorkspace() {
           onResizeImage: resizeImageNode,
           onOpenFolder: (nodeId: string) => openFolderRef.current(nodeId),
           onCopy: copyText,
+          onNotice: showGlobalNotice,
         },
       };
     },
-    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 

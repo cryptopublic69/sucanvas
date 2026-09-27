@@ -68,17 +68,31 @@ export async function comfyPreviewImageBlobFromSocketData(
       return null;
     }
   }
-  const buffer = data instanceof ArrayBuffer
-    ? data
-    : data instanceof Blob
-      ? await data.arrayBuffer()
-      : null;
-  if (!buffer || buffer.byteLength <= 8) return null;
-  const header = new DataView(buffer, 0, 8);
+  // Read only the protocol header; do not copy the entire binary preview into
+  // the JS heap before creating another Blob for the same image.
+  const payload = data instanceof Blob ? data
+    : data instanceof ArrayBuffer ? new Blob([data]) : null;
+  if (!payload || payload.size <= 8) return null;
+  const header = new DataView(await payload.slice(0, 8).arrayBuffer());
   if (header.getUint32(0, false) !== 1) return null;
   const imageType = header.getUint32(4, false);
   const mimeType = imageType === 2 ? "image/png" : "image/jpeg";
-  return new Blob([new Uint8Array(buffer, 8)], { type: mimeType });
+  return payload.slice(8, payload.size, mimeType);
+}
+
+// Own the source imperatively so cleanup runs before assigning the next URL.
+// Pausing and revoking a Blob URL alone do not reset a media element's source.
+export function attachLivePreviewSource(video: HTMLVideoElement, src: string): () => void {
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  video.src = src;
+  video.load();
+  return () => {
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  };
 }
 
 let previewDecodeBusy = false;

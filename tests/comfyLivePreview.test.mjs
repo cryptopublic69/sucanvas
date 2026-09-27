@@ -5,7 +5,7 @@ import ts from "typescript";
 
 const source = await readFile(new URL("../src/comfyLivePreview.ts", import.meta.url), "utf8");
 const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText;
-const { LivePreviewResourcePool, comfyStatusMessage, comfyPreviewImageBlobFromSocketData: decode,
+const { attachLivePreviewSource, LivePreviewResourcePool, comfyStatusMessage, comfyPreviewImageBlobFromSocketData: decode,
   createComfyPreviewReceiver, MAX_PREVIEW_BYTES, MAX_PREVIEW_TEXT_LENGTH } = await import(
   `data:text/javascript;base64,${Buffer.from(js).toString("base64")}`,
 );
@@ -66,6 +66,44 @@ test("preview bursts decode once; inactive and completed consumers receive nothi
   cancelled(packet()); active = false;
   await tick();
   assert.equal(delivered, 1);
+});
+
+test("binary Blob previews only read the eight-byte header into JS memory", async () => {
+  const header = new Uint8Array(8);
+  new DataView(header.buffer).setUint32(0, 1);
+  new DataView(header.buffer).setUint32(4, 2);
+  const payload = new Blob([header, "image payload"]);
+  payload.arrayBuffer = () => { throw new Error("full payload read"); };
+  const originalSlice = payload.slice.bind(payload);
+  const reads = [];
+  payload.slice = (...args) => {
+    const part = originalSlice(...args);
+    const read = part.arrayBuffer.bind(part);
+    part.arrayBuffer = () => { reads.push(part.size); return read(); };
+    return part;
+  };
+  const preview = await decode(payload);
+  assert.deepEqual(reads, [8]);
+  assert.equal(preview.type, "image/png");
+  assert.equal(await preview.text(), "image payload");
+});
+
+test("replacing and unmounting live preview sources resets the old media resource", () => {
+  const calls = [];
+  const video = {
+    src: "blob:previous",
+    pause() { calls.push(["pause", this.src]); },
+    removeAttribute(name) { assert.equal(name, "src"); this.src = ""; },
+    load() { calls.push(["load", this.src]); },
+  };
+  let release = attachLivePreviewSource(video, "blob:one");
+  assert.deepEqual(calls, [["pause", "blob:previous"], ["load", ""], ["load", "blob:one"]]);
+  release();
+  assert.equal(video.src, "");
+  release = attachLivePreviewSource(video, "blob:two");
+  assert.equal(video.src, "blob:two");
+  release();
+  assert.deepEqual(calls.slice(-2), [["pause", "blob:two"], ["load", ""]]);
 });
 
 function resourcePool() {

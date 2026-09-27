@@ -4,7 +4,7 @@ import { CanvasNodePresentation } from "./canvas/CanvasNodePresentation";
 import { useBatchedNodeInternals } from "./canvas/useBatchedNodeInternals";
 import { matchingVideoRegenerationPreset, orderedVideoRegenerationPresets, videoPresetNodePatch, videoNodeExtraParameters, videoNodeSecondaryColors } from "./video/videoRegenerationPresets";
 import type { VideoRegenerationPresetCollection } from "./video/videoRegenerationPresets";
-import { comfyStatusMessage, livePreviewResources } from "./comfyLivePreview";
+import { attachLivePreviewSource, comfyStatusMessage, livePreviewResources } from "./comfyLivePreview";
 import { StyleLoraInfo, LoraNameWithStrength } from "./StyleLoraInfo";
 import { H3StyleLora, h3StyleLorasFromContent, recordedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
 import { StyleLoraEditor } from "./StyleLoraEditor";
@@ -33,6 +33,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clapperboard,
+  ClipboardPaste,
   Copy,
   Dices,
   Eye,
@@ -1644,6 +1645,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   onResizeImage: (id: string, maxEdge: number) => Promise<void>;
   onOpenFolder: (id: string) => void;
   onCopy: (text: string) => void;
+  onNotice: (message: string) => void;
 }
 
 interface NodeClipboardEdge {
@@ -2288,7 +2290,7 @@ function openComfyProgressSocket(
 ): Promise<WebSocket | null> {
   return new Promise((resolve) => {
     const socket = new WebSocket(comfyWebSocketUrl(serverUrl, clientId));
-    socket.binaryType = "arraybuffer";
+    socket.binaryType = "blob";
     let settled = false;
     const finish = (result: WebSocket | null) => {
       if (settled) return;
@@ -2987,43 +2989,28 @@ function LiveComfyVideoPreview({ src, paused }: { src: string; paused: boolean }
 
   useEffect(() => {
     const video = previewRef.current;
-    return () => {
-      if (!video) return;
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-    };
-  }, []);
+    if (!video) return;
+    return attachLivePreviewSource(video, src);
+  }, [src]);
 
   useEffect(() => {
     const preview = previewRef.current;
     if (!preview) return;
     let disposed = false;
-    let resumeFrame: number | null = null;
     const startPlayback = () => {
       if (disposed || paused || preview.ended || !preview.paused) return;
       void preview.play().catch(() => {});
     };
-    const keepPreviewPlaying = () => {
-      if (disposed || paused || preview.ended || resumeFrame !== null) return;
-      resumeFrame = window.requestAnimationFrame(() => {
-        resumeFrame = null;
-        startPlayback();
-      });
-    };
 
     preview.addEventListener("loadeddata", startPlayback);
     preview.addEventListener("canplay", startPlayback);
-    preview.addEventListener("pause", keepPreviewPlaying);
     if (paused) preview.pause();
     else if (preview.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) startPlayback();
 
     return () => {
       disposed = true;
-      if (resumeFrame !== null) window.cancelAnimationFrame(resumeFrame);
       preview.removeEventListener("loadeddata", startPlayback);
       preview.removeEventListener("canplay", startPlayback);
-      preview.removeEventListener("pause", keepPreviewPlaying);
     };
   }, [paused, src]);
 
@@ -3031,7 +3018,6 @@ function LiveComfyVideoPreview({ src, paused }: { src: string; paused: boolean }
     <video
       ref={previewRef}
       className="generated-video-placeholder-live-preview"
-      src={src}
       autoPlay={!paused}
       loop
       muted
@@ -4637,6 +4623,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onResizeImage,
     onOpenFolder,
     onCopy,
+    onNotice,
   } = data;
   const mediaInputLayoutKey = mediaInputs
     .map((input) => `${input.id}:${videoInputMediaKind(input) ?? input.kind}`)
@@ -4770,6 +4757,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const [textIdsPendingClear, setTextIdsPendingClear] = useState<string[] | null>(null);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
   const [textDraft, setTextDraft] = useState(() => textFromContent(record.content));
+  const [textPasteStatus, setTextPasteStatus] = useState("");
   const [informationDraft, setInformationDraft] = useState(() => informationFromContent(record.content));
   const [textEditorFocused, setTextEditorFocused] = useState(false);
   const titleInputRef = useRef<HTMLInputElement>(null);
@@ -5819,8 +5807,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     return true;
   };
 
-  const changeText = (event: ChangeEvent<HTMLTextAreaElement>) => {
-    const nextText = event.currentTarget.value;
+  const updateText = (nextText: string) => {
     setTextDraft(nextText);
     markTextNodeChanged(id, nextText, informationDraft, savedText, savedInformation);
     if (createInitialPromptVersion(nextText, informationDraft)) return;
@@ -5839,6 +5826,25 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onChange(id, {
       content: { ...record.content, text: nextText },
     });
+  };
+
+  const changeText = (event: ChangeEvent<HTMLTextAreaElement>) => {
+    updateText(event.currentTarget.value);
+  };
+
+  const pasteText = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) {
+        setTextPasteStatus("剪贴板中没有文本");
+        return;
+      }
+      updateText(text);
+      setTextPasteStatus("已粘贴");
+      onNotice("粘贴成功");
+    } catch {
+      setTextPasteStatus("读取剪贴板失败，请在正文中按 Ctrl+V 粘贴");
+    }
   };
 
   const changeInformation = (event: ChangeEvent<HTMLTextAreaElement>) => {
@@ -6699,6 +6705,82 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     }
   };
 
+  const headerColorControl = supportsPreviewColor && (
+          <div
+            ref={previewColorControlRef}
+            className="nodrag node-preview-color-control"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="node-preview-color-picker"
+              onClick={() => setPreviewColorMenuOpen((open) => !open)}
+              title={isText
+                ? "选择文本节点颜色"
+                : isNote
+                  ? "选择备注节点颜色"
+                  : "选择视频预览颜色"}
+              aria-label={isText
+                ? "选择文本节点颜色"
+                : isNote
+                  ? "选择备注节点颜色"
+                  : "选择视频预览颜色"}
+              aria-expanded={previewColorMenuOpen}
+            >
+              <Palette size={13} />
+            </button>
+            {previewColorMenuOpen && (
+              <div
+                className="node-preview-color-presets"
+                role="menu"
+                aria-label={isText
+                  ? "文本节点颜色预设"
+                  : isNote
+                    ? "备注节点颜色预设"
+                    : "视频预览颜色预设"}
+              >
+                {previewColorPresets.map((preset) => (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    role="menuitem"
+                    className={previewDisplayColor === preset.value ? "is-active" : ""}
+                    style={{ "--preview-preset-color": preset.value } as CSSProperties}
+                    onClick={() => {
+                      onChange(id, {
+                        content: {
+                          ...record.content,
+                          previewThemeColor: preset.value,
+                        },
+                      });
+                      setPreviewColorMenuOpen(false);
+                    }}
+                    title={preset.label}
+                    aria-label={preset.label}
+                  >
+                    <span
+                      className={!isNote && preset.value === VIDEO_PREVIEW_DEFAULT_COLOR ? "is-default" : ""}
+                      aria-hidden="true"
+                    />
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+
+  const headerExpandControl = (isText || isNote) && (
+          <button
+            className="nodrag node-action"
+            onClick={() => setExpanded(true)}
+            title="放大编辑"
+            aria-label="放大编辑"
+          >
+            <Maximize2 size={13} />
+          </button>
+        );
+
   const toggleAudioPreview = async (inputId: string) => {
     const audio = audioPreviewRefs.current.get(inputId);
     if (!audio) return;
@@ -6974,17 +7056,23 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             )}
           </div>
         )}
-        {(isText || isNote) && (
+        {isText && (
           <button
+            type="button"
             className="nodrag node-action"
-            onClick={() => setExpanded(true)}
-            title="放大编辑"
-            aria-label="放大编辑"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              void pasteText();
+            }}
+            title={textPasteStatus || "粘贴剪贴板文本（替换当前正文）"}
+            aria-label="粘贴剪贴板文本"
           >
-            <Maximize2 size={13} />
+            <ClipboardPaste size={13} />
           </button>
         )}
-        {!isContentIterationNode && (isText || isNote) && (
+        {isText ? headerColorControl : headerExpandControl}
+        {isNote && (
           <button
             type="button"
             className={`nodrag node-action ${nodeMarkdownPreview ? "is-active-markdown" : ""}`}
@@ -7022,70 +7110,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             <Save size={13} />
           </button>
         )}
-        {supportsPreviewColor && (
-          <div
-            ref={previewColorControlRef}
-            className="nodrag node-preview-color-control"
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <button
-              type="button"
-              className="node-preview-color-picker"
-              onClick={() => setPreviewColorMenuOpen((open) => !open)}
-              title={isText
-                ? "选择文本节点颜色"
-                : isNote
-                  ? "选择备注节点颜色"
-                  : "选择视频预览颜色"}
-              aria-label={isText
-                ? "选择文本节点颜色"
-                : isNote
-                  ? "选择备注节点颜色"
-                  : "选择视频预览颜色"}
-              aria-expanded={previewColorMenuOpen}
-            >
-              <Palette size={13} />
-            </button>
-            {previewColorMenuOpen && (
-              <div
-                className="node-preview-color-presets"
-                role="menu"
-                aria-label={isText
-                  ? "文本节点颜色预设"
-                  : isNote
-                    ? "备注节点颜色预设"
-                    : "视频预览颜色预设"}
-              >
-                {previewColorPresets.map((preset) => (
-                  <button
-                    key={preset.value}
-                    type="button"
-                    role="menuitem"
-                    className={previewDisplayColor === preset.value ? "is-active" : ""}
-                    style={{ "--preview-preset-color": preset.value } as CSSProperties}
-                    onClick={() => {
-                      onChange(id, {
-                        content: {
-                          ...record.content,
-                          previewThemeColor: preset.value,
-                        },
-                      });
-                      setPreviewColorMenuOpen(false);
-                    }}
-                    title={preset.label}
-                    aria-label={preset.label}
-                  >
-                    <span
-                      className={!isNote && preset.value === VIDEO_PREVIEW_DEFAULT_COLOR ? "is-default" : ""}
-                      aria-hidden="true"
-                    />
-                    {preset.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+        {isText ? headerExpandControl : headerColorControl}
         {isText && (
           <div
             ref={textInformationRef}
@@ -7604,10 +7629,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 className="nodrag node-action generated-video-locate-prompt-action"
                 onClick={(event) => {
                   event.stopPropagation();
-                  onLocatePrompt(id, event.shiftKey ? "prompt" : "generator");
+                  onLocatePrompt(id, event.altKey ? "prompt" : "generator");
                 }}
-                title="点击定位关联的视频生成节点；Shift+点击定位提示词"
-                aria-label="定位视频生成节点；Shift+点击定位提示词"
+                title="点击定位关联的视频生成节点；Alt+点击定位提示词"
+                aria-label="定位视频生成节点；Alt+点击定位提示词"
               >
                 <LocateFixed size={12} />
               </button>
@@ -7964,10 +7989,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 className="nodrag node-action generated-video-locate-prompt-action"
                 onClick={(event) => {
                   event.stopPropagation();
-                  onLocateGeneratedImage(id, event.shiftKey ? "prompt" : "generator");
+                  onLocateGeneratedImage(id, event.altKey ? "prompt" : "generator");
                 }}
-                title="点击定位关联的图片生成节点；Shift+点击定位提示词"
-                aria-label="定位图片生成节点；Shift+点击定位提示词"
+                title="点击定位关联的图片生成节点；Alt+点击定位提示词"
+                aria-label="定位图片生成节点；Alt+点击定位提示词"
               >
                 <LocateFixed size={12} />
               </button>
