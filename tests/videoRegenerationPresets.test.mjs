@@ -27,7 +27,7 @@ const parse = new Function("h3StyleLorasFromContent", "styleLoraValidationError"
 const legacyKey = "infinite-canvas:video-regeneration-settings:v1";
 const key = "infinite-canvas:video-regeneration-presets:v1";
 const settings = {
-  durationSeconds: 8, primaryResolutionMegapixels: 0.4, primaryUpscaleFactor: 1,
+  primaryResolutionMegapixels: 0.4, primaryUpscaleFactor: 1,
   loraStrength: 1, primaryVideoSteps: 20, primaryAudioSteps: 20,
   primaryBrightness: 1, primaryContrast: 1, primarySaturation: 1,
   styleLoras: [], refImageSize: "max",
@@ -85,11 +85,11 @@ test("shared preset updates node generation parameters without changing seed, in
   const preset = { ...settings, diffusionModelName: "MinimaxH3/model.safetensors",
     primaryAudioSteps: 30, primaryBrightness: 1.2, primaryContrast: 0.8, primarySaturation: 0.7,
     styleLoras: [{ name: "style.safetensors", strength: 0.5, bypassed: false, applyToSecondary: true, applyToSecondPass: false }] };
-  const original = { generationSeed: "123", seedMode: "fixed", workflowModuleId: "workflow",
+  const original = { generationDuration: 12, generationSeed: "123", seedMode: "fixed", workflowModuleId: "workflow",
     activeTextInputId: "prompt", generationAspectRatio: "9:16", generationSecondaryResolution: 1.2 };
   const content = { ...original, ...videoPresetNodePatch(preset, false) };
   for (const [key, value] of Object.entries(original)) assert.equal(content[key], value);
-  assert.equal(content.generationDuration, preset.durationSeconds);
+  assert.equal(content.generationDuration, 12);
   assert.equal(content.generationDiffusionModelOverride, preset.diffusionModelName);
   assert.equal(content.generationPrimaryResolution, preset.primaryResolutionMegapixels);
   assert.equal(content.generationPrimaryUpscaleFactor, preset.primaryUpscaleFactor);
@@ -223,4 +223,28 @@ test("primary LoRA selection and bypass survive save, reload and node applicatio
   assert.equal(match(legacy, full)?.id, "legacy");
   assert.equal(Object.hasOwn(videoPresetNodePatch(settings, false), "generationLoraName"), false);
   assert.equal(Object.hasOwn(videoPresetNodePatch(settings, false), "generationLoraBypassed"), false);
+});
+
+
+test("duration and seed are excluded from old and new presets and matching", () => {
+  const legacy = { ...settings, durationSeconds: 8, seed: "123" };
+  assert.deepEqual(parse(legacy), settings);
+  assert.deepEqual(parse({ ...legacy, durationSeconds: "invalid" }), settings);
+  for (const db of [
+    storage({ [legacyKey]: JSON.stringify(legacy) }),
+    storage({ [key]: JSON.stringify({ presets: [{ id: "old", name: "Old", settings: legacy }], defaultPresetId: "old" }) }),
+  ]) {
+    const loaded = load(db, parse);
+    assert.deepEqual(loaded.presets[0].settings, settings);
+    assert.equal(match(loaded, { ...settings, durationSeconds: 15, seed: "999" })?.id, loaded.presets[0].id);
+    const draft = { durationSeconds: 12, seed: "456", ...loaded.presets[0].settings };
+    assert.equal(draft.durationSeconds, 12);
+    assert.equal(draft.seed, "456");
+  }
+  const db = storage();
+  save(db, { presets: [{ id: "new", name: "New", settings: legacy }], defaultPresetId: "new" });
+  assert.deepEqual(JSON.parse(db.getItem(key)).presets[0].settings, settings);
+  const patch = videoPresetNodePatch(legacy, false);
+  assert.equal(Object.hasOwn(patch, "generationDuration"), false);
+  assert.equal(Object.hasOwn(patch, "generationSeed"), false);
 });

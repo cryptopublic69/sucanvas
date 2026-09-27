@@ -870,7 +870,9 @@ button { color: inherit; }
 .generated-image-material-note input::placeholder { color: #626a7a; }
 .generated-image-material-note input:hover { background: rgba(139, 124, 246, .06); border-bottom-color: rgba(139, 124, 246, .28); }
 .generated-image-material-note input:focus { background: rgba(139, 124, 246, .08); border-bottom-color: #8b7cf6; box-shadow: 0 1px 0 rgba(139, 124, 246, .25); }
+.generated-info-copy-button,
 .generated-video-info-summary button { display: grid; width: 24px; height: 24px; place-items: center; padding: 0; color: #9991d5; background: transparent; border: 0; border-radius: 5px; cursor: pointer; }
+.generated-info-copy-button:hover,
 .generated-video-info-summary button:hover:not(:disabled) { color: #e2ddff; background: rgba(139, 124, 246, .13); }
 .generated-video-info-summary button:disabled { opacity: .32; cursor: default; }
 .text-information-control { position: relative; display: flex; width: 26px; height: 26px; flex: 0 0 26px; }
@@ -2316,6 +2318,9 @@ button { color: inherit; }
 .video-regeneration-preset-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .project-dialog .video-regeneration-preset-fields > label { grid-column: auto; min-width: 0; margin: 0; }
 .video-regeneration-preset-fields .settings-custom-select { margin-top: 6px; }
+.video-regeneration-presets:has(.settings-custom-select-toggle[aria-expanded="true"]) { position: relative; z-index: 40; }
+.video-regeneration-preset-fields .settings-custom-select-menu { width: 100%; max-height: min(420px, 55vh); grid-auto-rows: max-content; align-content: start; }
+.video-regeneration-preset-fields .settings-sortable-option-label { white-space: normal; overflow-wrap: anywhere; }
 .video-regeneration-preset-fields .settings-custom-select-toggle { height: 36px; font-size: calc(11px + var(--ui-font-adjust)); }
 .video-regeneration-preset-fields .settings-custom-select-menu > button { font-size: calc(11px + var(--ui-font-adjust)); }
 .video-regeneration-dialog .video-regeneration-preset-fields input { height: 36px; }

@@ -336,8 +336,9 @@ function workflowUsesSharedPrimarySteps(workflowModule: WorkflowModuleRecord | u
 function videoRegenerationSettingsFromValue(value: unknown): VideoRegenerationSettings | null {
   if (!value || typeof value !== "object") return null;
   const source = value as Record<string, unknown>;
-  const numbers = {} as Record<VideoRegenerationNumericField, number>;
+  const numbers = {} as Record<Exclude<VideoRegenerationNumericField, "durationSeconds">, number>;
   for (const field of Object.keys(VIDEO_REGENERATION_NUMBER_CONFIG) as VideoRegenerationNumericField[]) {
+    if (field === "durationSeconds") continue;
     const number = source[field];
     if (field.startsWith("secondary") && number === undefined) continue;
     const { min, max, step } = VIDEO_REGENERATION_NUMBER_CONFIG[field];
@@ -5972,6 +5973,7 @@ function CanvasWorkspace() {
       const width = generatorNode.width ?? generatorNode.data.record.width ?? 360;
       const height = generatorNode.height ?? generatorNode.data.record.height ?? VIDEO_NODE_BASE_HEIGHT;
       setRelationAnchorId(null);
+      flowStore.setState({ nodesSelectionActive: false });
       setNodes((current) => current.map((node) => ({
         ...node,
         selected: node.id === generatorNode.id,
@@ -6012,6 +6014,7 @@ function CanvasWorkspace() {
     const width = promptNode.width ?? promptNode.data.record.width ?? 320;
     const height = promptNode.height ?? promptNode.data.record.height ?? 240;
     setRelationAnchorId(promptNode.id);
+    flowStore.setState({ nodesSelectionActive: false });
     setNodes((current) => current.map((node) => ({
       ...node,
       selected: node.id === promptNode.id,
@@ -6022,7 +6025,7 @@ function CanvasWorkspace() {
       { zoom: 1, duration: 350 },
     );
     setNotice(`已定位提示词：${promptNode.data.record.title || "未命名文本"}`);
-  }, [setCenter, setNodes]);
+  }, [flowStore, setCenter, setNodes]);
 
   const locateGeneratedImageOrigin = useCallback((
     previewId: string,
@@ -6054,6 +6057,7 @@ function CanvasWorkspace() {
       const width = generator.width ?? generator.data.record.width ?? 420;
       const height = generator.height ?? generator.data.record.height ?? 624;
       setRelationAnchorId(null);
+      flowStore.setState({ nodesSelectionActive: false });
       setNodes((current) => current.map((node) => ({ ...node, selected: node.id === generator.id })));
       void setCenter(generator.position.x + width / 2, generator.position.y + height / 2, {
         zoom: 1,
@@ -6077,13 +6081,14 @@ function CanvasWorkspace() {
     const width = promptNode.width ?? promptNode.data.record.width ?? 320;
     const height = promptNode.height ?? promptNode.data.record.height ?? 240;
     setRelationAnchorId(promptNode.id);
+    flowStore.setState({ nodesSelectionActive: false });
     setNodes((current) => current.map((node) => ({ ...node, selected: node.id === promptNode.id })));
     void setCenter(promptNode.position.x + width / 2, promptNode.position.y + height / 2, {
       zoom: 1,
       duration: 350,
     });
     setNotice(`已定位提示词：${promptNode.data.record.title || "未命名文本"}`);
-  }, [setCenter, setNodes]);
+  }, [flowStore, setCenter, setNodes]);
 
   const copyNodesToClipboard = useCallback((nodeIds: string[]) => {
     const copiedIds = new Set(nodeIds);

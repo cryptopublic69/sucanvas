@@ -1,7 +1,7 @@
 import type { VideoRegenerationDraft, VideoRegenerationNumericField } from "../CanvasNode";
 
 export type VideoRegenerationSettings = Pick<VideoRegenerationDraft,
-  Exclude<VideoRegenerationNumericField, `secondary${string}`> | "styleLoras" | "refImageSize">
+  Exclude<VideoRegenerationNumericField, `secondary${string}` | "durationSeconds"> | "styleLoras" | "refImageSize">
   & Partial<Pick<VideoRegenerationDraft, Extract<VideoRegenerationNumericField, `secondary${string}`>
     | "loraName" | "loraBypassed" | "diffusionModelName" | "secondaryLoraName" | "secondaryLoraBypassed">>;
 export interface VideoRegenerationPreset {
@@ -14,9 +14,14 @@ export interface VideoRegenerationPresetCollection {
   defaultPresetId: string;
 }
 
+function presetOnlySettings(settings: VideoRegenerationSettings): VideoRegenerationSettings {
+  const { durationSeconds: _duration, seed: _seed, ...parameters } = settings as
+    VideoRegenerationSettings & { durationSeconds?: unknown; seed?: unknown };
+  return parameters;
+}
+
 export function videoPresetNodePatch(settings: VideoRegenerationSettings, sharedSteps: boolean) {
   return {
-    generationDuration: settings.durationSeconds,
     generationPrimaryResolution: settings.primaryResolutionMegapixels,
     generationPrimaryUpscaleFactor: settings.primaryUpscaleFactor,
     generationLoraStrength: settings.loraStrength,
@@ -83,7 +88,7 @@ export function matchingVideoRegenerationPreset(
 ): VideoRegenerationPreset | undefined {
   if (!settings) return undefined;
   const matches = collection.presets.filter((preset) => {
-    const { styleLoras, ...parameters } = settings;
+    const { styleLoras, ...parameters } = presetOnlySettings(settings);
     if (!Object.entries(parameters).every(([key, value]) => {
       const saved = preset.settings[key as keyof typeof parameters];
       if ((key.startsWith("secondary") || key === "loraName" || key === "loraBypassed") && saved === undefined) return true;
@@ -124,7 +129,7 @@ export function loadVideoRegenerationPresets(
           || typeof entry.name !== "string" || !entry.name.trim()
           || presets.some((preset) => preset.id === entry.id)) continue;
         const settings = parseSettings(entry.settings);
-        if (settings) presets.push({ id: entry.id, name: entry.name.trim(), settings });
+        if (settings) presets.push({ id: entry.id, name: entry.name.trim(), settings: presetOnlySettings(settings) });
       }
       return {
         presets,
@@ -134,7 +139,7 @@ export function loadVideoRegenerationPresets(
     }
     const settings = parseSettings(JSON.parse(storage.getItem(LEGACY_STORAGE_KEY) ?? "null"));
     return settings
-      ? { presets: [{ id: "legacy", name: "原有设置", settings }], defaultPresetId: "legacy" }
+      ? { presets: [{ id: "legacy", name: "原有设置", settings: presetOnlySettings(settings) }], defaultPresetId: "legacy" }
       : empty;
   } catch {
     return empty;
@@ -145,5 +150,8 @@ export function saveVideoRegenerationPresets(
   storage: PresetStorage,
   collection: VideoRegenerationPresetCollection,
 ): void {
-  storage.setItem(STORAGE_KEY, JSON.stringify(collection));
+  storage.setItem(STORAGE_KEY, JSON.stringify({
+    ...collection,
+    presets: collection.presets.map((preset) => ({ ...preset, settings: presetOnlySettings(preset.settings) })),
+  }));
 }
