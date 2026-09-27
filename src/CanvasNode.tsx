@@ -4569,6 +4569,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     mediaInputs,
     textInputCount,
     textInputs,
+    promptNodeTitle,
     videoRegenerationPresets,
     h3LoraOptions,
     h3DiffusionModelOptions,
@@ -4637,6 +4638,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   );
   const [copied, setCopied] = useState(false);
   const [copiedMarkdownTarget, setCopiedMarkdownTarget] = useState<string | null>(null);
+  const [promptCopied, setPromptCopied] = useState(false);
+  const [generatedPromptDialogOpen, setGeneratedPromptDialogOpen] = useState(false);
   const [generationInfoCopied, setGenerationInfoCopied] = useState(false);
   const [errorCopied, setErrorCopied] = useState(false);
   const [referenceCatalogCopied, setReferenceCatalogCopied] = useState(false);
@@ -5151,8 +5154,23 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     : generatedVideoSnapshot?.workflowModuleId
       ? `方案已缺失 · ${generatedVideoSnapshot.workflowModuleRevision || "未记录版本"}`
       : "未记录";
+  const generatedVideoPrompt = generatedVideoSnapshot?.prompt ?? "";
+  const generatedVideoPromptInformation = generatedVideoSnapshot?.promptInformation ?? "";
+  const generatedVideoPromptBaseTitle = promptNodeTitle
+    || generatedVideoSnapshot?.promptNodeTitle
+    || "";
+  const generatedVideoPromptTitle = generatedVideoSnapshot?.promptVersionLabel
+    ? `${generatedVideoPromptBaseTitle || "提示词"} · ${generatedVideoSnapshot.promptVersionLabel}`
+    : generatedVideoPromptBaseTitle;
   const generatedImageSeed = isGeneratedImage && typeof record.content.seed === "string"
     ? record.content.seed
+    : "";
+  const generatedImagePrompt = isGeneratedImage && typeof record.content.generationPrompt === "string"
+    ? record.content.generationPrompt
+    : "";
+  const generatedImageNegativePrompt = isGeneratedImage
+    && typeof record.content.generationNegativePrompt === "string"
+    ? record.content.generationNegativePrompt
     : "";
   const generatedImageWidth = Number(record.content.generationWidth);
   const generatedImageHeight = Number(record.content.generationHeight);
@@ -6216,7 +6234,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     });
     panel.querySelectorAll(".generated-video-stage-info").forEach((section) => {
       lines.push("", section.querySelector("h4")?.textContent ?? "");
-      section.querySelectorAll("dt").forEach((label) => {
+      section.querySelectorAll("dt:not([data-exclude-from-copy])").forEach((label) => {
         const value = label.nextElementSibling?.cloneNode(true) as HTMLElement | undefined;
         value?.querySelectorAll<HTMLElement>(".generated-lora-name-strength").forEach((lora) => {
           lora.textContent = lora.title || lora.textContent;
@@ -6237,6 +6255,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onCopy(generatedVideoSeed);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1200);
+  };
+
+  const copyGeneratedPrompt = () => {
+    if (!generatedVideoPrompt) return;
+    onCopy(generatedVideoPrompt);
+    setPromptCopied(true);
+    window.setTimeout(() => setPromptCopied(false), 1200);
   };
 
   const copyValidationError = (event: ReactMouseEvent<HTMLButtonElement>) => {
@@ -7760,10 +7785,100 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       </dl>
                     </section>
                   )}
+                  <section className="generated-video-prompt-info">
+                    <div>
+                      <h4 title={generatedVideoPromptTitle || "提示词"}>
+                        提示词{generatedVideoPromptTitle ? ` ${generatedVideoPromptTitle}` : ""}
+                      </h4>
+                      <button
+                        type="button"
+                        disabled={!generatedVideoPrompt && !generatedVideoPromptInformation}
+                        onClick={() => {
+                          setGeneratedInfoOpen(false);
+                          setGeneratedPromptDialogOpen(true);
+                        }}
+                        title="在大窗中查看提示词和备注"
+                        aria-label="在大窗中查看提示词和备注"
+                      >
+                        <Maximize2 size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!generatedVideoPrompt}
+                        onClick={copyGeneratedPrompt}
+                        title={promptCopied ? "提示词已复制" : "复制提示词"}
+                        aria-label={promptCopied ? "提示词已复制" : "复制提示词"}
+                      >
+                        {promptCopied ? <Check size={12} /> : <Copy size={12} />}
+                      </button>
+                    </div>
+                    <p title={generatedVideoPrompt}>{generatedVideoPrompt || "未记录提示词"}</p>
+                  </section>
                 </aside>,
                 document.body,
               )}
             </div>
+          )}
+          {generatedPromptDialogOpen && createPortal(
+            <div
+              className="expanded-editor-backdrop"
+              onMouseDown={() => setGeneratedPromptDialogOpen(false)}
+            >
+              <section
+                className="expanded-editor-dialog is-prompt-version is-readonly"
+                role="dialog"
+                aria-modal="true"
+                aria-label="生成时提示词与备注"
+                onMouseDown={(event) => event.stopPropagation()}
+              >
+                <header className="expanded-editor-header">
+                  <span className="node-kind-icon"><FileText size={15} /></span>
+                  <div>
+                    <strong>{generatedVideoPromptTitle || "生成时提示词"}</strong>
+                    <span>生成时快照 · 只读</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setGeneratedPromptDialogOpen(false)}
+                    title="关闭"
+                    aria-label="关闭提示词查看窗口"
+                  >
+                    <X size={17} />
+                  </button>
+                </header>
+                <div className="expanded-prompt-layout">
+                  <section className="expanded-prompt-pane is-prompt">
+                    <header>
+                      <strong>提示词</strong>
+                      <span>{generatedVideoPrompt.length.toLocaleString()} 字符</span>
+                    </header>
+                    <textarea
+                      className="expanded-text-editor"
+                      value={generatedVideoPrompt}
+                      readOnly
+                      spellCheck={false}
+                      placeholder="未记录提示词"
+                      aria-label="生成时提示词，只读"
+                    />
+                  </section>
+                  <section className="expanded-prompt-pane is-information">
+                    <header>
+                      <strong>备注</strong>
+                      <span>{generatedVideoPromptInformation.length.toLocaleString()} 字符</span>
+                    </header>
+                    <textarea
+                      className="expanded-text-editor"
+                      value={generatedVideoPromptInformation}
+                      readOnly
+                      spellCheck={false}
+                      placeholder="未记录中文信息"
+                      aria-label="生成时备注，只读"
+                    />
+                  </section>
+                </div>
+              </section>
+            </div>,
+            document.body,
           )}
           </div>
         </footer>
@@ -7968,12 +8083,106 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                           </>
                         )}
                         <dt>LoRA</dt><dd title={generatedImageLoraName || "—"}>{generatedImageLoraName || "—"}</dd>
+                        <dt data-exclude-from-copy>负向提示词</dt><dd title={generatedImageNegativePrompt || "—"}>{generatedImageNegativePrompt || "—"}</dd>
                       </dl>
+                    </section>
+                    <section className="generated-video-prompt-info">
+                      <div>
+                        <h4>正向提示词</h4>
+                        <button
+                          type="button"
+                          disabled={!generatedImagePrompt && !generatedImageNegativePrompt}
+                          onClick={() => {
+                            setGeneratedInfoOpen(false);
+                            setGeneratedPromptDialogOpen(true);
+                          }}
+                          title="在大窗中查看正向与负向提示词"
+                          aria-label="在大窗中查看正向与负向提示词"
+                        >
+                          <Maximize2 size={12} />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!generatedImagePrompt}
+                          onClick={() => {
+                            if (!generatedImagePrompt) return;
+                            onCopy(generatedImagePrompt);
+                            setPromptCopied(true);
+                            window.setTimeout(() => setPromptCopied(false), 1200);
+                          }}
+                          title={promptCopied ? "提示词已复制" : "复制提示词"}
+                          aria-label={promptCopied ? "提示词已复制" : "复制提示词"}
+                        >
+                          {promptCopied ? <Check size={12} /> : <Copy size={12} />}
+                        </button>
+                      </div>
+                      <p title={generatedImagePrompt}>{generatedImagePrompt || "未记录提示词"}</p>
                     </section>
                   </aside>,
                   document.body,
                 )}
               </div>
+            )}
+            {generatedPromptDialogOpen && createPortal(
+              <div
+                className="expanded-editor-backdrop"
+                onMouseDown={() => setGeneratedPromptDialogOpen(false)}
+              >
+                <section
+                  className="expanded-editor-dialog is-prompt-version is-readonly"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="图片生成提示词"
+                  onMouseDown={(event) => event.stopPropagation()}
+                >
+                  <header className="expanded-editor-header">
+                    <span className="node-kind-icon"><FileText size={15} /></span>
+                    <div>
+                      <strong>图片生成提示词</strong>
+                      <span>生成时快照 · 只读</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setGeneratedPromptDialogOpen(false)}
+                      title="关闭"
+                      aria-label="关闭提示词查看窗口"
+                    >
+                      <X size={17} />
+                    </button>
+                  </header>
+                  <div className="expanded-prompt-layout">
+                    <section className="expanded-prompt-pane is-prompt">
+                      <header>
+                        <strong>正向提示词</strong>
+                        <span>{generatedImagePrompt.length.toLocaleString()} 字符</span>
+                      </header>
+                      <textarea
+                        className="expanded-text-editor"
+                        value={generatedImagePrompt}
+                        readOnly
+                        spellCheck={false}
+                        placeholder="未记录提示词"
+                        aria-label="图片生成正向提示词，只读"
+                      />
+                    </section>
+                    <section className="expanded-prompt-pane is-information">
+                      <header>
+                        <strong>负向提示词</strong>
+                        <span>{generatedImageNegativePrompt.length.toLocaleString()} 字符</span>
+                      </header>
+                      <textarea
+                        className="expanded-text-editor"
+                        value={generatedImageNegativePrompt}
+                        readOnly
+                        spellCheck={false}
+                        placeholder="—"
+                        aria-label="图片生成负向提示词，只读"
+                      />
+                    </section>
+                  </div>
+                </section>
+              </div>,
+              document.body,
             )}
           </div>
         </footer>
