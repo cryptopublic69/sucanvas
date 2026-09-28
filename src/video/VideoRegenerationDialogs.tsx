@@ -167,9 +167,9 @@ export function VideoRegenerationDialogs({
               </div>
             </section>
             <div className="video-regeneration-fields">
-              {!videoRegenerationDraft.presetEditor && <div className="video-regeneration-basic-fields">
+              <div className={`video-regeneration-basic-fields${videoRegenerationDraft.presetEditor ? " video-preset-model-fields" : ""}`}>
               <h3>基础参数</h3>
-              {!videoRegenerationDraft.presetEditor && <label className="video-regeneration-model-field">
+              <label className="video-regeneration-model-field">
                 H3 模型
                 <SettingsSelect
                   value={catalogModel ?? selectedModel}
@@ -191,7 +191,7 @@ export function VideoRegenerationDialogs({
                   }))}
                   ariaLabel="重新生成 H3 模型"
                 />
-              </label>}
+              </label>
               {!videoRegenerationDraft.presetEditor && <>
               <label>
                 Seed
@@ -238,7 +238,7 @@ export function VideoRegenerationDialogs({
                   }))}
                 />
               </label>}
-              </div>}
+              </div>
               <section className="video-regeneration-group" aria-label="1采参数">
                 <header className="video-regeneration-group-header">
                   <h3>1采参数</h3>

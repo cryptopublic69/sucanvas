@@ -2407,6 +2407,7 @@ button { color: inherit; }
 :root[data-theme="light"] .video-regeneration-preset-actions > .video-preset-save { color: #554aa7; background: #ece9ff; border-color: #b6aee3; }
 .video-regeneration-basic-fields { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 50fr) minmax(240px, 32fr) minmax(90px, 18fr); gap: 13px; }
 .project-dialog .video-regeneration-basic-fields > label { grid-column: auto; min-width: 0; margin: 0; }
+.project-dialog .video-preset-model-fields > .video-regeneration-model-field { grid-column: 1 / -1; }
 :root .video-regeneration-dialog { --generation-control-height: 36px; }
 :root[data-font-size="medium"] .video-regeneration-dialog { --generation-control-height: 38px; }
 .video-regeneration-basic-fields :is(.settings-custom-select, .video-regeneration-seed, .model-parameter-number-input) { margin-top: 6px; }
