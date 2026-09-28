@@ -7629,10 +7629,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 className="nodrag node-action generated-video-locate-prompt-action"
                 onClick={(event) => {
                   event.stopPropagation();
-                  onLocatePrompt(id, event.altKey ? "prompt" : "generator");
+                  onLocatePrompt(id, event.altKey ? "generator" : "prompt");
                 }}
-                title="点击定位关联的视频生成节点；Alt+点击定位提示词"
-                aria-label="定位视频生成节点；Alt+点击定位提示词"
+                title="点击定位提示词；Alt+点击定位关联的视频生成节点"
+                aria-label="定位提示词；Alt+点击定位视频生成节点"
               >
                 <LocateFixed size={12} />
               </button>
@@ -7989,10 +7989,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 className="nodrag node-action generated-video-locate-prompt-action"
                 onClick={(event) => {
                   event.stopPropagation();
-                  onLocateGeneratedImage(id, event.altKey ? "prompt" : "generator");
+                  onLocateGeneratedImage(id, event.altKey ? "generator" : "prompt");
                 }}
-                title="点击定位关联的图片生成节点；Alt+点击定位提示词"
-                aria-label="定位图片生成节点；Alt+点击定位提示词"
+                title="点击定位提示词；Alt+点击定位关联的图片生成节点"
+                aria-label="定位提示词；Alt+点击定位图片生成节点"
               >
                 <LocateFixed size={12} />
               </button>
