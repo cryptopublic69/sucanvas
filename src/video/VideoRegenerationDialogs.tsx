@@ -1,9 +1,10 @@
 import type { VideoRegenerationPresetCollection } from "./videoRegenerationPresets";
 import { orderedVideoRegenerationPresets } from "./videoRegenerationPresets";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ChevronRight, Dices, FileText, RotateCcw, Settings, StickyNote, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, ClipboardPaste, Copy, Dices, Eye, FileText, PanelRightClose, PanelRightOpen, Pencil, RotateCcw, Settings, X } from "lucide-react";
+import { MarkdownPreview } from "../CanvasNode";
 import { StyleLoraEditor } from "../StyleLoraEditor";
 import { ModelParameterNumberInput, REF_IMAGE_SIZE_OPTIONS, VIDEO_REGENERATION_NUMBER_CONFIG, SettingsSelect, randomFixedSeed, h3DiffusionModelDisplayName, sameH3DiffusionModelName, h3LoraDisplayName, sameH3LoraName } from "../CanvasNode";
 import type { VideoRegenerationDraft, VideoRegenerationPromptOption, WorkflowModuleRecord } from "../CanvasNode";
@@ -22,6 +23,7 @@ type VideoRegenerationDialogsProps = {
   saveVideoRegenerationSettings: (asNew?: boolean) => void;
   presetCollection: VideoRegenerationPresetCollection;
   selectedPresetId: string;
+  selectedPresetModified: boolean;
   presetName: string;
   setPresetName: (name: string) => void;
   selectPreset: (id: string) => void;
@@ -46,6 +48,7 @@ export function VideoRegenerationDialogs({
   selectedVideoRegenerationPrompt,
   presetCollection,
   selectedPresetId,
+  selectedPresetModified,
   presetName,
   setPresetName,
   selectPreset,
@@ -54,6 +57,60 @@ export function VideoRegenerationDialogs({
   movePreset,
 }: VideoRegenerationDialogsProps) {
   const [secondaryExpanded, setSecondaryExpanded] = useState(false);
+  const [markdownPreview, setMarkdownPreview] = useState({ prompt: false, information: true });
+  const [informationHidden, setInformationHidden] = useState(false);
+  const [clipboardStatus, setClipboardStatus] = useState("");
+  const [copiedField, setCopiedField] = useState<string | null>(null);
+  const clipboardSession = useRef(0);
+  useEffect(() => {
+    setMarkdownPreview({ prompt: false, information: true });
+    setInformationHidden(false);
+    setClipboardStatus("");
+    setCopiedField(null);
+    return () => { clipboardSession.current += 1; };
+  }, [videoRegenerationInformationOpen, videoRegenerationDraft?.previewId, videoRegenerationDraft?.selectedPromptKey]);
+  useEffect(() => {
+    if (!copiedField) return;
+    const timer = window.setTimeout(() => setCopiedField(null), 1200);
+    return () => window.clearTimeout(timer);
+  }, [copiedField]);
+  const updatePromptField = (field: "prompt" | "information", value: string) => {
+    setVideoRegenerationDraft((current) => current && ({
+      ...current,
+      promptOptions: current.promptOptions.map((option) => (
+        option.key === current.selectedPromptKey ? { ...option, [field]: value } : option
+      )),
+    }));
+  };
+  const pastePrompt = async () => {
+    const session = clipboardSession.current;
+    try {
+      const text = await navigator.clipboard.readText();
+      if (session !== clipboardSession.current) return;
+      if (!text) {
+        setClipboardStatus("剪贴板中没有文本");
+        return;
+      }
+      updatePromptField("prompt", text);
+      setMarkdownPreview((current) => ({ ...current, prompt: false }));
+      setClipboardStatus("已粘贴并替换提示词");
+    } catch {
+      if (session === clipboardSession.current) {
+        setClipboardStatus("读取剪贴板失败，请在编辑模式中按 Ctrl+V 粘贴");
+      }
+    }
+  };
+  const copyField = async (field: "prompt" | "information") => {
+    const session = clipboardSession.current;
+    try {
+      await navigator.clipboard.writeText(selectedVideoRegenerationPrompt?.[field] ?? "");
+      if (session !== clipboardSession.current) return;
+      setCopiedField(field);
+      setClipboardStatus(field === "prompt" ? "已复制提示词" : "已复制备注");
+    } catch {
+      if (session === clipboardSession.current) setClipboardStatus("复制失败，请选择文本后按 Ctrl+C 复制");
+    }
+  };
   useEffect(() => { setSecondaryExpanded(false); }, [videoRegenerationDraft?.previewId]);
   const dialogOpen = videoRegenerationDraft !== null;
   useEffect(() => {
@@ -107,8 +164,8 @@ export function VideoRegenerationDialogs({
                 <h2>{videoRegenerationDraft.presetEditor ? "预设编辑" : "视频生成"}</h2>
                 {!videoRegenerationDraft.presetEditor && <>
                   <button type="button" className="video-regeneration-header-notes"
-                    onClick={() => setVideoRegenerationInformationOpen(true)} title="查看当前提示词的备注">
-                    <StickyNote size={14} />查看备注
+                    onClick={() => setVideoRegenerationInformationOpen(true)} title="修改本次生成使用的提示词">
+                    <Pencil size={14} />修改提示词
                   </button>
                   <button type="submit" className="primary-button video-regeneration-header-generate"><RotateCcw size={13} />生成</button>
                 </>}
@@ -127,7 +184,7 @@ export function VideoRegenerationDialogs({
                     value={selectedPresetId}
                     options={orderedVideoRegenerationPresets(presetCollection).map((preset) => ({
                       value: preset.id,
-                      label: `${preset.id === presetCollection.defaultPresetId ? "(Default) " : ""}${preset.name}`,
+                      label: `${preset.id === presetCollection.defaultPresetId ? "(Default) " : ""}${preset.name}${preset.id === selectedPresetId && selectedPresetModified ? " · 已修改" : ""}`,
                       title: preset.name,
                       reorderDisabled: preset.id === presetCollection.defaultPresetId,
                     }))}
@@ -153,7 +210,7 @@ export function VideoRegenerationDialogs({
               </div>
               <div className="video-regeneration-preset-actions">
                 <button type="button" className="dialog-cancel video-preset-save" onClick={() => saveVideoRegenerationSettings()}>
-                  {selectedPresetId ? "保存当前预设" : "保存为预设"}
+                  {selectedPresetId ? "保存修改" : "保存为预设"}
                 </button>
                 <button type="button" className="dialog-cancel" onClick={() => saveVideoRegenerationSettings(true)}>
                   另存为新预设
@@ -485,56 +542,85 @@ export function VideoRegenerationDialogs({
           onMouseDown={() => setVideoRegenerationInformationOpen(false)}
         >
           <section
-            className="expanded-editor-dialog is-prompt-version is-readonly"
+            className="expanded-editor-dialog is-prompt-version"
             role="dialog"
             aria-modal="true"
-            aria-label="重新生成提示词与备注"
+            aria-label="修改提示词"
             onMouseDown={(event) => event.stopPropagation()}
           >
             <header className="expanded-editor-header">
               <span className="node-kind-icon"><FileText size={15} /></span>
               <div>
                 <strong>{selectedVideoRegenerationPrompt?.label ?? "提示词版本"}</strong>
-                <span>当前选择版本 · 只读</span>
+                <span role="status">{clipboardStatus || "修改自动保留在本次生成中，原提示词版本保持不变"}</span>
               </div>
               <button
                 type="button"
                 onClick={() => setVideoRegenerationInformationOpen(false)}
                 title="关闭"
-                aria-label="关闭提示词与备注查看窗口"
+                aria-label="关闭提示词编辑窗口"
               >
                 <X size={17} />
               </button>
             </header>
-            <div className="expanded-prompt-layout">
-              <section className="expanded-prompt-pane is-prompt">
+            <div className={`expanded-prompt-layout ${informationHidden ? "is-information-hidden" : ""}`}>
+              {(["prompt", "information"] as const).map((field) => (
+              <section key={field} className={`expanded-prompt-pane is-${field}`}>
                 <header>
-                  <strong>提示词</strong>
-                  <span>{(selectedVideoRegenerationPrompt?.prompt ?? "").length.toLocaleString()} 字符</span>
+                  <strong>{field === "information" ? "备注" : markdownPreview.prompt ? "预览模式" : "编辑模式"}</strong>
+                  <span>{(selectedVideoRegenerationPrompt?.[field] ?? "").length.toLocaleString()} 字符</span>
+                  {field === "prompt" && <button
+                    type="button"
+                    className="markdown-copy-button"
+                    onClick={() => void pastePrompt()}
+                    title="粘贴剪贴板文本（替换当前提示词）"
+                    aria-label="粘贴并替换提示词"
+                  ><ClipboardPaste size={14} /></button>}
+                  <button
+                    type="button"
+                    className={`markdown-mode-toggle ${markdownPreview[field] ? "is-active" : ""}`}
+                    onClick={() => setMarkdownPreview((current) => ({ ...current, [field]: !current[field] }))}
+                    title={markdownPreview[field] ? "切换到 Markdown 编辑" : "预览 Markdown"}
+                    aria-label={`${field === "prompt" ? "提示词" : "备注"}：${markdownPreview[field] ? "切换到 Markdown 编辑" : "预览 Markdown"}`}
+                  >{markdownPreview[field] ? <Pencil size={14} /> : <Eye size={14} />}</button>
+                  <button
+                    type="button"
+                    className="markdown-copy-button"
+                    onClick={() => void copyField(field)}
+                    title="复制 Markdown 原文"
+                    aria-label={`复制${field === "prompt" ? "提示词" : "备注"} Markdown 原文`}
+                  >{copiedField === field ? <Check size={14} /> : <Copy size={14} />}</button>
+                  {field === "prompt" && <button
+                    type="button"
+                    className="expanded-information-toggle"
+                    onClick={(event) => {
+                      event.currentTarget.blur();
+                      setInformationHidden((hidden) => !hidden);
+                    }}
+                    title={informationHidden ? "显示备注栏" : "隐藏备注栏"}
+                    aria-label={informationHidden ? "显示备注栏" : "隐藏备注栏"}
+                    aria-pressed={informationHidden}
+                  >{informationHidden ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}</button>}
                 </header>
+                {markdownPreview[field] ? (
+                  <MarkdownPreview
+                    source={selectedVideoRegenerationPrompt?.[field] ?? ""}
+                    className={`expanded-markdown-preview ${field === "information" ? "is-information" : ""}`}
+                    enableSpaceTablePan
+                  />
+                ) : (
                 <textarea
                   className="expanded-text-editor"
-                  value={selectedVideoRegenerationPrompt?.prompt ?? ""}
-                  readOnly
+                  value={selectedVideoRegenerationPrompt?.[field] ?? ""}
+                  onChange={(event) => updatePromptField(field, event.currentTarget.value)}
+                  autoFocus={field === "prompt"}
                   spellCheck={false}
-                  placeholder="未记录提示词"
-                  aria-label="当前提示词版本的提示词，只读"
+                  placeholder={field === "prompt" ? "输入本次生成使用的提示词" : "这里记录本次生成的备注…"}
+                  aria-label={field === "prompt" ? "本次生成的提示词" : "本次生成的备注"}
                 />
+                )}
               </section>
-              <section className="expanded-prompt-pane is-information">
-                <header>
-                  <strong>备注</strong>
-                  <span>{(selectedVideoRegenerationPrompt?.information ?? "").length.toLocaleString()} 字符</span>
-                </header>
-                <textarea
-                  className="expanded-text-editor"
-                  value={selectedVideoRegenerationPrompt?.information ?? ""}
-                  readOnly
-                  spellCheck={false}
-                  placeholder="该提示词版本未填写备注"
-                  aria-label="当前提示词版本的备注，只读"
-                />
-              </section>
+              ))}
             </div>
           </section>
         </div>,

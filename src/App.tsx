@@ -8,7 +8,7 @@ import { initialCanvasViewport, readCanvasViewport, saveCanvasViewport } from ".
 import type { SetStateAction } from "react";
 import { ComfyStatusIndicators } from "./ComfyStatusIndicators";
 import { comfyStatusMessage, createComfyPreviewReceiver, livePreviewResources } from "./comfyLivePreview";
-import { loadVideoRegenerationPresets, matchingVideoRegenerationPreset, reorderVideoRegenerationPresets, saveVideoRegenerationPresets, videoNodeExtraParameters, videoNodeSecondaryColors } from "./video/videoRegenerationPresets";
+import { loadVideoRegenerationPresets, matchingVideoRegenerationPreset, reorderVideoRegenerationPresets, saveVideoRegenerationPresets, videoPresetNodePatch, videoNodeExtraParameters, videoNodeSecondaryColors } from "./video/videoRegenerationPresets";
 import type { VideoRegenerationPresetCollection, VideoRegenerationSettings } from "./video/videoRegenerationPresets";
 import { findDuplicateVideoRequest } from "./video/activeVideoSeed";
 import { VideoRegenerationDialogs } from "./video/VideoRegenerationDialogs";
@@ -4969,13 +4969,17 @@ function CanvasWorkspace() {
     setVideoRegenerationDraft(draft);
   }, [workflowModules, generationSnapshotForGenerator, flushVideoGenerationInputs, reportError]);
 
-  useEffect(() => {
-    if (!videoRegenerationDraft || videoRegenerationDraft.presetEditor) return;
+  const selectedVideoRegenerationPresetModified = useMemo(() => {
+    if (!videoRegenerationDraft) return false;
+    const selectedPreset = videoRegenerationPresets.presets.find(
+      (preset) => preset.id === selectedVideoRegenerationPresetId,
+    );
+    if (!selectedPreset) return false;
     const module = workflowModules.find((entry) => entry.id === videoRegenerationDraft.originalSnapshot.workflowModuleId);
     const sharedSteps = workflowUsesSharedPrimarySteps(module);
     const matchedPreset = matchingVideoRegenerationPreset({
       ...videoRegenerationPresets,
-      presets: videoRegenerationPresets.presets.map((preset) => ({
+      presets: [selectedPreset].map((preset) => ({
         ...preset,
         settings: {
           ...preset.settings,
@@ -4984,12 +4988,8 @@ function CanvasWorkspace() {
         },
       })),
     }, videoRegenerationSettingsFromValue(videoRegenerationDraft));
-    const matchedId = matchedPreset?.id ?? "";
-    if (matchedId !== selectedVideoRegenerationPresetId) {
-      setSelectedVideoRegenerationPresetId(matchedId);
-      setVideoRegenerationPresetName(matchedPreset?.name ?? "");
-    }
-  }, [videoRegenerationDraft, videoRegenerationPresets, workflowModules, selectedVideoRegenerationPresetId]);
+    return !matchedPreset || videoRegenerationPresetName.trim() !== selectedPreset.name;
+  }, [videoRegenerationDraft, videoRegenerationPresets, workflowModules, selectedVideoRegenerationPresetId, videoRegenerationPresetName]);
 
   const persistVideoRegenerationPresets = useCallback((collection: VideoRegenerationPresetCollection) => {
     try {
@@ -8087,6 +8087,9 @@ function CanvasWorkspace() {
       ? visibleVideoModules.find((module) => module.variant === "reference-to-video")
       ?? visibleVideoModules[0]
       : visibleVideoModules[0];
+    const defaultPreset = videoRegenerationPresets.presets.find(
+      (preset) => preset.id === videoRegenerationPresets.defaultPresetId,
+    );
     const nodeDefaults = storyboardReferenceCompiler
       ? {
         ...videoGenerationDefaults,
@@ -8116,6 +8119,9 @@ function CanvasWorkspace() {
             status: "idle",
             secondarySamplingEnabled: false,
             ...nodeDefaults,
+            ...(defaultPreset ? videoPresetNodePatch(
+              defaultPreset.settings, workflowUsesSharedPrimarySteps(defaultWorkflowModule),
+            ) : {}),
             ...(storyboardReferenceCompiler ? { storyboardReferenceCompiler: true } : {}),
             manualHeight: initialHeight,
             layoutTextInputCount: 0,
@@ -8141,7 +8147,7 @@ function CanvasWorkspace() {
       finishNodePlacementReservation(placement.reservationId);
       reportError(error);
     }
-  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes, videoGenerationDefaults, workflowModuleVisibleIds, workflowModules]);
+  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setCenter, setNodes, videoGenerationDefaults, videoRegenerationPresets, workflowModuleVisibleIds, workflowModules]);
 
   const addImageGenerationNode = useCallback(async (position?: { x: number; y: number }) => {
     if (!activeProjectId) return;
@@ -11393,6 +11399,7 @@ function CanvasWorkspace() {
         saveVideoRegenerationSettings={saveVideoRegenerationSettings}
         presetCollection={videoRegenerationPresets}
         selectedPresetId={selectedVideoRegenerationPresetId}
+        selectedPresetModified={selectedVideoRegenerationPresetModified}
         presetName={videoRegenerationPresetName}
         setPresetName={setVideoRegenerationPresetName}
         selectPreset={selectVideoRegenerationPreset}

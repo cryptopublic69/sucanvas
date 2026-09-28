@@ -158,7 +158,7 @@ function isMarkdownTableDivider(cells: string[]) {
   return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 }
 
-function MarkdownPreview({
+export function MarkdownPreview({
   source,
   className = "",
   enableSpaceTablePan = false,
