@@ -79,7 +79,7 @@ pub async fn stage_app_backup_restore(
         .map_err(|error| format!("软件恢复任务失败：{error}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn take_restored_frontend_settings(
     state: State<'_, ApplicationState>,
 ) -> Result<Option<BTreeMap<String, String>>, String> {
@@ -221,7 +221,7 @@ pub async fn disable_app_lock(
     .map_err(|error| format!("关闭应用锁任务失败：{error}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_workspace(
     canvas_id: Option<String>,
     state: State<'_, ApplicationState>,
@@ -297,7 +297,7 @@ pub fn update_canvas_selection(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inspect_workspace(
     canvas_id: String,
     state: State<'_, ApplicationState>,
@@ -308,7 +308,7 @@ pub fn inspect_workspace(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_projects(state: State<'_, ApplicationState>) -> Result<Vec<WorkspaceSnapshot>, String> {
     state
         .database
@@ -316,7 +316,7 @@ pub fn list_projects(state: State<'_, ApplicationState>) -> Result<Vec<Workspace
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_project_summaries(
     state: State<'_, ApplicationState>,
 ) -> Result<Vec<WorkspaceSnapshot>, String> {
@@ -326,7 +326,7 @@ pub fn list_project_summaries(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_project(
     input: CreateProjectInput,
     state: State<'_, ApplicationState>,
@@ -337,7 +337,7 @@ pub fn create_project(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn group_nodes_into_folder(
     input: GroupNodesIntoFolderInput,
     state: State<'_, ApplicationState>,
@@ -348,7 +348,7 @@ pub fn group_nodes_into_folder(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_empty_folder(
     input: CreateEmptyFolderInput,
     state: State<'_, ApplicationState>,
@@ -359,7 +359,7 @@ pub fn create_empty_folder(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn group_related_nodes_into_folder(
     input: GroupRelatedNodesIntoFolderInput,
     state: State<'_, ApplicationState>,
@@ -370,7 +370,7 @@ pub fn group_related_nodes_into_folder(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn undo_folder_grouping(
     input: UndoFolderGroupingInput,
     state: State<'_, ApplicationState>,
@@ -381,7 +381,7 @@ pub fn undo_folder_grouping(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn merge_folders(
     input: MergeFoldersInput,
     state: State<'_, ApplicationState>,
@@ -392,7 +392,7 @@ pub fn merge_folders(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn undo_folder_merge(
     input: UndoFolderMergeInput,
     state: State<'_, ApplicationState>,
@@ -403,7 +403,7 @@ pub fn undo_folder_merge(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cancel_folder(
     input: FolderActionInput,
     state: State<'_, ApplicationState>,
@@ -414,7 +414,7 @@ pub fn cancel_folder(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn undo_cancel_folder(
     input: UndoCancelFolderInput,
     state: State<'_, ApplicationState>,
@@ -425,7 +425,7 @@ pub fn undo_cancel_folder(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_folder_tree(
     input: FolderActionInput,
     state: State<'_, ApplicationState>,
@@ -436,7 +436,7 @@ pub fn delete_folder_tree(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn undo_delete_folder_tree(
     input: UndoDeleteFolderInput,
     state: State<'_, ApplicationState>,
@@ -447,7 +447,7 @@ pub fn undo_delete_folder_tree(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_project(
     input: UpdateProjectInput,
     state: State<'_, ApplicationState>,
@@ -458,7 +458,7 @@ pub fn update_project(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_project_private(
     input: SetProjectPrivacyInput,
     state: State<'_, ApplicationState>,
@@ -469,7 +469,7 @@ pub fn set_project_private(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_project_preview_image(
     input: SetProjectPreviewImageInput,
     state: State<'_, ApplicationState>,
@@ -480,7 +480,7 @@ pub fn set_project_preview_image(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_project(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
     state
         .database
@@ -512,7 +512,7 @@ pub fn delete_project(id: String, state: State<'_, ApplicationState>) -> Result<
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_node(
     input: CreateNodeInput,
     state: State<'_, ApplicationState>,
@@ -1088,7 +1088,7 @@ pub async fn resize_image(
     .map_err(|error| format!("图片 Resize 任务失败: {error}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_node(
     input: UpdateNodeInput,
     state: State<'_, ApplicationState>,
@@ -1099,7 +1099,7 @@ pub fn update_node(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_node(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
     state
         .database
@@ -1185,7 +1185,7 @@ pub async fn delete_image_files(paths: Vec<String>) -> Result<usize, String> {
         .map_err(|error| format!("图片文件删除任务失败: {error}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_nodes_undoable(
     input: DeleteNodesInput,
     state: State<'_, ApplicationState>,
@@ -1196,7 +1196,7 @@ pub fn delete_nodes_undoable(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_deleted_nodes(
     batch: DeletedBatch,
     state: State<'_, ApplicationState>,
@@ -1207,7 +1207,7 @@ pub fn restore_deleted_nodes(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn replace_node_and_delete_undoable(
     input: ReplaceNodeAndDeleteInput,
     state: State<'_, ApplicationState>,
@@ -1218,7 +1218,7 @@ pub fn replace_node_and_delete_undoable(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_node_replacement(
     input: RestoreNodeReplacementInput,
     state: State<'_, ApplicationState>,
@@ -1229,7 +1229,7 @@ pub fn restore_node_replacement(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_edge(
     input: CreateEdgeInput,
     state: State<'_, ApplicationState>,
@@ -1240,7 +1240,7 @@ pub fn create_edge(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_edge(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
     state
         .database
@@ -1248,7 +1248,7 @@ pub fn delete_edge(id: String, state: State<'_, ApplicationState>) -> Result<(),
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_workflow_modules(
     include_deleted: Option<bool>,
     state: State<'_, ApplicationState>,
@@ -1259,7 +1259,7 @@ pub fn list_workflow_modules(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_workflow_module(
     input: SaveWorkflowModuleInput,
     state: State<'_, ApplicationState>,
@@ -1267,7 +1267,7 @@ pub fn save_workflow_module(
     workflow_modules::save(&state.workflow_modules_dir, input)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn validate_workflow_module_source(
     source_workflow_path: String,
     _adapter_kind: Option<String>,
@@ -1282,7 +1282,7 @@ pub fn validate_workflow_module_source(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn trash_workflow_module(
     id: String,
     state: State<'_, ApplicationState>,
@@ -1290,7 +1290,7 @@ pub fn trash_workflow_module(
     workflow_modules::trash(&state.workflow_modules_dir, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_workflow_module(
     id: String,
     state: State<'_, ApplicationState>,
@@ -1298,12 +1298,12 @@ pub fn restore_workflow_module(
     workflow_modules::restore_from_trash(&state.workflow_modules_dir, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn purge_workflow_module(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
     workflow_modules::purge(&state.workflow_modules_dir, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_workflow_module_backup(
     id: String,
     state: State<'_, ApplicationState>,
@@ -1311,7 +1311,7 @@ pub fn restore_workflow_module_backup(
     workflow_modules::restore_latest_backup(&state.workflow_modules_dir, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_workflow_module(
     id: String,
     state: State<'_, ApplicationState>,
@@ -1323,7 +1323,7 @@ pub fn export_workflow_module(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_workflow_module_bundle(
     bundle_path: String,
     state: State<'_, ApplicationState>,
@@ -1334,7 +1334,7 @@ pub fn import_workflow_module_bundle(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_workflow_module_bundle(
     id: String,
     bundle_path: String,
