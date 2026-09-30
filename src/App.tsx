@@ -4,6 +4,7 @@ import { generationQueuePositions } from "./generationQueuePositions";
 import { VideoPosterViewportCache } from "./VideoPosterViewportCache";
 import { summarizeProject } from "./projects/projectSummaries";
 import { GraphRelations } from "./canvas/graphRelations";
+import { NodeHandleScaleSync } from "./canvas/NodeHandleScaleSync";
 import { initialCanvasViewport, readCanvasViewport, saveCanvasViewport } from "./canvas/viewport";
 import type { SetStateAction } from "react";
 import { ComfyStatusIndicators } from "./ComfyStatusIndicators";
@@ -35,7 +36,6 @@ import {
   useEdgesState,
   useNodesState,
   useReactFlow,
-  useStore,
   useStoreApi,
 } from "@xyflow/react";
 import {
@@ -72,7 +72,6 @@ import {
   X
 } from "lucide-react";
 import {
-  CSSProperties,
   MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
@@ -163,8 +162,6 @@ import {
   IMAGE_NODE_CHROME_HEIGHT,
   LEGACY_VIDEO_GENERATION_NODE_WIDTH,
   LIVE_COMFY_PREVIEW_EVENT,
-  NODE_HANDLE_BASE_SIZE_PX,
-  NODE_HANDLE_MIN_SCREEN_SIZE_PX,
   PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY,
   SHOW_NODE_SEARCH,
   UI_FONT_SIZE_STORAGE_KEY,
@@ -617,11 +614,6 @@ function CanvasWorkspace() {
   const alignedDragPositions = useRef(new Map<string, { x: number; y: number }>());
   const { setCenter, screenToFlowPosition, getViewport } = useReactFlow<CanvasFlowNode, Edge>();
   const flowStore = useStoreApi<CanvasFlowNode, Edge>();
-  const canvasZoom = useStore((state) => state.transform[2]);
-  const nodeHandleScreenScale = Math.max(
-    1,
-    NODE_HANDLE_MIN_SCREEN_SIZE_PX / (NODE_HANDLE_BASE_SIZE_PX * Math.max(canvasZoom, 0.01)),
-  );
 
   const resetReactFlowGraphState = useCallback(() => {
     const state = flowStore.getState();
@@ -10963,10 +10955,7 @@ function CanvasWorkspace() {
   return (
     <main
       className={`app-shell${ctrlNodeSelectionActive ? " is-ctrl-node-selection" : ""}${multiNodeSelectionActive ? " has-multi-node-selection" : ""}`}
-      style={{
-        ...(canvasBackground ? { background: canvasBackground } : {}),
-        "--node-handle-screen-scale": nodeHandleScreenScale,
-      } as CSSProperties}
+      style={canvasBackground ? { background: canvasBackground } : undefined}
       onPointerDownCapture={(event) => {
         if (event.button === 1) setMiddlePanActive(true);
       }}
@@ -11033,6 +11022,7 @@ function CanvasWorkspace() {
         panOnScroll
         proOptions={{ hideAttribution: true }}
       >
+        <NodeHandleScaleSync />
         <VideoPosterViewportCache />
         <Background
           variant={BackgroundVariant.Dots}
