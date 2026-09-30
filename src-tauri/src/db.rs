@@ -89,7 +89,10 @@ impl Database {
         connection.execute_batch(
             "
             PRAGMA foreign_keys = ON;
-            PRAGMA journal_mode = DELETE;
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA cache_size = -32000;
 
             CREATE TABLE IF NOT EXISTS canvases (
                 id TEXT PRIMARY KEY,
