@@ -273,7 +273,7 @@ export function WorkflowSettingsPanel({
                 onChange={(value) => {
                   const capability = value as WorkflowCapability;
                   setWorkflowModuleCapabilityDraft(capability);
-                  setWorkflowModuleVariantDraft(capability === "image-generation"
+                  setWorkflowModuleVariantDraft(capability === "video-upscale" ? "video-upscale" : capability === "image-generation"
                     ? "image-generation"
                     : "reference-to-video");
                 }}
@@ -336,7 +336,7 @@ export function WorkflowSettingsPanel({
           </label>
           <details className="workflow-bindings-editor">
             <summary>高级节点映射</summary>
-            <p>工作流节点 ID 变化时在这里调整映射。留空会使用当前 H3 多参默认映射。</p>
+            <p>{workflowModuleCapabilityDraft === "video-upscale" ? "超分方案在这里编辑 adapter 与 uiSchema；节点映射、默认值和弹窗字段随模块保存。新方案也可导入完整模块包。" : "工作流节点 ID 变化时在这里调整映射。留空会使用当前 H3 多参默认映射。"}</p>
             <textarea
               value={workflowModuleBindingsDraft}
               onChange={(event) => {

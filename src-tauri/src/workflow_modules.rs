@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -23,6 +23,7 @@ pub const H3_FIRST_LAST_FRAME_ADAPTER: &str = "minimax-h3-first-last-frame-v1";
 pub const H3_IMAGE_TO_VIDEO_ADAPTER: &str = "minimax-h3-image-to-video-v1";
 pub const H3_LAST_FRAME_TO_VIDEO_ADAPTER: &str = "minimax-h3-last-frame-to-video-v1";
 pub const KREA2_TEXT_TO_IMAGE_ADAPTER: &str = "krea2-text-to-image-v1";
+pub const VIDEO_PROCESSING_ADAPTER: &str = "video-processing-v1";
 pub const KREA2_IMAGE_EDIT_ADAPTER: &str = "krea2-image-edit-v1";
 const MAX_PACKAGE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -420,6 +421,22 @@ impl Default for WorkflowInputContract {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkflowParameterBinding {
+    pub node_id: String,
+    pub input_name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoProcessingAdapter {
+    pub video_input: WorkflowParameterBinding,
+    pub output_node_id: String,
+    pub parameters: BTreeMap<String, WorkflowParameterBinding>,
+    pub timeout_minutes: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowAdapter {
     pub schema_version: u32,
     pub engine_api_version: String,
@@ -429,6 +446,8 @@ pub struct WorkflowAdapter {
     #[serde(default)]
     pub input_contract: WorkflowInputContract,
     pub bindings: WorkflowBindings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_processing: Option<VideoProcessingAdapter>,
 }
 
 impl WorkflowAdapter {
@@ -449,6 +468,7 @@ impl WorkflowAdapter {
                 video_max: 0,
             },
             bindings,
+            video_processing: None,
         }
     }
 
@@ -469,6 +489,7 @@ impl WorkflowAdapter {
                 video_max: 0,
             },
             bindings,
+            video_processing: None,
         }
     }
     pub fn current_h3(bindings: WorkflowBindings) -> Self {
@@ -480,6 +501,7 @@ impl WorkflowAdapter {
             variant: "reference-to-video".to_owned(),
             input_contract: WorkflowInputContract::default(),
             bindings,
+            video_processing: None,
         }
     }
 
@@ -500,6 +522,7 @@ impl WorkflowAdapter {
                 video_max: 0,
             },
             bindings,
+            video_processing: None,
         }
     }
 
@@ -520,6 +543,7 @@ impl WorkflowAdapter {
                 video_max: 0,
             },
             bindings,
+            video_processing: None,
         }
     }
 
@@ -540,6 +564,7 @@ impl WorkflowAdapter {
                 video_max: 0,
             },
             bindings,
+            video_processing: None,
         }
     }
 
@@ -882,6 +907,48 @@ fn validate_adapter_contract(
     if adapter.adapter_id.trim().is_empty() {
         return Err("方案适配器 adapterId 不能为空".to_owned());
     }
+    if capability != "video-upscale" && adapter.video_processing.is_some() {
+        return Err("视频超分映射只能用于视频超分模块".to_owned());
+    }
+    if capability == "video-upscale" && variant == "video-upscale" {
+        let processing = adapter
+            .video_processing
+            .as_ref()
+            .ok_or_else(|| "视频超分方案缺少 videoProcessing 映射".to_owned())?;
+        if adapter.adapter_id != VIDEO_PROCESSING_ADAPTER
+            || adapter.input_contract.prompt_required
+            || adapter.input_contract.image_min != 0
+            || adapter.input_contract.image_max != 0
+            || adapter.input_contract.audio_min != 0
+            || adapter.input_contract.audio_max != 0
+            || adapter.input_contract.video_min != 1
+            || adapter.input_contract.video_max != 1
+        {
+            return Err(
+                "视频超分适配器必须仅接收一个视频，并使用 video-processing-v1 引擎".to_owned(),
+            );
+        }
+        if processing.video_input.node_id.trim().is_empty()
+            || processing.video_input.input_name.trim().is_empty()
+            || processing.output_node_id.trim().is_empty()
+            || !(1..=1440).contains(&processing.timeout_minutes)
+        {
+            return Err("视频超分的输入、输出映射或等待时限无效".to_owned());
+        }
+        let mut targets = HashSet::new();
+        for (key, binding) in &processing.parameters {
+            if key.trim().is_empty()
+                || binding.node_id.trim().is_empty()
+                || binding.input_name.trim().is_empty()
+                || !targets.insert((&binding.node_id, &binding.input_name))
+                || (binding.node_id == processing.video_input.node_id
+                    && binding.input_name == processing.video_input.input_name)
+            {
+                return Err(format!("视频超分参数 {key} 的节点映射无效或重复"));
+            }
+        }
+        return Ok(());
+    }
     if capability == "image-generation" && variant == "image-generation" {
         if adapter.adapter_id != KREA2_TEXT_TO_IMAGE_ADAPTER {
             return Err("图片生成方案必须使用 Krea2 文生图适配器".to_owned());
@@ -957,7 +1024,7 @@ fn validate_adapter_contract(
     Ok(())
 }
 
-fn validate_ui_schema(schema: &WorkflowUiSchema) -> Result<(), String> {
+fn validate_ui_schema(schema: &WorkflowUiSchema, adapter: &WorkflowAdapter) -> Result<(), String> {
     if schema.schema_version != WORKFLOW_PACKAGE_SCHEMA_VERSION {
         return Err(format!(
             "方案界面 schemaVersion {} 不受支持",
@@ -982,7 +1049,13 @@ fn validate_ui_schema(schema: &WorkflowUiSchema) -> Result<(), String> {
             return Err("方案界面分组必须包含 id 和标题".to_owned());
         }
         for field in &group.fields {
-            if field.field_type != "number" || !allowed_keys.contains(&field.key.as_str()) {
+            if field.field_type != "number"
+                || !(adapter
+                    .video_processing
+                    .as_ref()
+                    .map(|p| p.parameters.contains_key(&field.key))
+                    .unwrap_or_else(|| allowed_keys.contains(&field.key.as_str())))
+            {
                 return Err(format!("方案界面包含不受支持的参数 {}", field.key));
             }
             if !seen.insert(field.key.as_str()) {
@@ -1004,6 +1077,90 @@ fn validate_ui_schema(schema: &WorkflowUiSchema) -> Result<(), String> {
                 }
             }
         }
+    }
+    if let Some(processing) = &adapter.video_processing {
+        if seen.len() != processing.parameters.len() {
+            return Err("视频超分的界面参数与节点映射必须一一对应".to_owned());
+        }
+    }
+    Ok(())
+}
+
+pub fn video_processing_parameters(
+    module: &WorkflowModuleRecord,
+    overrides: &BTreeMap<String, f64>,
+) -> Result<BTreeMap<String, f64>, String> {
+    let processing = module
+        .adapter
+        .video_processing
+        .as_ref()
+        .ok_or_else(|| "方案不是视频超分模块".to_owned())?;
+    if overrides
+        .keys()
+        .any(|key| !processing.parameters.contains_key(key))
+    {
+        return Err("超分包含未映射的参数".to_owned());
+    }
+    let mut values = BTreeMap::new();
+    for field in module
+        .ui_schema
+        .groups
+        .iter()
+        .flat_map(|group| &group.fields)
+    {
+        let value = overrides.get(&field.key).copied().unwrap_or(field.default);
+        let offset = (value - field.min) / field.step;
+        if !value.is_finite()
+            || value < field.min
+            || value > field.max
+            || (offset - offset.round()).abs() > 1e-6
+        {
+            return Err(format!(
+                "{} 的数值必须在 {}–{} 之间，步长为 {}",
+                field.label, field.min, field.max, field.step
+            ));
+        }
+        values.insert(field.key.clone(), value);
+    }
+    Ok(values)
+}
+
+pub fn install_bundled_modules(root: &Path, bundles_root: &Path) -> Result<(), String> {
+    static INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = INSTALL_LOCK
+        .lock()
+        .map_err(|_| "模块安装锁已损坏".to_owned())?;
+    if !bundles_root.is_dir() {
+        return Ok(());
+    }
+    let markers = root.join(".installed-bundles");
+    fs::create_dir_all(&markers).map_err(|error| format!("创建模块安装记录失败：{error}"))?;
+    for entry in
+        fs::read_dir(bundles_root).map_err(|error| format!("读取内置模块目录失败：{error}"))?
+    {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let bundle = entry.path();
+        if !bundle.is_dir() || !bundle.join(MANIFEST_FILE).is_file() {
+            continue;
+        }
+        let marker = markers.join(entry.file_name());
+        if marker.exists() {
+            continue;
+        }
+        let manifest: WorkflowModuleManifest = serde_json::from_slice(
+            &fs::read(bundle.join(MANIFEST_FILE)).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let existing = list(root, true)?.into_iter().find(|module| {
+            module.manifest.name == manifest.name
+                && module.manifest.capability == manifest.capability
+                && module.manifest.revision == manifest.revision
+        });
+        let id = match existing {
+            Some(module) => module.manifest.id,
+            None => import_directory_bundle(root, &bundle, None)?.manifest.id,
+        };
+        fs::write(marker, id).map_err(|error| format!("保存模块安装记录失败：{error}"))?;
     }
     Ok(())
 }
@@ -1039,7 +1196,7 @@ fn read_or_migrate_package(
         write_json_file(&ui_schema_file, &schema, "方案界面定义")?;
         schema
     };
-    validate_ui_schema(&ui_schema)?;
+    validate_ui_schema(&ui_schema, &adapter)?;
 
     let manifest_needs_migration = manifest.adapter_kind != WORKFLOW_PACKAGE_ENGINE
         || manifest.package_schema_version != WORKFLOW_PACKAGE_SCHEMA_VERSION
@@ -1139,6 +1296,9 @@ fn normalize_classification(capability: &str, variant: &str) -> Result<(String, 
             "视频生成方案必须选择多参生视频、首尾帧、图生视频、尾帧生视频或文生视频子类型"
                 .to_owned(),
         ),
+        "video-upscale" if variant == "video-upscale" => {
+            Ok((capability.to_owned(), variant.to_owned()))
+        }
         "image-generation" if matches!(variant, "image-generation" | "image-edit") => {
             Ok((capability.to_owned(), variant.to_owned()))
         }
@@ -1262,6 +1422,38 @@ pub fn validate_workflow_bytes(
                 validate_input_connections(object, node_id, input_name, value, &mut issues);
             }
         }
+    }
+    if let Some(processing) = adapter.video_processing.as_ref() {
+        require_input(
+            &workflow,
+            &processing.video_input.node_id,
+            &processing.video_input.input_name,
+            &mut issues,
+        );
+        if workflow.get(&processing.output_node_id).is_none() {
+            issues.push("视频超分输出节点不存在".to_owned());
+        }
+        for (key, binding) in &processing.parameters {
+            require_input(
+                &workflow,
+                &binding.node_id,
+                &binding.input_name,
+                &mut issues,
+            );
+            if workflow
+                .get(&binding.node_id)
+                .and_then(|n| n.get("inputs"))
+                .and_then(|i| i.get(&binding.input_name))
+                .and_then(Value::as_f64)
+                .is_none()
+            {
+                issues.push(format!("视频超分参数 {key} 必须绑定数值输入"));
+            }
+        }
+        return WorkflowModuleValidation {
+            compatible: issues.is_empty(),
+            issues,
+        };
     }
     if adapter.capability == "image-generation" && adapter.variant == "image-generation" {
         for (node_id, input_name) in [
@@ -1536,6 +1728,17 @@ pub fn validate_workflow_bytes(
     }
 }
 
+pub fn validate_package_source(
+    path: &Path,
+    adapter: &WorkflowAdapter,
+    ui_schema: &WorkflowUiSchema,
+) -> Result<WorkflowModuleValidation, String> {
+    validate_adapter_contract(adapter, &adapter.capability, &adapter.variant)?;
+    validate_ui_schema(ui_schema, adapter)?;
+    let bytes = fs::read(path).map_err(|error| format!("读取工作流失败：{error}"))?;
+    Ok(validate_workflow_bytes(&bytes, adapter))
+}
+
 pub fn validate_source(
     source_path: &Path,
     variant: &str,
@@ -1574,7 +1777,7 @@ pub fn save(root: &Path, input: SaveWorkflowModuleInput) -> Result<WorkflowModul
         .unwrap_or_else(|| WorkflowAdapter::for_variant(&variant, bindings));
     validate_adapter_contract(&adapter, &capability, &variant)?;
     let ui_schema = input.ui_schema.unwrap_or_default();
-    validate_ui_schema(&ui_schema)?;
+    validate_ui_schema(&ui_schema, &adapter)?;
     let defaults = input.defaults.unwrap_or_default();
     let source = PathBuf::from(input.source_workflow_path.trim().trim_matches('"'));
     if !source.is_absolute() || !source.is_file() {

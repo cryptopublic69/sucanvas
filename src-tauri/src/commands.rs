@@ -17,7 +17,7 @@ use image::{imageops::FilterType, ImageFormat};
 use reqwest::{multipart, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{Manager, State};
 use uuid::Uuid;
 
 use crate::{
@@ -1250,9 +1250,21 @@ pub fn delete_edge(id: String, state: State<'_, ApplicationState>) -> Result<(),
 
 #[tauri::command(async)]
 pub fn list_workflow_modules(
+    app: tauri::AppHandle,
     include_deleted: Option<bool>,
     state: State<'_, ApplicationState>,
 ) -> Result<Vec<WorkflowModuleRecord>, String> {
+    let resource_root = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?
+        .join("workflows/video-upscale");
+    let bundles_root = if resource_root.is_dir() {
+        resource_root
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../workflows/video-upscale")
+    };
+    workflow_modules::install_bundled_modules(&state.workflow_modules_dir, &bundles_root)?;
     workflow_modules::list(
         &state.workflow_modules_dir,
         include_deleted.unwrap_or(false),
@@ -1273,7 +1285,16 @@ pub fn validate_workflow_module_source(
     _adapter_kind: Option<String>,
     variant: Option<String>,
     bindings: Option<WorkflowBindings>,
+    adapter: Option<workflow_modules::WorkflowAdapter>,
+    ui_schema: Option<workflow_modules::WorkflowUiSchema>,
 ) -> Result<WorkflowModuleValidation, String> {
+    if let Some(adapter) = adapter {
+        return workflow_modules::validate_package_source(
+            Path::new(source_workflow_path.trim().trim_matches('"')),
+            &adapter,
+            &ui_schema.ok_or_else(|| "模块界面定义不能为空".to_owned())?,
+        );
+    }
     let variant = variant.as_deref().unwrap_or("reference-to-video");
     workflow_modules::validate_source(
         Path::new(source_workflow_path.trim().trim_matches('"')),
@@ -1601,7 +1622,7 @@ fn workflow_inputs_mut<'a>(
         .ok_or_else(|| format!("API 工作流缺少节点 {node_id} 的 inputs"))
 }
 
-fn set_workflow_input(
+pub(crate) fn set_workflow_input(
     workflow: &mut Value,
     node_id: &str,
     input_name: &str,
@@ -2574,11 +2595,30 @@ async fn upload_comfy_output_as_input(
     subfolder: &str,
     source_label: &str,
 ) -> Result<String, String> {
+    upload_comfy_output_from_server(
+        client,
+        server_url,
+        server_url,
+        output,
+        subfolder,
+        source_label,
+    )
+    .await
+}
+
+pub(crate) async fn upload_comfy_output_from_server(
+    client: &Client,
+    source_server_url: &str,
+    server_url: &str,
+    output: &ComfyOutputFile,
+    subfolder: &str,
+    source_label: &str,
+) -> Result<String, String> {
     if output.filename.trim().is_empty() {
         return Err(format!("{source_label}缺少文件名"));
     }
     let source_url = comfy_view_url(
-        server_url,
+        source_server_url,
         &output.filename,
         &output.subfolder,
         &output.file_type,
@@ -2669,7 +2709,7 @@ async fn cleanup_comfy_input_directory(
         .map_err(|error| format!("删除 ComfyUI 输入任务目录失败：{error}"))
 }
 
-async fn cleanup_comfy_task_inputs(task: &RunningComfyTask) -> Option<String> {
+pub(crate) async fn cleanup_comfy_task_inputs(task: &RunningComfyTask) -> Option<String> {
     if task.input_root_path.trim().is_empty() || task.cleanup_started.swap(true, Ordering::SeqCst) {
         return None;
     }
@@ -3625,7 +3665,7 @@ pub async fn submit_comfyui_image_upscale(
     Err(format!("等待 ComfyUI 图片放大任务超时：{prompt_id}"))
 }
 
-fn comfy_execution_elapsed_seconds(entry: &Value) -> Option<f64> {
+pub(crate) fn comfy_execution_elapsed_seconds(entry: &Value) -> Option<f64> {
     let messages = entry.pointer("/status/messages")?.as_array()?;
     let timestamp_for = |message: &Value, event_name: &str| {
         let parts = message.as_array()?;
@@ -3668,7 +3708,7 @@ fn comfy_view_url(
     Ok(url.into())
 }
 
-fn ensure_comfy_task_active(cancelled: &AtomicBool) -> Result<(), String> {
+pub(crate) fn ensure_comfy_task_active(cancelled: &AtomicBool) -> Result<(), String> {
     if cancelled.load(Ordering::SeqCst) {
         Err("ComfyUI 生成已取消".to_owned())
     } else {
@@ -4227,7 +4267,7 @@ fn comfy_seed_from_prompt(prompt: &Value) -> Option<String> {
         .or_else(|| value.as_str().map(str::to_owned))
 }
 
-fn comfy_outputs_from_history_entry(
+pub(crate) fn comfy_outputs_from_history_entry(
     server_url: &str,
     entry: &Value,
     image_output: bool,
@@ -4356,7 +4396,7 @@ async fn wait_until_comfy_prompt_stopped(
     Err("ComfyUI 尚未确认任务停止，已保留输入素材避免提前删除".to_owned())
 }
 
-fn cancel_comfy_in_background(
+pub(crate) fn cancel_comfy_in_background(
     client: Client,
     server_url: String,
     prompt_id: String,
@@ -4430,6 +4470,7 @@ pub async fn get_comfyui_client_task_statuses(
     server_url: String,
     client_ids: Vec<String>,
     image_client_ids: Option<Vec<String>>,
+    video_output_node_ids: Option<BTreeMap<String, String>>,
 ) -> Result<Vec<ComfyClientTaskStatus>, String> {
     if client_ids.is_empty() {
         return Ok(Vec::new());
@@ -4527,6 +4568,16 @@ pub async fn get_comfyui_client_task_statuses(
                 .pointer("/status/status_str")
                 .and_then(Value::as_str)
                 .unwrap_or("error");
+            let filtered_entry;
+            let output_entry = if let Some(node_id) = video_output_node_ids
+                .as_ref()
+                .and_then(|ids| ids.get(&client_id))
+            {
+                filtered_entry = json!({"outputs": entry.get("outputs").and_then(|outputs| outputs.get(node_id)).cloned().unwrap_or(Value::Null), "prompt": entry.get("prompt")});
+                &filtered_entry
+            } else {
+                entry
+            };
             statuses.push(ComfyClientTaskStatus {
                 client_id,
                 prompt_id: entry
@@ -4536,7 +4587,7 @@ pub async fn get_comfyui_client_task_statuses(
                 status: status.to_owned(),
                 seed: comfy_seed_from_prompt(entry.get("prompt").unwrap_or(&Value::Null)),
                 outputs: if status == "success" {
-                    comfy_outputs_from_history_entry(&server_url, entry, image_output)?
+                    comfy_outputs_from_history_entry(&server_url, output_entry, image_output)?
                 } else {
                     Vec::new()
                 },

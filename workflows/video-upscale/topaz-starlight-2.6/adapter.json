@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "engineApiVersion": "1.0",
+  "adapterId": "video-processing-v1",
+  "capability": "video-upscale",
+  "variant": "video-upscale",
+  "inputContract": {
+    "promptRequired": false,
+    "imageMin": 0,
+    "imageMax": 0,
+    "audioMin": 0,
+    "audioMax": 0,
+    "videoMin": 1,
+    "videoMax": 1
+  },
+  "bindings": {
+    "promptNodeId": "",
+    "seedNodeId": "",
+    "durationNodeId": "",
+    "primaryResolutionNodeId": "",
+    "secondaryResolutionNodeId": "",
+    "primaryLoraNodeId": "",
+    "secondaryLoraNodeId": "",
+    "primaryStyleLoraNodeId": "",
+    "secondaryStyleLoraNodeId": "",
+    "primaryStyleLoraNodeIds": [],
+    "secondaryStyleLoraNodeIds": [],
+    "primarySolAttnNodeId": "",
+    "secondarySolAttnNodeId": "",
+    "primarySamplerNodeId": "",
+    "primaryModelTargetNodeId": "",
+    "primaryStepsNodeId": "",
+    "primaryVideoStepsInputName": "",
+    "primaryAudioStepsInputName": "",
+    "primaryUpscaleNodeId": "",
+    "livePreviewNodeId": "",
+    "secondarySchedulerNodeId": "",
+    "secondaryGuiderNodeId": "",
+    "primaryOutputNodeId": "",
+    "secondaryOutputNodeId": "",
+    "primaryColorNodeId": "",
+    "secondaryColorNodeId": "",
+    "cleanVideoNodeId": "",
+    "cleanSaveNodeId": "",
+    "secondaryVideoInputNodeId": "",
+    "conditioningNodeId": "",
+    "audioNodeIds": [],
+    "imageNodeIds": [],
+    "primaryAudioOutputNodeId": "",
+    "primaryAudioOutputIndex": 0,
+    "secondaryAudioOutputNodeId": "",
+    "secondaryAudioOutputIndex": 0,
+    "secondaryResizeNodeId": "",
+    "secondaryAudioEncodeNodeId": "",
+    "diffusionModelNodeId": "",
+    "diffusionModelClassType": "",
+    "diffusionModelDirectory": "",
+    "secondaryDiffusionModelNodeId": "",
+    "loraClassType": "",
+    "loraDirectory": "",
+    "secondaryPromptNodeId": "",
+    "secondaryConditioningNodeId": "",
+    "singleImageInputNodeId": "",
+    "secondaryImageInputNodeId": ""
+  },
+  "videoProcessing": {
+    "videoInput": {
+      "nodeId": "3",
+      "inputName": "file"
+    },
+    "outputNodeId": "4",
+    "parameters": {
+      "softness": {
+        "nodeId": "2",
+        "inputName": "softness"
+      },
+      "upscaleFactor": {
+        "nodeId": "2",
+        "inputName": "upscale_factor"
+      }
+    },
+    "timeoutMinutes": 1440
+  }
+}

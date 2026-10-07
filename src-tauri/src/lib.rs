@@ -4,6 +4,7 @@ mod commands;
 mod db;
 mod models;
 mod video_posters;
+mod video_upscale;
 mod workflow_modules;
 
 use std::{
@@ -333,6 +334,7 @@ pub fn run() {
             commands::create_edge,
             commands::delete_edge,
             commands::submit_comfyui_workflow,
+            video_upscale::submit_comfyui_video_upscale,
             commands::submit_comfyui_image_workflow,
             commands::submit_comfyui_image_upscale,
             commands::cancel_comfyui_workflow,

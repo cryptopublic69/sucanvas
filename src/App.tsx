@@ -13,6 +13,9 @@ import { loadVideoRegenerationPresets, matchingVideoRegenerationPreset, reorderV
 import type { VideoRegenerationPresetCollection, VideoRegenerationSettings } from "./video/videoRegenerationPresets";
 import { findDuplicateVideoRequest } from "./video/activeVideoSeed";
 import { VideoRegenerationDialogs } from "./video/VideoRegenerationDialogs";
+import { useVideoUpscale } from "./video/useVideoUpscale";
+import { VideoUpscaleDialog } from "./video/VideoUpscaleDialog";
+import type { VideoUpscaleSnapshot } from "./video/videoUpscale";
 import { SecondarySampleDialog } from "./video/SecondarySampleDialog";
 import { h3StyleLorasFromContent, styleLoraValidationError, usedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
 import { Channel, invoke } from "@tauri-apps/api/core";
@@ -133,6 +136,8 @@ import type {
   VideoRegenerationRequest,
   VisibleNodeCacheEntry,
   WorkflowBindings,
+  WorkflowAdapter,
+  WorkflowUiSchema,
   WorkflowCapability,
   WorkflowModuleRecord,
   WorkflowModuleValidation,
@@ -1201,7 +1206,7 @@ function CanvasWorkspace() {
       let modules = await invoke<WorkflowModuleRecord[]>("list_workflow_modules", {
         includeDeleted: true,
       });
-      if (!modules.length) {
+      if (!modules.some((module) => module.capability === "video-generation")) {
         const created = await invoke<WorkflowModuleRecord>("save_workflow_module", {
           input: {
             name: "MiniMax H3 全能参考",
@@ -1218,7 +1223,7 @@ function CanvasWorkspace() {
             },
           },
         });
-        modules = [created];
+        modules = [...modules, created];
       }
       if (!modules.some((module) => (
         !module.deletedAt
@@ -1293,6 +1298,13 @@ function CanvasWorkspace() {
         if (disposed) return;
         setWorkflowModules(modules);
         const activeModules = modules.filter((module) => !module.deletedAt);
+        // Enable the processing capability on first installation, while respecting
+        // visibility choices once a processing default has already been saved.
+        if (!workflowModuleDefaults["video-upscale"]) {
+          const processingModule = activeModules.find((module) => module.capability === "video-upscale");
+          if (processingModule) setWorkflowModuleVisibleIds((current) => current.includes(processingModule.id)
+            ? current : [...current, processingModule.id]);
+        }
         setWorkflowModuleDefaults((current) => {
           const next = { ...current };
           // Legacy defaults were stored by capability + variant.  Keep those values
@@ -1369,7 +1381,9 @@ function CanvasWorkspace() {
     setWorkflowModulePathDraft(selectedWorkflowModule.workflowPath);
     setWorkflowModuleValidation(null);
     setWorkflowModuleReplacementId("");
-    setWorkflowModuleBindingsDraft(JSON.stringify(selectedWorkflowModule.bindings, null, 2));
+    setWorkflowModuleBindingsDraft(JSON.stringify(selectedWorkflowModule.capability === "video-upscale"
+      ? { adapter: selectedWorkflowModule.adapter, uiSchema: selectedWorkflowModule.uiSchema }
+      : selectedWorkflowModule.bindings, null, 2));
     setH3DiffusionModelName(selectedWorkflowModule.defaults.diffusionModelName);
   }, [selectedWorkflowModule]);
 
@@ -1420,6 +1434,8 @@ function CanvasWorkspace() {
         ? workflowModuleDefaults[workflowSlotForVideoMode(videoGenerationModeFromContent(record.content))] ?? ""
         : "";
       if ((explicitModuleId || implicitModuleId) === moduleId) count += 1;
+      const processing = generationSnapshotFromContent(record.content)?.videoUpscale;
+      if (processing?.workflowModuleId === moduleId) count += 1;
       const snapshot = record.content.generationSnapshot;
       if (
         snapshot
@@ -1438,11 +1454,14 @@ function CanvasWorkspace() {
   const validateWorkflowModuleDraft = useCallback(async () => {
     setWorkflowModulesBusy(true);
     try {
+      const processingPackage = workflowModuleCapabilityDraft === "video-upscale"
+        ? JSON.parse(workflowModuleBindingsDraft) as { adapter: WorkflowAdapter; uiSchema: WorkflowUiSchema } : null;
       const validation = await invoke<WorkflowModuleValidation>("validate_workflow_module_source", {
         sourceWorkflowPath: workflowModulePathDraft,
         adapterKind: selectedWorkflowModule?.adapterKind ?? WORKFLOW_PACKAGE_ENGINE,
         variant: workflowModuleVariantDraft,
-        bindings: workflowBindingsFromDraft(workflowModuleBindingsDraft),
+        bindings: processingPackage ? undefined : workflowBindingsFromDraft(workflowModuleBindingsDraft),
+        adapter: processingPackage?.adapter, uiSchema: processingPackage?.uiSchema,
       });
       setWorkflowModuleValidation(validation);
       if (validation.compatible) setNotice("工作流与当前适配规则兼容");
@@ -1453,13 +1472,16 @@ function CanvasWorkspace() {
     } finally {
       setWorkflowModulesBusy(false);
     }
-  }, [reportError, selectedWorkflowModule, showGlobalNotice, workflowModuleBindingsDraft, workflowModulePathDraft, workflowModuleVariantDraft]);
+  }, [reportError, selectedWorkflowModule, showGlobalNotice, workflowModuleBindingsDraft, workflowModuleCapabilityDraft, workflowModulePathDraft, workflowModuleVariantDraft]);
 
   const saveWorkflowModuleDraft = useCallback(async (overwrite: boolean) => {
     if (overwrite && !selectedWorkflowModule) return;
     setWorkflowModulesBusy(true);
     try {
-      const bindings = workflowBindingsFromDraft(workflowModuleBindingsDraft);
+      const processingPackage = workflowModuleCapabilityDraft === "video-upscale"
+        ? JSON.parse(workflowModuleBindingsDraft) as { adapter: WorkflowAdapter; uiSchema: WorkflowUiSchema } : null;
+      if (processingPackage && (!processingPackage.adapter || !processingPackage.uiSchema)) throw new Error("视频超分模块需要 adapter 和 uiSchema");
+      const bindings = processingPackage ? processingPackage.adapter.bindings : workflowBindingsFromDraft(workflowModuleBindingsDraft);
       const saved = await invoke<WorkflowModuleRecord>("save_workflow_module", {
         input: {
           id: overwrite ? selectedWorkflowModule?.id : undefined,
@@ -1470,15 +1492,15 @@ function CanvasWorkspace() {
           adapterKind: selectedWorkflowModule?.adapterKind ?? WORKFLOW_PACKAGE_ENGINE,
           sourceWorkflowPath: workflowModulePathDraft,
           bindings,
-          adapter: overwrite && selectedWorkflowModule
+          adapter: processingPackage?.adapter ?? (overwrite && selectedWorkflowModule
             ? {
               ...selectedWorkflowModule.adapter,
               capability: workflowModuleCapabilityDraft,
               variant: workflowModuleVariantDraft,
               bindings: bindings ?? selectedWorkflowModule.bindings,
             }
-            : undefined,
-          uiSchema: overwrite ? selectedWorkflowModule?.uiSchema : undefined,
+            : undefined),
+          uiSchema: processingPackage?.uiSchema ?? (overwrite ? selectedWorkflowModule?.uiSchema : undefined),
           defaults: overwrite && selectedWorkflowModule
             ? selectedWorkflowModule.defaults
             : {
@@ -1596,6 +1618,14 @@ function CanvasWorkspace() {
           };
           changed = true;
         }
+      }
+      const processing = generationSnapshotFromContent(content)?.videoUpscale;
+      if (processing?.workflowModuleId === sourceModuleId) {
+        const migrated = { ...processing, workflowModuleReplacedFrom: sourceModuleId, workflowModuleId: replacement.id,
+          workflowModuleName: replacement.name, workflowModuleRevision: replacement.revision };
+        content = { ...content, videoUpscale: migrated,
+          generationSnapshot: { ...(content.generationSnapshot as JsonObject), videoUpscale: migrated } };
+        changed = true;
       }
       if (!changed) continue;
       const updated = await invoke<NodeRecord>("update_node", {
@@ -2605,7 +2635,7 @@ function CanvasWorkspace() {
           placeholderNodeId: record.id,
           kind: record.kind === "generated-image"
             ? sourcePreviewId ? "image-upscale" as const : "image-generation" as const
-            : sourcePreviewId ? "secondary" as const : "generation" as const,
+            : record.content.videoUpscale ? "video-upscale" as const : sourcePreviewId ? "secondary" as const : "generation" as const,
         }];
       })
       .filter((task) => Boolean(task.clientId));
@@ -2638,7 +2668,7 @@ function CanvasWorkspace() {
               ? `已通过删除占位取消任务，仍有 ${remainingTaskCount} 个任务`
               : `已通过删除占位取消 ComfyUI ${(task.kind === "image-generation" || task.kind === "image-upscale")
                 ? task.kind === "image-upscale" ? "图片放大" : "图片生成"
-                : task.kind === "secondary" ? "2采" : "生成"}`,
+                : task.kind === "video-upscale" ? "超分" : task.kind === "secondary" ? "2采" : "生成"}`,
           },
         });
       }
@@ -3476,7 +3506,9 @@ function CanvasWorkspace() {
     edgeSourceId = source.id,
     placeBelowSource = false,
     positionOverride,
+    processing,
   }: {
+    processing?: VideoUpscaleSnapshot;
     source: NodeRecord;
     clientId: string;
     snapshot: GenerationSnapshot;
@@ -3487,8 +3519,9 @@ function CanvasWorkspace() {
     placeBelowSource?: boolean;
     positionOverride?: { x: number; y: number };
   }) => {
-    const previewWidth = generatedVideoPreviewWidthForRatio(videoAspectRatioValue(snapshot.aspectRatio));
-    const previewHeight = generatedPreviewHeightForAspectRatio(snapshot.aspectRatio);
+    const ratio = processing?.aspectRatio ?? videoAspectRatioValue(snapshot.aspectRatio);
+    const previewWidth = generatedVideoPreviewWidthForRatio(ratio);
+    const previewHeight = processing ? Math.round(Math.max(180, previewWidth / ratio + GENERATED_VIDEO_FOOTER_HEIGHT)) : generatedPreviewHeightForAspectRatio(snapshot.aspectRatio);
     const placementRecords = [
       ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
       ...incomingPlacementReservations.current,
@@ -3502,19 +3535,20 @@ function CanvasWorkspace() {
       placeholderClientId: clientId,
       status: "running",
       executionProgress: null,
-      validationMessage: secondary
+      validationMessage: processing ? "正在准备视频超分…" : secondary
         ? `正在准备二次采样（${snapshot.secondaryResolutionMegapixels.toFixed(1)} MP）…`
         : "正在上传素材并提交到远程 ComfyUI…",
       sourceGeneratorId,
       ...(secondary ? { sourcePreviewId: source.id } : {}),
       ...(seed !== undefined ? { seed } : {}),
       generationSnapshot: snapshot,
+      ...(processing ? { videoUpscale: processing } : {}),
     };
     const reservation: NodeRecord = {
       ...source,
       id: reservationId,
       kind: "generated-video",
-      title: secondary ? "2采预览（生成中）" : "视频预览（生成中）",
+      title: processing ? "超分预览（生成中）" : secondary ? "2采预览（生成中）" : "视频预览（生成中）",
       content: placeholderContent,
       source: "comfyui-placeholder",
       requestId: reservationId,
@@ -3555,7 +3589,7 @@ function CanvasWorkspace() {
           metadata: {
             placeholder: true,
             clientId,
-            ...(secondary ? {
+            ...(processing ? { videoUpscale: processing } : secondary ? {
               secondaryResolutionMegapixels: snapshot.secondaryResolutionMegapixels,
             } : {}),
           },
@@ -5791,6 +5825,17 @@ function CanvasWorkspace() {
     await executeSecondarySample(draft.previewId, overrides, draft.seed);
   }, [executeSecondarySample, secondarySampleDraft]);
 
+  const videoUpscaleDependencies = useMemo(() => ({
+    nodesSnapshot, modules: workflowModules, defaults: workflowModuleDefaults, visibleIds: workflowModuleVisibleIds,
+    setDefaults: setWorkflowModuleDefaults, serverUrl: comfyUiServerUrlRef, inputRoot: comfyInputRootRef,
+    ownedClients: ownedComfyClients, cancelledClients: cancelledComfyClients,
+    register: registerComfyTask, unregister: unregisterComfyTask, remember: rememberComfyTask, forget: forgetComfyTask,
+    changeNode, updatePlaceholder: updateGenerationPlaceholder, createPlaceholder: createGenerationPlaceholder,
+    completePlaceholder: completeGenerationPlaceholder, finalizePlaceholder: finalizeGenerationPlaceholder,
+    notice: showGlobalNotice, reportError,
+  }), [workflowModules, workflowModuleDefaults, workflowModuleVisibleIds, registerComfyTask, unregisterComfyTask, rememberComfyTask, forgetComfyTask, changeNode, updateGenerationPlaceholder, createGenerationPlaceholder, completeGenerationPlaceholder, finalizeGenerationPlaceholder, showGlobalNotice, reportError]);
+  const videoUpscale = useVideoUpscale(videoUpscaleDependencies);
+
   const cancelVideoExecution = useCallback(async (targetId: string) => {
     const clientIds = [...(runningComfyClients.current.get(targetId) ?? [])];
     const clientId = clientIds.find(
@@ -5806,7 +5851,7 @@ function CanvasWorkspace() {
     );
     const taskLabel = persistedTask && isImageComfyTask(persistedTask)
       ? persistedTask.kind === "image-upscale" ? "图片放大" : "图片生成"
-      : persistedTask && isSecondaryComfyTask(persistedTask) ? "2采" : "生成";
+      : persistedTask?.kind === "video-upscale" ? "视频超分" : persistedTask && isSecondaryComfyTask(persistedTask) ? "2采" : "生成";
     cancelledComfyClients.current.add(clientId);
     changeNode(targetId, {
       content: {
@@ -6279,6 +6324,8 @@ function CanvasWorkspace() {
           onExecute: executeVideoNode,
           onExecuteImage: (nodeId: string) => executeImageNodeRef.current(nodeId),
           onBatchExecute: executeVideoNodeBatch,
+          onVideoUpscale: videoUpscale.execute,
+          onConfigureVideoUpscale: videoUpscale.configure,
           onSecondarySample: executeSecondarySample,
           onConfigureSecondarySample: configureSecondarySample,
           onRegenerateVideo: regenerateGeneratedVideo,
@@ -6300,7 +6347,7 @@ function CanvasWorkspace() {
         },
       };
     },
-    [activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -6574,7 +6621,8 @@ function CanvasWorkspace() {
       return sourceNode.data.record.content;
     }
 
-    const secondaryTask = isSecondaryComfyTask(task);
+    const processing = task.kind === "video-upscale" ? task.snapshot.videoUpscale : undefined;
+    const secondaryTask = isSecondaryComfyTask(task) || Boolean(processing);
     const source = recordAtCurrentFlowPosition(sourceNode);
     const sourceGeneratorId = secondaryTask
       ? task.sourceGeneratorId
@@ -6585,8 +6633,9 @@ function CanvasWorkspace() {
     const generationElapsedSeconds = validExecutionElapsedSeconds(
       recovered.executionElapsedSeconds,
     );
-    const previewWidth = generatedVideoPreviewWidthForRatio(videoAspectRatioValue(task.snapshot.aspectRatio));
-    const previewHeight = generatedPreviewHeightForAspectRatio(task.snapshot.aspectRatio);
+    const ratio = processing?.aspectRatio ?? videoAspectRatioValue(task.snapshot.aspectRatio);
+    const previewWidth = generatedVideoPreviewWidthForRatio(ratio);
+    const previewHeight = processing ? Math.round(Math.max(180, previewWidth / ratio + GENERATED_VIDEO_FOOTER_HEIGHT)) : generatedPreviewHeightForAspectRatio(task.snapshot.aspectRatio);
     const placementRecords = [
       ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
       ...incomingPlacementReservations.current,
@@ -6596,7 +6645,7 @@ function CanvasWorkspace() {
     const reservationIds = new Set<string>();
     try {
       for (const [index, output] of recovered.outputs.entries()) {
-        const title = secondaryTask
+        const title = processing ? recovered.outputs.length > 1 ? `超分预览 ${index + 1}` : "超分预览" : secondaryTask
           ? recovered.outputs.length > 1 ? `2采预览 ${index + 1}` : "2采预览"
           : recovered.outputs.length > 1 ? `视频预览 ${index + 1}` : "视频预览";
         const outputContent: JsonObject = {
@@ -6611,7 +6660,8 @@ function CanvasWorkspace() {
           sourceGeneratorId,
           ...(secondaryTask ? { sourcePreviewId: task.nodeId } : {}),
           outputIndex: index,
-          aspectRatio: videoAspectRatioValue(task.snapshot.aspectRatio),
+          aspectRatio: ratio,
+          ...(processing ? { videoUpscale: processing } : {}),
           generationSnapshot: task.snapshot,
           hasBeenPlayed: false,
           ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
@@ -6687,7 +6737,7 @@ function CanvasWorkspace() {
               promptId: recovered.promptId,
               outputIndex: index,
               recovered: true,
-              ...(secondaryTask ? {
+              ...(processing ? { videoUpscale: processing } : secondaryTask ? {
                 secondaryResolutionMegapixels: task.snapshot.secondaryResolutionMegapixels,
               } : {}),
             },
@@ -6715,7 +6765,7 @@ function CanvasWorkspace() {
         status: "idle",
         executionProgress: null,
         validationMessage: "",
-        generationSnapshot: task.snapshot,
+        ...(processing ? {} : { generationSnapshot: task.snapshot }),
       };
       changeNode(task.nodeId, { content: restoredContent });
       return restoredContent;
@@ -6776,7 +6826,7 @@ function CanvasWorkspace() {
         const workflowModule = workflowModules.find((module) => (
           !module.deletedAt && module.id === task.snapshot.workflowModuleId
         ));
-        const livePreviewNodeId = !isImageComfyTask(task) && !isSecondaryComfyTask(task)
+        const livePreviewNodeId = !isImageComfyTask(task) && !isSecondaryComfyTask(task) && task.kind !== "video-upscale"
           ? livePreviewNodeIdForBindings(workflowModule?.bindings)
           : "";
         const receivePreview = createComfyPreviewReceiver(
@@ -6799,7 +6849,7 @@ function CanvasWorkspace() {
           const imageTask = isImageComfyTask(task);
           const taskLabel = imageTask
             ? task.kind === "image-upscale" ? "放大图片" : "生成图片"
-            : secondaryTask ? "2采" : "生成";
+            : task.kind === "video-upscale" ? "超分" : secondaryTask ? "2采" : "生成";
           recoveredNodeActiveKeys.current.set(task.nodeId, `${task.clientId}:running`);
           changeNode(task.nodeId, {
             content: {
@@ -6841,6 +6891,8 @@ function CanvasWorkspace() {
             {
               serverUrl: comfyUiServerUrlRef.current,
               clientIds: tasks.map((task) => task.clientId),
+              videoOutputNodeIds: Object.fromEntries(tasks.filter((task) => task.kind === "video-upscale" && task.snapshot.videoUpscale)
+                .map((task) => [task.clientId, task.snapshot.videoUpscale!.outputNodeId])),
               imageClientIds: tasks
                 .filter(isImageComfyTask)
                 .map((task) => task.clientId),
@@ -6874,7 +6926,7 @@ function CanvasWorkspace() {
                   ? task.kind === "image-upscale"
                     ? "已恢复 ComfyUI 完成图片放大"
                     : "已恢复 ComfyUI 完成任务及图片预览"
-                  : isSecondaryComfyTask(task)
+                  : task.kind === "video-upscale" ? "已恢复 ComfyUI 完成超分及超分预览" : isSecondaryComfyTask(task)
                     ? "已恢复 ComfyUI 完成2采及2采预览"
                     : "已恢复 ComfyUI 完成任务及视频预览");
               } finally {
@@ -6901,7 +6953,7 @@ function CanvasWorkspace() {
                 const imageTask = isImageComfyTask(task);
                 const recoveryLabel = imageTask
                   ? task.kind === "image-upscale" ? "图片放大恢复" : "图片生成恢复"
-                  : secondaryTask ? "2采恢复" : "恢复";
+                  : task.kind === "video-upscale" ? "超分恢复" : secondaryTask ? "2采恢复" : "恢复";
                 const validationMessage = recovered.status === "missing"
                   ? `${recoveryLabel}失败：任务不在 ComfyUI 队列或最近历史记录中`
                   : recovered.status === "success"
@@ -6909,10 +6961,10 @@ function CanvasWorkspace() {
                     : recovered.status === "cancelled"
                       ? `已取消恢复的 ComfyUI ${imageTask
                         ? task.kind === "image-upscale" ? "图片放大" : "图片任务"
-                        : secondaryTask ? "2采" : "任务"}`
+                        : task.kind === "video-upscale" ? "超分" : secondaryTask ? "2采" : "任务"}`
                       : `恢复的 ComfyUI ${imageTask
                         ? task.kind === "image-upscale" ? "图片放大" : "图片任务"
-                        : secondaryTask ? "2采" : "任务"}执行失败`;
+                        : task.kind === "video-upscale" ? "超分" : secondaryTask ? "2采" : "任务"}执行失败`;
                 changeNode(task.nodeId, {
                   content: {
                     ...node.data.record.content,
@@ -6970,7 +7022,7 @@ function CanvasWorkspace() {
             const imageTask = isImageComfyTask(active.task);
             const taskLabel = imageTask
               ? active.task.kind === "image-upscale" ? "图片放大" : "图片任务"
-              : secondaryTask ? "2采" : "任务";
+              : active.task.kind === "video-upscale" ? "超分" : secondaryTask ? "2采" : "任务";
             changeNode(nodeId, {
               content: {
                 ...(updatedNodeContents.get(nodeId) ?? node.data.record.content),
@@ -11398,6 +11450,8 @@ function CanvasWorkspace() {
         movePreset={moveVideoRegenerationPreset}
         selectedVideoRegenerationPrompt={selectedVideoRegenerationPrompt}
       />
+      <VideoUpscaleDialog draft={videoUpscale.draft} setDraft={videoUpscale.setDraft}
+        modules={workflowModules.filter((module) => workflowModuleVisibleIds.includes(module.id))} submit={videoUpscale.submit} />
       <SecondarySampleDialog
         secondarySampleDraft={secondarySampleDraft}
         setSecondarySampleDraft={setSecondarySampleDraft}

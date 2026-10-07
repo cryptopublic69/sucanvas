@@ -785,6 +785,21 @@ pub struct ComfyImageSubmitInput {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ComfyVideoUpscaleInput {
+    pub server_url: String,
+    pub workflow_module_id: String,
+    pub client_id: String,
+    pub source: ComfyOutputFile,
+    #[serde(default)]
+    pub source_server_url: String,
+    #[serde(default)]
+    pub input_root_path: String,
+    #[serde(default)]
+    pub parameters: std::collections::BTreeMap<String, f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComfyImageUpscaleInput {
     pub server_url: String,
     pub workflow_module_id: String,

@@ -1,0 +1,15 @@
+{
+  "id": "topaz-starlight-2.6",
+  "name": "Topaz Starlight",
+  "capability": "video-upscale",
+  "variant": "video-upscale",
+  "revision": "2.6",
+  "packageSchemaVersion": 1,
+  "engineApiVersion": "1.0",
+  "adapterKind": "workflow-package-v1",
+  "adapterEntry": "adapter.json",
+  "uiSchemaEntry": "ui-schema.json",
+  "sourceWorkflowName": "Topaz Starlight2.6.json",
+  "createdAt": "2026-10-07T00:00:00Z",
+  "updatedAt": "2026-10-07T00:00:00Z"
+}

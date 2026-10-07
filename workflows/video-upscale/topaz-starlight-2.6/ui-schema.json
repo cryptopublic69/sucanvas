@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "groups": [
+    {
+      "id": "upscale",
+      "title": "超分参数",
+      "note": "softness：1 最锐利，2 均衡，3 最柔和；1 倍保持原尺寸并增强。",
+      "fields": [
+        {
+          "key": "softness",
+          "label": "Softness",
+          "type": "number",
+          "min": 1,
+          "max": 3,
+          "step": 1,
+          "default": 3
+        },
+        {
+          "key": "upscaleFactor",
+          "label": "放大倍率",
+          "type": "number",
+          "min": 1,
+          "max": 4,
+          "step": 1,
+          "default": 1
+        }
+      ]
+    }
+  ]
+}

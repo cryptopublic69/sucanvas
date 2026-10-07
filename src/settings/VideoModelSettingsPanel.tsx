@@ -121,7 +121,7 @@ export function VideoModelSettingsPanel({
                       : field.min}
                     max={field.max}
                     step={field.step}
-                    value={h3ModelParametersDraft[field.key]}
+                    value={h3ModelParametersDraft[field.key as keyof H3ModelParameters]}
                     onChange={(value) => setH3ModelParametersDraft((current) => ({
                       ...current,
                       [field.key]: value,

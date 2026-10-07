@@ -1,0 +1,49 @@
+{
+  "2": {
+    "inputs": {
+      "model": "Starlight Precise 2.6",
+      "upscale_factor": 1,
+      "softness": 3,
+      "keep_audio": true,
+      "topaz_dir": "E:\\Topaz",
+      "model_store": "",
+      "timeout_minutes": 1440,
+      "video": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "TopazSLPUpscale",
+    "_meta": {
+      "title": "Topaz Starlight Precise (Local)"
+    }
+  },
+  "3": {
+    "inputs": {
+      "file": "0e754c34-a65a-4385-b9dc-0d10f90b0c2a.mp4",
+      "video-preview": ""
+    },
+    "class_type": "LoadVideo",
+    "_meta": {
+      "title": "加载视频"
+    }
+  },
+  "4": {
+    "inputs": {
+      "filename_prefix": "video/Starlight/Starlight",
+      "format": "mp4",
+      "format.codec": "h264",
+      "format.codec.encoding": "auto",
+      "codec": "auto",
+      "video-preview": "",
+      "video": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "保存视频"
+    }
+  }
+}

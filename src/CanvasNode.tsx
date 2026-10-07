@@ -1,3 +1,5 @@
+import { Fragment } from "react";
+import { videoUpscaleFromValue } from "./video/videoUpscale";
 import { Settings as PresetSettingsIcon } from "lucide-react";
 import { useDropdownWheel } from "./useDropdownWheel";
 import { CanvasNodePresentation } from "./canvas/CanvasNodePresentation";
@@ -678,6 +680,7 @@ interface StoryboardReferenceResolution {
 }
 
 interface GenerationSnapshot {
+  videoUpscale?: import("./video/videoUpscale").VideoUpscaleSnapshot;
   presetName?: string;
   prompt: string;
   promptInformation: string;
@@ -895,7 +898,7 @@ interface PersistedComfyTask {
   canvasId: string;
   snapshot: GenerationSnapshot;
   startedAt: number;
-  kind?: "generation" | "secondary" | "image-generation" | "image-upscale";
+  kind?: "generation" | "secondary" | "image-generation" | "image-upscale" | "video-upscale";
   sourceGeneratorId?: string;
   placeholderNodeId?: string;
 }
@@ -991,15 +994,16 @@ interface VideoGenerationDefaults {
   generationRefImageSize: RefImageSize;
 }
 
-type WorkflowCapability = "video-generation" | "image-generation";
-type WorkflowVariant = "reference-to-video" | "first-last-frame" | "image-to-video" | "last-frame-to-video" | "text-to-video" | "image-generation" | "image-edit";
+type WorkflowCapability = "video-generation" | "image-generation" | "video-upscale";
+type WorkflowVariant = "reference-to-video" | "first-last-frame" | "image-to-video" | "last-frame-to-video" | "text-to-video" | "image-generation" | "image-edit" | "video-upscale";
 type UiFontSize = "small" | "medium";
 type WorkflowModuleSlot = "video-generation:reference-to-video"
   | "video-generation:first-last-frame"
   | "video-generation:image-to-video"
   | "video-generation:last-frame-to-video"
   | "video-generation:text-to-video"
-  | "image-generation";
+  | "image-generation"
+  | "video-upscale";
 type WorkflowModuleDefaultMap = Partial<Record<string, string>>;
 
 interface WorkflowModuleDefaults extends H3ModelParameters {
@@ -1062,10 +1066,16 @@ interface WorkflowAdapter {
   capability: WorkflowCapability;
   variant: WorkflowVariant;
   bindings: WorkflowBindings;
+  videoProcessing?: {
+    videoInput: { nodeId: string; inputName: string };
+    outputNodeId: string;
+    parameters: Record<string, { nodeId: string; inputName: string }>;
+    timeoutMinutes: number;
+  };
 }
 
 interface WorkflowUiField {
-  key: keyof H3ModelParameters;
+  key: string;
   label: string;
   type: "number";
   min: number;
@@ -1628,6 +1638,8 @@ interface CanvasNodeData extends Record<string, unknown> {
   onExecute: (id: string, regeneration?: VideoRegenerationRequest, options?: VideoExecutionOptions) => Promise<void>;
   onExecuteImage: (id: string) => Promise<void>;
   onBatchExecute: (id: string) => Promise<void>;
+  onVideoUpscale: (id: string) => Promise<void>;
+  onConfigureVideoUpscale: (id: string) => void;
   onSecondarySample: (id: string) => Promise<void>;
   onConfigureSecondarySample: (id: string) => void;
   onRegenerateVideo: (id: string) => Promise<void>;
@@ -2174,8 +2186,9 @@ const WORKFLOW_PACKAGE_ENGINE = "workflow-package-v1";
 const WORKFLOW_CAPABILITIES: Array<{ value: WorkflowCapability; label: string }> = [
   { value: "video-generation", label: "视频生成" },
   { value: "image-generation", label: "图片生成" },
+  { value: "video-upscale", label: "视频超分" },
 ];
-const WORKFLOW_VIDEO_VARIANTS: Array<{ value: Exclude<WorkflowVariant, "image-generation" | "image-edit">; label: string }> = [
+const WORKFLOW_VIDEO_VARIANTS: Array<{ value: Exclude<WorkflowVariant, "image-generation" | "image-edit" | "video-upscale">; label: string }> = [
   { value: "reference-to-video", label: "多参生视频" },
   { value: "first-last-frame", label: "首尾帧" },
   { value: "image-to-video", label: "图生视频" },
@@ -2189,6 +2202,7 @@ const WORKFLOW_MODULE_SLOTS: WorkflowModuleSlot[] = [
   "video-generation:last-frame-to-video",
   "video-generation:text-to-video",
   "image-generation",
+  "video-upscale",
 ];
 const COMFY_TASK_STORAGE_KEY = "infinite-canvas:comfy-tasks";
 const PRIVATE_PROJECT_VISIBILITY_STORAGE_KEY = "infinite-canvas:show-private-projects";
@@ -2749,6 +2763,7 @@ function persistedComfyTasksFromStorage(): PersistedComfyTask[] {
         || task.kind === "secondary"
         || task.kind === "image-generation"
         || task.kind === "image-upscale"
+        || task.kind === "video-upscale"
       )
       && (task.sourceGeneratorId === undefined || typeof task.sourceGeneratorId === "string")
       && (task.placeholderNodeId === undefined || typeof task.placeholderNodeId === "string")
@@ -2811,7 +2826,7 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
     : undefined;
   if (
     typeof snapshot.prompt !== "string"
-    || (!snapshot.prompt.trim() && !imageRecovery)
+    || (!snapshot.prompt.trim() && !imageRecovery && !videoUpscaleFromValue(snapshot.videoUpscale))
   ) return null;
   const restoredSelection = storyboardReferenceSelectionFromValue(
     snapshot.referenceSelection,
@@ -2923,6 +2938,7 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
       ? snapshot.workflowModuleRevision
       : "",
     ...(imageRecovery ? { imageRecovery } : {}),
+    ...(videoUpscaleFromValue(snapshot.videoUpscale) ? { videoUpscale: videoUpscaleFromValue(snapshot.videoUpscale) } : {}),
   };
 }
 
@@ -2955,7 +2971,7 @@ function persistedComfyTaskFromPlaceholder(record: NodeRecord): PersistedComfyTa
     startedAt: Number.isFinite(parsedStartedAt) ? parsedStartedAt : Date.now(),
     kind: imageTask
       ? imageTask.kind === "upscale" ? "image-upscale" : "image-generation"
-      : sourcePreviewId ? "secondary" : "generation",
+      : snapshot.videoUpscale ? "video-upscale" : sourcePreviewId ? "secondary" : "generation",
     ...((sourcePreviewId || imageTask) ? { sourceGeneratorId } : {}),
     placeholderNodeId: record.id,
   };
@@ -3058,7 +3074,7 @@ function workflowSlotForVideoMode(mode: VideoGenerationMode): WorkflowModuleSlot
 }
 
 function workflowSlotForModule(module: Pick<WorkflowModuleRecord, "capability" | "variant">): WorkflowModuleSlot {
-  return module.capability === "image-generation"
+  return module.capability === "video-upscale" ? "video-upscale" : module.capability === "image-generation"
     ? "image-generation"
     : `video-generation:${module.variant as VideoGenerationMode}`;
 }
@@ -3068,6 +3084,7 @@ function workflowModuleFamilyKey(module: Pick<WorkflowModuleRecord, "capability"
 }
 
 function workflowVariantLabel(module: Pick<WorkflowModuleRecord, "capability" | "variant">): string {
+  if (module.capability === "video-upscale") return "视频超分";
   if (module.capability === "image-generation") {
     return module.variant === "image-edit" ? "图像编辑" : "图片生成";
   }
@@ -4606,8 +4623,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onExecutionCheck,
     onExecuteImage,
     onBatchExecute,
-    onSecondarySample,
-    onConfigureSecondarySample,
+    // onSecondarySample,
+    // onConfigureSecondarySample,
+    onVideoUpscale,
+    onConfigureVideoUpscale,
     onRegenerateVideo,
     onConfigureRegenerateVideo,
     onLocatePrompt,
@@ -4870,6 +4889,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       : isFolder
         ? "子画布目录"
       : record.source;
+  const isVideoUpscalePreview = isGeneratedVideo && Boolean(record.content.videoUpscale);
   const isSecondaryPreview = isGeneratedVideo
     && typeof record.content.sourcePreviewId === "string";
   const supportsPreviewColor = isText || isNote || (
@@ -5169,7 +5189,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ? workflowModules.find((module) => module.id === generatedVideoSnapshot.workflowModuleId) ?? null
     : null;
   const generatedStyleUsage = generatedVideoSnapshot
-    ? styleLoraUsageFromSnapshot({ ...generatedVideoSnapshot }, isSecondaryPreview)
+    ? styleLoraUsageFromSnapshot({ ...generatedVideoSnapshot }, isSecondaryPreview && !isVideoUpscalePreview)
     : { primary: null, secondary: null };
   const generatedVideoUsesReferenceImageSize = generatedVideoWorkflowModule?.variant === "reference-to-video";
   const generatedVideoWorkflowLabel = generatedVideoWorkflowModule
@@ -7458,7 +7478,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 role="progressbar"
                 aria-label={isGeneratedImage
                   ? "图片生成进度"
-                  : isSecondaryPreview ? "二次采样生成进度" : "视频生成进度"}
+                  : isVideoUpscalePreview ? "视频超分进度" : isSecondaryPreview ? "二次采样生成进度" : "视频生成进度"}
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={executionProgress ?? undefined}
@@ -7597,11 +7617,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 disabled={executionCancelling}
                 onClick={(event) => {
                   if (executionRunning) void onCancelExecution(id);
-                  else if (event.ctrlKey) onConfigureSecondarySample(id);
-                  else void onSecondarySample(id);
+                  // 旧二采入口已改为 Alt 触发后停用，保留供恢复：
+                  // else if (event.altKey) onConfigureSecondarySample(id);
+                  // else void onSecondarySample(id);
+                  else if (event.altKey) onConfigureVideoUpscale(id);
+                  else void onVideoUpscale(id);
                 }}
-                title={executionRunning ? "取消这次2采" : "点击直接2采；Ctrl+点击可调整2采参数"}
-                aria-label={executionRunning ? "取消2采" : "2采当前视频"}
+                title={executionRunning ? "取消这次超分" : "点击使用工作流默认参数超分；Alt+点击设置超分参数"}
+                aria-label={executionRunning ? "取消超分" : "超分当前视频"}
               >
                 {executionRunning
                   ? <Square size={11} fill="currentColor" />
@@ -7744,7 +7767,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   <header>
                     <div>
                       <strong>生成信息</strong>
-                      <span>{isSecondaryPreview ? "2采预览" : "1采预览"}</span>
+                      <span>{isVideoUpscalePreview ? "超分预览" : isSecondaryPreview ? "2采预览" : "1采预览"}</span>
                     </div>
                     <button
                       type="button"
@@ -7822,7 +7845,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       <dd>{generatedVideoSnapshot.primaryBrightness.toFixed(2)} / {generatedVideoSnapshot.primaryContrast.toFixed(2)} / {generatedVideoSnapshot.primarySaturation.toFixed(2)}</dd>
                     </dl>
                   </section>
-                  {isSecondaryPreview && (
+                  {generatedVideoSnapshot.videoUpscale && <section className="generated-video-stage-info">
+                    <h4>视频超分</h4>
+                    <dl>
+                      <dt>工作流方案</dt><dd>{generatedVideoSnapshot.videoUpscale.workflowModuleName} · {generatedVideoSnapshot.videoUpscale.workflowModuleRevision}</dd>
+                      {Object.entries(generatedVideoSnapshot.videoUpscale.parameters).map(([key, value]) =>
+                        <Fragment key={key}><dt>{generatedVideoSnapshot.videoUpscale?.parameterLabels[key] ?? key}</dt><dd>{value}</dd></Fragment>)}
+                    </dl>
+                  </section>}
+                  {isSecondaryPreview && !isVideoUpscalePreview && (
                     <section className="generated-video-stage-info">
                       <h4>2采</h4>
                       <dl>
@@ -11102,7 +11133,10 @@ export type {
   VisibleNodeCacheEntry,
   WorkflowCapability,
   WorkflowBindings,
+  WorkflowAdapter,
+  WorkflowUiSchema,
   WorkflowModuleRecord,
+  WorkflowModuleDefaultMap,
   WorkflowModuleValidation,
   WorkflowVariant,
   WorkspaceSnapshot,
