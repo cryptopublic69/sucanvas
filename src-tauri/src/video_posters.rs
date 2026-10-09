@@ -4,6 +4,10 @@ use tokio::{process::Command, sync::Semaphore};
 static POSTER_SLOT: Semaphore = Semaphore::const_new(1);
 
 fn validate_source(source: &str) -> Result<(), String> {
+    #[cfg(feature = "server")]
+    if std::path::Path::new(source).is_file() {
+        return Ok(());
+    }
     let url = reqwest::Url::parse(source).map_err(|_| "无效的视频地址")?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("后台封面提取仅支持 HTTP 视频".into());
@@ -13,7 +17,7 @@ fn validate_source(source: &str) -> Result<(), String> {
 
 // Only one bounded decoder, without hardware decoding, temporary video copies,
 // or a visible console. The frontend persists the small JPEG in its poster cache.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn capture_video_poster(source: String) -> Result<Vec<u8>, String> {
     validate_source(&source)?;
     let _permit = POSTER_SLOT
@@ -21,10 +25,19 @@ pub async fn capture_video_poster(source: String) -> Result<Vec<u8>, String> {
         .await
         .map_err(|error| error.to_string())?;
     let mut executable = std::path::PathBuf::from("ffmpeg");
+    #[cfg(feature = "server")]
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(root) = current.parent() {
+            let bundled = root.join("tools/ffmpeg.exe");
+            if bundled.is_file() {
+                executable = bundled;
+            }
+        }
+    }
     #[cfg(windows)]
     if let Some(program_files) = std::env::var_os("ProgramFiles") {
         let installed = std::path::PathBuf::from(program_files).join("ffmpeg/bin/ffmpeg.exe");
-        if installed.is_file() {
+        if installed.is_file() && executable == std::path::PathBuf::from("ffmpeg") {
             executable = installed;
         }
     }

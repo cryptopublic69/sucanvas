@@ -4,6 +4,8 @@ import {
   Trash2,
   Upload
 } from "lucide-react";
+import { useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import type {
   WorkflowCapability,
   WorkflowModuleRecord,
@@ -108,6 +110,16 @@ export function WorkflowSettingsPanel({
   restoreSelectedWorkflowModule,
   workflowModulesReady,
 }: WorkflowSettingsPanelProps) {
+  const [uploadError, setUploadError] = useState("");
+  const [uploading, setUploading] = useState(false);
+  async function chooseWorkflow() {
+    setUploading(true); setUploadError("");
+    try {
+      const path = await open({ multiple: false, filters: [{ name: "API 工作流", extensions: ["json"] }] });
+      if (typeof path === "string") { setWorkflowModulePathDraft(path); setWorkflowModuleValidation(null); }
+    } catch (error) { setUploadError(error instanceof Error ? error.message : String(error)); }
+    finally { setUploading(false); }
+  }
   return (
     <section className="settings-pane workflow-settings-pane" aria-labelledby="workflow-settings-title">
       <div className="settings-pane-heading workflow-settings-heading">
@@ -320,8 +332,10 @@ export function WorkflowSettingsPanel({
           </div>
           <label className="workflow-module-path-field">
             API 工作流 JSON
+            {import.meta.env.MODE === "web" && <button type="button" disabled={uploading || Boolean(selectedWorkflowModule?.deletedAt)} onClick={() => void chooseWorkflow()}>{uploading ? "正在上传…" : "选择 JSON 文件"}</button>}
             <input
-              value={workflowModulePathDraft}
+              readOnly={import.meta.env.MODE === "web"}
+              value={import.meta.env.MODE === "web" ? workflowModulePathDraft.split(/[\\/]/).pop() ?? "" : workflowModulePathDraft}
               onChange={(event) => {
                 setWorkflowModulePathDraft(event.currentTarget.value);
                 setWorkflowModuleValidation(null);
@@ -334,6 +348,7 @@ export function WorkflowSettingsPanel({
               保存后会复制到应用的独立方案仓库，原始 JSON 后续移动或删除不会影响已保存方案。
             </small>
           </label>
+          {uploadError && <p role="alert">{uploadError}</p>}
           <details className="workflow-bindings-editor">
             <summary>高级节点映射</summary>
             <p>{workflowModuleCapabilityDraft === "video-upscale" ? "超分方案在这里编辑 adapter 与 uiSchema；节点映射、默认值和弹窗字段随模块保存。新方案也可导入完整模块包。" : "工作流节点 ID 变化时在这里调整映射。留空会使用当前 H3 多参默认映射。"}</p>

@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use crate::platform::AppHandle;
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
@@ -12,7 +13,8 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+#[cfg(feature = "desktop")]
+use tauri::Emitter;
 
 use crate::{
     db::{CanvasError, CanvasResult, Database},
@@ -94,7 +96,7 @@ pub async fn serve(listener: StdTcpListener, state: ApiState) -> CanvasResult<()
         .map_err(CanvasError::Io)
 }
 
-fn router(state: ApiState) -> Router {
+pub(crate) fn router(state: ApiState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/nodes", post(create_node))

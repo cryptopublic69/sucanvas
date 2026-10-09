@@ -228,11 +228,11 @@ impl Database {
         let mut updated = 0;
 
         for (id, content_json) in rows {
-            let mut content: serde_json::Value = serde_json::from_str(&content_json)?;
+            let mut content: serde_json::Value = crate::portable::from_str(&content_json)?;
             if rewrite_asset_paths_in_value(&mut content, legacy_assets_dir, assets_dir) {
                 transaction.execute(
                     "UPDATE nodes SET content_json = ?2 WHERE id = ?1",
-                    params![id, serde_json::to_string(&content)?],
+                    params![id, crate::portable::to_string(&content)?],
                 )?;
                 updated += 1;
             }
@@ -399,7 +399,7 @@ impl Database {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     is_private: row.get::<_, i64>(2)? != 0,
-                    preview_image_path: row.get(3)?,
+                    preview_image_path: row.get::<_, Option<String>>(3)?.map(|path| crate::portable::load_path(&path)),
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
                 })
@@ -432,7 +432,7 @@ impl Database {
                         id: row.get(0)?,
                         name: row.get(1)?,
                         is_private: row.get::<_, i64>(2)? != 0,
-                        preview_image_path: row.get(3)?,
+                        preview_image_path: row.get::<_, Option<String>>(3)?.map(|path| crate::portable::load_path(&path)),
                         created_at: row.get(4)?,
                         updated_at: row.get(5)?,
                     })
@@ -494,7 +494,7 @@ impl Database {
             ));
         }
 
-        let content: Value = serde_json::from_str(&content_json)?;
+        let content: Value = crate::portable::from_str(&content_json)?;
         let asset_path = content
             .get("assetPath")
             .and_then(Value::as_str)
@@ -508,7 +508,11 @@ impl Database {
             "UPDATE canvases
              SET preview_image_path = ?2, updated_at = ?3
              WHERE id = ?1",
-            params![project_id, asset_path, timestamp],
+            params![
+                project_id,
+                crate::portable::store_path(asset_path),
+                timestamp
+            ],
         )?;
         if changed == 0 {
             return Err(CanvasError::Validation(format!(
@@ -589,7 +593,7 @@ impl Database {
                 folder_node_id,
                 canvas_id,
                 folder_title,
-                serde_json::to_string(&folder_content)?,
+                crate::portable::to_string(&folder_content)?,
                 input.x,
                 input.y,
                 FOLDER_NODE_WIDTH,
@@ -796,7 +800,7 @@ impl Database {
                 folder_node_id,
                 canvas_id,
                 folder_title,
-                serde_json::to_string(&folder_content)?,
+                crate::portable::to_string(&folder_content)?,
                 folder_x,
                 folder_y,
                 FOLDER_NODE_WIDTH,
@@ -855,7 +859,7 @@ impl Database {
                 params![
                     node.id,
                     child_canvas_id,
-                    serde_json::to_string(&remapped_content)?,
+                    crate::portable::to_string(&remapped_content)?,
                     node.x - min_x + 80.0,
                     node.y - min_y + 80.0,
                     timestamp,
@@ -1057,7 +1061,7 @@ impl Database {
             update_prompt_scene_binding(&transaction, binding)?;
         }
         for edge in &grouping.edges {
-            let metadata_json = serde_json::to_string(&edge.metadata)?;
+            let metadata_json = crate::portable::to_string(&edge.metadata)?;
             transaction.execute(
                 "INSERT INTO edges (
                     id, canvas_id, source_node_id, target_node_id, kind,
@@ -1278,7 +1282,7 @@ impl Database {
                 merged_folder_node_id,
                 canvas_id,
                 folder_title,
-                serde_json::to_string(&folder_content)?,
+                crate::portable::to_string(&folder_content)?,
                 folder_x,
                 folder_y,
                 FOLDER_NODE_WIDTH,
@@ -1327,7 +1331,7 @@ impl Database {
                     params![
                         node.id,
                         merged_child_canvas_id,
-                        serde_json::to_string(&remapped_content)?,
+                        crate::portable::to_string(&remapped_content)?,
                         node.x - min_x + next_group_x,
                         node.y - min_y + 80.0,
                         timestamp,
@@ -1358,7 +1362,7 @@ impl Database {
                         source_node_id,
                         target_node_id,
                         edge.kind,
-                        serde_json::to_string(&edge.metadata)?,
+                        crate::portable::to_string(&edge.metadata)?,
                         edge.created_at,
                     ],
                 )?;
@@ -1528,7 +1532,7 @@ impl Database {
                 }
             }
             for edge in &source.edges {
-                let metadata_json = serde_json::to_string(&edge.metadata)?;
+                let metadata_json = crate::portable::to_string(&edge.metadata)?;
                 transaction.execute(
                     "INSERT INTO edges (
                         id, canvas_id, source_node_id, target_node_id, kind,
@@ -1568,7 +1572,7 @@ impl Database {
             )?;
         }
         for edge in &merge.parent_edges {
-            let metadata_json = serde_json::to_string(&edge.metadata)?;
+            let metadata_json = crate::portable::to_string(&edge.metadata)?;
             transaction.execute(
                 "INSERT INTO edges (
                     id, canvas_id, source_node_id, target_node_id, kind,
@@ -2763,7 +2767,7 @@ impl Database {
         let kind = input.kind.unwrap_or_else(|| "text".to_owned());
         let source = input.source.unwrap_or_else(|| "app".to_owned());
         let request_id = input.request_id.filter(|value| !value.trim().is_empty());
-        let content_json = serde_json::to_string(&input.content)?;
+        let content_json = crate::portable::to_string(&input.content)?;
         let default_width = if kind == "text" && is_content_iteration_node(&input.content) {
             CONTENT_ITERATION_NODE_WIDTH
         } else {
@@ -2972,7 +2976,7 @@ impl Database {
 
         write_node_update(&transaction, &input.previous_node)?;
         for node in &input.deleted.nodes {
-            let content_json = serde_json::to_string(&node.content)?;
+            let content_json = crate::portable::to_string(&node.content)?;
             transaction.execute(
                 "INSERT INTO nodes (
                     id, canvas_id, kind, title, content_json, source, request_id,
@@ -3001,7 +3005,7 @@ impl Database {
             insert_prompt_scene_binding(&transaction, binding)?;
         }
         for edge in &input.deleted.edges {
-            let metadata_json = serde_json::to_string(&edge.metadata)?;
+            let metadata_json = crate::portable::to_string(&edge.metadata)?;
             transaction.execute(
                 "INSERT INTO edges (
                     id, canvas_id, source_node_id, target_node_id, kind,
@@ -3121,7 +3125,7 @@ impl Database {
         let mut canvas_ids = BTreeSet::new();
 
         for node in &batch.nodes {
-            let content_json = serde_json::to_string(&node.content)?;
+            let content_json = crate::portable::to_string(&node.content)?;
             transaction.execute(
                 "INSERT INTO nodes (
                     id, canvas_id, kind, title, content_json, source, request_id,
@@ -3153,7 +3157,7 @@ impl Database {
         }
 
         for edge in &batch.edges {
-            let metadata_json = serde_json::to_string(&edge.metadata)?;
+            let metadata_json = crate::portable::to_string(&edge.metadata)?;
             transaction.execute(
                 "INSERT INTO edges (
                     id, canvas_id, source_node_id, target_node_id, kind,
@@ -3200,7 +3204,7 @@ impl Database {
             kind = "content-derivation".to_owned();
         }
         validate_kind(&kind)?;
-        let metadata_json = serde_json::to_string(&input.metadata)?;
+        let metadata_json = crate::portable::to_string(&input.metadata)?;
         let connection = self.lock()?;
         let source = get_node_by_id(&connection, &input.source_node_id)?
             .ok_or_else(|| CanvasError::Validation("source node not found".to_owned()))?;
@@ -3456,7 +3460,7 @@ fn rewrite_asset_paths_in_value(
 }
 
 fn insert_node(connection: &Connection, node: &NodeRecord) -> CanvasResult<()> {
-    let content_json = serde_json::to_string(&node.content)?;
+    let content_json = crate::portable::to_string(&node.content)?;
     connection.execute(
         "INSERT INTO nodes (
             id, canvas_id, kind, title, content_json, source, request_id,
@@ -4034,7 +4038,7 @@ fn migrate_content_iteration_nodes(connection: &Connection) -> CanvasResult<()> 
     };
 
     for (id, title, content_json, created_at) in rows {
-        let mut content: Value = serde_json::from_str(&content_json)?;
+        let mut content: Value = crate::portable::from_str(&content_json)?;
         let Some(object) = content.as_object_mut() else {
             continue;
         };
@@ -4095,7 +4099,7 @@ fn migrate_content_iteration_nodes(connection: &Connection) -> CanvasResult<()> 
             "UPDATE nodes SET content_json = ?2,
                title = CASE WHEN title IN ('提示词版本', '提示词迭代') THEN '内容迭代' ELSE title END
              WHERE id = ?1",
-            params![id, serde_json::to_string(&content)?],
+            params![id, crate::portable::to_string(&content)?],
         )?;
     }
 
@@ -4192,7 +4196,7 @@ fn migrate_legacy_content_version_provenance(connection: &Connection) -> CanvasR
         if changed {
             connection.execute(
                 "UPDATE nodes SET content_json = ?2 WHERE id = ?1",
-                params![target.id, serde_json::to_string(&target.content)?],
+                params![target.id, crate::portable::to_string(&target.content)?],
             )?;
         }
     }
@@ -4208,7 +4212,7 @@ fn legacy_storyboard_reference_selection(information: &str) -> Option<(String, V
         return None;
     }
     let mut selection: Value =
-        serde_json::from_str(information[start + START.len()..end].trim()).ok()?;
+        crate::portable::from_str(information[start + START.len()..end].trim()).ok()?;
     let object = selection.as_object_mut()?;
     object.remove("schema");
     validate_reference_selection(Some(&selection)).ok()?;
@@ -4239,7 +4243,7 @@ fn migrate_legacy_storyboard_reference_data(connection: &Connection) -> CanvasRe
     };
 
     for (id, content_json) in rows {
-        let mut content: Value = serde_json::from_str(&content_json)?;
+        let mut content: Value = crate::portable::from_str(&content_json)?;
         let Some(content_object) = content.as_object_mut() else {
             continue;
         };
@@ -4316,7 +4320,7 @@ fn migrate_legacy_storyboard_reference_data(connection: &Connection) -> CanvasRe
         if changed {
             connection.execute(
                 "UPDATE nodes SET content_json = ?2 WHERE id = ?1",
-                params![id, serde_json::to_string(&content)?],
+                params![id, crate::portable::to_string(&content)?],
             )?;
         }
     }
@@ -4459,7 +4463,7 @@ fn collect_canvas_tree_snapshot(
 }
 
 fn insert_edge(connection: &Connection, edge: &EdgeRecord) -> CanvasResult<()> {
-    let metadata_json = serde_json::to_string(&edge.metadata)?;
+    let metadata_json = crate::portable::to_string(&edge.metadata)?;
     connection.execute(
         "INSERT INTO edges (
             id, canvas_id, source_node_id, target_node_id, kind,
@@ -4716,7 +4720,7 @@ fn load_workspace_from_connection(
                 id: row.get(0)?,
                 name: row.get(1)?,
                 is_private: row.get::<_, i64>(2)? != 0,
-                preview_image_path: row.get(3)?,
+                preview_image_path: row.get::<_, Option<String>>(3)?.map(|path| crate::portable::load_path(&path)),
                 created_at: row.get(4)?,
                 updated_at: row.get(5)?,
             })
@@ -4801,7 +4805,7 @@ fn apply_node_update(node: &mut NodeRecord, input: UpdateNodeInput) {
 }
 
 fn write_node_update(connection: &Connection, node: &NodeRecord) -> CanvasResult<()> {
-    let content_json = serde_json::to_string(&node.content)?;
+    let content_json = crate::portable::to_string(&node.content)?;
     let changed = connection.execute(
         "UPDATE nodes SET title = ?2, content_json = ?3, x = ?4, y = ?5,
                           width = ?6, height = ?7, status = ?8, updated_at = ?9
@@ -5210,7 +5214,7 @@ fn get_node_by_request_id(
 
 fn node_from_row(row: &Row<'_>) -> rusqlite::Result<NodeRecord> {
     let content_json: String = row.get(4)?;
-    let content = serde_json::from_str(&content_json).map_err(|error| {
+    let content = crate::portable::from_str(&content_json).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             content_json.len(),
             rusqlite::types::Type::Text,
@@ -5237,7 +5241,7 @@ fn node_from_row(row: &Row<'_>) -> rusqlite::Result<NodeRecord> {
 
 fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<EdgeRecord> {
     let metadata_json: String = row.get(5)?;
-    let metadata = serde_json::from_str(&metadata_json).map_err(|error| {
+    let metadata = crate::portable::from_str(&metadata_json).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             metadata_json.len(),
             rusqlite::types::Type::Text,
@@ -5340,7 +5344,7 @@ mod tests {
                 input.source_node_id,
                 input.target_node_id,
                 input.kind.unwrap_or_else(|| "flow".to_owned()),
-                serde_json::to_string(&input.metadata).unwrap(),
+                crate::portable::to_string(&input.metadata).unwrap(),
                 now(),
             ],
         ).unwrap();

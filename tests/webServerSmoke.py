@@ -1,0 +1,199 @@
+"""HTTP and relocation checks in disposable directories. No browser automation."""
+from pathlib import Path
+import base64
+import contextlib
+import http.cookiejar
+import http.server
+import json
+import os
+import secrets
+import shutil
+import socket
+import sqlite3
+import subprocess
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ROOT = Path(__file__).resolve().parents[1]
+PACKAGE = ROOT / 'release-web/SuCanvas-Web'
+PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM6sAAAAASUVORK5CYII=')
+CLIENT_ID = 'smoke-client'
+
+class ComfyStub(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *_): pass
+    def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path == '/view': payload = PNG
+        elif path == '/queue': payload = json.dumps({'queue_running': [], 'queue_pending': []}).encode()
+        elif path == '/history': payload = json.dumps({'smoke-prompt': {
+            'prompt': [1, 'smoke-prompt', {'sampler': {'inputs': {'seed': 42}}}, {'client_id': CLIENT_ID}],
+            'status': {'status_str': 'success'},
+            'outputs': {'42': {'images': [{'filename': 'generated.png', 'subfolder': '', 'type': 'output'}]}}
+        }}).encode()
+        else: self.send_error(404); return
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png' if path == '/view' else 'application/json')
+        self.send_header('Content-Length', str(len(payload)))
+        self.end_headers(); self.wfile.write(payload)
+
+def port():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0)); return sock.getsockname()[1]
+
+def start(directory):
+    process = subprocess.Popen([str(directory / 'SuCanvasServer.exe'), '--config', str(directory / 'config.json')],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    for _ in range(100):
+        if process.poll() is not None:
+            raise AssertionError(process.stderr.read().decode('utf-8', 'replace'))
+        try:
+            urllib.request.urlopen(json.loads((directory / 'config.json').read_text())['publicUrl'], timeout=.2).close()
+            return process
+        except (OSError, urllib.error.URLError): time.sleep(.05)
+    process.terminate(); process.wait(); raise AssertionError('Server startup timed out')
+
+def stop(process):
+    if process and process.poll() is None: process.terminate(); process.wait(timeout=10)
+
+def main():
+    assert (PACKAGE / 'SuCanvasServer.exe').is_file(), 'Build the portable package first'
+    test_area = ROOT / '.web-dev'
+    test_area.mkdir(exist_ok=True)
+    comfy = http.server.ThreadingHTTPServer(('127.0.0.1', 0), ComfyStub)
+    threading.Thread(target=comfy.serve_forever, daemon=True).start()
+    source_process = moved_process = None
+    with tempfile.TemporaryDirectory(prefix='http-relocation-', dir=test_area) as temporary:
+        area = Path(temporary).resolve()
+        assert area.is_relative_to(test_area.resolve())
+        source, moved = area / 'source deployment', area / 'moved deployment'
+        # Every copied/moved/deleted test directory stays in the verified test area.
+        for path in [source, moved, area / 'backup']:
+            assert path.resolve().is_relative_to(area)
+        source.mkdir()
+        shutil.copy2(PACKAGE / 'SuCanvasServer.exe', source)
+        shutil.copytree(PACKAGE / 'web', source / 'web')
+        shutil.copytree(PACKAGE / 'scripts', source / 'scripts')
+        shutil.copytree(PACKAGE / 'workflows', source / 'workflows')
+        config = json.loads((PACKAGE / 'config.json').read_text(encoding='utf-8-sig'))
+        config['listen'] = f'127.0.0.1:{port()}'
+        config['publicUrl'] = f'http://{config["listen"]}'
+        config['comfyUrl'] = f'http://127.0.0.1:{comfy.server_port}'
+        (source / 'config.json').write_text(json.dumps(config), encoding='utf-8')
+        password = secrets.token_urlsafe(24)
+        init = subprocess.run([str(source / 'SuCanvasServer.exe'), '--config', str(source / 'config.json'), '--set-password'], input=password+'\n', text=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        assert init.returncode == 0, init.stderr
+        base = config['publicUrl']
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        def request(path, data=None, *, method=None, origin=None, anonymous=False, headers=None):
+            body = json.dumps(data).encode() if data is not None else None
+            values = {'Origin': origin or base}
+            if body is not None: values['Content-Type'] = 'application/json'
+            values.update(headers or {})
+            req = urllib.request.Request(base+path, data=body, method=method, headers=values)
+            client = urllib.request.build_opener() if anonymous else opener
+            try:
+                response = client.open(req, timeout=15)
+                with response: return response.status, response.read(), response.headers
+            except urllib.error.HTTPError as error: return error.code, error.read(), error.headers
+        def invoke(command, args=None):
+            status, body, _ = request('/api/invoke/'+command, {'args': args or {}})
+            assert status == 200, (command, status, body)
+            return json.loads(body)['result']
+        try:
+            source_process = start(source)
+            assert request('/api/settings', anonymous=True)[0] == 401
+            assert request('/api/invoke/load_workspace', {'args': {}}, anonymous=True)[0] == 401
+            assert request('/api/auth/login', {'password': password}, origin='https://untrusted.invalid')[0] == 403
+            assert request('/api/auth/login', {'password': password})[0] == 200
+            assert all(cookie.has_nonstandard_attr('HttpOnly') for cookie in jar)
+            project = invoke('create_project', {'input': {'name': 'Web migration smoke'}})['canvas']['id']
+            invoke('load_workspace', {'canvasId': project})
+            workflows = invoke('list_workflow_modules', {'includeDeleted': False})
+            assert workflows
+            text = invoke('create_node', {'input': {'canvasId': project, 'kind': 'text', 'title': 'Test', 'content': {'text': 'portable'}, 'source': 'user'}})['node']
+            assert text['content']['text'] == 'portable'
+            boundary = secrets.token_hex(12)
+            upload = (f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="test.png"\r\nContent-Type: image/png\r\n\r\n'.encode()+PNG+f'\r\n--{boundary}--\r\n'.encode())
+            req = urllib.request.Request(base+'/api/upload', data=upload, headers={'Origin': base, 'Content-Type': f'multipart/form-data; boundary={boundary}'})
+            with opener.open(req, timeout=10) as result: resource = json.load(result)['paths'][0]
+            image = invoke('import_media', {'path': resource, 'canvasId': project, 'x': 20, 'y': 30})['node']
+            asset = image['content']['assetPath']
+            assert asset.startswith('sucanvas://assets/')
+            assert image['content']['originalName'] == 'test.png'
+            invoke('set_project_preview_image', {'input': {'projectId': project, 'imageNodeId': image['id']}})
+            url = '/api/resource?resource='+urllib.parse.quote(asset, safe='')
+            assert request(url)[1] == PNG
+            assert request(url, anonymous=True)[0] == 401
+            status, data, _ = request(url, headers={'Range': 'bytes=0-7'})
+            assert status == 206 and data == PNG[:8]
+            assert request('/api/resource?resource=sucanvas%3A%2F%2Fweb-auth.json')[0] == 404
+            assert request('/api/resource?resource=sucanvas%3A%2F%2Fassets%2F..%2Fweb-auth.json')[0] == 400
+            assert request('/api/invoke/import_media', {'args': {'path': r'C:\Windows\win.ini', 'canvasId': project, 'x': 0, 'y': 0}})[0] == 400
+            assert request('/api/settings', {'infinite-canvas:smoke': 'retained', 'unrelated': 'ignored'}, method='PUT')[0] == 200
+            assert 'unrelated' not in json.loads(request('/api/settings')[1])
+            token = (source / 'data/web-integration-token').read_text()
+            assert request('/v1/health', anonymous=True, headers={'Authorization': 'Bearer '+token})[0] == 200
+            event = opener.open(urllib.request.Request(base+'/api/events'), timeout=5)
+            assert json.loads(event.readline().decode().removeprefix('data:').strip())['event'] == 'web://ready'
+            assert request('/v1/nodes', {'kind': 'text', 'title': 'External API', 'content': {'text': 'event'}, 'source': 'codex'})[0] == 201
+            while True:
+                line = event.readline().decode()
+                if line.startswith('data:'):
+                    assert json.loads(line[5:])['event'] == 'canvas://node-created'; break
+            event.close()
+            recovered = invoke('get_comfyui_client_task_statuses', {'serverUrl': 'http://ignored.invalid', 'clientIds': [CLIENT_ID], 'imageClientIds': [CLIENT_ID]})
+            output = recovered[0]['outputs'][0]
+            assert output['url'].startswith('/api/resource?') and output['assetPath'].startswith('sucanvas://assets/generated-')
+            assert request(output['url'])[1] == PNG
+            with contextlib.closing(sqlite3.connect(source / 'data/infinite-canvas.sqlite3')) as database:
+                content = database.execute('SELECT content_json FROM nodes WHERE id=?', [image['id']]).fetchone()[0]
+                assert json.loads(content)['assetPath'] == asset
+                assert str(source) not in content
+                assert database.execute('SELECT preview_image_path FROM canvases WHERE id=?', [project]).fetchone()[0] == asset
+            stop(source_process)
+            backup = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(source/'scripts/Backup-Web.ps1'), '-Destination', str(area/'backup')], capture_output=True, text=True)
+            assert backup.returncode == 0, backup.stderr
+            shutil.copytree(source, moved)
+            config['listen'] = f'127.0.0.1:{port()}'
+            config['publicUrl'] = f'http://{config["listen"]}'
+            (moved / 'config.json').write_text(json.dumps(config), encoding='utf-8')
+            restore = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(moved/'scripts/Restore-Web.ps1'), '-BackupDirectory', str(area/'backup')], capture_output=True, text=True)
+            assert restore.returncode == 0, restore.stderr
+            base = config['publicUrl']
+            moved_process = start(moved)
+            assert request('/api/auth/session')[0] == 401
+            assert request('/api/auth/login', {'password': password})[0] == 200
+            restored = invoke('load_workspace', {'canvasId': project})
+            assert any(node['id'] == image['id'] and node['content']['assetPath'] == asset for node in restored['nodes'])
+            assert restored['canvas']['previewImagePath'] == asset
+            assert request(url)[1] == PNG
+            assert request(output['url'])[1] == PNG
+            assert json.loads(request('/api/settings')[1])['infinite-canvas:smoke'] == 'retained'
+            moved_workflows = invoke('list_workflow_modules', {'includeDeleted': False})
+            assert {module['id'] for module in workflows} == {module['id'] for module in moved_workflows}
+            assert all(module['workflowPath'].startswith('sucanvas://workflow-modules/') for module in moved_workflows)
+            archive = invoke('export_app_backup', {'destinationPath': 'sucanvas-export://smoke/full.sucanvas-backup', 'frontendSettings': {'infinite-canvas:comfy-server-url': 'http://old-server.invalid', 'infinite-canvas:comfy-input-root': 'Z:/old/input'}})
+            assert archive['path'].startswith('sucanvas-export://')
+            assert request('/api/resource?resource='+urllib.parse.quote(archive['path'], safe=''))[0] == 200
+            invoke('stage_app_backup_restore', {'bundlePath': archive['path']})
+            stop(moved_process)
+            moved_process = start(moved)
+            assert request('/api/auth/login', {'password': password})[0] == 200
+            imported_settings = invoke('take_restored_frontend_settings')
+            assert imported_settings['infinite-canvas:comfy-server-url'] == base+'/api/comfy'
+            assert imported_settings['infinite-canvas:comfy-input-root'] == ''
+            assert request(url)[1] == PNG
+            assert request('/api/auth/logout', {}, method='POST')[0] == 200
+            assert request(url)[0] == 401
+            print('PASS: authentication, CSRF, CRUD, upload, media ranges, file boundaries, SSE, external API, ComfyUI output retention, workflows, full backup restore and relocation')
+        finally:
+            stop(source_process); stop(moved_process)
+            comfy.shutdown(); comfy.server_close()
+
+if __name__ == '__main__': main()

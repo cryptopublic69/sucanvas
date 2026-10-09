@@ -626,6 +626,7 @@ interface ComfyOutputFile {
   subfolder: string;
   fileType: string;
   url: string;
+  assetPath?: string;
 }
 
 interface ComfySubmitResult {
@@ -3045,6 +3046,7 @@ function LiveComfyVideoPreview({ src, paused }: { src: string; paused: boolean }
 }
 
 function mappedComfyOutputPath(root: string, content: JsonObject): string | null {
+  if (import.meta.env.MODE === "web" && typeof content.assetPath === "string" && content.assetPath) return content.assetPath;
   const filenameValue = typeof content.filename === "string" ? content.filename : "";
   const filenameParts = filenameValue.split(/[\\/]/).filter(Boolean);
   const filename = filenameParts[filenameParts.length - 1] ?? "";

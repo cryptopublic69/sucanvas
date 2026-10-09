@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use crate::platform::State;
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -17,7 +18,8 @@ use image::{imageops::FilterType, ImageFormat};
 use reqwest::{multipart, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{Manager, State};
+#[cfg(feature = "desktop")]
+use tauri::Manager;
 use uuid::Uuid;
 
 use crate::{
@@ -50,7 +52,7 @@ fn portable_frontend_settings(settings: BTreeMap<String, String>) -> BTreeMap<St
         .collect()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn export_app_backup(
     destination_path: String,
     frontend_settings: BTreeMap<String, String>,
@@ -60,26 +62,28 @@ pub async fn export_app_backup(
     let database = state.database.clone();
     let destination = PathBuf::from(destination_path.trim().trim_matches('"'));
     let frontend_settings = portable_frontend_settings(frontend_settings);
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::platform::runtime::spawn_blocking(move || {
         app_backup::export(&data_dir, &database, &destination, &frontend_settings)
     })
     .await
     .map_err(|error| format!("软件备份任务失败：{error}"))?
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn stage_app_backup_restore(
     bundle_path: String,
     state: State<'_, ApplicationState>,
 ) -> Result<RestoreSummary, String> {
     let data_dir = state.data_dir.clone();
     let bundle_path = PathBuf::from(bundle_path.trim().trim_matches('"'));
-    tauri::async_runtime::spawn_blocking(move || app_backup::stage_restore(&data_dir, &bundle_path))
-        .await
-        .map_err(|error| format!("软件恢复任务失败：{error}"))?
+    crate::platform::runtime::spawn_blocking(move || {
+        app_backup::stage_restore(&data_dir, &bundle_path)
+    })
+    .await
+    .map_err(|error| format!("软件恢复任务失败：{error}"))?
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn take_restored_frontend_settings(
     state: State<'_, ApplicationState>,
 ) -> Result<Option<BTreeMap<String, String>>, String> {
@@ -152,7 +156,7 @@ fn write_app_lock_config(path: &Path, config: &AppLockConfig) -> Result<(), Stri
     std::fs::write(path, bytes).map_err(|error| format!("无法保存应用锁配置：{error}"))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn get_app_lock_status(state: State<'_, ApplicationState>) -> Result<AppLockStatus, String> {
     let _guard = state
         .app_lock_guard
@@ -163,14 +167,14 @@ pub fn get_app_lock_status(state: State<'_, ApplicationState>) -> Result<AppLock
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn verify_app_lock_password(
     password: String,
     state: State<'_, ApplicationState>,
 ) -> Result<bool, String> {
     let path = state.app_lock_path.clone();
     let guard = state.app_lock_guard.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::platform::runtime::spawn_blocking(move || {
         let _guard = guard.lock().map_err(|_| "应用锁状态不可用".to_owned())?;
         let config = read_app_lock_config(&path)?.ok_or_else(|| "应用锁尚未启用".to_owned())?;
         verify_app_lock_hash(&password, &config.password_hash)
@@ -179,7 +183,7 @@ pub async fn verify_app_lock_password(
     .map_err(|error| format!("应用锁验证任务失败：{error}"))?
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn set_app_lock_password(
     input: SetAppLockInput,
     state: State<'_, ApplicationState>,
@@ -187,7 +191,7 @@ pub async fn set_app_lock_password(
     validate_new_app_lock_password(&input.new_password)?;
     let path = state.app_lock_path.clone();
     let guard = state.app_lock_guard.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::platform::runtime::spawn_blocking(move || {
         let _guard = guard.lock().map_err(|_| "应用锁状态不可用".to_owned())?;
         if let Some(config) = read_app_lock_config(&path)? {
             let current_password = input.current_password.as_deref().unwrap_or_default();
@@ -202,14 +206,14 @@ pub async fn set_app_lock_password(
     .map_err(|error| format!("应用锁设置任务失败：{error}"))?
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn disable_app_lock(
     password: String,
     state: State<'_, ApplicationState>,
 ) -> Result<(), String> {
     let path = state.app_lock_path.clone();
     let guard = state.app_lock_guard.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::platform::runtime::spawn_blocking(move || {
         let _guard = guard.lock().map_err(|_| "应用锁状态不可用".to_owned())?;
         let config = read_app_lock_config(&path)?.ok_or_else(|| "应用锁尚未启用".to_owned())?;
         if !verify_app_lock_hash(&password, &config.password_hash)? {
@@ -221,7 +225,7 @@ pub async fn disable_app_lock(
     .map_err(|error| format!("关闭应用锁任务失败：{error}"))?
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn load_workspace(
     canvas_id: Option<String>,
     state: State<'_, ApplicationState>,
@@ -253,7 +257,7 @@ pub fn load_workspace(
     Ok(snapshot)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn update_canvas_selection(
     canvas_id: Option<String>,
     node_ids: Vec<String>,
@@ -297,7 +301,7 @@ pub fn update_canvas_selection(
     Ok(())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn inspect_workspace(
     canvas_id: String,
     state: State<'_, ApplicationState>,
@@ -308,7 +312,7 @@ pub fn inspect_workspace(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn list_projects(state: State<'_, ApplicationState>) -> Result<Vec<WorkspaceSnapshot>, String> {
     state
         .database
@@ -316,7 +320,7 @@ pub fn list_projects(state: State<'_, ApplicationState>) -> Result<Vec<Workspace
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn list_project_summaries(
     state: State<'_, ApplicationState>,
 ) -> Result<Vec<WorkspaceSnapshot>, String> {
@@ -326,7 +330,7 @@ pub fn list_project_summaries(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn create_project(
     input: CreateProjectInput,
     state: State<'_, ApplicationState>,
@@ -337,7 +341,7 @@ pub fn create_project(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn group_nodes_into_folder(
     input: GroupNodesIntoFolderInput,
     state: State<'_, ApplicationState>,
@@ -348,7 +352,7 @@ pub fn group_nodes_into_folder(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn create_empty_folder(
     input: CreateEmptyFolderInput,
     state: State<'_, ApplicationState>,
@@ -359,7 +363,7 @@ pub fn create_empty_folder(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn group_related_nodes_into_folder(
     input: GroupRelatedNodesIntoFolderInput,
     state: State<'_, ApplicationState>,
@@ -370,7 +374,7 @@ pub fn group_related_nodes_into_folder(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn undo_folder_grouping(
     input: UndoFolderGroupingInput,
     state: State<'_, ApplicationState>,
@@ -381,7 +385,7 @@ pub fn undo_folder_grouping(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn merge_folders(
     input: MergeFoldersInput,
     state: State<'_, ApplicationState>,
@@ -392,7 +396,7 @@ pub fn merge_folders(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn undo_folder_merge(
     input: UndoFolderMergeInput,
     state: State<'_, ApplicationState>,
@@ -403,7 +407,7 @@ pub fn undo_folder_merge(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn cancel_folder(
     input: FolderActionInput,
     state: State<'_, ApplicationState>,
@@ -414,7 +418,7 @@ pub fn cancel_folder(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn undo_cancel_folder(
     input: UndoCancelFolderInput,
     state: State<'_, ApplicationState>,
@@ -425,7 +429,7 @@ pub fn undo_cancel_folder(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn delete_folder_tree(
     input: FolderActionInput,
     state: State<'_, ApplicationState>,
@@ -436,7 +440,7 @@ pub fn delete_folder_tree(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn undo_delete_folder_tree(
     input: UndoDeleteFolderInput,
     state: State<'_, ApplicationState>,
@@ -447,7 +451,7 @@ pub fn undo_delete_folder_tree(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn update_project(
     input: UpdateProjectInput,
     state: State<'_, ApplicationState>,
@@ -458,7 +462,7 @@ pub fn update_project(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn set_project_private(
     input: SetProjectPrivacyInput,
     state: State<'_, ApplicationState>,
@@ -469,7 +473,7 @@ pub fn set_project_private(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn set_project_preview_image(
     input: SetProjectPreviewImageInput,
     state: State<'_, ApplicationState>,
@@ -480,7 +484,7 @@ pub fn set_project_preview_image(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn delete_project(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
     state
         .database
@@ -512,7 +516,7 @@ pub fn delete_project(id: String, state: State<'_, ApplicationState>) -> Result<
     Ok(())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn create_node(
     input: CreateNodeInput,
     state: State<'_, ApplicationState>,
@@ -661,7 +665,7 @@ fn media_format(path: &Path) -> Option<MediaFormat> {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn import_media(
     path: String,
     canvas_id: String,
@@ -671,45 +675,45 @@ pub async fn import_media(
 ) -> Result<CreateNodeResult, String> {
     let database = state.database.clone();
     let assets_dir = state.assets_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::platform::runtime::spawn_blocking(move || {
         import_media_blocking(path, canvas_id, x, y, database, assets_dir)
     })
     .await
     .map_err(|error| format!("媒体导入任务失败: {error}"))?
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn export_media_asset(
     source_path: String,
     destination_path: String,
     state: State<'_, ApplicationState>,
 ) -> Result<String, String> {
     let assets_dir = state.assets_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::platform::runtime::spawn_blocking(move || {
         export_media_asset_blocking(source_path, destination_path, assets_dir)
     })
     .await
     .map_err(|error| format!("媒体下载任务失败: {error}"))?
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn export_generated_video(
     source_path: String,
     destination_path: String,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::platform::runtime::spawn_blocking(move || {
         export_generated_video_blocking(source_path, destination_path)
     })
     .await
     .map_err(|error| format!("生成视频下载任务失败: {error}"))?
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn export_generated_image(
     source_path: String,
     destination_path: String,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::platform::runtime::spawn_blocking(move || {
         export_generated_image_blocking(source_path, destination_path)
     })
     .await
@@ -965,18 +969,18 @@ pub(crate) fn cleanup_unreferenced_resize_images(
     Ok(removed)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn cleanup_resize_images(state: State<'_, ApplicationState>) -> Result<usize, String> {
     let data_dir = state.data_dir.clone();
     let database = state.database.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::platform::runtime::spawn_blocking(move || {
         cleanup_unreferenced_resize_images(&data_dir, &database)
     })
     .await
     .map_err(|error| format!("Resize 临时文件清理任务失败: {error}"))?
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 #[allow(clippy::too_many_arguments)]
 pub async fn resize_image(
     source_node_id: String,
@@ -999,7 +1003,7 @@ pub async fn resize_image(
 
     let database = state.database.clone();
     let resize_temp_dir = state.data_dir.join("temp").join("image-resize");
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::platform::runtime::spawn_blocking(move || {
         let source = PathBuf::from(source_path.trim());
         let source = source
             .canonicalize()
@@ -1088,7 +1092,7 @@ pub async fn resize_image(
     .map_err(|error| format!("图片 Resize 任务失败: {error}"))?
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn update_node(
     input: UpdateNodeInput,
     state: State<'_, ApplicationState>,
@@ -1099,7 +1103,7 @@ pub fn update_node(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn delete_node(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
     state
         .database
@@ -1171,21 +1175,21 @@ fn delete_image_files_blocking(paths: Vec<String>) -> Result<usize, String> {
     delete_media_files_blocking(paths, "image", "图片")
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn delete_video_files(paths: Vec<String>) -> Result<usize, String> {
-    tauri::async_runtime::spawn_blocking(move || delete_video_files_blocking(paths))
+    crate::platform::runtime::spawn_blocking(move || delete_video_files_blocking(paths))
         .await
         .map_err(|error| format!("视频文件删除任务失败: {error}"))?
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn delete_image_files(paths: Vec<String>) -> Result<usize, String> {
-    tauri::async_runtime::spawn_blocking(move || delete_image_files_blocking(paths))
+    crate::platform::runtime::spawn_blocking(move || delete_image_files_blocking(paths))
         .await
         .map_err(|error| format!("图片文件删除任务失败: {error}"))?
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn delete_nodes_undoable(
     input: DeleteNodesInput,
     state: State<'_, ApplicationState>,
@@ -1196,7 +1200,7 @@ pub fn delete_nodes_undoable(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn restore_deleted_nodes(
     batch: DeletedBatch,
     state: State<'_, ApplicationState>,
@@ -1207,7 +1211,7 @@ pub fn restore_deleted_nodes(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn replace_node_and_delete_undoable(
     input: ReplaceNodeAndDeleteInput,
     state: State<'_, ApplicationState>,
@@ -1218,7 +1222,7 @@ pub fn replace_node_and_delete_undoable(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn restore_node_replacement(
     input: RestoreNodeReplacementInput,
     state: State<'_, ApplicationState>,
@@ -1229,7 +1233,7 @@ pub fn restore_node_replacement(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn create_edge(
     input: CreateEdgeInput,
     state: State<'_, ApplicationState>,
@@ -1240,7 +1244,7 @@ pub fn create_edge(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn delete_edge(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
     state
         .database
@@ -1248,9 +1252,9 @@ pub fn delete_edge(id: String, state: State<'_, ApplicationState>) -> Result<(),
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn list_workflow_modules(
-    app: tauri::AppHandle,
+    app: crate::platform::AppHandle,
     include_deleted: Option<bool>,
     state: State<'_, ApplicationState>,
 ) -> Result<Vec<WorkflowModuleRecord>, String> {
@@ -1271,7 +1275,7 @@ pub fn list_workflow_modules(
     )
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn save_workflow_module(
     input: SaveWorkflowModuleInput,
     state: State<'_, ApplicationState>,
@@ -1279,7 +1283,7 @@ pub fn save_workflow_module(
     workflow_modules::save(&state.workflow_modules_dir, input)
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn validate_workflow_module_source(
     source_workflow_path: String,
     _adapter_kind: Option<String>,
@@ -1303,7 +1307,7 @@ pub fn validate_workflow_module_source(
     )
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn trash_workflow_module(
     id: String,
     state: State<'_, ApplicationState>,
@@ -1311,7 +1315,7 @@ pub fn trash_workflow_module(
     workflow_modules::trash(&state.workflow_modules_dir, &id)
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn restore_workflow_module(
     id: String,
     state: State<'_, ApplicationState>,
@@ -1319,12 +1323,12 @@ pub fn restore_workflow_module(
     workflow_modules::restore_from_trash(&state.workflow_modules_dir, &id)
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn purge_workflow_module(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
     workflow_modules::purge(&state.workflow_modules_dir, &id)
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn restore_workflow_module_backup(
     id: String,
     state: State<'_, ApplicationState>,
@@ -1332,7 +1336,7 @@ pub fn restore_workflow_module_backup(
     workflow_modules::restore_latest_backup(&state.workflow_modules_dir, &id)
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn export_workflow_module(
     id: String,
     state: State<'_, ApplicationState>,
@@ -1344,7 +1348,7 @@ pub fn export_workflow_module(
     )
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn import_workflow_module_bundle(
     bundle_path: String,
     state: State<'_, ApplicationState>,
@@ -1355,7 +1359,7 @@ pub fn import_workflow_module_bundle(
     )
 }
 
-#[tauri::command(async)]
+#[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn restore_workflow_module_bundle(
     id: String,
     bundle_path: String,
@@ -1407,7 +1411,7 @@ fn diffusion_models_from_object_info(
     models
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_comfyui_krea2_diffusion_models(
     server_url: String,
     workflow_module_id: String,
@@ -1498,7 +1502,7 @@ fn power_loras_from_object_info(value: &Value, directory: &str) -> Vec<String> {
     loras
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_comfyui_h3_loras(server_url: String) -> Result<Vec<String>, String> {
     const LORA_CLASS_TYPE: &str = "LoraLoaderModelOnly";
     const LORA_DIRECTORY: &str = "MinimaxH3";
@@ -1529,7 +1533,7 @@ pub async fn get_comfyui_h3_loras(server_url: String) -> Result<Vec<String>, Str
     ))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_comfyui_krea2_loras(server_url: String) -> Result<Vec<String>, String> {
     const LORA_DIRECTORY: &str = "Krea2";
     let parsed_server =
@@ -1567,7 +1571,7 @@ pub async fn get_comfyui_krea2_loras(server_url: String) -> Result<Vec<String>, 
     Ok(loras)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_comfyui_h3_diffusion_models(
     server_url: String,
     workflow_module_id: Option<String>,
@@ -2614,6 +2618,10 @@ pub(crate) async fn upload_comfy_output_from_server(
     subfolder: &str,
     source_label: &str,
 ) -> Result<String, String> {
+    #[cfg(feature = "server")]
+    if Path::new(&output.url).is_file() {
+        return upload_comfy_input(client, server_url, &output.url, subfolder).await;
+    }
     if output.filename.trim().is_empty() {
         return Err(format!("{source_label}缺少文件名"));
     }
@@ -3193,7 +3201,7 @@ async fn submit_krea2_image_edit_workflow(
     Err(format!("等待 ComfyUI 图像编辑任务超时：{prompt_id}"))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn submit_comfyui_image_workflow(
     input: ComfyImageSubmitInput,
     state: State<'_, ApplicationState>,
@@ -3464,7 +3472,7 @@ pub async fn submit_comfyui_image_workflow(
     Err(format!("等待 ComfyUI 图片任务超时：{prompt_id}"))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn submit_comfyui_image_upscale(
     input: ComfyImageUpscaleInput,
     state: State<'_, ApplicationState>,
@@ -3778,7 +3786,7 @@ async fn submit_comfyui_workflow_inner(
     input: ComfySubmitInput,
     task: Arc<RunningComfyTask>,
     workflow_modules_dir: &Path,
-    on_submitted: &tauri::ipc::Channel<()>,
+    on_submitted: &crate::platform::Channel<()>,
 ) -> Result<ComfySubmitResult, String> {
     ensure_comfy_task_active(&task.cancelled)?;
     let parsed_server = Url::parse(input.server_url.trim())
@@ -4189,11 +4197,11 @@ async fn submit_comfyui_workflow_inner(
     Err(format!("等待 ComfyUI 任务超时：{prompt_id}"))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn submit_comfyui_workflow(
     input: ComfySubmitInput,
     state: State<'_, ApplicationState>,
-    on_submitted: tauri::ipc::Channel<()>,
+    on_submitted: crate::platform::Channel<()>,
 ) -> Result<ComfySubmitResult, String> {
     let client_id = input.client_id.clone();
     let upload_subfolder = format!("infinite-canvas/{}", Uuid::new_v4().simple());
@@ -4402,7 +4410,7 @@ pub(crate) fn cancel_comfy_in_background(
     prompt_id: String,
     task: Option<Arc<RunningComfyTask>>,
 ) {
-    tauri::async_runtime::spawn(async move {
+    crate::platform::runtime::spawn(async move {
         if let Err(error) = cancel_known_comfy_prompt(&client, &server_url, &prompt_id).await {
             eprintln!("ComfyUI 取消请求失败：{error}");
             return;
@@ -4436,7 +4444,7 @@ fn comfy_queue_summary_from_value(queue: &Value) -> ComfyQueueSummary {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_comfyui_queue_summary(server_url: String) -> Result<ComfyQueueSummary, String> {
     let parsed_server =
         Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
@@ -4465,7 +4473,7 @@ pub async fn get_comfyui_queue_summary(server_url: String) -> Result<ComfyQueueS
     Ok(comfy_queue_summary_from_value(&queue))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_comfyui_client_task_statuses(
     server_url: String,
     client_ids: Vec<String>,
@@ -4608,7 +4616,7 @@ pub async fn get_comfyui_client_task_statuses(
     Ok(statuses)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn cancel_comfyui_workflow(
     server_url: String,
     client_id: String,
@@ -4632,7 +4640,7 @@ pub async fn cancel_comfyui_workflow(
         .get(&client_id)
         .cloned();
     let Some(task) = task else {
-        tauri::async_runtime::spawn(async move {
+        crate::platform::runtime::spawn(async move {
             let result = async {
                 let queue_response = client
                     .get(format!("{server_url}/queue"))
@@ -4682,7 +4690,7 @@ pub async fn cancel_comfyui_workflow(
     Ok(None)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn get_runtime_info(state: State<'_, ApplicationState>) -> RuntimeInfo {
     state.runtime.clone()
 }

@@ -110,7 +110,9 @@ export function useVideoUpscale(deps: Dependencies) {
       const output = result.outputs[0];
       if (!output) throw new Error("超分没有返回视频输出");
       await deps.completePlaceholder(placeholder.id, "超分预览", {
-        videoUrl: output.url, originalName: output.filename, filename: output.filename, subfolder: output.subfolder, fileType: output.fileType,
+        videoUrl: output.url,
+        ...(output.assetPath ? { assetPath: output.assetPath } : {}),
+        originalName: output.filename, filename: output.filename, subfolder: output.subfolder, fileType: output.fileType,
         comfyPromptId: result.promptId, comfyServerUrl: deps.serverUrl.current, sourceGeneratorId, sourcePreviewId: previewId,
         seed: typeof preview.content.seed === "string" ? preview.content.seed : "", aspectRatio: ratio,
         generationSnapshot: snapshot, videoUpscale: processing, hasBeenPlayed: false,

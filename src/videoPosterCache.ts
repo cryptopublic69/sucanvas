@@ -109,7 +109,7 @@ function capturePoster(src: string, signal: AbortSignal): Promise<VideoPoster | 
 async function extractPoster(src: string, signal: AbortSignal): Promise<VideoPoster | null> {
   // ComfyUI commonly has no CORS headers. Native extraction avoids downloading
   // entire remote videos into JS merely to capture one frame.
-  if (isTauri() && /^https?:\/\//.test(src) && new URL(src).hostname !== "asset.localhost") {
+  if (import.meta.env?.MODE === "web" || (isTauri() && /^https?:\/\//.test(src) && new URL(src).hostname !== "asset.localhost")) {
     try {
       const bytes = await invoke<number[]>("capture_video_poster", { source: src });
       if (signal.aborted || !bytes.length || bytes.length > MAX_POSTER_BYTES) return null;

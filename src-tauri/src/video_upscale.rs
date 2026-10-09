@@ -1,3 +1,4 @@
+use crate::platform::State;
 use crate::{
     commands::{
         cancel_comfy_in_background, cleanup_comfy_task_inputs, comfy_execution_elapsed_seconds,
@@ -19,7 +20,6 @@ use std::{
     },
     time::Duration,
 };
-use tauri::State;
 use uuid::Uuid;
 
 fn configure_video_processing(
@@ -65,7 +65,7 @@ async fn submit_inner(
     input: &ComfyVideoUpscaleInput,
     module: &WorkflowModuleRecord,
     task: Arc<RunningComfyTask>,
-    on_submitted: &tauri::ipc::Channel<()>,
+    on_submitted: &crate::platform::Channel<()>,
 ) -> Result<ComfySubmitResult, String> {
     if module.manifest.deleted_at.is_some() || module.adapter.capability != "video-upscale" {
         return Err("所选方案不是可用的视频超分模块".to_owned());
@@ -218,11 +218,11 @@ async fn submit_inner(
     ))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn submit_comfyui_video_upscale(
     input: ComfyVideoUpscaleInput,
     state: State<'_, ApplicationState>,
-    on_submitted: tauri::ipc::Channel<()>,
+    on_submitted: crate::platform::Channel<()>,
 ) -> Result<ComfySubmitResult, String> {
     let module = workflow_modules::get(&state.workflow_modules_dir, &input.workflow_module_id)?;
     let task = Arc::new(RunningComfyTask {

@@ -1,0 +1,11 @@
+{
+  "listen": "127.0.0.1:18740",
+  "publicUrl": "http://127.0.0.1:18740",
+  "dataDirectory": "data",
+  "webDirectory": "web",
+  "downloadsDirectory": "downloads",
+  "comfyUrl": "",
+  "comfyInputDirectory": "",
+  "comfyOutputDirectory": "",
+  "maxUploadBytes": 1073741824
+}

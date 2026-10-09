@@ -4,6 +4,7 @@ version = "1.0.0"
 description = "A local-first infinite canvas for AI workflows"
 authors = ["Raydio"]
 edition = "2021"
+default-run = "infinite-canvas"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -14,12 +15,27 @@ edition = "2021"
 name = "infinite_canvas_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog"]
+server = ["axum/ws", "axum/multipart", "tower-http/fs", "dep:tokio-tungstenite", "dep:futures-util", "dep:fs2", "dep:tower"]
+
+[[bin]]
+name = "SuCanvasServer"
+path = "src/bin/web_server.rs"
+required-features = ["server"]
+
+[[bin]]
+name = "infinite-canvas"
+path = "src/main.rs"
+required-features = ["desktop"]
+
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-opener = "2"
+tauri = { version = "2", features = ["protocol-asset"], optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 axum = "0.8.9"
@@ -31,6 +47,10 @@ tower-http = { version = "0.7.0", features = ["cors", "limit", "trace"] }
 thiserror = "2.0.19"
 reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 argon2 = "0.5"
-tauri-plugin-dialog = "2"
+tauri-plugin-dialog = { version = "2", optional = true }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"], optional = true }
+futures-util = { version = "0.3", optional = true }
+fs2 = { version = "0.4", optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
 zip = { version = "6.0.0", default-features = false, features = ["deflate"] }
 image = { version = "0.25.8", default-features = false, features = ["avif", "bmp", "gif", "jpeg", "png", "webp"] }

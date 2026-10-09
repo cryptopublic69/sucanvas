@@ -1166,8 +1166,8 @@ function CanvasWorkspace() {
       });
       setAppBackupRestorePath(null);
       setAppBackupMessageKind("success");
-      setAppBackupMessage(`备份已校验，${result.fileCount} 个数据文件将在下次启动时恢复。请关闭并重新打开软件。`);
-      showGlobalNotice("恢复已准备完成，请关闭并重新打开 SuCanvas");
+      setAppBackupMessage(`备份已校验，${result.fileCount} 个数据文件将在下次启动时恢复。${import.meta.env.MODE === "web" ? "请在服务器上重启 Web 服务，再刷新网页。" : "请关闭并重新打开软件。"}`);
+      showGlobalNotice(import.meta.env.MODE === "web" ? "恢复已准备完成，请重启服务器上的 Web 服务" : "恢复已准备完成，请关闭并重新打开 SuCanvas");
     } catch (error) {
       setAppBackupMessageKind("error");
       setAppBackupMessage(error instanceof Error ? error.message : String(error));
@@ -2821,7 +2821,7 @@ function CanvasWorkspace() {
     )?.data.record;
     if (!preview) return;
     const currentOutputRoot = comfyOutputRootRef.current;
-    if (!currentOutputRoot.trim()) {
+    if (!currentOutputRoot.trim() && import.meta.env.MODE !== "web") {
       setComfyOutputRootDraft("");
       setSettingsOpen(true);
       setNotice("请先在设置中填写 ComfyUI 输出映射目录");
@@ -2852,7 +2852,7 @@ function CanvasWorkspace() {
     )?.data.record;
     if (!preview) return;
     const currentOutputRoot = comfyOutputRootRef.current;
-    if (!currentOutputRoot.trim()) {
+    if (!currentOutputRoot.trim() && import.meta.env.MODE !== "web") {
       setComfyOutputRootDraft("");
       setSettingsOpen(true);
       setNotice("请先在设置中填写 ComfyUI 输出映射目录");
@@ -2911,7 +2911,7 @@ function CanvasWorkspace() {
         sourcePath,
         destinationPath,
       });
-      setNotice(`已下载到：${savedPath}`);
+      setNotice(import.meta.env.MODE === "web" ? "下载已开始" : `已下载到：${savedPath}`);
     } catch (error) {
       reportError(error);
     }
@@ -2921,7 +2921,7 @@ function CanvasWorkspace() {
     const preview = nodesSnapshot.current.find((node) => node.id === previewId)?.data.record;
     if (!preview || preview.kind !== "generated-video") return;
     const currentOutputRoot = comfyOutputRootRef.current;
-    if (!currentOutputRoot.trim()) {
+    if (!currentOutputRoot.trim() && import.meta.env.MODE !== "web") {
       setComfyOutputRootDraft("");
       setSettingsOpen(true);
       setNotice("请先在设置中填写 ComfyUI 输出映射目录");
@@ -2957,7 +2957,7 @@ function CanvasWorkspace() {
         sourcePath,
         destinationPath,
       });
-      setNotice(`已下载到：${savedPath}`);
+      setNotice(import.meta.env.MODE === "web" ? "下载已开始" : `已下载到：${savedPath}`);
     } catch (error) {
       reportError(error);
     }
@@ -2967,7 +2967,7 @@ function CanvasWorkspace() {
     const preview = nodesSnapshot.current.find((node) => node.id === previewId)?.data.record;
     if (!preview || preview.kind !== "generated-image") return;
     const currentOutputRoot = comfyOutputRootRef.current;
-    if (!currentOutputRoot.trim()) {
+    if (!currentOutputRoot.trim() && import.meta.env.MODE !== "web") {
       setComfyOutputRootDraft("");
       setSettingsOpen(true);
       setNotice("请先在设置中填写 ComfyUI 输出映射目录");
@@ -2985,7 +2985,7 @@ function CanvasWorkspace() {
     if (!destinationPath) return;
     try {
       const savedPath = await invoke<string>("export_generated_image", { sourcePath, destinationPath });
-      setNotice(`已下载到：${savedPath}`);
+      setNotice(import.meta.env.MODE === "web" ? "下载已开始" : `已下载到：${savedPath}`);
     } catch (error) { reportError(error); }
   }, [reportError]);
 
@@ -4366,6 +4366,7 @@ function CanvasWorkspace() {
             : "视频预览";
           const outputContent: JsonObject = {
             videoUrl: output.url,
+            ...(output.assetPath ? { assetPath: output.assetPath } : {}),
             originalName: output.filename,
             filename: output.filename,
             subfolder: output.subfolder,
@@ -5632,6 +5633,7 @@ function CanvasWorkspace() {
         const title = result.outputs.length > 1 ? `2采预览 ${index + 1}` : "2采预览";
         const outputContent: JsonObject = {
           videoUrl: output.url,
+          ...(output.assetPath ? { assetPath: output.assetPath } : {}),
           originalName: output.filename,
           filename: output.filename,
           subfolder: output.subfolder,
@@ -6443,7 +6445,7 @@ function CanvasWorkspace() {
     const reservationIds = new Set<string>();
     const generationElapsedSeconds = validExecutionElapsedSeconds(recovered.executionElapsedSeconds);
     const imageContent = (output: ComfyClientTaskStatus["outputs"][number], outputIndex: number): JsonObject => {
-      const assetPath = mappedComfyOutputPath(comfyOutputRootRef.current, {
+      const assetPath = output.assetPath || mappedComfyOutputPath(comfyOutputRootRef.current, {
         filename: output.filename,
         subfolder: output.subfolder,
         fileType: output.fileType,
@@ -6650,6 +6652,7 @@ function CanvasWorkspace() {
           : recovered.outputs.length > 1 ? `视频预览 ${index + 1}` : "视频预览";
         const outputContent: JsonObject = {
           videoUrl: output.url,
+            ...(output.assetPath ? { assetPath: output.assetPath } : {}),
           originalName: output.filename,
           filename: output.filename,
           subfolder: output.subfolder,
@@ -8426,7 +8429,7 @@ function CanvasWorkspace() {
       const generationElapsedSeconds = validExecutionElapsedSeconds(result.executionElapsedSeconds);
 
       const imageContent = (output: typeof firstOutput): JsonObject => {
-        const assetPath = mappedComfyOutputPath(comfyOutputRootRef.current, {
+        const assetPath = output.assetPath || mappedComfyOutputPath(comfyOutputRootRef.current, {
           filename: output.filename,
           subfolder: output.subfolder,
           fileType: output.fileType,
@@ -8708,7 +8711,7 @@ function CanvasWorkspace() {
       const [firstOutput, ...additionalOutputs] = result.outputs;
       if (!firstOutput) throw new Error("ComfyUI 没有返回放大后的图片");
       const imageContent = (output: typeof firstOutput): JsonObject => {
-        const assetPath = mappedComfyOutputPath(comfyOutputRootRef.current, {
+        const assetPath = output.assetPath || mappedComfyOutputPath(comfyOutputRootRef.current, {
           filename: output.filename,
           subfolder: output.subfolder,
           fileType: output.fileType,

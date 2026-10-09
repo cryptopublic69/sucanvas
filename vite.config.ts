@@ -5,8 +5,14 @@ import react from "@vitejs/plugin-react";
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
+export default defineConfig(async ({ mode }) => ({
   plugins: [react()],
+  resolve: mode === "web" ? {
+    alias: Object.fromEntries([
+      "@tauri-apps/api/core", "@tauri-apps/api/event", "@tauri-apps/api/webview",
+      "@tauri-apps/plugin-dialog", "@tauri-apps/plugin-opener",
+    ].map((name) => [name, new URL("./src/web/bridge.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")])),
+  } : undefined,
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -17,6 +23,10 @@ export default defineConfig(async () => ({
     port: 1420,
     strictPort: true,
     host: host || false,
+    proxy: mode === "web" ? {
+      "/api": { target: "http://127.0.0.1:18740", ws: true, headers: { origin: "http://127.0.0.1:18740" } },
+      "/v1": { target: "http://127.0.0.1:18740", headers: { origin: "http://127.0.0.1:18740" } },
+    } : undefined,
     hmr: host
       ? {
           protocol: "ws",
