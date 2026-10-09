@@ -38,8 +38,9 @@ export default defineConfig(async ({ mode, command }) => {
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // Runtime data is not frontend source. On Windows, watching restore
+      // staging directories can prevent their rename into pending data.
+      ignored: ["**/src-tauri/**", ...(webDevelopment ? ["**/.web-dev/**", "**/release-web/**", "**/dist-web/**"] : [])],
     },
   },
   build: {

@@ -18,6 +18,11 @@ const BACKUP_EXTENSION: &str = "sucanvas-backup";
 const MANIFEST_ENTRY: &str = "backup-manifest.json";
 const SETTINGS_ENTRY: &str = "frontend-settings.json";
 const DATABASE_FILE: &str = "infinite-canvas.sqlite3";
+const DATABASE_SIDECARS: [&str; 3] = [
+    "infinite-canvas.sqlite3-wal",
+    "infinite-canvas.sqlite3-shm",
+    "infinite-canvas.sqlite3-journal",
+];
 const RESTORED_SETTINGS_FILE: &str = "restored-frontend-settings.json";
 const PENDING_DIRECTORY: &str = "data.restore-pending";
 const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
@@ -91,6 +96,14 @@ fn archive_name(relative: &Path) -> Result<String, String> {
     Ok(format!("data/{}", parts.join("/")))
 }
 
+fn is_database_sidecar(relative: &Path) -> bool {
+    relative.to_str().is_some_and(|name| {
+        DATABASE_SIDECARS
+            .iter()
+            .any(|sidecar| name.eq_ignore_ascii_case(sidecar))
+    })
+}
+
 fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     for entry in fs::read_dir(directory).map_err(|error| format!("读取数据目录失败：{error}"))?
     {
@@ -109,6 +122,7 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Res
                 .strip_prefix(root)
                 .map_err(|_| format!("数据文件超出数据目录：{}", path.display()))?;
             if relative == Path::new(DATABASE_FILE)
+                || is_database_sidecar(relative)
                 || relative == Path::new("api.json")
                 || relative == Path::new(RESTORED_SETTINGS_FILE)
             {
@@ -370,7 +384,14 @@ pub fn stage_restore(data_dir: &Path, bundle_path: &Path) -> Result<RestoreSumma
             };
             let relative = Path::new(relative_name);
             validate_archive_relative_path(relative)?;
-            if relative == Path::new("api.json") || relative == Path::new(RESTORED_SETTINGS_FILE) {
+            // Every v1 archive stores a standalone VACUUM INTO snapshot. Older
+            // exporters also collected the live database's WAL/SHM/journal;
+            // those belong to a different page layout and must not be replayed
+            // over the snapshot. Leave genuine corruption to integrity_check.
+            if is_database_sidecar(relative)
+                || relative == Path::new("api.json")
+                || relative == Path::new(RESTORED_SETTINGS_FILE)
+            {
                 continue;
             }
             if entry
@@ -461,6 +482,129 @@ mod tests {
     use super::*;
     use crate::models::{CreateNodeInput, DEFAULT_CANVAS_ID};
     use serde_json::json;
+
+    #[test]
+    fn standalone_snapshots_exclude_live_sqlite_sidecars() {
+        let root = std::env::temp_dir().join(format!(
+            "sucanvas-sidecar-export-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let data = root.join("data");
+        fs::create_dir_all(data.join("assets")).unwrap();
+        // A similarly named user asset is not a database sidecar.
+        fs::write(data.join("assets/infinite-canvas.sqlite3-wal"), b"asset").unwrap();
+        let database = Database::open(&data.join(DATABASE_FILE)).unwrap();
+        assert!(fs::metadata(data.join(DATABASE_SIDECARS[0])).unwrap().len() > 0);
+        assert!(data.join(DATABASE_SIDECARS[1]).is_file());
+        fs::write(data.join(DATABASE_SIDECARS[2]), b"transient journal").unwrap();
+        let bundle = root.join("backup.sucanvas-backup");
+        export(&data, &database, &bundle, &BTreeMap::new()).unwrap();
+        let mut archive = ZipArchive::new(fs::File::open(bundle).unwrap()).unwrap();
+        assert!(archive.by_name("data/infinite-canvas.sqlite3").is_ok());
+        for sidecar in DATABASE_SIDECARS {
+            assert!(matches!(
+                archive.by_name(&format!("data/{sidecar}")),
+                Err(zip::result::ZipError::FileNotFound)
+            ));
+        }
+        assert!(archive
+            .by_name("data/assets/infinite-canvas.sqlite3-wal")
+            .is_ok());
+        drop(archive);
+        database.verify_integrity().unwrap();
+        drop(database);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn imports_legacy_snapshot_without_replaying_live_sqlite_sidecars() {
+        let root = std::env::temp_dir().join(format!(
+            "sucanvas-sidecar-restore-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let source = root.join("source/data");
+        let target = root.join("target/data");
+        let database = Database::open(&source.join(DATABASE_FILE)).unwrap();
+        database.create_project("Legacy backup project").unwrap();
+        let bundle = root.join("legacy.sucanvas-backup");
+        export(&source, &database, &bundle, &BTreeMap::new()).unwrap();
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&bundle)
+            .unwrap();
+        let mut archive = ZipWriter::new_append(file).unwrap();
+        for sidecar in &DATABASE_SIDECARS[..2] {
+            add_file(
+                &mut archive,
+                &format!("data/{sidecar}"),
+                &source.join(sidecar),
+                SimpleFileOptions::default(),
+            )
+            .unwrap();
+        }
+        archive
+            .start_file(
+                "data/INFINITE-CANVAS.SQLITE3-JOURNAL",
+                SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive.write_all(b"old transient journal").unwrap();
+        archive.finish().unwrap();
+        let restored = stage_restore(&target, &bundle).unwrap();
+        assert!(restored.requires_restart);
+        let pending = pending_directory(&target).unwrap();
+        assert!(!pending.join("INFINITE-CANVAS.SQLITE3-JOURNAL").exists());
+        let restored_database = Database::open(&pending.join(DATABASE_FILE)).unwrap();
+        restored_database.verify_integrity().unwrap();
+        assert!(restored_database
+            .list_projects()
+            .unwrap()
+            .iter()
+            .any(|project| project.canvas.name == "Legacy backup project"));
+        drop(restored_database);
+        drop(database);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupted_snapshot_is_rejected_without_changing_existing_data() {
+        let root = std::env::temp_dir().join(format!(
+            "sucanvas-corrupt-snapshot-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let target = root.join("data");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("keep.txt"), b"existing data").unwrap();
+        let bundle = root.join("corrupt.sucanvas-backup");
+        let mut archive = ZipWriter::new(fs::File::create(&bundle).unwrap());
+        archive
+            .start_file(MANIFEST_ENTRY, SimpleFileOptions::default())
+            .unwrap();
+        serde_json::to_writer(
+            &mut archive,
+            &BackupManifest {
+                format: BACKUP_FORMAT.to_owned(),
+                format_version: BACKUP_FORMAT_VERSION,
+                app_version: "1.0.0".to_owned(),
+                created_at: Utc::now().to_rfc3339(),
+                source_data_dir: String::new(),
+            },
+        )
+        .unwrap();
+        archive
+            .start_file("data/infinite-canvas.sqlite3", SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(b"not a sqlite database").unwrap();
+        archive.finish().unwrap();
+        assert!(stage_restore(&target, &bundle)
+            .unwrap_err()
+            .contains("打开备份数据库失败"));
+        assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"existing data");
+        assert!(!pending_directory(&target).unwrap().exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn exports_and_stages_a_complete_portable_restore() {
