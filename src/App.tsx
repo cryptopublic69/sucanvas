@@ -4017,7 +4017,28 @@ function CanvasWorkspace() {
       rejectSubmission("无法执行：找不到视频生成节点");
       return;
     }
-    const target = recordAtCurrentFlowPosition(targetNode);
+    let target = recordAtCurrentFlowPosition(targetNode);
+    if (options?.saveSnapshotParameters && options.snapshot) {
+      const parameters = options.snapshot;
+      target = {
+        ...target,
+        content: {
+          ...target.content,
+          ...videoPresetNodePatch(parameters, false),
+          generationDuration: parameters.durationSeconds,
+          generationRefImageSize: parameters.refImageSize,
+          generationSeed: options.seed ?? fixedSeedFromContent(target.content),
+        },
+      };
+      changeNode(targetId, { content: target.content });
+      try {
+        await flushNodePatches([targetId]);
+      } catch (error) {
+        reportError(error);
+        rejectSubmission("无法生成：节点参数保存失败");
+        return;
+      }
+    }
     const requestedSeedMode = regeneration || options?.seed ? "fixed" : seedModeFromContent(target.content);
     const requestedFixedSeed = regeneration?.seed ?? options?.seed ?? fixedSeedFromContent(target.content);
     const activeClients = runningComfyClients.current.get(targetId);
@@ -4629,7 +4650,7 @@ function CanvasWorkspace() {
       if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
       unregisterComfyTask(targetId, clientId);
     }
-  }, [changeNode, clearGenerationLivePreview, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, flushVideoGenerationInputs, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, showGenerationLivePreview, showGlobalNotice, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
+  }, [changeNode, clearGenerationLivePreview, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, flushNodePatches, flushVideoGenerationInputs, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, showGenerationLivePreview, showGlobalNotice, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
 
   const executeVideoNodeBatch = useCallback(async (targetId: string) => {
     const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
@@ -5302,6 +5323,7 @@ function CanvasWorkspace() {
       if (draft.generatorId) {
         await executeVideoNode(draft.generatorId, undefined, {
           snapshot, seed: draft.seed, placementSourceNodeId: draft.placementSourceNodeId,
+          saveSnapshotParameters: true,
         });
       } else {
         await regenerateGeneratedVideo(draft.previewId, snapshot, draft.seed);
