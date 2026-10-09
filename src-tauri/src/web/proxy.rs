@@ -21,6 +21,7 @@ fn upstream(state: &WebState, suffix: &str) -> Result<String, StatusCode> {
     ))
 }
 pub async fn http(State(state): State<WebState>, request: Request<Body>) -> Response {
+    let state = state.connection_snapshot();
     let tail = request
         .uri()
         .path()
@@ -92,6 +93,7 @@ pub async fn websocket(
     ws: WebSocketUpgrade,
     uri: axum::http::Uri,
 ) -> Response {
+    let state = state.connection_snapshot();
     let url = match upstream(
         &state,
         &format!(

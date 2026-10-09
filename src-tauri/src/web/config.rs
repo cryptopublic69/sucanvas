@@ -24,6 +24,23 @@ pub struct Config {
 fn default_upload() -> usize {
     1024 * 1024 * 1024
 }
+pub(super) fn validate_comfy_url(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    let invalid = "ComfyUI 服务地址无效，请填写不含账号、查询参数的 HTTP(S) 地址";
+    let url = reqwest::Url::parse(value).map_err(|_| invalid.to_owned())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid.into());
+    }
+    Ok(())
+}
 impl Config {
     pub fn read(path: &Path) -> Result<Self, String> {
         let config: Self = serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
@@ -43,16 +60,7 @@ impl Config {
         if url.scheme() != "https" && (!local || !config.listen.ip().is_loopback()) {
             return Err("Public deployment requires an HTTPS publicUrl. Place a TLS reverse proxy in front of the server.".into());
         }
-        if !config.comfy_url.is_empty() {
-            let comfy = reqwest::Url::parse(&config.comfy_url).map_err(|e| e.to_string())?;
-            if !matches!(comfy.scheme(), "http" | "https")
-                || comfy.host_str().is_none()
-                || comfy.query().is_some()
-                || comfy.fragment().is_some()
-            {
-                return Err("Invalid comfyUrl".into());
-            }
-        }
+        validate_comfy_url(&config.comfy_url)?;
         if config.max_upload_bytes == 0 || config.max_upload_bytes > 16 * 1024 * 1024 * 1024usize {
             return Err("maxUploadBytes must be between 1 byte and 16 GiB".into());
         }

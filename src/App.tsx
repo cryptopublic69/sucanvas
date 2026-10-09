@@ -457,6 +457,9 @@ function CanvasWorkspace() {
   const [comfyUiServerUrlDraft, setComfyUiServerUrlDraft] = useState(() =>
     window.localStorage.getItem(COMFYUI_SERVER_URL_STORAGE_KEY) ?? DEFAULT_COMFYUI_SERVER_URL,
   );
+  const [comfySettingsBusy, setComfySettingsBusy] = useState(false);
+  const [comfySettingsError, setComfySettingsError] = useState("");
+  const [comfyConnectionRevision, setComfyConnectionRevision] = useState(0);
   const [h3WorkflowPath, setH3WorkflowPath] = useState(() =>
     window.localStorage.getItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY)
     ?? DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
@@ -2989,7 +2992,25 @@ function CanvasWorkspace() {
     } catch (error) { reportError(error); }
   }, [reportError]);
 
-  const saveComfySettings = useCallback(() => {
+  useEffect(() => {
+    if (!settingsOpen || import.meta.env.MODE !== "web") return;
+    let cancelled = false;
+    setComfySettingsBusy(true);
+    setComfySettingsError("");
+    void import("./web/connection").then(({ readComfyConnection }) => readComfyConnection())
+      .then((connection) => {
+        if (cancelled) return;
+        setComfyUiServerUrlDraft(connection.comfyUrl);
+        setComfyInputRootDraft(connection.comfyInputDirectory);
+        setComfyOutputRootDraft(connection.comfyOutputDirectory);
+      }).catch((error: unknown) => {
+        if (!cancelled) setComfySettingsError(String(error));
+      }).finally(() => { if (!cancelled) setComfySettingsBusy(false); });
+    return () => { cancelled = true; };
+  }, [settingsOpen]);
+
+  const saveComfySettings = useCallback(async () => {
+    if (comfySettingsBusy) return;
     const normalizePath = (path: string) => path
       .trim()
       .replace(/^"|"$/g, "")
@@ -3007,27 +3028,53 @@ function CanvasWorkspace() {
       showGlobalNotice("ComfyUI 服务地址无效，请填写 http:// 或 https:// 开头的完整地址");
       return;
     }
-    const outputRoot = normalizePath(comfyOutputRootDraft);
-    const inputRoot = normalizePath(comfyInputRootDraft);
+    let outputRoot = normalizePath(comfyOutputRootDraft);
+    let inputRoot = normalizePath(comfyInputRootDraft);
+    let connectionUrl = serverUrl;
+    if (import.meta.env.MODE === "web") {
+      setComfySettingsBusy(true);
+      setComfySettingsError("");
+      try {
+        const { saveComfyConnection } = await import("./web/connection");
+        const saved = await saveComfyConnection({
+          comfyUrl: serverUrl,
+          comfyInputDirectory: comfyInputRootDraft.trim().replace(/^"|"$/g, ""),
+          comfyOutputDirectory: comfyOutputRootDraft.trim().replace(/^"|"$/g, ""),
+        });
+        outputRoot = saved.comfyOutputDirectory;
+        inputRoot = saved.comfyInputDirectory;
+        setComfyUiServerUrlDraft(saved.comfyUrl);
+        setComfyInputRootDraft(inputRoot);
+        setComfyOutputRootDraft(outputRoot);
+        connectionUrl = `${window.location.origin}/api/comfy`;
+        setComfyConnectionRevision((current) => current + 1);
+      } catch (error) {
+        setComfySettingsError(String(error));
+        showGlobalNotice(`ComfyUI 设置保存失败：${String(error)}`);
+        return;
+      } finally {
+        setComfySettingsBusy(false);
+      }
+    }
     const workflowPath = normalizePath(h3WorkflowPathDraft)
       || DEFAULT_H3_REFERENCE_WORKFLOW_PATH;
     comfyOutputRootRef.current = outputRoot;
     comfyInputRootRef.current = inputRoot;
-    comfyUiServerUrlRef.current = serverUrl;
+    comfyUiServerUrlRef.current = connectionUrl;
     h3WorkflowPathRef.current = workflowPath;
     setComfyOutputRoot(outputRoot);
     setComfyInputRoot(inputRoot);
-    setComfyUiServerUrl(serverUrl);
-    setComfyUiServerUrlDraft(serverUrl);
+    setComfyUiServerUrl(connectionUrl);
+    if (import.meta.env.MODE !== "web") setComfyUiServerUrlDraft(serverUrl);
     setH3WorkflowPath(workflowPath);
     if (outputRoot) window.localStorage.setItem("infinite-canvas:comfy-output-root", outputRoot);
     else window.localStorage.removeItem("infinite-canvas:comfy-output-root");
     if (inputRoot) window.localStorage.setItem("infinite-canvas:comfy-input-root", inputRoot);
     else window.localStorage.removeItem("infinite-canvas:comfy-input-root");
-    window.localStorage.setItem(COMFYUI_SERVER_URL_STORAGE_KEY, serverUrl);
+    window.localStorage.setItem(COMFYUI_SERVER_URL_STORAGE_KEY, connectionUrl);
     window.localStorage.setItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY, workflowPath);
     showGlobalNotice("ComfyUI 设置已保存");
-  }, [comfyInputRootDraft, comfyOutputRootDraft, comfyUiServerUrlDraft, h3WorkflowPathDraft, showGlobalNotice]);
+  }, [comfySettingsBusy, comfyInputRootDraft, comfyOutputRootDraft, comfyUiServerUrlDraft, h3WorkflowPathDraft, showGlobalNotice]);
 
   const saveH3ModelParameters = useCallback(async () => {
     const {
@@ -10366,7 +10413,7 @@ function CanvasWorkspace() {
     setSettingsOpen(true);
   };
 
-  const comfyQueueIndicator = <ComfyStatusIndicators serverUrl={comfyUiServerUrl} showGpu={Boolean(activeProjectId)} />;
+  const comfyQueueIndicator = <ComfyStatusIndicators key={comfyConnectionRevision} serverUrl={comfyUiServerUrl} showGpu={Boolean(activeProjectId)} />;
 
   const privateProjectCount = projects.filter((project) => project.canvas.isPrivate).length;
   const normalizedPrivateProjectSearch = privateProjectSearch.trim().toLocaleLowerCase();
@@ -10492,7 +10539,7 @@ function CanvasWorkspace() {
           className="project-dialog app-settings-dialog"
           onSubmit={(event) => {
             event.preventDefault();
-            if (activeSettingsSection === "general") saveComfySettings();
+            if (activeSettingsSection === "general") void saveComfySettings();
             if (activeSettingsSection === "video-defaults") saveVideoGenerationDefaults();
             if (activeSettingsSection === "video-model") void saveH3ModelParameters();
             if (activeSettingsSection === "image-model") void saveKrea2ModelParameters();
@@ -10625,6 +10672,8 @@ function CanvasWorkspace() {
             <div className="app-settings-content">
               {activeSettingsSection === "general" && (
                 <GeneralSettingsPanel
+                  comfySettingsBusy={comfySettingsBusy}
+                  comfySettingsError={comfySettingsError}
                   uiFontSize={uiFontSize}
                   setUiFontSize={setUiFontSize}
                   comfyUiServerUrlDraft={comfyUiServerUrlDraft}
@@ -10765,8 +10814,8 @@ function CanvasWorkspace() {
             || activeSettingsSection === "image-model") && (
               <div className="project-dialog-actions">
                 {activeSettingsSection === "general" && (
-                  <button type="submit" className="primary-button">
-                    保存基础设置
+                  <button type="submit" className="primary-button" disabled={comfySettingsBusy}>
+                    {comfySettingsBusy ? "正在处理…" : "保存基础设置"}
                   </button>
                 )}
                 {activeSettingsSection === "video-defaults" && (

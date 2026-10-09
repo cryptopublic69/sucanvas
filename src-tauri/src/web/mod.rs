@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod connection;
 mod dispatch;
 mod files;
 mod media;
@@ -43,6 +44,7 @@ use tower_http::services::{ServeDir, ServeFile};
 pub(crate) struct WebState {
     core: Arc<ApplicationState>,
     config: Arc<config::Config>,
+    connection: Arc<connection::Store>,
     auth: Arc<auth::Auth>,
     handle: AppHandle,
     downloads: PathBuf,
@@ -50,6 +52,13 @@ pub(crate) struct WebState {
     client: reqwest::Client,
     settings_guard: Arc<tokio::sync::Mutex<()>>,
     media_guard: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl WebState {
+    fn connection_snapshot(mut self) -> Self {
+        self.config = self.connection.snapshot();
+        self
+    }
 }
 
 pub async fn run() -> Result<(), String> {
@@ -134,18 +143,7 @@ pub async fn run() -> Result<(), String> {
     if !web.join("index.html").is_file() {
         return Err(format!("Web build is missing: {}", web.display()));
     }
-    for directory in [
-        &mut config.comfy_input_directory,
-        &mut config.comfy_output_directory,
-    ] {
-        if !directory.is_empty() {
-            *directory = config::Config::directory(&root, directory)
-                .canonicalize()
-                .map_err(|e| e.to_string())?
-                .to_string_lossy()
-                .into_owned();
-        }
-    }
+    connection::resolve_directories(&mut config, &root)?;
     crate::portable::set_root(data.clone())?;
     let database =
         Database::open(&data.join("infinite-canvas.sqlite3")).map_err(|e| e.to_string())?;
@@ -209,6 +207,7 @@ pub async fn run() -> Result<(), String> {
     let state = WebState {
         core: Arc::new(core),
         auth,
+        connection: Arc::new(connection::Store::new(config_path, config.clone())),
         config: Arc::new(config),
         handle,
         downloads,
@@ -230,6 +229,10 @@ pub async fn run() -> Result<(), String> {
         .route("/api/resource", get(files::resource))
         .route("/api/events", get(events))
         .route("/api/settings", get(read_settings).put(write_settings))
+        .route(
+            "/api/comfy-config",
+            get(connection::read).put(connection::write),
+        )
         .route("/api/comfy/ws", get(proxy::websocket))
         .route("/api/comfy/{*path}", get(proxy::http))
         .route_layer(middleware::from_fn_with_state(
@@ -323,6 +326,7 @@ async fn legacy_adapter(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    let state = state.connection_snapshot();
     let bearer = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -379,7 +383,7 @@ async fn events(State(state): State<WebState>, headers: HeaderMap) -> impl IntoR
                 }
                 match tokio::time::timeout(Duration::from_secs(15), receiver.recv()).await {
                     Ok(Ok(mut value)) => {
-                        rpc::normalize_result(&state, &mut value);
+                        rpc::normalize_result(&state.clone().connection_snapshot(), &mut value);
                         return Some((
                             Ok::<_, Infallible>(Event::default().data(value.to_string())),
                             (receiver, state, headers),
@@ -412,6 +416,7 @@ async fn events(State(state): State<WebState>, headers: HeaderMap) -> impl IntoR
     Sse::new(ready.chain(stream)).keep_alive(KeepAlive::default())
 }
 async fn read_settings(State(state): State<WebState>) -> impl IntoResponse {
+    let state = state.connection_snapshot();
     let _guard = state.settings_guard.lock().await;
     let path = state.core.data_dir.join("web-settings.json");
     let mut settings: BTreeMap<String, String> = std::fs::read(&path)

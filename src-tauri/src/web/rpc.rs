@@ -213,6 +213,7 @@ pub async fn invoke(
     Path(command): Path<String>,
     Json(mut input): Json<Request>,
 ) -> Response {
+    let state = state.connection_snapshot();
     if command == "capture_video_poster" {
         if let Some(source) = input.args.get_mut("source") {
             if let Err(error) = normalize_args(&state, source, "sourcePath") {

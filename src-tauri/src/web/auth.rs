@@ -155,7 +155,8 @@ pub async fn session(State(state): State<WebState>, headers: HeaderMap) -> Respo
     if !state.auth.authenticated(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({"ok": true, "comfyConfigured": !state.config.comfy_url.is_empty()})).into_response()
+    Json(json!({"ok": true, "comfyConfigured": !state.connection.snapshot().comfy_url.is_empty()}))
+        .into_response()
 }
 
 #[cfg(test)]
