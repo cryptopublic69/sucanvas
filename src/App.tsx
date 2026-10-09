@@ -2923,6 +2923,15 @@ function CanvasWorkspace() {
   const downloadGeneratedVideo = useCallback(async (previewId: string) => {
     const preview = nodesSnapshot.current.find((node) => node.id === previewId)?.data.record;
     if (!preview || preview.kind !== "generated-video") return;
+    if (import.meta.env.MODE === "web") {
+      setCanvasContextMenu(null);
+      try {
+        const { downloadGeneratedMedia } = await import("./web/download");
+        downloadGeneratedMedia(preview.content, "video");
+        setNotice("视频下载已开始");
+      } catch (error) { reportError(error); }
+      return;
+    }
     const currentOutputRoot = comfyOutputRootRef.current;
     if (!currentOutputRoot.trim() && import.meta.env.MODE !== "web") {
       setComfyOutputRootDraft("");
@@ -2969,6 +2978,15 @@ function CanvasWorkspace() {
   const downloadGeneratedImage = useCallback(async (previewId: string) => {
     const preview = nodesSnapshot.current.find((node) => node.id === previewId)?.data.record;
     if (!preview || preview.kind !== "generated-image") return;
+    if (import.meta.env.MODE === "web") {
+      setCanvasContextMenu(null);
+      try {
+        const { downloadGeneratedMedia } = await import("./web/download");
+        downloadGeneratedMedia(preview.content, "image");
+        setNotice("图片下载已开始");
+      } catch (error) { reportError(error); }
+      return;
+    }
     const currentOutputRoot = comfyOutputRootRef.current;
     if (!currentOutputRoot.trim() && import.meta.env.MODE !== "web") {
       setComfyOutputRootDraft("");
@@ -6384,8 +6402,8 @@ function CanvasWorkspace() {
           onRegenerateGeneratedImage: (nodeId: string) => regenerateGeneratedImageRef.current(nodeId),
           onLocateGeneratedImage: locateGeneratedImageOrigin,
           onCancelExecution: cancelVideoExecution,
-          onRevealGeneratedVideo: revealGeneratedVideo,
-          onRevealGeneratedImage: revealGeneratedImage,
+          onRevealGeneratedVideo: import.meta.env.MODE === "web" ? downloadGeneratedVideo : revealGeneratedVideo,
+          onRevealGeneratedImage: import.meta.env.MODE === "web" ? downloadGeneratedImage : revealGeneratedImage,
           onRemoveInput: removeInputFromVideoNode,
           onActivateTextInput: activateTextInput,
           onDeletePromptVersion: deletePromptVersionFromNode,
@@ -6396,7 +6414,7 @@ function CanvasWorkspace() {
         },
       };
     },
-    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, downloadGeneratedImage, downloadGeneratedVideo, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 

@@ -50,11 +50,12 @@ pub fn ensure_contained(path: &FsPath, roots: &[PathBuf]) -> Result<(), String> 
         ancestor = ancestor.parent().ok_or("Missing path parent")?;
     }
     let resolved = ancestor.canonicalize().map_err(|e| e.to_string())?;
+    // Compare resolved paths: mapped drives and UNC/verbatim paths can name
+    // the same file. Traversal was rejected above; junction escapes remain
+    // rejected because the resolved ancestor must be inside a resolved root.
     let allowed = roots.iter().any(|root| {
-        path.starts_with(root)
-            && root
-                .canonicalize()
-                .is_ok_and(|root| resolved.starts_with(root))
+        root.canonicalize()
+            .is_ok_and(|root| resolved.starts_with(root))
     });
     if !allowed {
         return Err("File access is outside the configured storage directories".into());
@@ -208,12 +209,26 @@ pub struct Request {
 fn empty_args() -> Value {
     json!({})
 }
+fn remove_unused_workflow_fallback(command: &str, args: &mut Value) {
+    if command != "submit_comfyui_workflow" {
+        return;
+    }
+    let Some(input) = args.get_mut("input").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if input.get("workflowModuleId").is_some_and(Value::is_string) {
+        // Core execution resolves the selected module inside the managed
+        // repository. The desktop fallback path is unused, even after restore.
+        input.insert("workflowPath".into(), Value::String(String::new()));
+    }
+}
 pub async fn invoke(
     State(state): State<WebState>,
     Path(command): Path<String>,
     Json(mut input): Json<Request>,
 ) -> Response {
     let state = state.connection_snapshot();
+    remove_unused_workflow_fallback(&command, &mut input.args);
     if command == "capture_video_poster" {
         if let Some(source) = input.args.get_mut("source") {
             if let Err(error) = normalize_args(&state, source, "sourcePath") {
@@ -260,6 +275,43 @@ mod tests {
         assert!(
             ensure_contained(&root.join("assets/../outside.txt"), &[root.join("assets")]).is_err()
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_module_ignores_unused_desktop_fallback_but_keeps_media_paths() {
+        let mut args = json!({"input": {
+            "workflowModuleId": "workflow-module-existing",
+            "workflowPath": "D:\\desktop\\workflows\\old.json",
+            "imagePaths": ["sucanvas://assets/reference.png"],
+            "videoPaths": ["D:\\outside\\video.mp4"]
+        }});
+        let original = args.clone();
+        remove_unused_workflow_fallback("submit_comfyui_workflow", &mut args);
+        assert_eq!(args["input"]["workflowPath"], "");
+        assert_eq!(args["input"]["imagePaths"], original["input"]["imagePaths"]);
+        assert_eq!(args["input"]["videoPaths"], original["input"]["videoPaths"]);
+        let mut other = original.clone();
+        remove_unused_workflow_fallback("save_workflow_module", &mut other);
+        assert_eq!(other, original);
+        let mut fallback = original;
+        fallback["input"]["workflowModuleId"] = Value::Null;
+        let before = fallback.clone();
+        remove_unused_workflow_fallback("submit_comfyui_workflow", &mut fallback);
+        assert_eq!(fallback, before);
+    }
+
+    #[test]
+    fn filesystem_boundary_accepts_canonical_alias_and_rejects_outside_file() {
+        let root = std::env::temp_dir().join(format!("web-alias-{}", uuid::Uuid::new_v4()));
+        let assets = root.join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(assets.join("existing.png"), b"fixture").unwrap();
+        std::fs::write(root.join("outside.png"), b"fixture").unwrap();
+        let canonical = assets.canonicalize().unwrap();
+        assert!(ensure_contained(&assets.join("existing.png"), &[canonical.clone()]).is_ok());
+        assert!(ensure_contained(&assets.join("new.png"), &[canonical.clone()]).is_ok());
+        assert!(ensure_contained(&root.join("outside.png"), &[canonical]).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

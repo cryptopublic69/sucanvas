@@ -101,12 +101,12 @@ export async function save(options: SaveDialogOptions = {}): Promise<string | nu
   const name = (options.defaultPath?.split(/[\\/]/).pop() || "download").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_");
   return `sucanvas-export://${crypto.randomUUID()}/${name}`;
 }
-function download(resource: string) {
+export function download(resource: string, filename?: string) {
   const url = convertFileSrc(resource);
   if (!url) throw new Error("没有可下载的文件");
   const link = document.createElement("a");
   link.href = `${url}${url.includes("?") ? "&" : "?"}download=true`;
-  link.download = resource.split("/").pop() || "download";
+  link.download = filename || resource.split("/").pop() || "download";
   document.body.appendChild(link); link.click(); link.remove();
 }
 export async function revealItemInDir(path: string) { download(path); }

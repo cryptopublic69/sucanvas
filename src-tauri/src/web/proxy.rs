@@ -45,6 +45,11 @@ pub async fn http(State(state): State<WebState>, request: Request<Body>) -> Resp
             .map(|q| format!("?{q}"))
             .unwrap_or_default()
     );
+    let download = tail == "/view"
+        && reqwest::Url::parse(&format!("http://localhost{}", request.uri())).is_ok_and(|url| {
+            url.query_pairs()
+                .any(|(key, value)| key == "download" && value == "true")
+        });
     let url = match upstream(&state, &suffix) {
         Ok(url) => url,
         Err(status) => return status.into_response(),
@@ -77,6 +82,11 @@ pub async fn http(State(state): State<WebState>, request: Request<Body>) -> Resp
                 if let Some(value) = headers.get(&name) {
                     response.headers_mut().insert(name, value.clone());
                 }
+            }
+            if download && status.is_success() {
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_DISPOSITION, "attachment".parse().unwrap());
             }
             response.headers_mut().insert(
                 header::CACHE_CONTROL,

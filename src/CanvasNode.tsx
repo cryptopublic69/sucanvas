@@ -38,6 +38,7 @@ import {
   ClipboardPaste,
   Copy,
   Dices,
+  Download,
   Eye,
   FileText,
   Film,
@@ -7718,10 +7719,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               type="button"
               className="nodrag node-action"
               onClick={() => void onRevealGeneratedVideo(id)}
-              title="在 Windows 资源管理器中定位视频"
-              aria-label="在 Windows 资源管理器中定位视频"
+              title={import.meta.env.MODE === "web" ? "下载视频" : "在 Windows 资源管理器中定位视频"}
+              aria-label={import.meta.env.MODE === "web" ? "下载视频" : "在 Windows 资源管理器中定位视频"}
             >
-              <FolderOpen size={13} />
+              {import.meta.env.MODE === "web" ? <Download size={13} /> : <FolderOpen size={13} />}
             </button>
           )}
           {generatedVideoUrl && (
@@ -8080,10 +8081,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 type="button"
                 className="nodrag node-action"
                 onClick={() => void onRevealGeneratedImage(id)}
-                title="在 Windows 资源管理器中定位图片"
-                aria-label="在 Windows 资源管理器中定位图片"
+                title={import.meta.env.MODE === "web" ? "下载图片" : "在 Windows 资源管理器中定位图片"}
+                aria-label={import.meta.env.MODE === "web" ? "下载图片" : "在 Windows 资源管理器中定位图片"}
               >
-                <FolderOpen size={13} />
+                {import.meta.env.MODE === "web" ? <Download size={13} /> : <FolderOpen size={13} />}
               </button>
             )}
             {generatedImageUrl && (
