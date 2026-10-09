@@ -768,6 +768,7 @@ interface VideoExecutionOptions {
   seed?: string;
   clientId?: string;
   snapshot?: GenerationSnapshot;
+  saveSnapshotParameters?: boolean;
   placeholderPosition?: { x: number; y: number };
   allowFixedSeedRepeat?: boolean;
 }
