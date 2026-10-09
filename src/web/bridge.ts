@@ -1,5 +1,7 @@
 // Vite uses this module only for --mode web; desktop keeps the native APIs.
 import type { OpenDialogOptions, SaveDialogOptions } from "@tauri-apps/plugin-dialog";
+import { webApiUrl, webApiUrls } from "./urls";
+const devBackend = import.meta.env.DEV ? import.meta.env.SUCANVAS_WEB_DEV_BACKEND ?? "" : "";
 type DragDropEvent =
   | { type: "enter" | "drop"; paths: string[]; position: { x: number; y: number } }
   | { type: "over"; position: { x: number; y: number } }
@@ -24,7 +26,7 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
     try { message = (JSON.parse(text) as { error?: string }).error || message; } catch { /* plain server response */ }
     throw new Error(message);
   }
-  return response.json() as Promise<T>;
+  return webApiUrls(await response.json(), devBackend, window.location.origin) as T;
 }
 function connectEvents(): Promise<void> {
   if (eventReady) return eventReady;
@@ -33,7 +35,7 @@ function connectEvents(): Promise<void> {
     const timeout = window.setTimeout(() => { reject(new Error("无法连接任务通知服务")); closeEvents(); }, 15000);
     events!.onopen = () => { window.clearTimeout(timeout); resolve(); };
     events!.onmessage = (message) => {
-      const value = JSON.parse(message.data) as { event: string; payload: unknown };
+      const value = webApiUrls(JSON.parse(message.data), devBackend, window.location.origin) as { event: string; payload: unknown };
       if (value.event.startsWith("channel:")) channels.get(value.event.slice(8))?.onmessage(value.payload);
       else if (value.event === "canvas://resync") window.location.reload();
       else for (const listener of listeners.get(value.event) ?? []) listener({ ...value, id: 0 });
@@ -54,7 +56,8 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
   if (channel) await connectEvents();
   try {
     const result = await request<{ result: T }>(`/api/invoke/${encodeURIComponent(command)}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ args }),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ args }, (_key, value) => typeof value === "string" && devBackend ? webApiUrl(value, window.location.origin, devBackend) : value),
     });
     if (["export_media_asset", "export_generated_video", "export_generated_image"].includes(command) && typeof result.result === "string") download(result.result);
     return result.result;

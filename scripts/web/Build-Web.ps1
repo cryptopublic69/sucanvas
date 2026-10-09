@@ -48,6 +48,7 @@ try {
     Copy-Item -LiteralPath 'deploy/windows/README.md' -Destination (Join-Path $OutputDirectory 'README.md') -Force
     Copy-Item -LiteralPath 'deploy/windows/VALIDATION.md' -Destination (Join-Path $OutputDirectory 'VALIDATION.md') -Force
     Copy-Item -LiteralPath 'deploy/windows/UPDATE-SETTINGS-RESTORE.md' -Destination (Join-Path $OutputDirectory 'UPDATE-SETTINGS-RESTORE.md') -Force
+    Copy-Item -LiteralPath 'deploy/windows/DEVELOPMENT.md' -Destination (Join-Path $OutputDirectory 'DEVELOPMENT.md') -Force
     $revision = (& git rev-parse HEAD).Trim()
     @{ builtAt = [DateTime]::UtcNow.ToString('o'); sourceRevision = $revision; platform = 'windows-x64'; dirtySource = [bool](& git status --porcelain) } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'build-info.json') -Encoding UTF8
     Write-Host "Portable package: $OutputDirectory"

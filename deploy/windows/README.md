@@ -27,6 +27,8 @@ SuCanvas-Web/
 
 不要将部署包放进现有桌面版的安装目录，也不要将 `dataDirectory` 指向桌面版的运行数据。
 
+日常开发无需反复打包：在本机 Web 源码目录使用 `scripts/web/Start-WebDev.ps1 -DeploymentDirectory <远端共享部署目录>`，前后端都在本机运行，前端保存后热更新，Rust 保存后自动编译重启。远端目录仅用于初始读取 ComfyUI 地址和登录密码哈希；本机测试数据独立保存。人工验收后再更新正式服务器。详细启动和停止方式见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
 ## 首次启动和人工测试
 
 在部署包目录运行以下命令。密码通过隐藏输入传给程序，配置中保存 Argon2 密码哈希。
