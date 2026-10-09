@@ -1,6 +1,6 @@
 # Web 开发版验证记录
 
-日期：2026-10-09。分支：`codex/windows-web`。基于桌面版提交 `49881e5`，在独立 Git worktree 中实现；原 `D:\Data\CodexProjects\InfiniteCanvas` 的 main、已有未提交修改及文件保持原样。
+日期：2026-10-09。分支：`windows-web`。基于桌面版提交 `49881e5`，在独立 Git worktree 中实现；原 `D:\Data\CodexProjects\InfiniteCanvas` 的 main、已有未提交修改及文件保持原样。
 
 ## 已完成
 

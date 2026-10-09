@@ -1,6 +1,6 @@
 # SuCanvas Web：Windows 便携部署
 
-Web 开发分支为 `codex/windows-web`。现有桌面入口仍使用默认 `desktop` 构建；Web 服务使用独立 `server` 构建，不启动 Tauri/WebView。部署包不需要 Node、Rust 或 Docker。需要 Windows 10/11 或相应的 Windows Server x64 系统，以及可连接的 ComfyUI（使用生成功能时）。
+Web 开发分支为 `windows-web`。现有桌面入口仍使用默认 `desktop` 构建；Web 服务使用独立 `server` 构建，不启动 Tauri/WebView。部署包不需要 Node、Rust 或 Docker。需要 Windows 10/11 或相应的 Windows Server x64 系统，以及可连接的 ComfyUI（使用生成功能时）。
 
 ## 在开发机器打包
 
