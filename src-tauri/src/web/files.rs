@@ -13,6 +13,37 @@ use tower::ServiceExt;
 use tower_http::services::ServeFile;
 use uuid::Uuid;
 
+pub(super) fn download_disposition(path: &std::path::Path) -> axum::http::HeaderValue {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    let fallback: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || " .-_()".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let encoded: String = filename
+        .as_bytes()
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._".contains(byte) {
+                (*byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect();
+    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
+        .parse()
+        .unwrap()
+}
+
 pub async fn upload(State(state): State<WebState>, mut multipart: Multipart) -> Response {
     match receive(&state, &mut multipart).await {
         Ok(files) => Json(json!({"paths": files})).into_response(),
@@ -136,6 +167,7 @@ pub struct Resource {
     resource: String,
     #[serde(default)]
     download: bool,
+    filename: Option<String>,
 }
 pub async fn resource(
     State(state): State<WebState>,
@@ -199,9 +231,32 @@ pub async fn resource(
         .headers_mut()
         .insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
     if download {
-        response
-            .headers_mut()
-            .insert(header::CONTENT_DISPOSITION, "attachment".parse().unwrap());
+        let filename = input
+            .filename
+            .as_deref()
+            .and_then(|name| name.rsplit(['/', '\\']).next())
+            .filter(|name| !name.is_empty());
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            download_disposition(filename.map(std::path::Path::new).unwrap_or(&path)),
+        );
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn attachment_preserves_backup_extension_and_unicode_filename() {
+        let header = download_disposition(std::path::Path::new(
+            "exports/SuCanvas-软件备份.sucanvas-backup",
+        ));
+        assert_eq!(header.to_str().unwrap(), "attachment; filename=\"SuCanvas-____.sucanvas-backup\"; filename*=UTF-8''SuCanvas-%E8%BD%AF%E4%BB%B6%E5%A4%87%E4%BB%BD.sucanvas-backup");
+    }
+    #[test]
+    fn attachment_escapes_quotes_and_control_characters() {
+        let header = download_disposition(std::path::Path::new("bad\"\r\n.sucanvas-backup"));
+        assert_eq!(header.to_str().unwrap(), "attachment; filename=\"bad___.sucanvas-backup\"; filename*=UTF-8''bad%22%0D%0A.sucanvas-backup");
+    }
 }

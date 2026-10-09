@@ -1,3 +1,9 @@
-.web-logout { position: fixed; right: 16px; bottom: 12px; z-index: 1200; padding: 7px 11px; background: #171e2c; color: #e5e7ee; border: 1px solid #53617b; border-radius: 8px; cursor: pointer; }
+.web-logout { position: fixed; left: 13px; bottom: 13px; z-index: 1200; display: grid; place-items: center; width: 32px; height: 32px; padding: 0; background: #151821; color: #a6abba; border: 1px solid #343946; border-radius: 10px; box-shadow: 0 12px 30px rgba(0, 0, 0, .25); cursor: pointer; }
+.web-logout:hover { color: white; background: #20242f; }
+.web-logout:focus-visible { outline: 2px solid #b6a7ff; outline-offset: 3px; }
+/* Leave a separate icon below the canvas control column. */
+.react-flow__controls.react-flow__panel.bottom { bottom: 44px; }
+:root[data-theme="light"] .web-logout { color: #626b80; background: #fff; border-color: #d8dce6; box-shadow: 0 8px 24px rgba(68, 77, 103, .13); }
+:root[data-theme="light"] .web-logout:hover { color: #30374a; background: #f2f4f8; }
 .web-error { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); max-width: 80vw; z-index: 1500; background: #492527; color: white; border-radius: 8px; padding: 12px 20px; }
 .web-error button { margin-left: 14px; background: none; color: inherit; border: 0; cursor: pointer; }

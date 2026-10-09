@@ -37,19 +37,20 @@ pub async fn http(State(state): State<WebState>, request: Request<Body>) -> Resp
     {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let suffix = format!(
-        "{tail}{}",
-        request
-            .uri()
-            .query()
-            .map(|q| format!("?{q}"))
-            .unwrap_or_default()
-    );
+    let query = reqwest::Url::parse(&format!("http://localhost{}", request.uri())).unwrap();
     let download = tail == "/view"
-        && reqwest::Url::parse(&format!("http://localhost{}", request.uri())).is_ok_and(|url| {
-            url.query_pairs()
-                .any(|(key, value)| key == "download" && value == "true")
-        });
+        && query.query_pairs().any(|(key, value)| key == "download" && value == "true");
+    let filename = query.query_pairs()
+        .find(|(key, value)| key == "downloadName" && !value.trim().is_empty())
+        .or_else(|| query.query_pairs().find(|(key, _)| key == "filename"))
+        .map(|(_, value)| value.rsplit(['/', '\\']).next().unwrap_or("download").to_owned())
+        .unwrap_or_else(|| "download".into());
+    let mut upstream_query = query.clone();
+    upstream_query.query_pairs_mut().clear().extend_pairs(
+        query.query_pairs().filter(|(key, _)| key != "downloadName" && key != "download"),
+    );
+    let suffix = format!("{tail}{}", upstream_query.query()
+        .filter(|query| !query.is_empty()).map(|query| format!("?{query}")).unwrap_or_default());
     let url = match upstream(&state, &suffix) {
         Ok(url) => url,
         Err(status) => return status.into_response(),
@@ -84,9 +85,10 @@ pub async fn http(State(state): State<WebState>, request: Request<Body>) -> Resp
                 }
             }
             if download && status.is_success() {
-                response
-                    .headers_mut()
-                    .insert(header::CONTENT_DISPOSITION, "attachment".parse().unwrap());
+                response.headers_mut().insert(
+                    header::CONTENT_DISPOSITION,
+                    super::files::download_disposition(std::path::Path::new(&filename)),
+                );
             }
             response.headers_mut().insert(
                 header::CACHE_CONTROL,

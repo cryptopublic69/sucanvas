@@ -1,3 +1,14 @@
+export function downloadFilename(resource: string, suggested?: string): string {
+  let name = suggested?.trim();
+  if (!name) {
+    try {
+      const url = new URL(resource, "http://localhost");
+      name = url.searchParams.get("downloadName") || url.searchParams.get("filename") || url.searchParams.get("resource") || (url.protocol.startsWith("http") ? decodeURIComponent(url.pathname) : resource);
+    } catch { name = resource; }
+  }
+  return name.split(/[\\/]/).pop()?.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/, "") || "download";
+}
+
 export function webApiUrl(value: string, from: string, to: string): string {
   if (!from || from === to) return value;
   const source = from.replace(/\/$/, "");

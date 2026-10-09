@@ -12,6 +12,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/web/Build-Web.ps1
 
 脚本生成 `release-web/SuCanvas-Web`，包含 `SuCanvasServer.exe`、编译好的网页、FFmpeg、默认工作流包及运维脚本。FFmpeg 从开发机器复制，也可以使用 `-FfmpegPath` 指定。分发 FFmpeg 时应保留所使用发行版的许可证及对应源码获取说明。
 
+每次发布生成唯一的 `assets/<版本>/` 目录，由 Vite 同时处理入口、模块导入和预加载引用；重复打包同一提交也不会复用上次的资源地址。`build-info.json` 记录源码提交与资源版本，`web-assets.json` 记录本次网页和全部资源的哈希，用于检查错误缓存、漏传文件和错误上游。无需手动给单个脚本加 URL 参数。
+
 ```text
 SuCanvas-Web/
   SuCanvasServer.exe
@@ -82,18 +84,20 @@ Web 使用原应用锁界面解锁，输入一次密码后由服务器建立访�
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Stop-Web.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Backup-Web.ps1 -Destination E:\Backups\SuCanvas-20261009
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Backup-Web.ps1
 ```
 
 脚本不会自动停止其他实例；备份前需要停止当前部署。备份包括 config 和整个 data（数据库 WAL、素材、工作流、设置和密码哈希）。迁移时，将完整部署目录复制到新服务器；相对目录配置下无需改盘符。调整域名、端口和 ComfyUI 配置后启动即可。`downloads` 仅是导出暂存文件，项目数据不依赖它。
 
+脚本数据备份、更新前完整备份和脚本恢复前的旧数据都统一保存在部署目录的 `backup` 下；108 对应 `F:\SuCanvas-Web\backup`。目录不存在时自动创建。可用 `-Destination` 指定该目录内的子目录，不能指定其他位置。
+
 恢复到一个已有的部署包：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Restore-Web.ps1 -BackupDirectory E:\Backups\SuCanvas-20261009
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Restore-Web.ps1 -BackupDirectory .\backup\data-20261009-120000-example
 ```
 
-恢复保留目标服务器的 config，旧数据会移动到带时间戳的 `data.before-restore-*`，再复制备份数据。不要删除旧目录，直到人工确认恢复正确。可在网页应用锁设置中修改密码；忘记密码时先停止服务，再运行 `Set-Password.ps1`。脚本整目录恢复包含备份中的应用锁密码；网页完整软件备份恢复则保留当前服务器密码。
+恢复保留目标服务器的 config，旧数据会移动到 `backup/data-before-restore-*`，再复制备份数据。不要删除旧目录，直到人工确认恢复正确。可在网页应用锁设置中修改密码；忘记密码时先停止服务，再运行 `Set-Password.ps1`。脚本整目录恢复包含备份中的应用锁密码；网页完整软件备份恢复则保留当前服务器密码。
 
 网页中的完整软件备份也可以使用；恢复后需要由管理员重启服务。当前服务器应用锁密码不会被导入的桌面备份覆盖。首次从桌面版迁移时，请通过备份导出/导入，避免直接共用或覆盖正在运行的桌面数据库。
 
@@ -117,4 +121,44 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Install-Autostart.ps
 
 ## 更新
 
-先停止当前部署。替换 EXE、web、tools 和发布自带的 workflows；保留 config、data 和用户备份。程序复用现有 SQLite 初始化/迁移逻辑，启动时检查数据库完整性。更新前保留整份备份；迁移和新版页面仍需要人工验收。
+先停止当前部署。替换 EXE、web 和发布自带的 workflows；保留 config、data、现有 tools 和用户备份。需要升级 FFmpeg 时再单独更换 tools。程序复用现有 SQLite 初始化/迁移逻辑，启动时检查数据库完整性。更新前保留整份备份；迁移和新版页面仍需要人工验收。
+
+可使用新发布包中的脚本更新已有部署：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\NewPackage\scripts\Update-WebFiles.ps1 -PackageDirectory E:\NewPackage -DeploymentDirectory F:\SuCanvas-Web -PublicUrl https://sucanvas.geeksbar.com:8888
+```
+
+脚本不负责服务启停。先由独立开关程序停止后端；脚本检查 EXE 与服务锁、把整个部署备份到 `backup/before-update-*`，校验备份后替换程序、工作流和脚本，最后发布网页入口并检查结果。配置、数据、HTTPS 代理、启停程序和现有 FFmpeg 保留；发现错误时恢复旧发布文件。使用相对 dataDirectory 和默认 webDirectory=web，迁移时不复制正在运行的数据库。
+
+## 新服务器部署检查
+
+新服务器复制完整发布包并初始化密码；迁移已有数据时先停服复制整个 data，或使用备份恢复。每台服务器按实际环境确认 `publicUrl`、监听地址、ComfyUI 地址和目录映射，不把旧服务器域名、IP 或盘符作为新服务器默认值。`publicUrl` 必须与浏览器地址完全一致，包括 HTTPS 和非默认端口；使用域名根路径。
+
+如果 Nginx 直接转发到同机后端，可使用下面的 location；TLS 证书和外部监听端口由 Nginx 的 server 配置提供。保留浏览器 Origin，不改写为内部 IP。
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:18740;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 3600s;
+    client_max_body_size 1g;
+}
+```
+
+如果 Nginx 转发到另一台机器上的 Caddy HTTPS 端口，Caddy 站点必须同时匹配浏览器域名和需要保留的内部 IP；Caddy 的监听端口使用内部 HTTPS 端口，不是外部端口映射值。例如 108 的站点地址为 `https://192.168.5.108:18741, https://sucanvas.geeksbar.com:18741`，应用 publicUrl 为 `https://sucanvas.geeksbar.com:8888`。新服务器要替换内部 IP、绑定地址、存储路径和域名。若已有 Nginx 静态资源缓存规则，不能缓存空响应和错误响应；发布后检查实际资源内容。
+
+部署配置后先运行静态检查，由自己的开关程序启动后端和代理，再运行外网检查：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-WebDeployment.ps1 -PublicUrl https://sucanvas.geeksbar.com:8888
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-WebDeployment.ps1 -PublicUrl https://sucanvas.geeksbar.com:8888 -CheckHttp
+```
+
+检查会比对应用访问地址、Caddy 域名匹配、网页和全部资源文件；外网检查逐个核对哈希和 JS/CSS 类型，拒绝“HTTP 200 但内容为空”、旧缓存和错误上游，并确认未登录会话返回 401。检查通过后仍由人工确认解锁、项目、上传、备份、下载与真实生成。

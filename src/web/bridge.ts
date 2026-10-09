@@ -1,6 +1,6 @@
 // Vite uses this module only for --mode web; desktop keeps the native APIs.
 import type { OpenDialogOptions, SaveDialogOptions } from "@tauri-apps/plugin-dialog";
-import { webApiUrl, webApiUrls } from "./urls";
+import { downloadFilename, webApiUrl, webApiUrls } from "./urls";
 const devBackend = import.meta.env.DEV ? import.meta.env.SUCANVAS_WEB_DEV_BACKEND ?? "" : "";
 type DragDropEvent =
   | { type: "enter" | "drop"; paths: string[]; position: { x: number; y: number } }
@@ -116,8 +116,13 @@ export function download(resource: string, filename?: string) {
   const url = convertFileSrc(resource);
   if (!url) throw new Error("没有可下载的文件");
   const link = document.createElement("a");
-  link.href = `${url}${url.includes("?") ? "&" : "?"}download=true`;
-  link.download = filename || resource.split("/").pop() || "download";
+  const name = downloadFilename(resource, filename);
+  const target = new URL(url, window.location.origin);
+  target.searchParams.set("download", "true");
+  if (target.pathname === "/api/resource") target.searchParams.set("filename", name);
+  if (target.pathname === "/api/comfy/view") target.searchParams.set("downloadName", name);
+  link.href = target.toString();
+  link.download = name;
   document.body.appendChild(link); link.click(); link.remove();
 }
 export async function revealItemInDir(path: string) { download(path); }

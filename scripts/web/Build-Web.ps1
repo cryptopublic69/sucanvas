@@ -15,7 +15,11 @@ if (-not $FfmpegPath) {
 if (-not $FfmpegPath -or -not (Test-Path -LiteralPath $FfmpegPath)) { throw 'Provide -FfmpegPath to include FFmpeg in the portable package.' }
 Push-Location $repoRoot
 $previousRustFlags = $env:RUSTFLAGS
+$previousAssetVersion = $env:SUCANVAS_WEB_ASSET_VERSION
 try {
+    $revision = (& git rev-parse HEAD).Trim()
+    $assetVersion = $revision.Substring(0,12) + '-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,8)
+    $env:SUCANVAS_WEB_ASSET_VERSION = $assetVersion
     if (-not (Test-Path -LiteralPath 'node_modules')) { & npm.cmd ci; if ($LASTEXITCODE) { throw 'npm ci failed' } }
     & npm.cmd run build:web
     if ($LASTEXITCODE) { throw 'Web build failed' }
@@ -30,7 +34,7 @@ try {
     # A new package uses an empty data directory. Updating keeps its settings.
     Copy-Item -Path 'dist-web/*' -Destination (Join-Path $OutputDirectory 'web') -Recurse -Force
     Copy-Item -LiteralPath 'workflows' -Destination $OutputDirectory -Recurse -Force
-    foreach ($script in @('Start-Web.ps1', 'Stop-Web.ps1', 'Set-Password.ps1', 'Backup-Web.ps1', 'Restore-Web.ps1', 'Install-Autostart.ps1')) {
+    foreach ($script in @('Start-Web.ps1', 'Stop-Web.ps1', 'Set-Password.ps1', 'Backup-Web.ps1', 'Restore-Web.ps1', 'Install-Autostart.ps1', 'Test-WebDeployment.ps1', 'Update-WebFiles.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $OutputDirectory 'scripts') -Force
     }
     Copy-Item -LiteralPath $FfmpegPath -Destination (Join-Path $OutputDirectory 'tools/ffmpeg.exe') -Force
@@ -49,7 +53,11 @@ try {
     Copy-Item -LiteralPath 'deploy/windows/VALIDATION.md' -Destination (Join-Path $OutputDirectory 'VALIDATION.md') -Force
     Copy-Item -LiteralPath 'deploy/windows/UPDATE-SETTINGS-RESTORE.md' -Destination (Join-Path $OutputDirectory 'UPDATE-SETTINGS-RESTORE.md') -Force
     Copy-Item -LiteralPath 'deploy/windows/DEVELOPMENT.md' -Destination (Join-Path $OutputDirectory 'DEVELOPMENT.md') -Force
-    $revision = (& git rev-parse HEAD).Trim()
-    @{ builtAt = [DateTime]::UtcNow.ToString('o'); sourceRevision = $revision; platform = 'windows-x64'; dirtySource = [bool](& git status --porcelain) } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'build-info.json') -Encoding UTF8
+    $builtWeb = (Resolve-Path -LiteralPath 'dist-web').Path
+    $indexFile = Get-Item -LiteralPath (Join-Path $builtWeb 'index.html')
+    $manifest = @{ assetVersion = $assetVersion; index = @{ sha256 = (Get-FileHash -LiteralPath $indexFile.FullName).Hash; bytes = $indexFile.Length }; assets = @(Get-ChildItem -LiteralPath (Join-Path $builtWeb 'assets') -Recurse -File | ForEach-Object { @{ path = '/' + $_.FullName.Substring($builtWeb.Length+1).Replace('\','/'); sha256 = (Get-FileHash -LiteralPath $_.FullName).Hash; bytes = $_.Length } }) }
+    [IO.File]::WriteAllText((Join-Path $OutputDirectory 'web-assets.json'),($manifest | ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+    @{ builtAt = [DateTime]::UtcNow.ToString('o'); sourceRevision = $revision; assetVersion = $assetVersion; platform = 'windows-x64'; dirtySource = [bool](& git status --porcelain) } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'build-info.json') -Encoding UTF8
+    & (Join-Path $PSScriptRoot 'Test-WebDeployment.ps1') -DeploymentDirectory $OutputDirectory
     Write-Host "Portable package: $OutputDirectory"
-} finally { $env:RUSTFLAGS = $previousRustFlags; Pop-Location }
+} finally { $env:RUSTFLAGS = $previousRustFlags; $env:SUCANVAS_WEB_ASSET_VERSION = $previousAssetVersion; Pop-Location }

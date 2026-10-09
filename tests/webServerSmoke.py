@@ -7,6 +7,7 @@ import http.cookiejar
 import http.server
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -26,10 +27,13 @@ PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4
 CLIENT_ID = 'smoke-client'
 
 class ComfyStub(http.server.BaseHTTPRequestHandler):
+    view_queries = []
     def log_message(self, *_): pass
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
-        if path == '/view': payload = PNG
+        if path == '/view':
+            self.view_queries.append(urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query))
+            payload = PNG
         elif path == '/queue': payload = json.dumps({'queue_running': [], 'queue_pending': []}).encode()
         elif path == '/history': payload = json.dumps({'smoke-prompt': {
             'prompt': [1, 'smoke-prompt', {'sampler': {'inputs': {'seed': 42}}}, {'client_id': CLIENT_ID}],
@@ -145,6 +149,9 @@ def main():
             return json.loads(body)['result']
         try:
             source_process = start(source)
+            html = request('/', anonymous=True)[1].decode()
+            favicon = re.search(r'<link\s+rel="icon"[^>]+href="([^"]+)"', html).group(1)
+            assert request(favicon, anonymous=True)[1] == (ROOT / 'src-tauri/icons/icon.ico').read_bytes()
             assert (source / 'data/app-lock.json').is_file()
             assert not (source / 'data/web-auth.json').exists()
             assert request('/api/settings', anonymous=True)[0] == 401
@@ -195,9 +202,18 @@ def main():
             assert request(url, anonymous=True)[0] == 401
             # Uploaded source downloads stream the retained bytes directly;
             # browser downloads do not need a server export directory.
-            status, downloaded, download_headers = request(url+'&download=true')
+            status, downloaded, download_headers = request(url+'&download=true&filename=test.png')
             assert status == 200 and downloaded == PNG
-            assert download_headers['Content-Disposition'] == 'attachment'
+            assert download_headers['Content-Disposition'] == 'attachment; filename="test.png"; filename*=UTF-8\'\'test.png', download_headers['Content-Disposition']
+            original_name = '原始图片.png'
+            renamed_headers = request(url+'&download=true&filename='+urllib.parse.quote(original_name))[2]
+            assert "filename*=UTF-8''"+urllib.parse.quote(original_name) in renamed_headers['Content-Disposition']
+            proxy_download = '/api/comfy/view?filename=source.png&type=output&download=true&downloadName='+urllib.parse.quote(original_name)
+            status, downloaded, proxy_headers = request(proxy_download)
+            assert status == 200 and downloaded == PNG
+            assert "filename*=UTF-8''"+urllib.parse.quote(original_name) in proxy_headers['Content-Disposition']
+            assert ComfyStub.view_queries[-1] == {'filename': ['source.png'], 'type': ['output']}
+            assert request(proxy_download, anonymous=True)[0] == 401
             assert request(url+'&download=true', anonymous=True)[0] == 401
             assert not any((source / 'downloads').iterdir())
             status, data, _ = request(url, headers={'Range': 'bytes=0-7'})
@@ -228,13 +244,13 @@ def main():
                 assert str(source) not in content
                 assert database.execute('SELECT preview_image_path FROM canvases WHERE id=?', [project]).fetchone()[0] == asset
             stop(source_process)
-            backup = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(source/'scripts/Backup-Web.ps1'), '-Destination', str(area/'backup')], capture_output=True, text=True)
+            backup = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(source/'scripts/Backup-Web.ps1'), '-Destination', str(source/'backup/script-backup')], capture_output=True, text=True)
             assert backup.returncode == 0, backup.stderr
             shutil.copytree(source, moved)
             config['listen'] = f'127.0.0.1:{port()}'
             config['publicUrl'] = f'http://{config["listen"]}'
             (moved / 'config.json').write_text(json.dumps(config), encoding='utf-8')
-            restore = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(moved/'scripts/Restore-Web.ps1'), '-BackupDirectory', str(area/'backup')], capture_output=True, text=True)
+            restore = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(moved/'scripts/Restore-Web.ps1'), '-BackupDirectory', str(moved/'backup/script-backup')], capture_output=True, text=True)
             assert restore.returncode == 0, restore.stderr
             base = config['publicUrl']
             moved_process = start(moved)
@@ -251,10 +267,22 @@ def main():
             assert all(module['workflowPath'].startswith('sucanvas://workflow-modules/') for module in moved_workflows)
             large_setting = json.dumps({'label': '桌面迁移预设', 'payload': '设置' * 40_000}, ensure_ascii=False)
             exported_settings = {'infinite-canvas:theme': 'light', 'infinite-canvas:restore-test-presets': large_setting, 'infinite-canvas:comfy-server-url': 'http://old-server.invalid', 'infinite-canvas:comfy-input-root': 'Z:/old/input'}
-            archive = invoke('export_app_backup', {'destinationPath': 'sucanvas-export://smoke/full.sucanvas-backup', 'frontendSettings': exported_settings})
+            backup_name = 'SuCanvas-软件备份.sucanvas-backup'
+            archive = invoke('export_app_backup', {'destinationPath': 'sucanvas-export://smoke/'+backup_name, 'frontendSettings': exported_settings})
             assert archive['path'].startswith('sucanvas-export://')
-            assert request('/api/resource?resource='+urllib.parse.quote(archive['path'], safe=''))[0] == 200
-            invoke('stage_app_backup_restore', {'bundlePath': archive['path']})
+            status, backup_bytes, backup_headers = request('/api/resource?resource='+urllib.parse.quote(archive['path'], safe='')+'&download=true')
+            assert status == 200 and backup_bytes.startswith(b'PK')
+            disposition = backup_headers['Content-Disposition']
+            assert 'filename="SuCanvas-____.sucanvas-backup"' in disposition
+            assert "filename*=UTF-8''"+urllib.parse.quote(backup_name, safe='') in disposition
+            # Import the downloaded bytes through the same upload flow used on
+            # another Web server, with the filename supplied by the response.
+            boundary = 'backup-smoke-boundary'
+            backup_upload = (f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="{backup_name}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode()+backup_bytes+f'\r\n--{boundary}--\r\n'.encode())
+            req = urllib.request.Request(base+'/api/upload', data=backup_upload, headers={'Origin': base, 'Content-Type': f'multipart/form-data; boundary={boundary}'})
+            with opener.open(req) as response: uploaded_backup = json.load(response)['paths'][0]
+            assert uploaded_backup.endswith(backup_name)
+            invoke('stage_app_backup_restore', {'bundlePath': uploaded_backup})
             stop(moved_process)
             moved_process = start(moved)
             assert request('/api/auth/login', {'password': password})[0] == 200
@@ -273,7 +301,7 @@ def main():
             assert request('/api/auth/login', {'password': password})[0] == 200
             assert json.loads(request('/api/settings')[1])['infinite-canvas:restore-test-presets'] == large_setting
             desktop_archive = moved / 'downloads/smoke/desktop.sucanvas-backup'
-            desktop_backup_fixture(moved / 'downloads/smoke/full.sucanvas-backup', desktop_archive, area / 'desktop.sqlite3', initial_lock)
+            desktop_backup_fixture(moved / 'downloads/smoke' / backup_name, desktop_archive, area / 'desktop.sqlite3', initial_lock)
             invoke('stage_app_backup_restore', {'bundlePath': 'sucanvas-export://smoke/desktop.sucanvas-backup'})
             stop(moved_process)
             moved_process = start(moved)
@@ -286,7 +314,7 @@ def main():
             assert request(url)[1] == PNG
             assert request('/api/auth/logout', {}, method='POST')[0] == 200
             assert request(url)[0] == 401
-            print('PASS: unified application lock, anonymous API rejection, live password change, old session revocation, CSRF, CRUD, upload, media ranges, file boundaries, SSE, external API, ComfyUI output retention, workflows, Web/desktop backup settings before canvas load, repeated restart and relocation')
+            print('PASS: unified application lock, anonymous API rejection, live password change, old session revocation, CSRF, CRUD, upload, original Chinese download names, ComfyUI proxy download names, application favicon, media ranges, file boundaries, SSE, external API, ComfyUI output retention, workflows, Web/desktop backup settings before canvas load, repeated restart and relocation')
         finally:
             stop(source_process); stop(moved_process)
             comfy.shutdown(); comfy.server_close()

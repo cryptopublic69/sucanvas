@@ -9,9 +9,17 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async ({ mode, command }) => {
   const webDevelopment = mode === "web" && command === "serve";
   const webEnvironment = loadEnv(mode, ".", "SUCANVAS_WEB_");
+  const assetVersion = webEnvironment.SUCANVAS_WEB_ASSET_VERSION || new Date().toISOString().replace(/\D/g, "");
+  if (mode === "web" && command === "build" && !/^[A-Za-z0-9_-]+$/.test(assetVersion)) throw new Error("Invalid Web asset version");
   const webBackend = webEnvironment.SUCANVAS_WEB_BACKEND || "http://127.0.0.1:18742";
   return ({
-  plugins: [react(), ...(webDevelopment ? [webDevOriginGuard()] : [])],
+  plugins: [react(), ...(mode === "web" ? [{
+    name: "web-app-icon",
+    transformIndexHtml: {
+      order: "pre" as const,
+      handler: (html: string) => html.replace("</head>", '<link rel="icon" type="image/x-icon" href="/src-tauri/icons/icon.ico" />\n  </head>'),
+    },
+  }] : []), ...(webDevelopment ? [webDevOriginGuard()] : [])],
   define: webDevelopment ? { "import.meta.env.SUCANVAS_WEB_DEV_BACKEND": JSON.stringify(new URL(webBackend).origin) } : {},
   resolve: mode === "web" ? {
     alias: Object.fromEntries([
@@ -44,6 +52,7 @@ export default defineConfig(async ({ mode, command }) => {
     },
   },
   build: {
+    assetsDir: mode === "web" ? `assets/${assetVersion}` : "assets",
     rollupOptions: {
       output: {
         manualChunks(id) {

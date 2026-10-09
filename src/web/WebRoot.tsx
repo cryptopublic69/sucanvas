@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { LockKeyhole } from "lucide-react";
 import App from "../App";
 import { closeEvents, request } from "./bridge";
 import { flushSettings, loadSettings } from "./settings";
@@ -26,7 +27,7 @@ export default function WebRoot() {
   }
   async function logout() { await flushSettings(); await request("/api/auth/logout", { method: "POST" }); closeEvents(); setReady(false); }
   if (checking) return <main className="app-lock-screen is-loading"><p>正在连接画布…</p></main>;
-  return <>{ready ? <><App /><button className="web-logout" type="button" onClick={() => void logout().catch((error) => setError(String(error)))}>退出并锁定</button></>
+  return <>{ready ? <><App /><button className="web-logout" type="button" title="退出并锁定" aria-label="退出并锁定" onClick={() => void logout().catch((error) => setError(String(error)))}><LockKeyhole size={16} aria-hidden="true" /></button></>
     : <AppLockScreen onUnlock={() => void unlock()} />}
     {error && <div className="web-error" role="alert">{error}<button type="button" onClick={() => setError("")} aria-label="关闭提示">×</button></div>}
   </>;
