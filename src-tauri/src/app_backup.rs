@@ -437,10 +437,12 @@ pub fn stage_restore(data_dir: &Path, bundle_path: &Path) -> Result<RestoreSumma
         if !manifest.source_data_dir.trim().is_empty() {
             restored_database
                 .rewrite_asset_paths(
-                    &PathBuf::from(&manifest.source_data_dir).join("assets"),
-                    &data_dir.join("assets"),
+                    // Backup data also contains resized inputs, uploads and
+                    // workflow files referenced by generation snapshots.
+                    &PathBuf::from(&manifest.source_data_dir),
+                    data_dir,
                 )
-                .map_err(|error| format!("更新恢复素材路径失败：{error}"))?;
+                .map_err(|error| format!("更新恢复数据路径失败：{error}"))?;
         }
         drop(restored_database);
         fs::write(
@@ -615,9 +617,15 @@ mod tests {
         let source_data = root.join("source").join("data");
         let target_data = root.join("target").join("data");
         let source_assets = source_data.join("assets");
+        let source_resized_image = source_data.join("temp/image-resize/input.png");
+        let source_upload = source_data.join("uploads/reference.wav");
         fs::create_dir_all(&source_assets).unwrap();
+        fs::create_dir_all(source_resized_image.parent().unwrap()).unwrap();
+        fs::create_dir_all(source_upload.parent().unwrap()).unwrap();
         fs::create_dir_all(source_data.join("workflow-modules").join("module-one")).unwrap();
         fs::write(source_assets.join("image.png"), b"image-bytes").unwrap();
+        fs::write(&source_resized_image, b"resized-image").unwrap();
+        fs::write(&source_upload, b"audio-reference").unwrap();
         fs::write(
             source_data
                 .join("workflow-modules")
@@ -636,7 +644,13 @@ mod tests {
                 kind: Some("image".to_owned()),
                 title: "Portable image".to_owned(),
                 content: json!({
-                    "assetPath": source_assets.join("image.png").to_string_lossy()
+                    "assetPath": source_assets.join("image.png").to_string_lossy(),
+                    "generationSnapshot": {
+                        "imagePaths": [source_resized_image.to_string_lossy()],
+                        "audioPaths": [source_upload.to_string_lossy()],
+                        "sourceWorkflowPath": source_data.join("workflow-modules/module-one/manifest.json").to_string_lossy(),
+                        "externalPath": root.join("external/not-backed-up.png").to_string_lossy(),
+                    }
                 }),
                 source: Some("test".to_owned()),
                 request_id: Some("portable-backup-node".to_owned()),
@@ -683,6 +697,35 @@ mod tests {
                 .join("assets")
                 .join("image.png")
                 .to_string_lossy())
+        );
+        let snapshot = &workspace.nodes[0].content["generationSnapshot"];
+        assert_eq!(
+            snapshot["imagePaths"][0],
+            json!(target_data
+                .join("temp/image-resize/input.png")
+                .to_string_lossy())
+        );
+        assert_eq!(
+            snapshot["audioPaths"][0],
+            json!(target_data.join("uploads/reference.wav").to_string_lossy())
+        );
+        assert_eq!(
+            snapshot["sourceWorkflowPath"],
+            json!(target_data
+                .join("workflow-modules/module-one/manifest.json")
+                .to_string_lossy())
+        );
+        assert_eq!(
+            snapshot["externalPath"],
+            json!(root.join("external/not-backed-up.png").to_string_lossy())
+        );
+        assert_eq!(
+            fs::read(pending.join("temp/image-resize/input.png")).unwrap(),
+            b"resized-image"
+        );
+        assert_eq!(
+            fs::read(pending.join("uploads/reference.wav")).unwrap(),
+            b"audio-reference"
         );
 
         drop(restored_database);
