@@ -30,7 +30,8 @@ if ($DeploymentDirectory) {
     $deployment = Get-Content -LiteralPath (Join-Path $deploymentRoot 'config.json') -Encoding UTF8 -Raw | ConvertFrom-Json
     if (-not $CredentialsFile) {
         $dataRoot = if ([IO.Path]::IsPathRooted($deployment.dataDirectory)) { $deployment.dataDirectory } else { Join-Path $deploymentRoot $deployment.dataDirectory }
-        $CredentialsFile = Join-Path $dataRoot 'web-auth.json'
+        $CredentialsFile = Join-Path $dataRoot 'app-lock.json'
+        if (-not (Test-Path -LiteralPath $CredentialsFile)) { $CredentialsFile = Join-Path $dataRoot 'web-auth.json' }
     }
 }
 foreach ($directory in @($runtime, (Join-Path $runtime 'data'), (Join-Path $runtime 'web'))) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
@@ -48,10 +49,12 @@ if (-not (Test-Path -LiteralPath $configPath)) {
     $configuration = Get-Content -LiteralPath $configPath -Encoding UTF8 -Raw | ConvertFrom-Json
     if ($configuration.listen -ne "127.0.0.1:$BackendPort" -or $configuration.publicUrl -ne $backendUrl -or $configuration.dataDirectory -ne 'data') { throw 'Existing local config differs from the requested port or data directory. Adjust it deliberately before restarting.' }
 }
-$authPath = Join-Path $runtime 'data/web-auth.json'
+$authPath = Join-Path $runtime 'data/app-lock.json'
 if (-not (Test-Path -LiteralPath $authPath)) {
-    if (-not $CredentialsFile -or -not (Test-Path -LiteralPath $CredentialsFile)) { throw 'For first initialization, provide -DeploymentDirectory or -CredentialsFile to reuse an existing login password hash.' }
-    Copy-Item -LiteralPath $CredentialsFile -Destination $authPath
+    $legacyAuth = Join-Path $runtime 'data/web-auth.json'
+    if (Test-Path -LiteralPath $legacyAuth) { Copy-Item -LiteralPath $legacyAuth -Destination $authPath }
+    elseif ($CredentialsFile -and (Test-Path -LiteralPath $CredentialsFile)) { Copy-Item -LiteralPath $CredentialsFile -Destination $authPath }
+    else { throw 'For first initialization, provide -DeploymentDirectory or -CredentialsFile to reuse an application lock password hash.' }
 }
 # Browsers use Vite. This private backend placeholder satisfies its startup check.
 '<!doctype html><title>SuCanvas local development backend</title>' | Set-Content -LiteralPath (Join-Path $runtime 'web/index.html') -Encoding UTF8

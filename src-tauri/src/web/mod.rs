@@ -99,31 +99,33 @@ pub async fn run() -> Result<(), String> {
         .open(root.join("server.lock"))
         .map_err(|e| e.to_string())?;
     lock.try_lock_exclusive().map_err(|_| "This deployment is already running. Stop it before changing its password or restoring a backup.".to_owned())?;
-    let auth_path = data.join("web-auth.json");
+    let auth_path = data.join("app-lock.json");
     if set_password {
         let mut password = String::new();
         std::io::stdin()
             .read_line(&mut password)
             .map_err(|e| e.to_string())?;
         auth::write_password(&auth_path, password.trim_end_matches(['\r', '\n']))?;
-        println!("Login password updated.");
+        println!("Application lock password updated.");
         return Ok(());
     }
-    let auth = Arc::new(auth::Auth::read(&auth_path)?);
+    auth::migrate_credentials(&data)?;
     let pending = app_backup::pending_directory(&data).map_err(|e| e.to_string())?;
     if pending.exists() {
         if !pending.join("infinite-canvas.sqlite3").is_file() {
             return Err("Pending restore is incomplete".into());
         }
+        // Preserve access credentials before replacing the active directory.
+        std::fs::copy(&auth_path, pending.join("app-lock.json")).map_err(|e| e.to_string())?;
         let previous = root.join(format!("data.before-restore-{}", uuid::Uuid::new_v4()));
         std::fs::rename(&data, &previous).map_err(|e| e.to_string())?;
         if let Err(error) = std::fs::rename(&pending, &data) {
             let _ = std::fs::rename(&previous, &data);
             return Err(error.to_string());
         }
-        // Server login credentials are independent of imported desktop backups.
-        std::fs::copy(previous.join("web-auth.json"), &auth_path).map_err(|e| e.to_string())?;
     }
+    auth::migrate_credentials(&data)?;
+    let auth = Arc::new(auth::Auth::read(&auth_path)?);
     // Restore settings before accepting requests or mounting the canvas. Web
     // clients must never have to flush imported settings while reloading.
     settings::restore_frontend_settings(&data)?;
@@ -383,6 +385,9 @@ async fn events(State(state): State<WebState>, headers: HeaderMap) -> impl IntoR
                 }
                 match tokio::time::timeout(Duration::from_secs(15), receiver.recv()).await {
                     Ok(Ok(mut value)) => {
+                        if !state.auth.authenticated(&headers) {
+                            return None;
+                        }
                         rpc::normalize_result(&state.clone().connection_snapshot(), &mut value);
                         return Some((
                             Ok::<_, Infallible>(Event::default().data(value.to_string())),
@@ -391,12 +396,15 @@ async fn events(State(state): State<WebState>, headers: HeaderMap) -> impl IntoR
                     }
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                        if !state.auth.authenticated(&headers) {
+                            return None;
+                        }
                         return Some((
                             Ok(Event::default().data(
                                 json!({"event": "canvas://resync", "payload": null}).to_string(),
                             )),
                             (receiver, state, headers),
-                        ))
+                        ));
                     }
                     Err(_) => {
                         return Some((

@@ -48,7 +48,7 @@ export function AppLockScreen({ onUnlock }: { onUnlock: () => void }) {
         </div>
         <span className="app-lock-eyebrow">SUCANVAS</span>
         <h1>应用已锁定</h1>
-        <p>输入本机应用锁密码以继续。</p>
+        <p>{import.meta.env.MODE === "web" ? "输入应用锁密码以访问画布。" : "输入本机应用锁密码以继续。"}</p>
         <label>
           密码
           <div className="app-lock-screen-input">
@@ -71,7 +71,7 @@ export function AppLockScreen({ onUnlock }: { onUnlock: () => void }) {
           </div>
         </label>
         <div className={`app-lock-screen-feedback ${error ? "is-error" : ""}`} aria-live="polite">
-          {error || "密码只在本机验证"}
+          {error || (import.meta.env.MODE === "web" ? "解锁后可访问项目、素材与生成服务" : "密码只在本机验证")}
         </div>
         <button className="app-lock-unlock" type="submit" disabled={!password || busy}>
           {busy ? "正在验证…" : "解锁"}

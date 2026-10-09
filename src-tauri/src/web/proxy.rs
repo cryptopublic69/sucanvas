@@ -131,10 +131,12 @@ async fn relay(
         tokio::select! {
             _ = heartbeat.tick() => { if !state.auth.authenticated(&headers) { break; } },
             message = browser.recv() => {
+                if !state.auth.authenticated(&headers) { break; }
                 let message = match message { Some(Ok(Message::Text(value))) => tokio_tungstenite::tungstenite::Message::Text(value.to_string().into()), Some(Ok(Message::Binary(value))) => tokio_tungstenite::tungstenite::Message::Binary(value), Some(Ok(Message::Ping(value))) => tokio_tungstenite::tungstenite::Message::Ping(value), Some(Ok(Message::Pong(value))) => tokio_tungstenite::tungstenite::Message::Pong(value), _ => break };
                 if comfy.send(message).await.is_err() { break; }
             },
             message = comfy.next() => {
+                if !state.auth.authenticated(&headers) { break; }
                 let message = match message { Some(Ok(tokio_tungstenite::tungstenite::Message::Text(value))) => Message::Text(value.to_string().into()), Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(value))) => Message::Binary(value), Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(value))) => Message::Ping(value), Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(value))) => Message::Pong(value), _ => break };
                 if browser.send(message).await.is_err() { break; }
             }

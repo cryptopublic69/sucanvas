@@ -228,6 +228,19 @@ pub async fn invoke(
     Json(mut input): Json<Request>,
 ) -> Response {
     let state = state.connection_snapshot();
+    if command == "disable_app_lock" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Web 应用锁同时保护网络接口，不能关闭；可以在设置中修改密码。"})),
+        )
+            .into_response();
+    }
+    if command == "set_app_lock_password" {
+        return match argument(&input.args, "input") {
+            Ok(password) => super::auth::change_password(state, password).await,
+            Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response(),
+        };
+    }
     remove_unused_workflow_fallback(&command, &mut input.args);
     if command == "capture_video_poster" {
         if let Some(source) = input.args.get_mut("source") {

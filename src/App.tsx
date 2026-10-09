@@ -2897,6 +2897,14 @@ function CanvasWorkspace() {
       : "";
     const label = media.kind === "image" ? "图片" : media.kind === "audio" ? "音频" : "视频";
     setCanvasContextMenu(null);
+    if (import.meta.env.MODE === "web") {
+      try {
+        const { download } = await import("./web/bridge");
+        download(sourcePath, defaultPath.split(/[\\/]/).pop() || "素材");
+        setNotice(`${label}下载已开始`);
+      } catch (error) { reportError(error); }
+      return;
+    }
     let destinationPath: string | null;
     try {
       destinationPath = await saveDialog({
@@ -11747,7 +11755,8 @@ export default function App() {
     setStatusError("");
     try {
       const status = await invoke<AppLockStatus>("get_app_lock_status");
-      setAccessState(status.enabled ? "locked" : "unlocked");
+      // WebRoot has already established the server session through AppLockScreen.
+      setAccessState(import.meta.env.MODE === "web" || !status.enabled ? "unlocked" : "locked");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setStatusError(message);

@@ -1,6 +1,7 @@
 """HTTP and relocation checks in disposable directories. No browser automation."""
 from pathlib import Path
 import base64
+import argparse
 import contextlib
 import http.cookiejar
 import http.server
@@ -61,7 +62,7 @@ def start(directory):
 def stop(process):
     if process and process.poll() is None: process.terminate(); process.wait(timeout=10)
 
-def desktop_backup_fixture(original, destination, database_file):
+def desktop_backup_fixture(original, destination, database_file, desktop_lock):
     """Match desktop backups: absolute asset paths and no Web-specific files."""
     desktop_data = r'D:\Desktop\SuCanvasData\data'
     def absolute_assets(value):
@@ -83,6 +84,9 @@ def desktop_backup_fixture(original, destination, database_file):
                 if entry.filename in {'data/web-auth.json', 'data/web-settings.json', 'data/web-integration-token', 'data/infinite-canvas.sqlite3-wal', 'data/infinite-canvas.sqlite3-shm'}: continue
                 if entry.filename == 'data/infinite-canvas.sqlite3':
                     target.write(database_file, entry.filename)
+                elif entry.filename == 'data/app-lock.json':
+                    # A desktop backup may contain a different application lock.
+                    target.writestr(entry, desktop_lock)
                 elif entry.filename == 'backup-manifest.json':
                     manifest = json.loads(source.read(entry))
                     manifest['sourceDataDir'] = desktop_data
@@ -90,6 +94,10 @@ def desktop_backup_fixture(original, destination, database_file):
                 else: target.writestr(entry, source.read(entry))
 
 def main():
+    global PACKAGE
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--package', type=Path, default=PACKAGE)
+    PACKAGE = parser.parse_args().package.resolve()
     assert (PACKAGE / 'SuCanvasServer.exe').is_file(), 'Build the portable package first'
     test_area = ROOT / '.web-dev'
     test_area.mkdir(exist_ok=True)
@@ -116,16 +124,17 @@ def main():
         password = secrets.token_urlsafe(24)
         init = subprocess.run([str(source / 'SuCanvasServer.exe'), '--config', str(source / 'config.json'), '--set-password'], input=password+'\n', text=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
         assert init.returncode == 0, init.stderr
+        initial_lock = (source / 'data/app-lock.json').read_bytes()
         base = config['publicUrl']
         jar = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-        def request(path, data=None, *, method=None, origin=None, anonymous=False, headers=None):
+        def request(path, data=None, *, method=None, origin=None, anonymous=False, headers=None, client=None):
             body = json.dumps(data).encode() if data is not None else None
             values = {'Origin': origin or base}
             if body is not None: values['Content-Type'] = 'application/json'
             values.update(headers or {})
             req = urllib.request.Request(base+path, data=body, method=method, headers=values)
-            client = urllib.request.build_opener() if anonymous else opener
+            client = client or (urllib.request.build_opener() if anonymous else opener)
             try:
                 response = client.open(req, timeout=15)
                 with response: return response.status, response.read(), response.headers
@@ -136,11 +145,36 @@ def main():
             return json.loads(body)['result']
         try:
             source_process = start(source)
+            assert (source / 'data/app-lock.json').is_file()
+            assert not (source / 'data/web-auth.json').exists()
             assert request('/api/settings', anonymous=True)[0] == 401
             assert request('/api/invoke/load_workspace', {'args': {}}, anonymous=True)[0] == 401
+            assert request('/api/invoke/get_app_lock_status', {'args': {}}, anonymous=True)[0] == 401
+            assert request('/api/events', anonymous=True)[0] == 401
+            assert request('/v1/health', anonymous=True)[0] == 401
             assert request('/api/auth/login', {'password': password}, origin='https://untrusted.invalid')[0] == 403
+            assert request('/api/auth/login', {'password': 'wrong-password'})[0] == 401
             assert request('/api/auth/login', {'password': password})[0] == 200
             assert all(cookie.has_nonstandard_attr('HttpOnly') for cookie in jar)
+            assert invoke('get_app_lock_status')['enabled'] is True
+            assert request('/api/invoke/disable_app_lock', {'args': {'password': password}})[0] == 400
+            second = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+            assert request('/api/auth/login', {'password': password}, client=second)[0] == 200
+            second_events = second.open(urllib.request.Request(base+'/api/events'), timeout=10)
+            assert json.loads(second_events.readline().decode().removeprefix('data:').strip())['event'] == 'web://ready'
+            assert request('/api/invoke/set_app_lock_password', {'args': {'input': {'currentPassword': 'wrong-password', 'newPassword': 'next-password'}}})[0] == 400
+            assert request('/api/auth/session', client=second)[0] == 200
+            old_password, password = password, secrets.token_urlsafe(24)
+            invoke('set_app_lock_password', {'input': {'currentPassword': old_password, 'newPassword': password}})
+            assert request('/v1/nodes', {'kind': 'text', 'title': 'Revoked SSE check', 'content': {'text': 'private'}, 'source': 'codex'})[0] == 201
+            # The revoked stream must close without delivering this private event.
+            assert second_events.read() == b'\n'
+            second_events.close()
+            assert request('/api/auth/session')[0] == 200
+            assert request('/api/auth/session', client=second)[0] == 401
+            assert request('/api/settings', client=second)[0] == 401
+            assert request('/api/auth/login', {'password': old_password}, client=second)[0] == 401
+            assert request('/api/auth/login', {'password': password}, client=second)[0] == 200
             project = invoke('create_project', {'input': {'name': 'Web migration smoke'}})['canvas']['id']
             invoke('load_workspace', {'canvasId': project})
             workflows = invoke('list_workflow_modules', {'includeDeleted': False})
@@ -159,9 +193,17 @@ def main():
             url = '/api/resource?resource='+urllib.parse.quote(asset, safe='')
             assert request(url)[1] == PNG
             assert request(url, anonymous=True)[0] == 401
+            # Uploaded source downloads stream the retained bytes directly;
+            # browser downloads do not need a server export directory.
+            status, downloaded, download_headers = request(url+'&download=true')
+            assert status == 200 and downloaded == PNG
+            assert download_headers['Content-Disposition'] == 'attachment'
+            assert request(url+'&download=true', anonymous=True)[0] == 401
+            assert not any((source / 'downloads').iterdir())
             status, data, _ = request(url, headers={'Range': 'bytes=0-7'})
             assert status == 206 and data == PNG[:8]
             assert request('/api/resource?resource=sucanvas%3A%2F%2Fweb-auth.json')[0] == 404
+            assert request('/api/resource?resource=sucanvas%3A%2F%2Fapp-lock.json')[0] == 404
             assert request('/api/resource?resource=sucanvas%3A%2F%2Fassets%2F..%2Fweb-auth.json')[0] == 400
             assert request('/api/invoke/import_media', {'args': {'path': r'C:\Windows\win.ini', 'canvasId': project, 'x': 0, 'y': 0}})[0] == 400
             assert request('/api/settings', {'infinite-canvas:smoke': 'retained', 'unrelated': 'ignored'}, method='PUT')[0] == 200
@@ -231,7 +273,7 @@ def main():
             assert request('/api/auth/login', {'password': password})[0] == 200
             assert json.loads(request('/api/settings')[1])['infinite-canvas:restore-test-presets'] == large_setting
             desktop_archive = moved / 'downloads/smoke/desktop.sucanvas-backup'
-            desktop_backup_fixture(moved / 'downloads/smoke/full.sucanvas-backup', desktop_archive, area / 'desktop.sqlite3')
+            desktop_backup_fixture(moved / 'downloads/smoke/full.sucanvas-backup', desktop_archive, area / 'desktop.sqlite3', initial_lock)
             invoke('stage_app_backup_restore', {'bundlePath': 'sucanvas-export://smoke/desktop.sucanvas-backup'})
             stop(moved_process)
             moved_process = start(moved)
@@ -244,7 +286,7 @@ def main():
             assert request(url)[1] == PNG
             assert request('/api/auth/logout', {}, method='POST')[0] == 200
             assert request(url)[0] == 401
-            print('PASS: authentication, CSRF, CRUD, upload, media ranges, file boundaries, SSE, external API, ComfyUI output retention, workflows, Web/desktop backup settings before canvas load, repeated restart and relocation')
+            print('PASS: unified application lock, anonymous API rejection, live password change, old session revocation, CSRF, CRUD, upload, media ranges, file boundaries, SSE, external API, ComfyUI output retention, workflows, Web/desktop backup settings before canvas load, repeated restart and relocation')
         finally:
             stop(source_process); stop(moved_process)
             comfy.shutdown(); comfy.server_close()

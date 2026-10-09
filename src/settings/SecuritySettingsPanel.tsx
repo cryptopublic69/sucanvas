@@ -44,8 +44,8 @@ export function SecuritySettingsPanel({
       <div className="app-lock-settings-heading">
         <span className="app-lock-settings-icon"><LockKeyhole size={16} /></span>
         <div>
-          <strong id="app-lock-settings-title">本机应用锁</strong>
-          <small>密码经 Argon2 加盐哈希后保存在本机，不会保存明文。</small>
+          <strong id="app-lock-settings-title">{import.meta.env.MODE === "web" ? "应用锁与访问密码" : "本机应用锁"}</strong>
+          <small>{import.meta.env.MODE === "web" ? "密码经 Argon2 加盐哈希保存在服务器，同时保护画布与网络接口；修改后其他访问会话失效。" : "密码经 Argon2 加盐哈希后保存在本机，不会保存明文。"}</small>
         </div>
         <span className={`app-lock-status ${appLockEnabled ? "is-enabled" : ""}`}>
           {!appLockStatusReady ? "读取中" : appLockEnabled ? "已启用" : "未启用"}
@@ -124,7 +124,7 @@ export function SecuritySettingsPanel({
             </p>
           )}
           <div className="app-lock-actions">
-            {appLockEnabled && (
+            {appLockEnabled && import.meta.env.MODE !== "web" && (
               <button
                 type="button"
                 className="app-lock-disable"

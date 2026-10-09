@@ -20,7 +20,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/web/Start-WebDev.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/web/Stop-WebDev.ps1
 ```
 
-第一次初始化后不需要再指定服务器目录，直接运行 `Start-WebDev.ps1` 即可。若没有现有部署，可用 `-CredentialsFile` 指定已有的 `web-auth.json`，用 `-FfmpegPath` 指定 FFmpeg。默认优先使用已有发布目录中的 FFmpeg，其次查找 PATH。
+第一次初始化后不需要再指定服务器目录，直接运行 `Start-WebDev.ps1` 即可。若没有现有部署，可用 `-CredentialsFile` 指定已有的 `app-lock.json`（兼容旧 `web-auth.json`），用 `-FfmpegPath` 指定 FFmpeg。默认优先使用已有发布目录中的 FFmpeg，其次查找 PATH。
+
+Web 只使用一套应用锁密码。本机已有应用锁时保留它；旧开发环境只有 Web 登录密码时自动沿用并迁移。页面使用原应用锁解锁界面，密码同时保护后端接口；设置中可改密码，不能关闭 Web 访问保护。迁移前保存密码配置备份，人工确认升级后的解锁与改密码行为。
 
 ## 保存源码后的效果
 

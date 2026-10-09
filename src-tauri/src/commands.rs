@@ -122,7 +122,7 @@ fn password_character_count(password: &str) -> usize {
     password.chars().count()
 }
 
-fn validate_new_app_lock_password(password: &str) -> Result<(), String> {
+pub(crate) fn validate_new_app_lock_password(password: &str) -> Result<(), String> {
     let length = password_character_count(password);
     if length < 4 {
         return Err("新密码至少需要 4 个字符".to_owned());
@@ -133,7 +133,7 @@ fn validate_new_app_lock_password(password: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn hash_app_lock_password(password: &str) -> Result<String, String> {
+pub(crate) fn hash_app_lock_password(password: &str) -> Result<String, String> {
     let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
         .map_err(|error| format!("无法生成密码盐：{error}"))?;
     Argon2::default()

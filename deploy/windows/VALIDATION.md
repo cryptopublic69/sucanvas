@@ -4,6 +4,7 @@
 
 ## 已完成
 
+- 应用锁统一回归：Web 和桌面前端构建、131 项 Rust server 测试与 85 项 JavaScript 测试通过；隔离 HTTP 验证通过。覆盖旧 Web 密码的 snake_case 字段迁移、已有应用锁优先、未解锁接口拒绝、实时改密码、旧会话失效、旧 SSE 不再发送数据，以及导入不同应用锁密码的桌面备份后仍保留服务器当前密码。使用开发 EXE 和隔离目录，不修改正式部署或本机用户项目；页面交互仍待人工确认。
 - Web 与桌面前端分别构建成功；Web 发布包使用独立 Rust server feature 和静态 C runtime。
 - JavaScript 回归测试：68 项通过。Rust server 单元测试：118 项通过。
 - 桌面 Rust 单元测试：113 项通过。本机测试 EXE 最初因缺少 Common Controls v6 manifest 返回 `0xc0000139`；只给工作目录中的测试 EXE 注入该 manifest 后运行成功，未修改现有桌面安装。

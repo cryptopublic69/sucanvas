@@ -19,7 +19,7 @@ export function reportWebError(error: unknown) {
 }
 export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, { credentials: "same-origin", ...options });
-  if (response.status === 401 && path !== "/api/auth/session") window.dispatchEvent(new Event("sucanvas:session-expired"));
+  if (response.status === 401 && !["/api/auth/session", "/api/auth/login"].includes(path)) window.dispatchEvent(new Event("sucanvas:session-expired"));
   if (!response.ok) {
     const text = await response.text();
     let message = text || `请求失败 (${response.status})`;
@@ -34,6 +34,13 @@ function connectEvents(): Promise<void> {
   eventReady = new Promise<void>((resolve, reject) => {
     const timeout = window.setTimeout(() => { reject(new Error("无法连接任务通知服务")); closeEvents(); }, 15000);
     events!.onopen = () => { window.clearTimeout(timeout); resolve(); };
+    events!.onerror = () => {
+      // SSE reconnects after a restart or revocation. Lock the UI only when
+      // the server confirms expiration; a network interruption may recover.
+      void fetch("/api/auth/session", { credentials: "same-origin" }).then((response) => {
+        if (response.status === 401) window.dispatchEvent(new Event("sucanvas:session-expired"));
+      }).catch(() => {});
+    };
     events!.onmessage = (message) => {
       const value = webApiUrls(JSON.parse(message.data), devBackend, window.location.origin) as { event: string; payload: unknown };
       if (value.event.startsWith("channel:")) channels.get(value.event.slice(8))?.onmessage(value.payload);
@@ -51,6 +58,10 @@ export class Channel<T> {
   toJSON() { return { __webChannel: this.id }; }
 }
 export async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+  if (command === "verify_app_lock_password") {
+    await request("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: args.password }) });
+    return true as T;
+  }
   const channel = args.onSubmitted as Channel<unknown> | undefined;
   if (command.startsWith("submit_comfyui_")) await (await import("./settings")).flushSettings();
   if (channel) await connectEvents();

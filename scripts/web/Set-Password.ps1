@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $deploymentRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$secret = Read-Host 'New login password (12-256 characters)' -AsSecureString
+$secret = Read-Host 'New application lock password (4-128 characters)' -AsSecureString
 $confirm = Read-Host 'Repeat password' -AsSecureString
 $first = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
 $second = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($confirm)

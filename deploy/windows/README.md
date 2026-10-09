@@ -31,7 +31,7 @@ SuCanvas-Web/
 
 ## 首次启动和人工测试
 
-在部署包目录运行以下命令。密码通过隐藏输入传给程序，配置中保存 Argon2 密码哈希。
+在部署包目录运行以下命令。密码通过隐藏输入传给程序，Argon2 密码哈希保存在 data/app-lock.json；这是网页应用锁与网络访问共同使用的唯一密码。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Set-Password.ps1
@@ -68,7 +68,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Start-Web.ps1
 
 Web 版预览下方的媒体按钮为“下载视频／下载图片”，与右键下载使用同一路径。已保存素材从画布服务器下载；从桌面备份导入的旧生成结果通过 ComfyUI 代理下载，不要求输出映射目录。浏览器按其下载设置选择保存位置，Web 版不会打开服务器的 Windows 资源管理器。
 
-浏览器设置会同步到 `data/web-settings.json`，包含预设和任务恢复记录；当前版本按个人单用户设计，同一时间建议使用一个编辑窗口，多个窗口的设置修改采用最后保存的版本。服务器登录独立于桌面“应用锁”。
+浏览器设置会同步到 `data/web-settings.json`，包含预设和任务恢复记录；当前版本按个人单用户设计，同一时间建议使用一个编辑窗口，多个窗口的设置修改采用最后保存的版本。
+
+Web 使用原应用锁界面解锁，输入一次密码后由服务器建立访问会话，项目、上传、素材下载、生成接口和事件连接均检查会话。刷新网页时有效会话继续使用；退出并锁定、会话过期或服务器重启后需重新解锁。外部工具的 `/v1` API 仍使用独立 Bearer 令牌授权。
+
+升级时优先使用已有 `data/app-lock.json` 的应用锁密码；没有应用锁配置时，自动沿用旧 Web 登录密码，将 `web-auth.json` 迁移并归档为 `web-auth.before-app-lock-*.json`。旧密码不会同时作为第二套密码继续使用。应用锁配置损坏或没有任何密码配置时，服务拒绝启动，可停止服务后运行 `Set-Password.ps1` 重设。
+
+网页应用锁设置可修改密码，使用与桌面版相同的 4–128 字符规则。修改后其他会话立即失效，当前修改窗口获得新会话。Web 应用锁必须保持启用，网页不提供关闭按钮，接口也拒绝关闭请求；桌面版仍可关闭本机应用锁。
 
 ## 停止、备份和迁移
 
@@ -87,9 +93,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Backup-Web.ps1 -Dest
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Restore-Web.ps1 -BackupDirectory E:\Backups\SuCanvas-20261009
 ```
 
-恢复保留目标服务器的 config，旧数据会移动到带时间戳的 `data.before-restore-*`，再复制备份数据。不要删除旧目录，直到人工确认恢复正确。修改登录密码需要先停止服务，再运行 `Set-Password.ps1`。
+恢复保留目标服务器的 config，旧数据会移动到带时间戳的 `data.before-restore-*`，再复制备份数据。不要删除旧目录，直到人工确认恢复正确。可在网页应用锁设置中修改密码；忘记密码时先停止服务，再运行 `Set-Password.ps1`。脚本整目录恢复包含备份中的应用锁密码；网页完整软件备份恢复则保留当前服务器密码。
 
-网页中的完整软件备份也可以使用；恢复后需要由管理员重启服务。当前服务器登录密码不会被导入的桌面备份覆盖。首次从桌面版迁移时，请通过备份导出/导入，避免直接共用或覆盖正在运行的桌面数据库。
+网页中的完整软件备份也可以使用；恢复后需要由管理员重启服务。当前服务器应用锁密码不会被导入的桌面备份覆盖。首次从桌面版迁移时，请通过备份导出/导入，避免直接共用或覆盖正在运行的桌面数据库。
 
 软件备份中的 SQLite 文件由 `VACUUM INTO` 生成，是包含当时已提交数据的完整快照。新备份不再收集原数据库的 WAL、SHM 和 rollback journal；导入旧备份时也会跳过这些临时文件，避免它们覆盖快照中的不同页面布局。旧备份通常无需重新导出；真正损坏的快照仍会被完整性校验拒绝。这个规则只适用于软件导出的 `.sucanvas-backup`，不能用于手动复制正在运行的原数据库。
 
