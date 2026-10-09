@@ -5,6 +5,7 @@ mod files;
 mod media;
 mod proxy;
 mod rpc;
+mod settings;
 
 use crate::{
     api::{self, ApiState},
@@ -114,6 +115,9 @@ pub async fn run() -> Result<(), String> {
         // Server login credentials are independent of imported desktop backups.
         std::fs::copy(previous.join("web-auth.json"), &auth_path).map_err(|e| e.to_string())?;
     }
+    // Restore settings before accepting requests or mounting the canvas. Web
+    // clients must never have to flush imported settings while reloading.
+    settings::restore_frontend_settings(&data)?;
     for directory in [
         "assets",
         "uploads",
@@ -434,11 +438,7 @@ async fn write_settings(
 ) -> Response {
     settings.retain(|key, _| key.starts_with("infinite-canvas:"));
     let _guard = state.settings_guard.lock().await;
-    let path = state.core.data_dir.join("web-settings.json");
-    let temporary = path.with_extension("json.new");
-    match std::fs::write(&temporary, serde_json::to_vec(&settings).unwrap())
-        .and_then(|_| std::fs::rename(&temporary, &path))
-    {
+    match settings::write(&state.core.data_dir, &settings) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }

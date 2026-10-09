@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / 'release-web/SuCanvas-Web'
@@ -59,6 +60,34 @@ def start(directory):
 
 def stop(process):
     if process and process.poll() is None: process.terminate(); process.wait(timeout=10)
+
+def desktop_backup_fixture(original, destination, database_file):
+    """Match desktop backups: absolute asset paths and no Web-specific files."""
+    desktop_data = r'D:\Desktop\SuCanvasData\data'
+    def absolute_assets(value):
+        if isinstance(value, str) and value.startswith('sucanvas://assets/'):
+            return desktop_data+'\\'+value[len('sucanvas://'):].replace('/', '\\')
+        if isinstance(value, dict): return {key: absolute_assets(item) for key, item in value.items()}
+        if isinstance(value, list): return [absolute_assets(item) for item in value]
+        return value
+    with zipfile.ZipFile(original) as source:
+        database_file.write_bytes(source.read('data/infinite-canvas.sqlite3'))
+        with contextlib.closing(sqlite3.connect(database_file)) as database:
+            for node_id, content in database.execute('SELECT id, content_json FROM nodes').fetchall():
+                database.execute('UPDATE nodes SET content_json=? WHERE id=?', [json.dumps(absolute_assets(json.loads(content))), node_id])
+            for project_id, path in database.execute('SELECT id, preview_image_path FROM canvases WHERE preview_image_path IS NOT NULL').fetchall():
+                database.execute('UPDATE canvases SET preview_image_path=? WHERE id=?', [absolute_assets(path), project_id])
+            database.commit()
+        with zipfile.ZipFile(destination, 'w', compression=zipfile.ZIP_DEFLATED) as target:
+            for entry in source.infolist():
+                if entry.filename in {'data/web-auth.json', 'data/web-settings.json', 'data/web-integration-token', 'data/infinite-canvas.sqlite3-wal', 'data/infinite-canvas.sqlite3-shm'}: continue
+                if entry.filename == 'data/infinite-canvas.sqlite3':
+                    target.write(database_file, entry.filename)
+                elif entry.filename == 'backup-manifest.json':
+                    manifest = json.loads(source.read(entry))
+                    manifest['sourceDataDir'] = desktop_data
+                    target.writestr(entry, json.dumps(manifest))
+                else: target.writestr(entry, source.read(entry))
 
 def main():
     assert (PACKAGE / 'SuCanvasServer.exe').is_file(), 'Build the portable package first'
@@ -178,20 +207,44 @@ def main():
             moved_workflows = invoke('list_workflow_modules', {'includeDeleted': False})
             assert {module['id'] for module in workflows} == {module['id'] for module in moved_workflows}
             assert all(module['workflowPath'].startswith('sucanvas://workflow-modules/') for module in moved_workflows)
-            archive = invoke('export_app_backup', {'destinationPath': 'sucanvas-export://smoke/full.sucanvas-backup', 'frontendSettings': {'infinite-canvas:comfy-server-url': 'http://old-server.invalid', 'infinite-canvas:comfy-input-root': 'Z:/old/input'}})
+            large_setting = json.dumps({'label': '桌面迁移预设', 'payload': '设置' * 40_000}, ensure_ascii=False)
+            exported_settings = {'infinite-canvas:theme': 'light', 'infinite-canvas:restore-test-presets': large_setting, 'infinite-canvas:comfy-server-url': 'http://old-server.invalid', 'infinite-canvas:comfy-input-root': 'Z:/old/input'}
+            archive = invoke('export_app_backup', {'destinationPath': 'sucanvas-export://smoke/full.sucanvas-backup', 'frontendSettings': exported_settings})
             assert archive['path'].startswith('sucanvas-export://')
             assert request('/api/resource?resource='+urllib.parse.quote(archive['path'], safe=''))[0] == 200
             invoke('stage_app_backup_restore', {'bundlePath': archive['path']})
             stop(moved_process)
             moved_process = start(moved)
             assert request('/api/auth/login', {'password': password})[0] == 200
-            imported_settings = invoke('take_restored_frontend_settings')
+            # Read settings before any canvas restore call or browser writeback.
+            imported_settings = json.loads(request('/api/settings')[1])
+            assert imported_settings['infinite-canvas:theme'] == 'light'
+            assert imported_settings['infinite-canvas:restore-test-presets'] == large_setting
             assert imported_settings['infinite-canvas:comfy-server-url'] == base+'/api/comfy'
             assert imported_settings['infinite-canvas:comfy-input-root'] == ''
+            assert invoke('take_restored_frontend_settings') is None
+            assert not (moved / 'data/restored-frontend-settings.json').exists()
+            assert json.loads((moved / 'data/web-settings.json').read_text(encoding='utf-8'))['infinite-canvas:restore-test-presets'] == large_setting
+            # Re-login and restart without a pagehide/settings PUT must retain it.
+            stop(moved_process)
+            moved_process = start(moved)
+            assert request('/api/auth/login', {'password': password})[0] == 200
+            assert json.loads(request('/api/settings')[1])['infinite-canvas:restore-test-presets'] == large_setting
+            desktop_archive = moved / 'downloads/smoke/desktop.sucanvas-backup'
+            desktop_backup_fixture(moved / 'downloads/smoke/full.sucanvas-backup', desktop_archive, area / 'desktop.sqlite3')
+            invoke('stage_app_backup_restore', {'bundlePath': 'sucanvas-export://smoke/desktop.sucanvas-backup'})
+            stop(moved_process)
+            moved_process = start(moved)
+            assert request('/api/auth/login', {'password': password})[0] == 200
+            assert json.loads(request('/api/settings')[1])['infinite-canvas:restore-test-presets'] == large_setting
+            restored = invoke('load_workspace', {'canvasId': project})
+            assert any(node['id'] == image['id'] and node['content']['assetPath'] == asset for node in restored['nodes'])
+            assert request(url)[1] == PNG
+            assert restored['canvas']['previewImagePath'] == asset
             assert request(url)[1] == PNG
             assert request('/api/auth/logout', {}, method='POST')[0] == 200
             assert request(url)[0] == 401
-            print('PASS: authentication, CSRF, CRUD, upload, media ranges, file boundaries, SSE, external API, ComfyUI output retention, workflows, full backup restore and relocation')
+            print('PASS: authentication, CSRF, CRUD, upload, media ranges, file boundaries, SSE, external API, ComfyUI output retention, workflows, Web/desktop backup settings before canvas load, repeated restart and relocation')
         finally:
             stop(source_process); stop(moved_process)
             comfy.shutdown(); comfy.server_close()
