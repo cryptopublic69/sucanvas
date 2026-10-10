@@ -1,6 +1,7 @@
 {
   "listen": "127.0.0.1:18740",
   "publicUrl": "http://127.0.0.1:18740",
+  "allowedOrigins": [],
   "dataDirectory": "data",
   "webDirectory": "web",
   "downloadsDirectory": "downloads",

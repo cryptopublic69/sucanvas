@@ -287,7 +287,7 @@ fn same_origin(state: &WebState, headers: &HeaderMap) -> bool {
     headers
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|origin| origin == state.config.origin())
+        .is_some_and(|origin| state.config.allows_origin(origin))
 }
 async fn check_origin(
     State(state): State<WebState>,

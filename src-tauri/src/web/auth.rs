@@ -192,7 +192,11 @@ pub async fn login(State(state): State<WebState>, Json(input): Json<Login>) -> R
         )
             .into_response();
     };
-    unlocked_response(&state, token, json!({"ok": true}))
+    unlocked_response(
+        &state,
+        token,
+        json!({"ok": true, "publicUrl": state.config.origin()}),
+    )
 }
 
 fn unlocked_response(state: &WebState, token: String, body: serde_json::Value) -> Response {
@@ -252,7 +256,7 @@ pub async fn session(State(state): State<WebState>, headers: HeaderMap) -> Respo
     if !state.auth.authenticated(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({"ok": true, "comfyConfigured": !state.connection.snapshot().comfy_url.is_empty()}))
+    Json(json!({"ok": true, "publicUrl": state.config.origin(), "comfyConfigured": !state.connection.snapshot().comfy_url.is_empty()}))
         .into_response()
 }
 

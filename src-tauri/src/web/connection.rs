@@ -90,7 +90,7 @@ impl Store {
         super::config::validate_comfy_url(&input.comfy_url)?;
         let mut current = self.current.write().map_err(|_| "无法锁定 ComfyUI 配置")?;
         if let Ok(url) = reqwest::Url::parse(&input.comfy_url) {
-            if url.origin().ascii_serialization() == current.origin()
+            if current.allows_origin(&url.origin().ascii_serialization())
                 && url.path().starts_with("/api/comfy")
             {
                 return Err("请填写实际的 ComfyUI 服务地址，不能填写画布代理地址".into());
@@ -152,6 +152,7 @@ mod tests {
         let config = Config {
             listen: "127.0.0.1:18742".parse().unwrap(),
             public_url: "http://127.0.0.1:18742".into(),
+            allowed_origins: vec!["https://192.168.5.108:18741".into()],
             data_directory: "data".into(),
             web_directory: "web".into(),
             downloads_directory: "downloads".into(),
@@ -227,6 +228,7 @@ mod tests {
             "http://host?token=x",
             "http://host#x",
             "http://127.0.0.1:18742/api/comfy",
+            "https://192.168.5.108:18741/api/comfy",
         ] {
             let mut input = Connection::from_config(&store.snapshot());
             input.comfy_url = url.into();

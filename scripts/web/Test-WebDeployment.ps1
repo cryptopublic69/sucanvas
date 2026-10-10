@@ -7,6 +7,11 @@ $origin = [Uri]$config.publicUrl
 if (-not $origin.IsAbsoluteUri -or $origin.AbsolutePath -ne '/' -or $origin.Query -or $origin.Fragment -or $origin.UserInfo) { throw 'publicUrl must be an origin without a subpath.' }
 if ($origin.Scheme -ne 'https' -and -not ($origin.Scheme -eq 'http' -and $origin.Host -in @('localhost','127.0.0.1','[::1]'))) { throw 'Public access requires HTTPS.' }
 if ($PublicUrl -and ([Uri]$PublicUrl).GetLeftPart([UriPartial]::Authority) -ne $origin.GetLeftPart([UriPartial]::Authority)) { throw 'publicUrl does not match the intended browser address.' }
+foreach ($allowed in @($config.allowedOrigins)) {
+    if ($null -eq $allowed) { continue }
+    $extra = [Uri]$allowed
+    if (-not $extra.IsAbsoluteUri -or $extra.Scheme -ne 'https' -or -not $extra.Host -or $extra.Host.Contains('*') -or $extra.AbsolutePath -ne '/' -or $extra.Query -or $extra.Fragment -or $extra.UserInfo) { throw 'allowedOrigins must contain explicit HTTPS origins without credentials or subpaths.' }
+}
 $web = if ([IO.Path]::IsPathRooted($config.webDirectory)) { $config.webDirectory } else { Join-Path $root $config.webDirectory }
 $index = Join-Path $web 'index.html'
 $manifest = Get-Content -LiteralPath (Join-Path $root 'web-assets.json') -Encoding UTF8 -Raw | ConvertFrom-Json

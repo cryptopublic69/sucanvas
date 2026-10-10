@@ -64,3 +64,37 @@ test("a revoked event connection confirms expiration before locking the UI", asy
   assert.deepEqual(events, ["sucanvas:session-expired"]);
   stop();
 });
+
+test("LAN sessions use the current entry for API media, RPC arguments and task events", async (t) => {
+  environment(t);
+  const canonical = "https://canvas.example.com:8888";
+  const lan = "https://192.168.5.108:18741";
+  window.location.origin = lan;
+  const payload = { imageUrl: canonical + "/api/comfy/view?filename=scene.png", external: "https://other.example.com/api/comfy/view?filename=other.png" };
+  let outgoing;
+  t.mock.method(globalThis, "fetch", async (path, options) => {
+    outgoing = options;
+    return { status: 200, ok: true, json: async () => path.startsWith("/api/auth/") ? { ok: true, publicUrl: canonical } : { result: payload } };
+  });
+  await request("/api/auth/session");
+  const result = await invoke("load_workspace", { imageUrl: lan + "/api/comfy/view?filename=reference.png" });
+  assert.equal(result.imageUrl, lan + "/api/comfy/view?filename=scene.png");
+  assert.equal(result.external, payload.external);
+  assert.equal(JSON.parse(outgoing.body).args.imageUrl, canonical + "/api/comfy/view?filename=reference.png");
+  const previous = globalThis.EventSource;
+  let connection, received;
+  globalThis.EventSource = class { constructor() { connection = this; } close() {} };
+  window.setTimeout = setTimeout;
+  window.clearTimeout = clearTimeout;
+  t.after(() => { closeEvents(); if (previous === undefined) delete globalThis.EventSource; else globalThis.EventSource = previous; });
+  const ready = listen("generation://done", (event) => { received = event.payload; });
+  connection.onopen();
+  const stop = await ready;
+  connection.onmessage({ data: JSON.stringify({ event: "generation://done", payload }) });
+  assert.equal(received.imageUrl, result.imageUrl);
+  assert.equal(received.external, payload.external);
+  stop();
+  window.location.origin = canonical;
+  await request("/api/auth/login");
+  assert.equal((await invoke("load_workspace")).imageUrl, payload.imageUrl);
+});

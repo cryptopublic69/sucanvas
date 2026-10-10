@@ -50,10 +50,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Start-Web.ps1
 
 `publicUrl` 必须是域名根地址，不支持部署到子路径。除本机回环开发地址外，服务会拒绝 HTTP 公网配置。登录 Cookie 为 HttpOnly、SameSite=Strict，HTTPS 配置下同时设置 Secure；所有画布 API、上传及媒体访问均需要登录。
 
+同时使用公网和局域网时，保留 `publicUrl` 为公网入口，并在 `allowedOrigins` 中明确列出额外的 HTTPS 入口，例如 `["https://192.168.5.108:18741"]`。协议、主机和端口必须匹配浏览器地址；不支持通配符、HTTP 或子路径。反向代理也必须提供对应的 HTTPS 站点。修改后需通过服务开关重启后端。登录、素材链接和任务通知使用当前浏览器入口，两个入口分别保持登录会话。
+
 | 配置 | 含义 |
 | --- | --- |
 | `listen` | HTTP 后端监听地址，默认 `127.0.0.1:18740` |
 | `publicUrl` | 浏览器实际访问的地址，公网必须 HTTPS |
+| `allowedOrigins` | 可选的额外 HTTPS 入口列表，默认空；publicUrl 自动允许 |
 | `dataDirectory` | 数据目录，默认相对于配置文件的 `data` |
 | `webDirectory` | 编译后的网页目录，默认 `web` |
 | `downloadsDirectory` | 导出暂存目录，默认 `downloads`，应放在 data 外面 |
@@ -133,7 +136,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File E:\NewPackage\scripts\Update
 
 ## 新服务器部署检查
 
-新服务器复制完整发布包并初始化密码；迁移已有数据时先停服复制整个 data，或使用备份恢复。每台服务器按实际环境确认 `publicUrl`、监听地址、ComfyUI 地址和目录映射，不把旧服务器域名、IP 或盘符作为新服务器默认值。`publicUrl` 必须与浏览器地址完全一致，包括 HTTPS 和非默认端口；使用域名根路径。
+新服务器复制完整发布包并初始化密码；迁移已有数据时先停服复制整个 data，或使用备份恢复。每台服务器按实际环境确认 `publicUrl`、`allowedOrigins`、监听地址、ComfyUI 地址和目录映射，不把旧服务器域名、IP 或盘符作为新服务器默认值。浏览器入口必须匹配 `publicUrl` 或 `allowedOrigins` 中的一个地址，包括 HTTPS 和非默认端口；使用域名根路径。
 
 如果 Nginx 直接转发到同机后端，可使用下面的 location；TLS 证书和外部监听端口由 Nginx 的 server 配置提供。保留浏览器 Origin，不改写为内部 IP。
 

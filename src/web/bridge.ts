@@ -2,6 +2,7 @@
 import type { OpenDialogOptions, SaveDialogOptions } from "@tauri-apps/plugin-dialog";
 import { downloadFilename, webApiUrl, webApiUrls } from "./urls";
 const devBackend = import.meta.env.DEV ? import.meta.env.SUCANVAS_WEB_DEV_BACKEND ?? "" : "";
+let serverOrigin = devBackend;
 type DragDropEvent =
   | { type: "enter" | "drop"; paths: string[]; position: { x: number; y: number } }
   | { type: "over"; position: { x: number; y: number } }
@@ -26,7 +27,11 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
     try { message = (JSON.parse(text) as { error?: string }).error || message; } catch { /* plain server response */ }
     throw new Error(message);
   }
-  return webApiUrls(await response.json(), devBackend, window.location.origin) as T;
+  const value = await response.json();
+  if (["/api/auth/session", "/api/auth/login"].includes(path) && typeof value?.publicUrl === "string") {
+    serverOrigin = devBackend || value.publicUrl;
+  }
+  return webApiUrls(value, serverOrigin, window.location.origin) as T;
 }
 function connectEvents(): Promise<void> {
   if (eventReady) return eventReady;
@@ -42,7 +47,7 @@ function connectEvents(): Promise<void> {
       }).catch(() => {});
     };
     events!.onmessage = (message) => {
-      const value = webApiUrls(JSON.parse(message.data), devBackend, window.location.origin) as { event: string; payload: unknown };
+      const value = webApiUrls(JSON.parse(message.data), serverOrigin, window.location.origin) as { event: string; payload: unknown };
       if (value.event.startsWith("channel:")) channels.get(value.event.slice(8))?.onmessage(value.payload);
       else if (value.event === "canvas://resync") window.location.reload();
       else for (const listener of listeners.get(value.event) ?? []) listener({ ...value, id: 0 });
@@ -68,7 +73,7 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
   try {
     const result = await request<{ result: T }>(`/api/invoke/${encodeURIComponent(command)}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ args }, (_key, value) => typeof value === "string" && devBackend ? webApiUrl(value, window.location.origin, devBackend) : value),
+      body: JSON.stringify({ args }, (_key, value) => typeof value === "string" && serverOrigin ? webApiUrl(value, window.location.origin, serverOrigin) : value),
     });
     if (["export_media_asset", "export_generated_video", "export_generated_image"].includes(command) && typeof result.result === "string") download(result.result);
     return result.result;

@@ -123,6 +123,8 @@ def main():
         config = json.loads((PACKAGE / 'config.json').read_text(encoding='utf-8-sig'))
         config['listen'] = f'127.0.0.1:{port()}'
         config['publicUrl'] = f'http://{config["listen"]}'
+        lan_origin = 'https://192.168.5.108:18741'
+        config['allowedOrigins'] = [lan_origin]
         config['comfyUrl'] = f'http://127.0.0.1:{comfy.server_port}'
         (source / 'config.json').write_text(json.dumps(config), encoding='utf-8')
         password = secrets.token_urlsafe(24)
@@ -160,13 +162,21 @@ def main():
             assert request('/api/events', anonymous=True)[0] == 401
             assert request('/v1/health', anonymous=True)[0] == 401
             assert request('/api/auth/login', {'password': password}, origin='https://untrusted.invalid')[0] == 403
+            assert request('/api/auth/login', {'password': password}, origin='https://192.168.5.108:18742')[0] == 403
+            assert request('/api/auth/login', {'password': password}, origin='null')[0] == 403
+            assert request('/api/auth/login', {}, origin=lan_origin)[0] == 422
+            assert request('/api/auth/login', {}, headers={'Origin': ''})[0] == 403
+            assert request('/api/comfy/ws', origin='https://untrusted.invalid', headers={'Upgrade': 'websocket'})[0] == 403
             assert request('/api/auth/login', {'password': 'wrong-password'})[0] == 401
             assert request('/api/auth/login', {'password': password})[0] == 200
+            assert json.loads(request('/api/auth/session')[1])['publicUrl'] == base
+            assert request('/api/invoke/load_workspace', {'args': {}}, origin=lan_origin)[0] == 200
             assert all(cookie.has_nonstandard_attr('HttpOnly') for cookie in jar)
             assert invoke('get_app_lock_status')['enabled'] is True
             assert request('/api/invoke/disable_app_lock', {'args': {'password': password}})[0] == 400
             second = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-            assert request('/api/auth/login', {'password': password}, client=second)[0] == 200
+            status, body, _ = request('/api/auth/login', {'password': password}, origin=lan_origin, client=second)
+            assert status == 200 and json.loads(body)['publicUrl'] == base
             second_events = second.open(urllib.request.Request(base+'/api/events'), timeout=10)
             assert json.loads(second_events.readline().decode().removeprefix('data:').strip())['event'] == 'web://ready'
             assert request('/api/invoke/set_app_lock_password', {'args': {'input': {'currentPassword': 'wrong-password', 'newPassword': 'next-password'}}})[0] == 400
