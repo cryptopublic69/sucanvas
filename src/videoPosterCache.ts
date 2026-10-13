@@ -1,5 +1,7 @@
 import { videoPreviewScheduler } from "./videoPreviewScheduler";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { webPosterExtractionQueue } from "./web/posterExtractionQueue";
+import { requestPosterBlob } from "./web/posterRequest";
 
 export type VideoPoster = { src: string; blob: Blob; width: number; height: number; createdAt: number };
 const MAX_POSTERS = 300;
@@ -8,6 +10,12 @@ const FAILED_POSTER_COOLDOWN_MS = 2000;
 const failedSources = new Map<string, number>();
 const pending = new Map<string, { listeners: Set<(poster: VideoPoster | null) => void>; cancel: () => void }>();
 let database: Promise<IDBDatabase | null> | undefined;
+const webSessionOnly = import.meta.env?.MODE === "web";
+const waitingForCovers = new Map<string, Set<() => void>>();
+if (webSessionOnly) {
+  // Remove the Web site's former poster-only database. No project data is here.
+  try { indexedDB.deleteDatabase("infinite-canvas-video-posters"); } catch { /* Storage may be unavailable. */ }
+}
 
 function openCache(): Promise<IDBDatabase | null> {
   if (!database) database = new Promise((resolve) => {
@@ -27,6 +35,7 @@ function openCache(): Promise<IDBDatabase | null> {
 }
 
 async function readPoster(src: string): Promise<VideoPoster | null> {
+  if (webSessionOnly) return null;
   const db = await openCache();
   if (!db) return null;
   return new Promise((resolve) => {
@@ -39,6 +48,7 @@ async function readPoster(src: string): Promise<VideoPoster | null> {
 }
 
 async function writePoster(poster: VideoPoster): Promise<void> {
+  if (webSessionOnly) return;
   const db = await openCache();
   if (!db) return;
   await new Promise<void>((resolve) => {
@@ -107,9 +117,15 @@ function capturePoster(src: string, signal: AbortSignal): Promise<VideoPoster | 
 }
 
 async function extractPoster(src: string, signal: AbortSignal): Promise<VideoPoster | null> {
+  if (webSessionOnly) {
+    try {
+      const blob = await requestPosterBlob(src, signal);
+      return signal.aborted ? null : { src, blob, width: 0, height: 0, createdAt: Date.now() };
+    } catch { return null; }
+  }
   // ComfyUI commonly has no CORS headers. Native extraction avoids downloading
   // entire remote videos into JS merely to capture one frame.
-  if (import.meta.env?.MODE === "web" || (isTauri() && /^https?:\/\//.test(src) && new URL(src).hostname !== "asset.localhost")) {
+  if (isTauri() && /^https?:\/\//.test(src) && new URL(src).hostname !== "asset.localhost") {
     try {
       const bytes = await invoke<number[]>("capture_video_poster", { source: src });
       if (signal.aborted || !bytes.length || bytes.length > MAX_POSTER_BYTES) return null;
@@ -167,10 +183,21 @@ export class PosterMemoryCache {
   }
 }
 
-export const posterMemoryCache = new PosterMemoryCache();
+// Web keeps loaded compressed covers for the lifetime of this page. Moving
+// nodes out of view still releases players, but must not evict their covers.
+export const posterMemoryCache = import.meta.env?.MODE === "web"
+  ? new PosterMemoryCache(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY)
+  : new PosterMemoryCache();
 
 // Overview nodes may read existing covers, but must never start video decoding.
 export function requestCachedVideoPoster(src: string, listener: () => void): () => void {
+  if (webSessionOnly) {
+    if (posterMemoryCache.peek(src)) { listener(); return () => {}; }
+    const listeners = waitingForCovers.get(src) ?? new Set<() => void>();
+    listeners.add(listener);
+    waitingForCovers.set(src, listeners);
+    return () => { listeners.delete(listener); if (!listeners.size) waitingForCovers.delete(src); };
+  }
   let cancelled = false;
   if (posterMemoryCache.peek(src)) listener();
   else void readPoster(src).then((poster) => {
@@ -203,7 +230,18 @@ export function requestVideoPoster(src: string, listener: (poster: VideoPoster |
   const finish = (poster: VideoPoster | null) => {
     if (controller.signal.aborted) return;
     if (pending.get(src) === entry) pending.delete(src);
-    if (poster) posterMemoryCache.put(poster);
+    if (poster) {
+      posterMemoryCache.put(poster);
+      if (webSessionOnly) {
+        const waiting = waitingForCovers.get(src);
+        const callbacks = [...(waiting ?? [])];
+        waiting?.clear();
+        waitingForCovers.delete(src);
+        for (const callback of callbacks) {
+          try { callback(); } catch { /* Other overview nodes must still update. */ }
+        }
+      }
+    }
     const listeners = [...entry.listeners];
     entry.listeners.clear();
     entry.cancel = () => {};
@@ -217,7 +255,7 @@ export function requestVideoPoster(src: string, listener: (poster: VideoPoster |
     const failedAt = failedSources.get(src);
     if (poster || (failedAt !== undefined && Date.now() - failedAt < FAILED_POSTER_COOLDOWN_MS)) { finish(poster); return; }
     failedSources.delete(src);
-    cancelDecode = videoPreviewScheduler.enqueue(async (signal) => {
+    cancelDecode = (webSessionOnly ? webPosterExtractionQueue : videoPreviewScheduler).enqueue(async (signal) => {
       const poster = await extractPoster(src, signal);
       if (signal.aborted || controller.signal.aborted) return;
       if (poster) await writePoster(poster);

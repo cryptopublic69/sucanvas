@@ -20,29 +20,36 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / 'release-web/SuCanvas-Web'
 PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM6sAAAAASUVORK5CYII=')
 CLIENT_ID = 'smoke-client'
+VIDEO_CLIENT_ID = 'smoke-video-client'
 
 class ComfyStub(http.server.BaseHTTPRequestHandler):
     view_queries = []
+    video_payload = None
     def log_message(self, *_): pass
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         if path == '/view':
             self.view_queries.append(urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query))
-            payload = PNG
+            payload = self.video_payload if self.view_queries[-1].get('filename') == ['poster-fixture.mp4'] else PNG
         elif path == '/queue': payload = json.dumps({'queue_running': [], 'queue_pending': []}).encode()
         elif path == '/history': payload = json.dumps({'smoke-prompt': {
             'prompt': [1, 'smoke-prompt', {'sampler': {'inputs': {'seed': 42}}}, {'client_id': CLIENT_ID}],
             'status': {'status_str': 'success'},
             'outputs': {'42': {'images': [{'filename': 'generated.png', 'subfolder': '', 'type': 'output'}]}}
+        }, 'smoke-video-prompt': {
+            'prompt': [2, 'smoke-video-prompt', {'sampler': {'inputs': {'seed': 43}}}, {'client_id': VIDEO_CLIENT_ID}],
+            'status': {'status_str': 'success'},
+            'outputs': {'43': {'videos': [{'filename': 'generated.mp4', 'subfolder': 'H3', 'type': 'output'}]}}
         }}).encode()
         else: self.send_error(404); return
         self.send_response(200)
-        self.send_header('Content-Type', 'image/png' if path == '/view' else 'application/json')
+        self.send_header('Content-Type', ('video/mp4' if payload == self.video_payload else 'image/png') if path == '/view' else 'application/json')
         self.send_header('Content-Length', str(len(payload)))
         self.end_headers(); self.wfile.write(payload)
 
@@ -70,6 +77,10 @@ def desktop_backup_fixture(original, destination, database_file, desktop_lock):
     """Match desktop backups: absolute asset paths and no Web-specific files."""
     desktop_data = r'D:\Desktop\SuCanvasData\data'
     def absolute_assets(value):
+        if isinstance(value, str) and value.startswith('sucanvas-input://sucanvas-imports/'):
+            return desktop_data+'\\assets\\'+value[len('sucanvas-input://sucanvas-imports/'):].replace('/', '\\')
+        if isinstance(value, str) and value.startswith('sucanvas-output://'):
+            return r'D:\Desktop\ComfyUI\output'+'\\'+value[len('sucanvas-output://'):].replace('/', '\\')
         if isinstance(value, str) and value.startswith('sucanvas://assets/'):
             return desktop_data+'\\'+value[len('sucanvas://'):].replace('/', '\\')
         if isinstance(value, dict): return {key: absolute_assets(item) for key, item in value.items()}
@@ -85,7 +96,7 @@ def desktop_backup_fixture(original, destination, database_file, desktop_lock):
             database.commit()
         with zipfile.ZipFile(destination, 'w', compression=zipfile.ZIP_DEFLATED) as target:
             for entry in source.infolist():
-                if entry.filename in {'data/web-auth.json', 'data/web-settings.json', 'data/web-integration-token', 'data/infinite-canvas.sqlite3-wal', 'data/infinite-canvas.sqlite3-shm'}: continue
+                if entry.filename in {'data/web-auth.json', 'data/web-settings.json', 'data/web-integration-token', 'data/storage-migration-map.json', 'data/infinite-canvas.sqlite3-wal', 'data/infinite-canvas.sqlite3-shm'}: continue
                 if entry.filename == 'data/infinite-canvas.sqlite3':
                     target.write(database_file, entry.filename)
                 elif entry.filename == 'data/app-lock.json':
@@ -95,6 +106,8 @@ def desktop_backup_fixture(original, destination, database_file, desktop_lock):
                     manifest = json.loads(source.read(entry))
                     manifest['sourceDataDir'] = desktop_data
                     target.writestr(entry, json.dumps(manifest))
+                elif entry.filename.startswith('data/comfy-input/sucanvas-imports/'):
+                    target.writestr('data/assets/'+entry.filename[len('data/comfy-input/sucanvas-imports/'):], source.read(entry))
                 else: target.writestr(entry, source.read(entry))
 
 def main():
@@ -126,6 +139,12 @@ def main():
         lan_origin = 'https://192.168.5.108:18741'
         config['allowedOrigins'] = [lan_origin]
         config['comfyUrl'] = f'http://127.0.0.1:{comfy.server_port}'
+        comfy_output = source / 'comfy-output'
+        (comfy_output / 'H3').mkdir(parents=True)
+        config['comfyOutputDirectory'] = str(comfy_output)
+        comfy_input = source / 'comfy-input'
+        comfy_input.mkdir()
+        config['comfyInputDirectory'] = str(comfy_input)
         (source / 'config.json').write_text(json.dumps(config), encoding='utf-8')
         password = secrets.token_urlsafe(24)
         init = subprocess.run([str(source / 'SuCanvasServer.exe'), '--config', str(source / 'config.json'), '--set-password'], input=password+'\n', text=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
@@ -204,7 +223,9 @@ def main():
             with opener.open(req, timeout=10) as result: resource = json.load(result)['paths'][0]
             image = invoke('import_media', {'path': resource, 'canvasId': project, 'x': 20, 'y': 30})['node']
             asset = image['content']['assetPath']
-            assert asset.startswith('sucanvas://assets/')
+            assert asset.startswith('sucanvas-input://sucanvas-imports/')
+            assert (comfy_input / 'sucanvas-imports' / asset.rsplit('/', 1)[-1]).is_file()
+            assert not (source / 'data/assets').exists()
             assert image['content']['originalName'] == 'test.png'
             invoke('set_project_preview_image', {'input': {'projectId': project, 'imageNodeId': image['id']}})
             url = '/api/resource?resource='+urllib.parse.quote(asset, safe='')
@@ -228,6 +249,69 @@ def main():
             assert not any((source / 'downloads').iterdir())
             status, data, _ = request(url, headers={'Range': 'bytes=0-7'})
             assert status == 206 and data == PNG[:8]
+            # Migrated projects store relative media URLs. Exercise the real
+            # server poster command with an MP4, rather than only stub bytes.
+            ffmpeg = PACKAGE / 'tools/ffmpeg.exe'
+            assert ffmpeg.is_file(), 'Preview regression checks require the packaged FFmpeg.'
+            fixture = area / 'poster-fixture.mp4'
+            generated = subprocess.run([str(ffmpeg), '-nostdin', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=64x64:d=0.2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', str(fixture)], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+            assert generated.returncode == 0, generated.stderr
+            ComfyStub.video_payload = fixture.read_bytes()
+            (comfy_output / 'H3/poster-fixture.mp4').write_bytes(ComfyStub.video_payload)
+            tools = source / 'tools'
+            tools.mkdir()
+            bundled_ffmpeg = tools / 'ffmpeg.exe'
+            try: os.link(ffmpeg, bundled_ffmpeg)
+            except OSError: shutil.copy2(ffmpeg, bundled_ffmpeg)
+            try:
+                relative_video = '/api/comfy/view?filename=poster-fixture.mp4&type=output'
+                local_video = '/api/resource?resource=' + urllib.parse.quote('sucanvas-output://H3/poster-fixture.mp4', safe='')
+                for poster_source in [relative_video, base + relative_video, local_video]:
+                    poster_status, poster_body, _ = request('/api/invoke/capture_video_poster', {'args': {'source': poster_source}})
+                    assert poster_status == 200, (poster_source, poster_status, poster_body)
+                    poster = bytes(json.loads(poster_body)['result'])
+                    assert poster.startswith(b'\xff\xd8\xff'), poster_source
+                mapped_source = '/api/comfy/view?filename=poster-fixture.mp4&subfolder=H3&type=output'
+                binary_path = '/api/video-poster?source=' + urllib.parse.quote(mapped_source, safe='')
+                views_before = len(ComfyStub.view_queries)
+                binary_status, binary_poster, binary_headers = request(binary_path)
+                assert binary_status == 200 and binary_poster.startswith(b'\xff\xd8\xff')
+                assert binary_headers['Content-Type'] == 'image/jpeg'
+                assert binary_headers['Cache-Control'] == 'no-store'
+                assert len(ComfyStub.view_queries) == views_before, 'Mapped originals must bypass HTTP video reads.'
+                with ThreadPoolExecutor(max_workers=12) as pool:
+                    parallel_posters = list(pool.map(lambda _: request(binary_path), range(12)))
+                assert all(status == 200 and data.startswith(b'\xff\xd8\xff') for status, data, _headers in parallel_posters)
+                assert len(ComfyStub.view_queries) == views_before
+                # A legacy URL may name an existing but different original.
+                # The fast path must honor the migration map and refresh it.
+                map_path = source / 'data/storage-migration-map.json'
+                original_map = map_path.read_bytes() if map_path.exists() else None
+                legacy_file = comfy_output / 'H3/legacy-poster.mp4'
+                legacy_file.write_bytes(b'not the migrated video')
+                legacy_source = '/api/comfy/view?filename=legacy-poster.mp4&subfolder=H3&type=output'
+                legacy_path = '/api/video-poster?source=' + urllib.parse.quote(legacy_source, safe='')
+                try:
+                    mapping = json.loads(original_map) if original_map else {}
+                    mapping[legacy_source] = mapped_source
+                    map_path.write_text(json.dumps(mapping), encoding='utf-8')
+                    assert request(legacy_path)[1] == binary_poster
+                    mapping[legacy_source] = legacy_source
+                    map_path.write_text(json.dumps(mapping), encoding='utf-8')
+                    assert request(legacy_path)[0] == 400
+                finally:
+                    if original_map is None: map_path.unlink()
+                    else: map_path.write_bytes(original_map)
+                    legacy_file.unlink()
+                assert request(binary_path, anonymous=True)[0] == 401
+                forbidden = '/api/video-poster?source=' + urllib.parse.quote(r'C:\Windows\win.ini', safe='')
+                assert request(forbidden)[0] == 400
+                traversal = '/api/video-poster?source=' + urllib.parse.quote('/api/comfy/view?filename=poster-fixture.mp4&subfolder=../outside&type=output', safe='')
+                assert request(traversal)[0] == 400
+            finally:
+                assert bundled_ffmpeg.resolve().is_relative_to(area)
+                bundled_ffmpeg.unlink()
+                tools.rmdir()
             assert request('/api/resource?resource=sucanvas%3A%2F%2Fweb-auth.json')[0] == 404
             assert request('/api/resource?resource=sucanvas%3A%2F%2Fapp-lock.json')[0] == 404
             assert request('/api/resource?resource=sucanvas%3A%2F%2Fassets%2F..%2Fweb-auth.json')[0] == 400
@@ -246,8 +330,84 @@ def main():
             event.close()
             recovered = invoke('get_comfyui_client_task_statuses', {'serverUrl': 'http://ignored.invalid', 'clientIds': [CLIENT_ID], 'imageClientIds': [CLIENT_ID]})
             output = recovered[0]['outputs'][0]
-            assert output['url'].startswith('/api/resource?') and output['assetPath'].startswith('sucanvas://assets/generated-')
-            assert request(output['url'])[1] == PNG
+            assert '/api/comfy/view?' in output['url'] and output['assetPath'] == 'sucanvas-output://generated.png'
+            assert request(output['url'].removeprefix(base))[1] == PNG
+            (comfy_output / 'generated.png').write_bytes(PNG)
+            # Videos stay in ComfyUI output and are served through the proxy.
+            original_video = comfy_output / 'H3/generated.mp4'
+            original_video.write_bytes(PNG)
+            view_count = len(ComfyStub.view_queries)
+            video_results = invoke('get_comfyui_client_task_statuses', {'serverUrl': 'http://ignored.invalid', 'clientIds': [VIDEO_CLIENT_ID]})
+            video_output = video_results[0]['outputs'][0]
+            assert '/api/comfy/view?' in video_output['url'] and video_output['assetPath'] == 'sucanvas-output://H3/generated.mp4'
+            assert len(ComfyStub.view_queries) == view_count, 'Recovering video results must not download a second copy'
+            assert not list((source / 'data/assets').glob('generated-*.mp4'))
+            assert request(video_output['url'].removeprefix(base))[1] == PNG
+            status, body, _ = request('/api/comfy-config', {'comfyUrl': config['comfyUrl'], 'comfyInputDirectory': 'comfy-input', 'comfyOutputDirectory': 'comfy-output'}, method='PUT')
+            assert status == 200, body
+            connection = json.loads(request('/api/comfy-config')[1])
+            settings = json.loads(request('/api/settings')[1])
+            assert os.path.samefile(connection['comfyInputDirectory'], comfy_input)
+            assert os.path.samefile(settings['infinite-canvas:comfy-output-root'], comfy_output)
+            video = invoke('create_node', {'input': {'canvasId': project, 'kind': 'generated-video', 'title': 'Original video', 'content': {'videoUrl': video_output['url'], 'filename': video_output['filename'], 'subfolder': video_output['subfolder']}, 'source': 'comfyui'}})['node']
+            deleted = invoke('delete_nodes_undoable', {'input': {'ids': [video['id']]}})
+            assert original_video.is_file(), 'Node-only deletion must retain the ComfyUI original'
+            invoke('restore_deleted_nodes', {'batch': deleted})
+            assert any(node['id'] == video['id'] for node in invoke('load_workspace', {'canvasId': project})['nodes'])
+            invoke('delete_nodes_undoable', {'input': {'ids': [video['id']]}})
+            assert invoke('delete_video_files', {'paths': [str(original_video)]}) == 1
+            assert not original_video.exists()
+            # Existing Web copies and desktop imports migrate to ComfyUI directories.
+            saved_video_resource = 'sucanvas://assets/generated-existing.mp4'
+            (source / 'data/assets').mkdir()
+            (source / 'data/assets/generated-existing.mp4').write_bytes(PNG)
+            saved_video_url = '/api/resource?resource=' + urllib.parse.quote(saved_video_resource, safe='')
+            saved_video_content = {'assetPath': saved_video_resource, 'videoUrl': saved_video_url, 'filename': 'previous-video.mp4', 'subfolder': 'old'}
+            saved_video = invoke('create_node', {'input': {'canvasId': project, 'kind': 'generated-video', 'title': 'Existing saved video', 'content': saved_video_content, 'source': 'comfyui'}})['node']
+            assert request(saved_video_url)[1] == PNG
+            (source / 'data/assets/asset-previous.png').write_bytes(PNG)
+            legacy_import = invoke('create_node', {'input': {'canvasId': project, 'kind': 'image', 'title': 'Migrated import', 'content': {'assetPath': 'sucanvas://assets/asset-previous.png', 'originalName': 'previous.png'}, 'source': 'manual'}})['node']
+            (source / 'data/assets/generated-same.png').write_bytes(PNG)
+            same_image = invoke('create_node', {'input': {'canvasId': project, 'kind': 'generated-image', 'title': 'Existing output', 'content': {'assetPath': 'sucanvas://assets/generated-same.png', 'imageUrl': '/api/resource?resource=sucanvas%3A%2F%2Fassets%2Fgenerated-same.png', 'filename': 'generated.png'}, 'source': 'comfyui'}})['node']
+            (comfy_output / 'conflict.mp4').write_bytes(b'different original')
+            (source / 'data/assets/generated-conflict.mp4').write_bytes(PNG)
+            conflict_video = invoke('create_node', {'input': {'canvasId': project, 'kind': 'generated-video', 'content': {'assetPath': 'sucanvas://assets/generated-conflict.mp4', 'videoUrl': '/api/resource?resource=sucanvas%3A%2F%2Fassets%2Fgenerated-conflict.mp4', 'filename': 'conflict.mp4'}, 'source': 'comfyui'}})['node']
+            missing_video = invoke('create_node', {'input': {'canvasId': project, 'kind': 'generated-video', 'content': {'filename': 'missing-original.mp4', 'videoUrl': '/api/comfy/view?filename=missing-original.mp4'}, 'source': 'comfyui'}})['node']
+            old_task_setting = json.dumps({'assetPath': 'sucanvas://assets/asset-previous.png', 'sourceVideoUrl': saved_video_url})
+            assert request('/api/settings', {'infinite-canvas:smoke': 'retained', 'infinite-canvas:migration-task': old_task_setting}, method='PUT')[0] == 200
+            status, body, _ = request('/api/comfy-config', {'comfyUrl': config['comfyUrl'], 'comfyInputDirectory': '', 'comfyOutputDirectory': ''}, method='PUT')
+            assert status == 200 and json.loads(body)['storageMigration']['pending']
+            assert request(saved_video_url)[1] == PNG
+            status, body, _ = request('/api/comfy-config', {'comfyUrl': config['comfyUrl'], 'comfyInputDirectory': 'comfy-input', 'comfyOutputDirectory': 'comfy-output'}, method='PUT')
+            assert status == 400 and 'missing-original.mp4' in body.decode()
+            before_retry = {node['id']: node for node in invoke('load_workspace', {'canvasId': project})['nodes']}
+            assert before_retry[saved_video['id']]['content']['assetPath'] == saved_video_resource
+            assert (source / 'data/assets/generated-existing.mp4').read_bytes() == PNG
+            invoke('delete_node', {'id': missing_video['id']})
+            status, body, _ = request('/api/comfy-config', {'comfyUrl': config['comfyUrl'], 'comfyInputDirectory': 'comfy-input', 'comfyOutputDirectory': 'comfy-output'}, method='PUT')
+            assert status == 200, body
+            report = json.loads(body)['storageMigration']
+            assert report['migrated'] and list((source / 'backup').glob('storage-migration-*/before-migration.sucanvas-backup'))
+            assert not (source / 'data/assets').exists()
+            migrated = invoke('load_workspace', {'canvasId': project})
+            migrated_nodes = {node['id']: node for node in migrated['nodes']}
+            saved_video_content = migrated_nodes[saved_video['id']]['content']
+            saved_video_url = saved_video_content['videoUrl']
+            assert saved_video_content['assetPath'] == 'sucanvas-output://sucanvas-migrated/generated-existing.mp4', saved_video_content
+            assert (comfy_output / 'sucanvas-migrated/generated-existing.mp4').read_bytes() == PNG
+            assert migrated_nodes[same_image['id']]['content']['assetPath'] == 'sucanvas-output://generated.png'
+            assert migrated_nodes[conflict_video['id']]['content']['assetPath'] == 'sucanvas-output://sucanvas-migrated/generated-conflict.mp4'
+            assert (comfy_output / 'conflict.mp4').read_bytes() == b'different original'
+            assert not (comfy_output / 'sucanvas-migrated/generated-same.png').exists()
+            assert migrated_nodes[legacy_import['id']]['content']['assetPath'] == 'sucanvas-input://sucanvas-imports/asset-previous.png'
+            assert (comfy_input / 'sucanvas-imports/asset-previous.png').read_bytes() == PNG
+            assert request(saved_video_url)[1] == PNG
+            assert request('/api/resource?resource=' + urllib.parse.quote(saved_video_resource, safe=''))[1] == PNG
+            task_setting = json.loads(json.loads(request('/api/settings')[1])['infinite-canvas:migration-task'])
+            assert task_setting['assetPath'] == 'sucanvas-input://sucanvas-imports/asset-previous.png'
+            # Old clients cannot reintroduce the inactive asset reference.
+            updated = invoke('update_node', {'input': {'id': legacy_import['id'], 'content': {'assetPath': 'sucanvas://assets/asset-previous.png'}}})
+            assert updated['content']['assetPath'] == 'sucanvas-input://sucanvas-imports/asset-previous.png'
             with contextlib.closing(sqlite3.connect(source / 'data/infinite-canvas.sqlite3')) as database:
                 content = database.execute('SELECT content_json FROM nodes WHERE id=?', [image['id']]).fetchone()[0]
                 assert json.loads(content)['assetPath'] == asset
@@ -259,6 +419,8 @@ def main():
             shutil.copytree(source, moved)
             config['listen'] = f'127.0.0.1:{port()}'
             config['publicUrl'] = f'http://{config["listen"]}'
+            comfy_input, comfy_output = moved / 'comfy-input', moved / 'comfy-output'
+            config['comfyInputDirectory'], config['comfyOutputDirectory'] = str(comfy_input), str(comfy_output)
             (moved / 'config.json').write_text(json.dumps(config), encoding='utf-8')
             restore = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(moved/'scripts/Restore-Web.ps1'), '-BackupDirectory', str(moved/'backup/script-backup')], capture_output=True, text=True)
             assert restore.returncode == 0, restore.stderr
@@ -268,9 +430,13 @@ def main():
             assert request('/api/auth/login', {'password': password})[0] == 200
             restored = invoke('load_workspace', {'canvasId': project})
             assert any(node['id'] == image['id'] and node['content']['assetPath'] == asset for node in restored['nodes'])
+            restored_video = next(node for node in restored['nodes'] if node['id'] == saved_video['id'])
+            for key in ['assetPath', 'videoUrl', 'filename', 'subfolder', 'fileType']:
+                assert restored_video['content'][key] == saved_video_content[key]
+            assert request(saved_video_url)[1] == PNG
             assert restored['canvas']['previewImagePath'] == asset
             assert request(url)[1] == PNG
-            assert request(output['url'])[1] == PNG
+            assert request(output['url'].removeprefix(output['url'].split('/api/comfy')[0]))[1] == PNG
             assert json.loads(request('/api/settings')[1])['infinite-canvas:smoke'] == 'retained'
             moved_workflows = invoke('list_workflow_modules', {'includeDeleted': False})
             assert {module['id'] for module in workflows} == {module['id'] for module in moved_workflows}
@@ -282,6 +448,8 @@ def main():
             assert archive['path'].startswith('sucanvas-export://')
             status, backup_bytes, backup_headers = request('/api/resource?resource='+urllib.parse.quote(archive['path'], safe='')+'&download=true')
             assert status == 200 and backup_bytes.startswith(b'PK')
+            with zipfile.ZipFile(__import__('io').BytesIO(backup_bytes)) as archive_contents:
+                assert any(name.startswith('data/comfy-input/sucanvas-imports/') for name in archive_contents.namelist())
             disposition = backup_headers['Content-Disposition']
             assert 'filename="SuCanvas-____.sucanvas-backup"' in disposition
             assert "filename*=UTF-8''"+urllib.parse.quote(backup_name, safe='') in disposition
@@ -294,14 +462,18 @@ def main():
             assert uploaded_backup.endswith(backup_name)
             invoke('stage_app_backup_restore', {'bundlePath': uploaded_backup})
             stop(moved_process)
+            input_file_to_restore = comfy_input / 'sucanvas-imports' / asset.rsplit('/', 1)[-1]
+            assert input_file_to_restore.resolve().is_relative_to(area)
+            input_file_to_restore.unlink()
             moved_process = start(moved)
+            assert input_file_to_restore.read_bytes() == PNG
             assert request('/api/auth/login', {'password': password})[0] == 200
             # Read settings before any canvas restore call or browser writeback.
             imported_settings = json.loads(request('/api/settings')[1])
             assert imported_settings['infinite-canvas:theme'] == 'light'
             assert imported_settings['infinite-canvas:restore-test-presets'] == large_setting
             assert imported_settings['infinite-canvas:comfy-server-url'] == base+'/api/comfy'
-            assert imported_settings['infinite-canvas:comfy-input-root'] == ''
+            assert os.path.samefile(imported_settings['infinite-canvas:comfy-input-root'], comfy_input)
             assert invoke('take_restored_frontend_settings') is None
             assert not (moved / 'data/restored-frontend-settings.json').exists()
             assert json.loads((moved / 'data/web-settings.json').read_text(encoding='utf-8'))['infinite-canvas:restore-test-presets'] == large_setting
@@ -324,7 +496,7 @@ def main():
             assert request(url)[1] == PNG
             assert request('/api/auth/logout', {}, method='POST')[0] == 200
             assert request(url)[0] == 401
-            print('PASS: unified application lock, anonymous API rejection, live password change, old session revocation, CSRF, CRUD, upload, original Chinese download names, ComfyUI proxy download names, application favicon, media ranges, file boundaries, SSE, external API, ComfyUI output retention, workflows, Web/desktop backup settings before canvas load, repeated restart and relocation')
+            print('PASS: auth, CSRF, CRUD, input imports, output-only generation, mapped deletion, backed-up legacy migration, missing-output repair, identical-output reuse, stale-client aliases, original downloads, file boundaries, SSE, workflows, input backup/restore, repeated restart and relocation')
         finally:
             stop(source_process); stop(moved_process)
             comfy.shutdown(); comfy.server_close()

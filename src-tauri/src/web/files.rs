@@ -174,21 +174,28 @@ pub async fn resource(
     Query(input): Query<Resource>,
     request: Request<Body>,
 ) -> Response {
+    let state = state.connection_snapshot();
     let path = if input.resource.starts_with("sucanvas-export://") {
         rpc::export_path(&state, &input.resource)
     } else {
-        crate::portable::resource_path(&state.core.data_dir, &input.resource)
+        super::storage::resource_path(&state, &input.resource)
     };
     let Ok(path) = path else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let roots = vec![
+    let mut roots = vec![
         state.core.assets_dir.clone(),
+        state.core.data_dir.join("assets"), // Only before legacy migration.
         state.core.data_dir.join("temp/image-resize"),
         state.core.data_dir.join("uploads"),
         state.core.workflow_module_exports_dir.clone(),
         state.downloads.clone(),
     ];
+    if !state.config.comfy_output_directory.is_empty() {
+        roots.push(std::path::PathBuf::from(
+            &state.config.comfy_output_directory,
+        ));
+    }
     if rpc::ensure_contained(&path, &roots).is_err() || !path.is_file() {
         return StatusCode::NOT_FOUND.into_response();
     }

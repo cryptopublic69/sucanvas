@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { resolveComfyOutputPath } from "./web/outputFiles";
 import { videoUpscaleFromValue } from "./video/videoUpscale";
 import { Settings as PresetSettingsIcon } from "lucide-react";
 import { useDropdownWheel } from "./useDropdownWheel";
@@ -12,6 +13,9 @@ import { H3StyleLora, h3StyleLorasFromContent, recordedStyleLoras, styleLoraUsag
 import { StyleLoraEditor } from "./StyleLoraEditor";
 import { LazyVideoPreview, VideoPreviewHandle } from "./LazyVideoPreview";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { versionedPreviewUrl } from "./web/previewCache";
+import { SessionImagePreview } from "./web/SessionImagePreview";
+import { requestInputImagePreview } from "./web/inputImageCache";
 import { createPortal } from "react-dom";
 import {
   BaseEdge,
@@ -2260,6 +2264,9 @@ function videoInputMediaKind(record: NodeRecord): "image" | "audio" | "video" | 
 }
 
 function loadImageNaturalSize(path: string): Promise<{ width: number; height: number }> {
+  if (import.meta.env.MODE === "web") {
+    return requestInputImagePreview(convertFileSrc(path)).then(({ width, height }) => ({ width, height }));
+  }
   return new Promise((resolve, reject) => {
     const image = new window.Image();
     image.decoding = "async";
@@ -2993,6 +3000,7 @@ function comfyOutputFromContent(content: JsonObject): ComfyOutputFile | null {
 function cacheBustedGeneratedVideoUrl(content: JsonObject): string {
   const url = typeof content.videoUrl === "string" ? content.videoUrl : "";
   const promptId = typeof content.comfyPromptId === "string" ? content.comfyPromptId : "";
+  if (import.meta.env.MODE === "web") return versionedPreviewUrl(url, promptId);
   if (!url || !promptId) return url;
   try {
     const parsed = new URL(url);
@@ -3048,7 +3056,7 @@ function LiveComfyVideoPreview({ src, paused }: { src: string; paused: boolean }
 }
 
 function mappedComfyOutputPath(root: string, content: JsonObject): string | null {
-  if (import.meta.env.MODE === "web" && typeof content.assetPath === "string" && content.assetPath) return content.assetPath;
+  if (import.meta.env.MODE === "web") return resolveComfyOutputPath(root, content);
   const filenameValue = typeof content.filename === "string" ? content.filename : "";
   const filenameParts = filenameValue.split(/[\\/]/).filter(Boolean);
   const filename = filenameParts[filenameParts.length - 1] ?? "";
@@ -7494,7 +7502,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               </div>
             </div>
           ) : (assetPath && isImage) || (isGeneratedImage && typeof record.content.imageUrl === "string") ? (
-            <img
+            import.meta.env.MODE === "web" && isImage ? <SessionImagePreview
+              src={convertFileSrc(assetPath)}
+              alt={originalName}
+              draggable={false}
+              onDimensions={applyNaturalMediaRatio}
+            /> : <img
               src={isGeneratedImage ? String(record.content.imageUrl) : convertFileSrc(assetPath)}
               alt={originalName}
               draggable={false}
@@ -9404,7 +9417,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                               </>
                             ) : <span className={`video-input-preview is-${inputKind ?? input.kind}`}>
                               {inputPreviewUrl && inputKind === "image" ? (
-                                <img src={inputPreviewUrl} alt="" draggable={false} />
+                                import.meta.env.MODE === "web" && input.kind === "image"
+                                  ? <SessionImagePreview src={inputPreviewUrl} alt="" draggable={false} />
+                                  : <img src={inputPreviewUrl} alt="" draggable={false} />
                               ) : inputAssetPath && inputKind === "video" ? (
                                 <LazyVideoPreview
                                   key={inputAssetPath}
@@ -9859,7 +9874,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     >
                       <span className="video-input-index">{index + 1}</span>
                       <span className="video-input-preview is-image">
-                        {inputPreviewUrl ? <img src={inputPreviewUrl} alt="" draggable={false} /> : <ImageIcon size={16} />}
+                        {inputPreviewUrl ? import.meta.env.MODE === "web" && input?.kind === "image"
+                          ? <SessionImagePreview src={inputPreviewUrl} alt="" draggable={false} />
+                          : <img src={inputPreviewUrl} alt="" draggable={false} /> : <ImageIcon size={16} />}
                       </span>
                       <span className="video-input-copy">
                         <strong>{input ? inputName : index === 0 ? "图 1（必填）" : "图 2（可选）"}</strong>

@@ -3,7 +3,8 @@ export function generatedMediaDownload(content: Record<string, unknown>, kind: "
   const url = content[kind === "video" ? "videoUrl" : "imageUrl"];
   // Imported desktop outputs may have only a ComfyUI URL, or an old drive
   // path. Download through the Web proxy without requiring a mapped directory.
-  const resource = asset.startsWith("sucanvas://") ? asset
+  const resource = asset.startsWith("sucanvas-output://") && typeof url === "string" && /^(https?:\/\/|\/api\/)/.test(url) ? url
+    : /^sucanvas(?:-input|-output)?:\/\//.test(asset) ? asset
     : typeof url === "string" && /^(https?:\/\/|\/api\/)/.test(url) ? url : "";
   if (!resource) return null;
   const name = [content.originalName, content.filename].find((value) => typeof value === "string" && value.trim());

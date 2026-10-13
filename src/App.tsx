@@ -1,4 +1,5 @@
 import { withSubmissionWaitNotice } from "./video/submissionWait";
+import { generatedVideoDeletionPaths } from "./web/outputFiles";
 import { deduplicateRegenerationPromptOptions } from "./video/regenerationPromptOptions";
 import { generationQueuePositions } from "./generationQueuePositions";
 import { VideoPosterViewportCache } from "./VideoPosterViewportCache";
@@ -2537,6 +2538,7 @@ function CanvasWorkspace() {
         return assetPath ? [assetPath] : [];
       }
       if (record.kind === "generated-video") {
+        if (import.meta.env.MODE === "web") return generatedVideoDeletionPaths(comfyOutputRootRef.current, record.content);
         const mappedPath = mappedComfyOutputPath(comfyOutputRootRef.current, record.content);
         return mappedPath ? [mappedPath] : [];
       }
@@ -2738,6 +2740,12 @@ function CanvasWorkspace() {
             : await requestVideoDeletionChoice(records);
         if (choice === "cancel") return;
 
+        if (import.meta.env.MODE === "web" && choice === "node-and-file" && generatedVideoRecords.some(
+          (record) => !generatedVideoDeletionPaths(comfyOutputRootRef.current, record.content).length,
+        )) {
+          throw new Error("无法定位 ComfyUI 视频原件，请先在设置中填写服务器可访问的输出映射目录，并确认视频文件信息完整。");
+        }
+
         const cancelledPlaceholderTaskCount = await cancelTasksForDeletedPlaceholders(records);
 
         const ids = records.map((record) => record.id);
@@ -2748,7 +2756,7 @@ function CanvasWorkspace() {
 
         if (choice === "node-and-file") {
           try {
-            if (generatedVideoRecords.length) {
+            if (generatedVideoRecords.length || (import.meta.env.MODE === "web" && records.some((record) => record.kind === "video" || record.kind === "generated-video"))) {
               const videoFilePaths = videoFilePathsForRecords(
                 deleteSourceFiles ? generatedVideoRecords : records,
               );
@@ -11429,9 +11437,11 @@ function CanvasWorkspace() {
                 即将删除 {videoDeletionRequest.videoCount} 个视频节点。
                 {videoDeletionRequest.filePaths.length
                   ? ` 检测到 ${videoDeletionRequest.filePaths.length} 个本地视频文件，可选择一并永久删除。`
-                  : " 当前没有可定位的本地视频文件，只能删除节点。"}
+                  : import.meta.env.MODE === "web"
+                    ? " 请先在设置中填写服务器可访问的 ComfyUI 输出映射目录，再同时删除文件。"
+                    : " 当前没有可定位的本地视频文件，只能删除节点。"}
               </p>
-              {videoDeletionRequest.filePaths.length > 0 && (
+              {(videoDeletionRequest.filePaths.length > 0 || import.meta.env.MODE === "web") && (
                 <p className="video-delete-warning">
                   同时删除文件后无法撤销，Ctrl+Z 也不能恢复真实视频文件。
                 </p>
@@ -11453,7 +11463,7 @@ function CanvasWorkspace() {
               >
                 仅删除节点
               </button>
-              {videoDeletionRequest.filePaths.length > 0 && (
+              {(videoDeletionRequest.filePaths.length > 0 || import.meta.env.MODE === "web") && (
                 <button
                   type="button"
                   className="dialog-danger"

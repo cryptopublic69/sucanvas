@@ -7,6 +7,8 @@ import type { CanvasFlowNode } from "../CanvasNode";
 import { nodeRenderQueue } from "./renderQueue";
 import { useBatchedNodeInternals } from "./useBatchedNodeInternals";
 import { posterMemoryCache, requestCachedVideoPoster } from "../videoPosterCache";
+import { versionedPreviewUrl } from "../web/previewCache";
+import { SessionImagePreview } from "../web/SessionImagePreview";
 
 type Props = NodeProps<CanvasFlowNode> & { detail: ComponentType<NodeProps<CanvasFlowNode>> };
 export const CanvasNodePresentation = memo(function CanvasNodePresentation({ detail: Detail, ...props }: Props) {
@@ -27,9 +29,12 @@ export const CanvasNodePresentation = memo(function CanvasNodePresentation({ det
     });
   }, [ready, distant, props.selected, engaged]);
   useEffect(() => { updateInternals(props.id); }, [full, props.id, updateInternals]);
-  const video = record.kind === "generated-video" && typeof record.content.videoUrl === "string"
+  let video = record.kind === "generated-video" && typeof record.content.videoUrl === "string"
     ? record.content.videoUrl : record.kind === "video" && typeof record.content.assetPath === "string"
       ? convertFileSrc(record.content.assetPath) : "";
+  if (import.meta.env.MODE === "web" && record.kind === "generated-video") {
+    video = versionedPreviewUrl(video, typeof record.content.comfyPromptId === "string" ? record.content.comfyPromptId : "");
+  }
   const image = record.kind === "generated-image" && typeof record.content.imageUrl === "string"
     ? record.content.imageUrl : record.kind === "image" && typeof record.content.assetPath === "string"
       ? convertFileSrc(record.content.assetPath) : "";
@@ -38,16 +43,20 @@ export const CanvasNodePresentation = memo(function CanvasNodePresentation({ det
     if (full || !video) return;
     let release: (() => void) | undefined;
     let cancelRead: (() => void) | undefined;
-    const cancel = nodeRenderQueue.enqueue(() => {
+    const readCover = () => {
       cancelRead = requestCachedVideoPoster(video, () => {
         const cover = posterMemoryCache.retain(video);
         if (cover) { release = cover.release; setPoster({ src: video, url: cover.url }); }
       });
-    });
+    };
+    let cancel = () => {};
+    if (import.meta.env.MODE === "web" && posterMemoryCache.peek(video)) readCover();
+    else cancel = nodeRenderQueue.enqueue(readCover);
     return () => { cancel(); cancelRead?.(); release?.(); };
   }, [full, video]);
   if (full) return <div className="canvas-node-detail-host" onFocusCapture={() => setEngaged(true)} onDoubleClickCapture={() => setEngaged(true)}><Detail {...props} /></div>;
-  const thumbnail = image || (poster?.src === video ? poster.url : "");
+  const residentPoster = import.meta.env.MODE === "web" ? posterMemoryCache.peek(video)?.url : "";
+  const thumbnail = image || residentPoster || (poster?.src === video ? poster.url : "");
   const kind = ({ text: "文本", "generated-video": "视频", "video-generation": "视频生成", image: "图片", "generated-image": "图片", "image-generation": "图片生成", video: "视频", audio: "音频", folder: "目录", note: "便签" } as Record<string, string>)[record.kind] ?? "内容";
   const status = props.data.activeTaskCount > 0 ? `${props.data.activeTaskCount} 个任务执行中`
     : record.content.generationPlaceholder === true ? "生成中"
@@ -58,7 +67,9 @@ export const CanvasNodePresentation = memo(function CanvasNodePresentation({ det
   return <div ref={host} className={`canvas-node canvas-node-overview kind-${record.kind} ${props.data.matched ? "" : "is-dimmed"} ${props.data.relationHighlighted ? "is-relation-highlighted" : ""}`}>
     {target && <Handle type="target" position={Position.Left} className="node-handle target-handle" />}
     <header><span>{kind}</span><strong>{record.title || kind}</strong></header>
-    {thumbnail ? <img src={thumbnail} alt="" loading="lazy" decoding="async" /> : <div className="canvas-node-overview-symbol">{kind}</div>}
+    {import.meta.env.MODE === "web" && record.kind === "image" && image
+      ? <SessionImagePreview src={image} alt="" loading="lazy" decoding="async" />
+      : thumbnail ? <img src={thumbnail} alt="" loading="lazy" decoding="async" /> : <div className="canvas-node-overview-symbol">{kind}</div>}
     <footer>{status}</footer>
     {source && <Handle type="source" position={Position.Right} className="node-handle source-handle" />}
   </div>;

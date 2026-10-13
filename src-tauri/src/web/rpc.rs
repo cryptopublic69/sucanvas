@@ -82,9 +82,24 @@ fn path_key(key: &str) -> bool {
             | "sourceVideoPath"
     )
 }
+fn comfy_source_url(value: &str, public_origin: &str, comfy_url: &str) -> Option<String> {
+    let absolute_prefix = format!("{public_origin}/api/comfy");
+    let tail = value
+        .strip_prefix(&absolute_prefix)
+        .or_else(|| value.strip_prefix("/api/comfy"))?;
+    if !tail.starts_with('/') || comfy_url.is_empty() {
+        return None;
+    }
+    Some(format!("{}{tail}", comfy_url.trim_end_matches('/')))
+}
 pub fn normalize_args(state: &WebState, value: &mut Value, key: &str) -> Result<(), String> {
     match value {
         Value::String(text) => {
+            if path_key(key) {
+                let mut value = Value::String(text.clone());
+                super::storage::normalize_record(state, &mut value);
+                *text = value.as_str().unwrap().to_owned();
+            }
             if path_key(key) && text.starts_with("/api/resource?") {
                 let url = reqwest::Url::parse(&format!("http://localhost{text}"))
                     .map_err(|e| e.to_string())?;
@@ -104,20 +119,20 @@ pub fn normalize_args(state: &WebState, value: &mut Value, key: &str) -> Result<
                 *text = state.config.comfy_input_directory.clone();
                 return Ok(());
             }
-            if text.starts_with("sucanvas://") {
-                *text = crate::portable::resource_path(&state.core.data_dir, text)?
+            if text.starts_with("sucanvas://")
+                || text.starts_with("sucanvas-input://")
+                || text.starts_with("sucanvas-output://")
+            {
+                *text = super::storage::resource_path(state, text)?
                     .to_string_lossy()
                     .into_owned();
             } else if text.starts_with("sucanvas-export://") {
                 *text = export_path(state, text)?.to_string_lossy().into_owned();
             }
-            let proxy_prefix = format!("{}/api/comfy", state.config.origin());
-            if text.starts_with(&proxy_prefix) {
-                *text = format!(
-                    "{}{}",
-                    state.config.comfy_url.trim_end_matches('/'),
-                    &text[proxy_prefix.len()..]
-                );
+            if let Some(url) =
+                comfy_source_url(text, &state.config.origin(), &state.config.comfy_url)
+            {
+                *text = url;
             }
             if path_key(key)
                 && !text.trim().is_empty()
@@ -128,6 +143,7 @@ pub fn normalize_args(state: &WebState, value: &mut Value, key: &str) -> Result<
                 // Only managed files or administrator-configured ComfyUI output are reachable.
                 let mut roots = vec![
                     state.core.assets_dir.clone(),
+                    state.core.data_dir.join("assets"), // Pending legacy migration only.
                     state.core.data_dir.join("uploads"),
                     state.core.data_dir.join("temp"),
                     state.core.workflow_modules_dir.clone(),
@@ -147,7 +163,11 @@ pub fn normalize_args(state: &WebState, value: &mut Value, key: &str) -> Result<
         }
         Value::Object(values) => {
             for (key, value) in values {
-                normalize_args(state, value, key)?;
+                if key == "content" {
+                    super::storage::normalize_record(state, value);
+                } else {
+                    normalize_args(state, value, key)?;
+                }
             }
         }
         _ => {}
@@ -158,6 +178,7 @@ pub fn normalize_result(state: &WebState, value: &mut Value) {
     crate::portable::transform(value, &state.core.data_dir, false);
     match value {
         Value::String(text) => {
+            *text = super::storage::encode(state, text);
             if let Ok(relative) = FsPath::new(text).strip_prefix(&state.downloads) {
                 *text = format!(
                     "sucanvas-export://{}",
@@ -182,9 +203,13 @@ pub fn normalize_result(state: &WebState, value: &mut Value) {
             .for_each(|value| normalize_result(state, value)),
         Value::Object(values) => values.iter_mut().for_each(|(key, value)| {
             if key == "infinite-canvas:comfy-input-root" {
-                *value = Value::String(state.config.comfy_input_directory.clone());
+                *value = Value::String(super::connection::display_directory(
+                    &state.config.comfy_input_directory,
+                ));
             } else if key == "infinite-canvas:comfy-output-root" {
-                *value = Value::String(state.config.comfy_output_directory.clone());
+                *value = Value::String(super::connection::display_directory(
+                    &state.config.comfy_output_directory,
+                ));
             } else if matches!(
                 key.as_str(),
                 "comfyServerUrl"
@@ -227,6 +252,17 @@ pub async fn invoke(
     Path(command): Path<String>,
     Json(mut input): Json<Request>,
 ) -> Response {
+    let _storage_guard = if matches!(
+        command.as_str(),
+        "import_media" | "export_app_backup" | "stage_app_backup_restore"
+    ) || command.contains("node")
+        || command.starts_with("delete_")
+        || command.starts_with("export_")
+    {
+        Some(state.media_guard.clone().lock_owned().await)
+    } else {
+        None
+    };
     let state = state.connection_snapshot();
     if command == "disable_app_lock" {
         return (
@@ -242,6 +278,21 @@ pub async fn invoke(
         };
     }
     remove_unused_workflow_fallback(&command, &mut input.args);
+    if command == "import_media" {
+        let directory = match super::storage::input_root(&state) {
+            Ok(root) => root.join(super::storage::IMPORT_FOLDER),
+            Err(error) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response()
+            }
+        };
+        if let Err(error) = std::fs::create_dir_all(directory) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    }
     if command == "capture_video_poster" {
         if let Some(source) = input.args.get_mut("source") {
             if let Err(error) = normalize_args(&state, source, "sourcePath") {
@@ -257,7 +308,50 @@ pub async fn invoke(
     let result = tokio::spawn(async move {
         let mut result = super::dispatch::dispatch(&worker_state, &command, &input.args).await?;
         if command.starts_with("submit_comfyui_") || command == "get_comfyui_client_task_statuses" {
-            super::media::retain_outputs(&worker_state, &mut result).await?;
+            super::media::reference_outputs(&mut result)?;
+        }
+        if command == "import_media" {
+            let physical_asset = result["node"]["content"]["assetPath"]
+                .as_str()
+                .ok_or("导入结果缺少素材路径")?
+                .to_owned();
+            let mut content = result["node"]["content"].clone();
+            super::storage::encode_value(&worker_state, &mut content);
+            let update = serde_json::from_value(
+                serde_json::json!({"id": result["node"]["id"], "content": content}),
+            )
+            .map_err(|e| e.to_string())?;
+            let node =
+                crate::commands::update_node(update, crate::platform::State(&worker_state.core))?;
+            let connection = rusqlite::Connection::open(
+                worker_state.core.data_dir.join("infinite-canvas.sqlite3"),
+            )
+            .map_err(|e| e.to_string())?;
+            connection
+                .busy_timeout(std::time::Duration::from_secs(5))
+                .map_err(|e| e.to_string())?;
+            connection
+                .execute(
+                    "UPDATE canvases SET preview_image_path=?1 WHERE preview_image_path=?2",
+                    rusqlite::params![
+                        super::storage::encode(&worker_state, &physical_asset),
+                        physical_asset
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+            result["node"] = serde_json::to_value(node).map_err(|e| e.to_string())?;
+            if let Some(source) = input.args["path"].as_str() {
+                let path = PathBuf::from(source);
+                if path.starts_with(worker_state.core.data_dir.join("uploads")) {
+                    let _ = std::fs::remove_file(&path);
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::remove_dir(parent);
+                    }
+                }
+            }
+        }
+        if command == "export_app_backup" {
+            super::backup::append_imported_inputs(&worker_state, &mut result)?;
         }
         Ok::<_, String>(result)
     })
@@ -279,6 +373,28 @@ pub async fn invoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn migrated_relative_preview_urls_reach_comfyui() {
+        let tail = "/view?filename=clip.mp4&subfolder=2026-09-25&type=output";
+        let origin = "https://canvas.example.com";
+        let upstream = "http://127.0.0.1:8188/";
+        let expected = Some(format!("http://127.0.0.1:8188{tail}"));
+        assert_eq!(
+            comfy_source_url(&format!("/api/comfy{tail}"), origin, upstream),
+            expected
+        );
+        assert_eq!(
+            comfy_source_url(&format!("{origin}/api/comfy{tail}"), origin, upstream),
+            expected
+        );
+        for value in [
+            "/api/comfy-other/view",
+            "https://other.example/api/comfy/view",
+            "sucanvas-input://sucanvas-imports/a.png",
+        ] {
+            assert!(comfy_source_url(value, origin, upstream).is_none());
+        }
+    }
     #[test]
     fn filesystem_boundary_rejects_parent_traversal() {
         let root = std::env::temp_dir().join(format!("web-paths-{}", uuid::Uuid::new_v4()));

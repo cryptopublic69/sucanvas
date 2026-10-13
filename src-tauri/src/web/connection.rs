@@ -21,12 +21,28 @@ pub(super) struct Connection {
     comfy_input_directory: String,
     comfy_output_directory: String,
 }
+pub(super) fn display_directory(directory: &str) -> String {
+    if let Some(relative) = directory.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{relative}");
+    }
+    if let Some(relative) = directory.strip_prefix(r"\\?\") {
+        let bytes = relative.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\'
+        {
+            return relative.to_owned();
+        }
+    }
+    directory.to_owned()
+}
 impl Connection {
     fn from_config(config: &Config) -> Self {
         Self {
             comfy_url: config.comfy_url.clone(),
-            comfy_input_directory: config.comfy_input_directory.clone(),
-            comfy_output_directory: config.comfy_output_directory.clone(),
+            comfy_input_directory: display_directory(&config.comfy_input_directory),
+            comfy_output_directory: display_directory(&config.comfy_output_directory),
         }
     }
     fn apply(&self, config: &mut Config) {
@@ -136,7 +152,35 @@ pub(super) async fn write(
     Json(input): Json<Connection>,
 ) -> Response {
     match state.connection.save(input) {
-        Ok(saved) => Json(saved).into_response(),
+        Ok(saved) => {
+            let state = state.connection_snapshot();
+            let _storage_guard = state.media_guard.lock().await;
+            let _settings_guard = state.settings_guard.lock().await;
+            let handle = state.handle.clone();
+            let migration_state = state.clone();
+            match tokio::task::spawn_blocking(move || super::storage::migrate(&migration_state))
+                .await
+            {
+                Ok(Ok(report)) => {
+                    if report["migrated"] == true {
+                        let _ = handle.emit("canvas://resync", json!({}));
+                    }
+                    let mut value = serde_json::to_value(saved).unwrap();
+                    value["storageMigration"] = report;
+                    Json(value).into_response()
+                }
+                Ok(Err(error)) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("目录已保存，但旧素材迁移未完成：{error}")})),
+                )
+                    .into_response(),
+                Err(error) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": error.to_string()})),
+                )
+                    .into_response(),
+            }
+        }
         Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response(),
     }
 }
@@ -183,7 +227,7 @@ mod tests {
         assert_eq!(store.snapshot().comfy_url, saved.comfy_url);
         assert_eq!(
             saved.comfy_input_directory,
-            root.join("input").canonicalize().unwrap().to_string_lossy()
+            display_directory(&root.join("input").canonicalize().unwrap().to_string_lossy())
         );
         let disk = Config::read(&root.join("config.json")).unwrap();
         assert_eq!(disk.comfy_input_directory, "input");
@@ -204,7 +248,10 @@ mod tests {
         assert_eq!(fs::read(backup).unwrap(), original);
         let mut restarted = disk;
         resolve_directories(&mut restarted, &root).unwrap();
-        assert_eq!(restarted.comfy_input_directory, saved.comfy_input_directory);
+        assert_eq!(
+            restarted.comfy_input_directory,
+            store.snapshot().comfy_input_directory
+        );
         // Both mappings can be cleared without restarting the server.
         let saved = store
             .save(Connection {

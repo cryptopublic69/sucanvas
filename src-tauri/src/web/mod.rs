@@ -1,12 +1,15 @@
 mod auth;
+mod backup;
 mod config;
 mod connection;
 mod dispatch;
 mod files;
 mod media;
+mod posters;
 mod proxy;
 mod rpc;
 mod settings;
+mod storage;
 
 use crate::{
     api::{self, ApiState},
@@ -57,6 +60,10 @@ pub(crate) struct WebState {
 impl WebState {
     fn connection_snapshot(mut self) -> Self {
         self.config = self.connection.snapshot();
+        let mut core = (*self.core).clone();
+        core.assets_dir =
+            PathBuf::from(&self.config.comfy_input_directory).join(storage::IMPORT_FOLDER);
+        self.core = Arc::new(core);
         self
     }
 }
@@ -130,7 +137,6 @@ pub async fn run() -> Result<(), String> {
     // clients must never have to flush imported settings while reloading.
     settings::restore_frontend_settings(&data)?;
     for directory in [
-        "assets",
         "uploads",
         "temp/image-resize",
         "workflow-modules",
@@ -196,7 +202,7 @@ pub async fn run() -> Result<(), String> {
                 .into_owned(),
             canvas_id: DEFAULT_CANVAS_ID.to_owned(),
         },
-        assets_dir: data.join("assets"),
+        assets_dir: PathBuf::from(&config.comfy_input_directory).join(storage::IMPORT_FOLDER),
         workflow_modules_dir: data.join("workflow-modules"),
         workflow_module_exports_dir: data.join("workflow-module-exports"),
         app_lock_path: data.join("app-lock.json"),
@@ -222,6 +228,11 @@ pub async fn run() -> Result<(), String> {
         settings_guard: Arc::new(tokio::sync::Mutex::new(())),
         media_guard: Arc::new(tokio::sync::Mutex::new(())),
     };
+    if let Err(error) = storage::migrate(&state) {
+        // Keep the settings UI and existing project references available for
+        // correcting an unavailable mapping. Saving settings retries migration.
+        eprintln!("旧素材迁移未完成，保留原数据：{error}");
+    }
     let protected = Router::new()
         .route("/api/invoke/{command}", post(rpc::invoke))
         .route(
@@ -229,6 +240,7 @@ pub async fn run() -> Result<(), String> {
             post(files::upload).layer(DefaultBodyLimit::max(state.config.max_upload_bytes)),
         )
         .route("/api/resource", get(files::resource))
+        .route("/api/video-poster", get(posters::image))
         .route("/api/events", get(events))
         .route("/api/settings", get(read_settings).put(write_settings))
         .route(
@@ -337,6 +349,12 @@ async fn legacy_adapter(
     if !bearer && !state.auth.authenticated(request.headers()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let _storage_guard = if !matches!(*request.method(), Method::GET | Method::HEAD) {
+        Some(state.media_guard.clone().lock_owned().await)
+    } else {
+        None
+    };
+    let state = state.connection_snapshot();
     request.headers_mut().insert(
         header::AUTHORIZATION,
         format!("Bearer {}", state.token).parse().unwrap(),
@@ -437,11 +455,11 @@ async fn read_settings(State(state): State<WebState>) -> impl IntoResponse {
     );
     settings.insert(
         "infinite-canvas:comfy-input-root".to_owned(),
-        state.config.comfy_input_directory.clone(),
+        connection::display_directory(&state.config.comfy_input_directory),
     );
     settings.insert(
         "infinite-canvas:comfy-output-root".to_owned(),
-        state.config.comfy_output_directory.clone(),
+        connection::display_directory(&state.config.comfy_output_directory),
     );
     Json(settings)
 }
@@ -450,7 +468,9 @@ async fn write_settings(
     Json(mut settings): Json<BTreeMap<String, String>>,
 ) -> Response {
     settings.retain(|key, _| key.starts_with("infinite-canvas:"));
+    let state = state.connection_snapshot();
     let _guard = state.settings_guard.lock().await;
+    storage::normalize_settings(&state, &mut settings);
     match settings::write(&state.core.data_dir, &settings) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

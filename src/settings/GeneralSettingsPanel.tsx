@@ -96,11 +96,11 @@ export function GeneralSettingsPanel({
                   setSettingsOpen(false);
                 }
               }}
-              placeholder="例如：X:\ComfyUI_windows_portable\ComfyUI\input"
+              placeholder={import.meta.env.MODE === "web" ? "例如：E:\\ComfyUI_windows_portable\\ComfyUI\\input" : "例如：X:\\ComfyUI_windows_portable\\ComfyUI\\input"}
               spellCheck={false}
             />
             <small>
-              {import.meta.env.MODE === "web" ? "填写运行 Web 后端的机器可访问的 ComfyUI input 根目录，用于任务结束后清理输入文件。不要包含 infinite-canvas；留空则不自动清理。" : <>请填写 ComfyUI 的 input 根目录，例如
+              {import.meta.env.MODE === "web" ? "填写 Web 服务器本机的 ComfyUI input 根目录，使用服务器本机盘符。导入素材保存在 sucanvas-imports；任务临时输入在 infinite-canvas\\任务ID 中，任务结束后清理。填写输入、输出目录并保存后会备份并迁移旧项目素材。" : <>请填写 ComfyUI 的 input 根目录，例如
               X:\ComfyUI_windows_portable\ComfyUI\input。不要包含 infinite-canvas；程序会自动创建并在任务结束后清理
               infinite-canvas\任务ID。留空则不自动清理。</>}
             </small>
@@ -117,11 +117,11 @@ export function GeneralSettingsPanel({
                   setSettingsOpen(false);
                 }
               }}
-              placeholder="例如：X:\ComfyUI_windows_portable\ComfyUI\output"
+              placeholder={import.meta.env.MODE === "web" ? "例如：E:\\ComfyUI_windows_portable\\ComfyUI\\output" : "例如：X:\\ComfyUI_windows_portable\\ComfyUI\\output"}
               spellCheck={false}
             />
             <small>
-              {import.meta.env.MODE === "web" ? "填写运行 Web 后端的机器可访问的 ComfyUI output 根目录。生成结果会保存在画布服务器，仅需要直接读取 ComfyUI 文件时填写；可以留空。" : "请选择或填写远端 ComfyUI 的 output 根目录，不要包含生成任务的子文件夹和文件名。"}
+              {import.meta.env.MODE === "web" ? "填写 Web 服务器本机的 ComfyUI output 根目录，使用服务器本机盘符，不要包含任务子文件夹或文件名。生成图片和视频只关联此目录中的文件；同时删除文件会删除对应原件。旧副本会迁入对应目录，并在备份后更新项目引用。" : "请选择或填写远端 ComfyUI 的 output 根目录，不要包含生成任务的子文件夹和文件名。"}
             </small>
           </label>
         </div>

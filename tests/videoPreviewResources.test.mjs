@@ -6,6 +6,9 @@ import ts from "typescript";
 async function moduleUrl(path, replacements = []) {
   let source = await readFile(new URL(path, import.meta.url), "utf8");
   for (const [from, to] of replacements) source = source.replace(from, to);
+  for (const [specifier, path] of [["./web/posterExtractionQueue", "../src/web/posterExtractionQueue.ts"], ["./web/posterRequest", "../src/web/posterRequest.ts"]]) {
+    if (source.includes(JSON.stringify(specifier))) source = source.replace(JSON.stringify(specifier), JSON.stringify(await moduleUrl(path)));
+  }
   const output = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext },
   }).outputText;
@@ -274,6 +277,86 @@ test("memory cache shares URLs, evicts unused covers, and protects mounted cover
   cache.put(poster("d"));
   assert.equal(cache.peek("a"), undefined);
   assert.ok(cache.peek("c"));
+});
+
+test("Web retains loaded covers beyond the desktop limits when viewport nodes unmount", async (t) => {
+  const webPosterUrl = await moduleUrl("../src/videoPosterCache.ts", [
+    ['"./videoPreviewScheduler"', JSON.stringify(schedulerUrl)],
+    ['"@tauri-apps/api/core"', '"data:text/javascript,export const isTauri = () => false; export const invoke = () => Promise.reject();"'],
+    [/import\.meta\.env\?\.MODE/g, '"web"'],
+  ]);
+  const { posterMemoryCache: cache, requestVideoPoster: request } = await import(webPosterUrl);
+  const revoked = [];
+  t.mock.method(URL, "revokeObjectURL", (url) => revoked.push(url));
+  const blob = new Blob([new Uint8Array(64 * 1024)], { type: "image/jpeg" });
+  cache.put({ src: "web-first", blob, width: 480, height: 270, createdAt: 0 });
+  const mounted = cache.retain("web-first");
+  const originalUrl = mounted.url;
+  mounted.release();
+  for (let i = 0; i < 640; i++) cache.put({ src: `web-${i}`, blob, width: 480, height: 270, createdAt: i + 1 });
+  await tick();
+  assert.equal(cache.peek("web-first").url, originalUrl);
+  const remounted = cache.retain("web-first");
+  assert.equal(remounted.url, originalUrl);
+  remounted.release();
+  let delivered;
+  request("web-first", (poster) => { delivered = poster; });
+  assert.equal(delivered.blob, blob, "returning to the viewport reuses the resident cover synchronously");
+  assert.deepEqual(revoked, []);
+});
+
+test("Web simplified covers are notified after first extraction without persistent storage", async () => {
+  const previous = globalThis.indexedDB;
+  let deletions = 0;
+  globalThis.indexedDB = {
+    deleteDatabase(name) { assert.equal(name, "infinite-canvas-video-posters"); deletions++; },
+    open() { throw new Error("Web covers must not read or write persistent storage"); },
+  };
+  let extractions = 0;
+  globalThis.webSessionPosterBlob = async () => { extractions++; return new Blob([new Uint8Array([255, 216, 255, 217])], { type: "image/jpeg" }); };
+  try {
+    const url = await moduleUrl("../src/videoPosterCache.ts", [
+      ['"./videoPreviewScheduler"', JSON.stringify(schedulerUrl)],
+      ['"@tauri-apps/api/core"', '"data:text/javascript,export const isTauri=()=>false;export const invoke=()=>Promise.reject();"'],
+      ['"./web/posterRequest"', '"data:text/javascript,export const requestPosterBlob=(...args)=>globalThis.webSessionPosterBlob(...args);"'],
+      [/import\.meta\.env\?\.MODE/g, '"web"'],
+    ]);
+    const session = await import(url);
+    let simplified = 0;
+    let cancelled = 0;
+    const source = "/api/comfy/view?filename=first-open.mp4&type=output";
+    const stop = session.requestCachedVideoPoster(source, () => simplified++);
+    const stopCancelled = session.requestCachedVideoPoster(source, () => cancelled++);
+    stopCancelled();
+    assert.equal(simplified, 0);
+    session.requestVideoPoster(source, () => {});
+    await tick();
+    assert.equal(extractions, 1);
+    assert.equal(simplified, 1, "simplified nodes update when a visible cover is first generated");
+    assert.equal(cancelled, 0);
+    session.requestVideoPoster(source, () => {});
+    await tick();
+    assert.equal(extractions, 1, "returning within this page reuses memory");
+    const freshPage = await import(url + "#fresh-page");
+    assert.equal(freshPage.posterMemoryCache.peek(source), undefined, "new page starts without durable covers");
+    assert.equal(deletions, 2);
+    stop();
+  } finally {
+    if (previous === undefined) delete globalThis.indexedDB;
+    else globalThis.indexedDB = previous;
+  }
+});
+
+test("Web regenerated previews use distinct cache keys for relative and absolute URLs", async () => {
+  const { versionedPreviewUrl } = await import(await moduleUrl("../src/web/previewCache.ts"));
+  const origin = "https://canvas.example.com";
+  const relative = "/api/comfy/view?filename=same.mp4&type=output";
+  const first = versionedPreviewUrl(relative, "prompt-1", origin);
+  assert.equal(first, versionedPreviewUrl(origin + relative, "prompt-1", origin));
+  assert.notEqual(first, versionedPreviewUrl(relative, "prompt-2", origin));
+  assert.equal(new URL(first).searchParams.get("filename"), "same.mp4");
+  assert.equal(new URL(first).searchParams.get("infinite_canvas_prompt"), "prompt-1");
+  assert.equal(versionedPreviewUrl(relative, "", origin), relative);
 });
 
 test("disk cache hits bypass the decoder queue and prewarming never extracts misses", async () => {

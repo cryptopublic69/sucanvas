@@ -81,7 +81,7 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
 }
 export function isTauri() { return false; }
 export function convertFileSrc(path: string) {
-  if (path.startsWith("sucanvas://") || path.startsWith("sucanvas-export://")) return `/api/resource?resource=${encodeURIComponent(path)}`;
+  if (/^sucanvas(?:-input|-output|-export)?:\/\//.test(path)) return `/api/resource?resource=${encodeURIComponent(path)}`;
   if (/^(https?:|blob:|data:|\/)/.test(path)) return path;
   return "";
 }

@@ -3,10 +3,16 @@ import { useStore, useStoreApi } from "@xyflow/react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { preloadCachedVideoPosters } from "./videoPosterCache";
 import type { CanvasFlowNode } from "./CanvasNode";
+import { WebViewportPosters } from "./web/WebViewportPosters";
 
 // Prewarm covers 320 screen pixels beyond the viewport. Keep React Flow's
 // node virtualization; moving the canvas must not mount distant players.
 export function VideoPosterViewportCache() {
+  if (import.meta.env.MODE === "web") return <WebViewportPosters />;
+  return <DesktopPosterViewportCache />;
+}
+
+function DesktopPosterViewportCache() {
   const store = useStoreApi();
   const changes = useStore((state) => [state.nodes, state.transform, state.width, state.height] as const,
     (a, b) => a.every((value, index) => value === b[index]));

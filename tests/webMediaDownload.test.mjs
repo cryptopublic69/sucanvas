@@ -30,3 +30,9 @@ test("local drive paths and missing media do not become browser download links",
   assert.equal(generatedMediaDownload({ videoUrl: "javascript:alert(1)" }, "video"), null);
   assert.equal(generatedMediaDownload({}, "image"), null);
 });
+
+test("ComfyUI originals download through the proxy without a directory mapping", () => {
+  const videoUrl = "/api/comfy/view?filename=scene.mp4&subfolder=H3&type=output";
+  assert.deepEqual(generatedMediaDownload({ assetPath: "sucanvas-output://H3/scene.mp4", videoUrl, filename: "scene.mp4" }, "video"), { resource: videoUrl, filename: "scene.mp4" });
+  assert.deepEqual(generatedMediaDownload({ assetPath: "sucanvas-input://sucanvas-imports/voice.mp3", originalName: "voice.mp3" }, "video"), { resource: "sucanvas-input://sucanvas-imports/voice.mp3", filename: "voice.mp3" });
+});

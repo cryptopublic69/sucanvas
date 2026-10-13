@@ -6,7 +6,7 @@ use super::{
 use crate::{
     commands,
     platform::{Channel, State},
-    video_posters, video_upscale,
+    video_upscale,
 };
 use serde_json::Value;
 pub async fn dispatch(state: &WebState, command: &str, args: &Value) -> Result<Value, String> {
@@ -396,10 +396,10 @@ pub async fn dispatch(state: &WebState, command: &str, args: &Value) -> Result<V
             .await?,
         )
         .map_err(|e| e.to_string()),
-        "capture_video_poster" => serde_json::to_value(
-            video_posters::capture_video_poster(argument(args, "source")?).await?,
-        )
-        .map_err(|e| e.to_string()),
+        "capture_video_poster" => {
+            serde_json::to_value(super::posters::capture(state, argument(args, "source")?).await?)
+                .map_err(|e| e.to_string())
+        }
         _ => Err(format!("Unknown command: {command}")),
     }
 }
