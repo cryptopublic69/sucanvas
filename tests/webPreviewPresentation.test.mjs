@@ -24,6 +24,7 @@ async function presentation(mode) {
     ['"../videoPosterCache"', JSON.stringify(inline('export const posterMemoryCache={peek:src=>globalThis.previewTestCovers.get(src)}; export const requestCachedVideoPoster=()=>{ throw new Error("Loaded covers must not require asynchronous reads for the initial render"); };'))],
     ['"../web/previewCache"', JSON.stringify(previewModule)],
     ['"../web/SessionImagePreview"', JSON.stringify(inline(`import React from ${JSON.stringify(realModule("react"))}; export const SessionImagePreview=props=>React.createElement("img",{...props,src:globalThis.previewTestImages?.get(props.src)?.url});`))],
+    ['"../web/useVideoStill"', JSON.stringify(inline(`export const useVideoStill=src=>${mode === "web" ? 'globalThis.previewTestStills?.get(src) || ""' : '""'};`))],
   ];
   let input = source.replaceAll('import.meta.env.MODE', JSON.stringify(mode));
   for (const [from, to] of replacements) input = input.replaceAll(from, to);
@@ -64,6 +65,21 @@ test("a regenerated video cannot display the previous resident cover", () => {
   updated.data.record.content.comfyPromptId = "new-prompt";
   const html = renderToStaticMarkup(React.createElement(WebPresentation, updated));
   assert.ok(!html.includes('src="blob:loaded-cover-0"'));
+});
+
+test("Web overview prefers a stopped frame and falls back to the resident cover after cleanup", () => {
+  globalThis.previewTestZoom = 0.2;
+  const src = versionedPreviewUrl(props(0).data.record.content.videoUrl, "prompt-0", origin);
+  globalThis.previewTestStills = new Map([[src, "blob:stopped-frame"]]);
+  const stopped = renderToStaticMarkup(React.createElement(WebPresentation, props(0)));
+  assert.ok(stopped.includes('src="blob:stopped-frame"'));
+  assert.ok(!stopped.includes('src="blob:loaded-cover-0"'));
+  const updated = props(0);
+  updated.data.record.content.comfyPromptId = "new-prompt";
+  assert.ok(!renderToStaticMarkup(React.createElement(WebPresentation, updated)).includes('src="blob:stopped-frame"'));
+  previewTestStills.clear();
+  const restored = renderToStaticMarkup(React.createElement(WebPresentation, props(0)));
+  assert.ok(restored.includes('src="blob:loaded-cover-0"'));
 });
 
 test("desktop overview retains its existing initial render behavior", () => {

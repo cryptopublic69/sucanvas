@@ -3,6 +3,8 @@ import { flushSync } from "react-dom";
 import { Film } from "lucide-react";
 import { posterMemoryCache, requestVideoPoster } from "./videoPosterCache";
 import { videoPreviewScheduler } from "./videoPreviewScheduler";
+import { useVideoStill } from "./web/useVideoStill";
+import { webVideoStills } from "./web/videoStillCache";
 
 export interface VideoPreviewHandle { playFullscreen(): void }
 interface Props {
@@ -27,6 +29,8 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
   const videoRef = useRef<HTMLVideoElement>(null);
   const ownedVideo = useRef<HTMLVideoElement | null>(null);
   const wrapperRef = useRef<HTMLSpanElement>(null);
+  const still = useVideoStill(src, wrapperRef);
+  const preview = still || poster;
   const alive = useRef(true);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const unloadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -60,6 +64,7 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
       positions.set(src, video.ended ? 0 : video.currentTime);
       if (positions.size > 128) positions.delete(positions.keys().next().value!);
       video.pause();
+      if (import.meta.env.MODE === "web" && alive.current && !document.hidden) webVideoStills.capture(src, video);
       video.removeAttribute("src");
       video.load();
       ownedVideo.current = null;
@@ -181,18 +186,19 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
         clearTimers();
         if (videoRef.current && document.fullscreenElement === videoRef.current) return;
         videoRef.current?.pause();
+        if (import.meta.env.MODE === "web" && videoRef.current) webVideoStills.capture(src, videoRef.current);
         unloadTimer.current = setTimeout(release, 1200);
       }}
       onClick={() => { if (!mounted || failed) activate(); }}
     >
-      {poster ? <img src={poster} alt="视频封面" draggable={false} /> : (
+      {preview ? <img src={preview} alt={still ? "视频停止画面" : "视频封面"} draggable={false} /> : (
         <span className="lazy-video-placeholder"><Film size={24} /><small>悬停播放</small></span>
       )}
       {mounted && (
         <video
           ref={videoRef}
           className={frameReady ? "is-frame-ready" : undefined}
-          poster={poster || undefined}
+          poster={preview || undefined}
           muted={muted}
           preload="none"
           playsInline

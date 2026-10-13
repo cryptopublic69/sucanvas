@@ -7,3 +7,15 @@
 :root[data-theme="light"] .web-logout:hover { color: #30374a; background: #f2f4f8; }
 .web-error { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); max-width: 80vw; z-index: 1500; background: #492527; color: white; border-radius: 8px; padding: 12px 20px; }
 .web-error button { margin-left: 14px; background: none; color: inherit; border: 0; cursor: pointer; }
+
+/* Match the player and still bounds so releasing the player does not shift the crop. */
+.canvas-node.kind-generated-video > .media-node-body .lazy-video-preview > img,
+.canvas-node.kind-generated-video > .media-node-body .lazy-video-preview > video:not(:fullscreen) {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
