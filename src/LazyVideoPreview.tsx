@@ -36,6 +36,13 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
   const unloadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const ownership = useRef<(() => void) | undefined>(undefined);
   const pendingFrame = useRef<{ video: HTMLVideoElement; handle: number } | undefined>(undefined);
+  const playbackTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const playbackAttempt = useRef(0);
+
+  function revealFrame() {
+    clearTimeout(playbackTimer.current);
+    setFrameReady(true);
+  }
 
   function cancelPendingFrame() {
     if (!pendingFrame.current) return;
@@ -46,7 +53,7 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
   function revealFallbackFrame(video: HTMLVideoElement) {
     if (typeof video.requestVideoFrameCallback === "function") return;
     if (alive.current && ownedVideo.current === video && video.readyState >= 2 && !video.seeking) {
-      setFrameReady(true);
+      revealFrame();
     }
   }
 
@@ -56,7 +63,9 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
   }
 
   function release() {
+    ++playbackAttempt.current;
     clearTimers();
+    clearTimeout(playbackTimer.current);
     cancelPendingFrame();
     const video = ownedVideo.current;
     if (video) {
@@ -81,6 +90,7 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
   function activate(fullscreen = false) {
     clearTimers();
     if (document.hidden || (document.fullscreenElement && document.fullscreenElement !== videoRef.current)) return;
+    const attempt = ++playbackAttempt.current;
     if (!ownership.current) ownership.current = videoPreviewScheduler.claim(release);
     // Mount synchronously so requestFullscreen keeps the button's user activation.
     flushSync(() => {
@@ -92,13 +102,20 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
     if (!video) { release(); return; }
     ownedVideo.current = video;
     if (video.getAttribute("src") !== src) video.src = src;
+    if (import.meta.env.MODE === "web" && !frameReady) {
+      clearTimeout(playbackTimer.current);
+      playbackTimer.current = setTimeout(() => {
+        if (alive.current && playbackAttempt.current === attempt && ownedVideo.current === video) { setFailed(true); release(); }
+      }, 15_000);
+    }
     cancelPendingFrame();
     if (typeof video.requestVideoFrameCallback === "function") {
       pendingFrame.current = {
         video,
         handle: video.requestVideoFrameCallback(() => {
+          if (import.meta.env.MODE === "web" && playbackAttempt.current !== attempt) return;
           pendingFrame.current = undefined;
-          if (alive.current && ownedVideo.current === video && video.hasAttribute("src")) setFrameReady(true);
+          if (alive.current && ownedVideo.current === video && video.hasAttribute("src")) revealFrame();
         }),
       };
     } else {
@@ -106,7 +123,11 @@ export const LazyVideoPreview = forwardRef<VideoPreviewHandle, Props>(function L
     }
     if (fullscreen) void video.requestFullscreen().catch(() => {});
     void video.play().catch(() => {
-      if (alive.current && videoRef.current === video && video.hasAttribute("src")) setFailed(true);
+      if (alive.current && (import.meta.env.MODE !== "web" || playbackAttempt.current === attempt)
+        && videoRef.current === video && video.hasAttribute("src")) {
+        setFailed(true);
+        if (import.meta.env.MODE === "web") release();
+      }
     });
   }
 

@@ -1,6 +1,7 @@
 // Vite uses this module only for --mode web; desktop keeps the native APIs.
 import type { OpenDialogOptions, SaveDialogOptions } from "@tauri-apps/plugin-dialog";
 import { downloadFilename, webApiUrl, webApiUrls } from "./urls";
+import { rpcTimeoutMs, withRequestTimeout } from "./requestTimeout";
 const devBackend = import.meta.env.DEV ? import.meta.env.SUCANVAS_WEB_DEV_BACKEND ?? "" : "";
 let serverOrigin = devBackend;
 type DragDropEvent =
@@ -18,20 +19,22 @@ let eventReady: Promise<void> | null = null;
 export function reportWebError(error: unknown) {
   window.dispatchEvent(new CustomEvent("sucanvas:web-error", { detail: error instanceof Error ? error.message : String(error) }));
 }
-export async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, { credentials: "same-origin", ...options });
-  if (response.status === 401 && !["/api/auth/session", "/api/auth/login"].includes(path)) window.dispatchEvent(new Event("sucanvas:session-expired"));
-  if (!response.ok) {
-    const text = await response.text();
-    let message = text || `请求失败 (${response.status})`;
-    try { message = (JSON.parse(text) as { error?: string }).error || message; } catch { /* plain server response */ }
-    throw new Error(message);
-  }
-  const value = await response.json();
-  if (["/api/auth/session", "/api/auth/login"].includes(path) && typeof value?.publicUrl === "string") {
-    serverOrigin = devBackend || value.publicUrl;
-  }
-  return webApiUrls(value, serverOrigin, window.location.origin) as T;
+export async function request<T>(path: string, options?: RequestInit, timeoutMs?: number): Promise<T> {
+  return withRequestTimeout(async signal => {
+    const response = await fetch(path, { credentials: "same-origin", ...options, signal });
+    if (response.status === 401 && !["/api/auth/session", "/api/auth/login"].includes(path)) window.dispatchEvent(new Event("sucanvas:session-expired"));
+    if (!response.ok) {
+      const text = await response.text();
+      let message = text || `请求失败 (${response.status})`;
+      try { message = (JSON.parse(text) as { error?: string }).error || message; } catch { /* plain server response */ }
+      throw new Error(message);
+    }
+    const value = await response.json();
+    if (["/api/auth/session", "/api/auth/login"].includes(path) && typeof value?.publicUrl === "string") {
+      serverOrigin = devBackend || value.publicUrl;
+    }
+    return webApiUrls(value, serverOrigin, window.location.origin) as T;
+  }, timeoutMs, options?.signal ?? undefined);
 }
 function connectEvents(): Promise<void> {
   if (eventReady) return eventReady;
@@ -42,7 +45,8 @@ function connectEvents(): Promise<void> {
     events!.onerror = () => {
       // SSE reconnects after a restart or revocation. Lock the UI only when
       // the server confirms expiration; a network interruption may recover.
-      void fetch("/api/auth/session", { credentials: "same-origin" }).then((response) => {
+      void withRequestTimeout(async signal => {
+        const response = await fetch("/api/auth/session", { credentials: "same-origin", signal });
         if (response.status === 401) window.dispatchEvent(new Event("sucanvas:session-expired"));
       }).catch(() => {});
     };
@@ -74,7 +78,7 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
     const result = await request<{ result: T }>(`/api/invoke/${encodeURIComponent(command)}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ args }, (_key, value) => typeof value === "string" && serverOrigin ? webApiUrl(value, window.location.origin, serverOrigin) : value),
-    });
+    }, rpcTimeoutMs(command));
     if (["export_media_asset", "export_generated_video", "export_generated_image"].includes(command) && typeof result.result === "string") download(result.result);
     return result.result;
   } finally { if (channel) channels.delete(channel.id); }

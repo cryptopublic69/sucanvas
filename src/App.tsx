@@ -1,5 +1,7 @@
 import { withSubmissionWaitNotice } from "./video/submissionWait";
 import { generatedVideoDeletionPaths } from "./web/outputFiles";
+import { WebRequestTimeoutError } from "./web/requestTimeout";
+import { imageRegenerationPrompt, type WebImagePromptRequest } from "./web/imageGenerationPrompt";
 import { deduplicateRegenerationPromptOptions } from "./video/regenerationPromptOptions";
 import { generationQueuePositions } from "./generationQueuePositions";
 import { VideoPosterViewportCache } from "./VideoPosterViewportCache";
@@ -608,7 +610,7 @@ function CanvasWorkspace() {
   const comfyInputRootRef = useRef(comfyInputRoot);
   const comfyUiServerUrlRef = useRef(comfyUiServerUrl);
   const h3WorkflowPathRef = useRef(h3WorkflowPath);
-  const executeImageNodeRef = useRef<(id: string, placementSourceId?: string) => Promise<void>>(async () => { });
+  const executeImageNodeRef = useRef<(id: string, placementSourceId?: string, promptRequest?: WebImagePromptRequest) => Promise<void>>(async () => { });
   const upscaleGeneratedImageRef = useRef<(id: string) => Promise<void>>(async () => { });
   const regenerateGeneratedImageRef = useRef<(id: string) => Promise<void>>(async () => { });
   const makeFlowNodeRef = useRef<((record: NodeRecord, matched?: boolean) => CanvasFlowNode) | null>(null);
@@ -2767,7 +2769,11 @@ function CanvasWorkspace() {
               await invoke<number>("delete_image_files", { paths: imageFilePaths });
             }
           } catch (error) {
-            await invoke<DeletedBatch>("restore_deleted_nodes", { batch });
+            // A timed-out file operation may still be running on the server.
+            // Do not recreate nodes pointing at originals that may already be deleted.
+            if (!(import.meta.env.MODE === "web" && error instanceof WebRequestTimeoutError)) {
+              await invoke<DeletedBatch>("restore_deleted_nodes", { batch });
+            }
             throw error;
           }
         } else if (!cancelledPlaceholderTaskCount) {
@@ -3709,6 +3715,7 @@ function CanvasWorkspace() {
     title = "图片预览（生成中）",
     sourceGeneratorId = source.id,
     sourcePreviewId,
+    edgeSourceId = source.id,
     placeBelowSource = false,
   }: {
     source: NodeRecord;
@@ -3720,6 +3727,7 @@ function CanvasWorkspace() {
     title?: string;
     sourceGeneratorId?: string;
     sourcePreviewId?: string;
+    edgeSourceId?: string;
     placeBelowSource?: boolean;
   }) => {
     const previewWidth = 420;
@@ -3794,7 +3802,7 @@ function CanvasWorkspace() {
       const edgeRecord = await invoke<EdgeRecord>("create_edge", {
         input: {
           canvasId: source.canvasId,
-          sourceNodeId: source.id,
+          sourceNodeId: edgeSourceId,
           targetNodeId: result.node.id,
           kind: "output",
           metadata: { placeholder: true, clientId, imageGeneration: true },
@@ -6421,13 +6429,19 @@ function CanvasWorkspace() {
               liveComfyPreviewMimeType: livePreview.mimeType,
             }
             : {}),
+          ...(import.meta.env.MODE === "web"
+            ? { getLiveComfyPreview: () => liveComfyPreviews.current.get(record.id) }
+            : {}),
           onH3LoraPreferenceChange: rememberH3LoraPreference,
           onChange: changeNode,
           onSaveNode: saveTextNodeImmediately,
           onMarkGeneratedVideoFullyPlayed: markGeneratedVideoFullyPlayed,
           onExecutionCheck: reportExecutionCheck,
           onExecute: executeVideoNode,
-          onExecuteImage: (nodeId: string) => executeImageNodeRef.current(nodeId),
+          onExecuteImage: (nodeId: string, promptNodeId?: string) => executeImageNodeRef.current(
+            nodeId, import.meta.env.MODE === "web" ? promptNodeId : undefined,
+            import.meta.env.MODE === "web" && promptNodeId ? { kind: "text", promptNodeId } : undefined,
+          ),
           onBatchExecute: executeVideoNodeBatch,
           onVideoUpscale: videoUpscale.execute,
           onConfigureVideoUpscale: videoUpscale.configure,
@@ -8319,8 +8333,11 @@ function CanvasWorkspace() {
     } catch (error) { finishNodePlacementReservation(placement.reservationId); reportError(error); }
   }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setNodes, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules]);
 
-  const executeImageNode = useCallback(async (targetId: string, placementSourceId?: string) => {
-    await flushNodePatches([targetId]);
+  const executeImageNode = useCallback(async (targetId: string, placementSourceId?: string, promptRequest?: WebImagePromptRequest) => {
+    const webPromptRequest = import.meta.env.MODE === "web" ? promptRequest : undefined;
+    await flushNodePatches(import.meta.env.MODE === "web"
+      ? [targetId, ...edgesSnapshot.current.filter((edge) => edge.target === targetId).map((edge) => edge.source)]
+      : [targetId]);
     const flowNode = nodesSnapshot.current.find((node) => node.id === targetId);
     if (!flowNode) return;
     const target = recordAtCurrentFlowPosition(flowNode);
@@ -8374,7 +8391,9 @@ function CanvasWorkspace() {
         fileType: typeof record.content.fileType === "string" ? record.content.fileType : "",
       }) ?? "";
     });
-    const positiveInput = activeTextInputFromContent(target.content, textInputs);
+    const positiveInput = webPromptRequest?.kind === "text"
+      ? textInputs.find((input) => input.id === webPromptRequest.promptNodeId) ?? null
+      : activeTextInputFromContent(target.content, textInputs);
     const promptFromInput = (input: NodeRecord | null): string => {
       if (!input) return "";
       const content = isContentIterationContent(input.content)
@@ -8382,14 +8401,18 @@ function CanvasWorkspace() {
         : input.content;
       return activePromptVersionFromContent(content)?.text ?? textFromContent(content);
     };
-    const prompt = promptFromInput(positiveInput).trim();
-    const negativePrompt = typeof target.content.negativePrompt === "string"
+    const prompt = webPromptRequest?.kind === "snapshot"
+      ? webPromptRequest.prompt : promptFromInput(positiveInput).trim();
+    const promptSourceNodeId = webPromptRequest?.kind === "snapshot"
+      ? webPromptRequest.promptSourceNodeId : positiveInput?.id ?? "";
+    const negativePrompt = webPromptRequest?.kind === "snapshot"
+      ? webPromptRequest.negativePrompt : typeof target.content.negativePrompt === "string"
       ? target.content.negativePrompt.trim()
       : "";
     const imageLoraName = typeof target.content.imageLoraName === "string"
       ? target.content.imageLoraName.trim()
       : "";
-    if (!prompt || !moduleId || (isImageEdit && (imageInputs.length < 1 || imageInputs.length > 2)) || (isImageEdit && imagePaths.some((path) => !path))) {
+    if (!prompt.trim() || !moduleId || (isImageEdit && (imageInputs.length < 1 || imageInputs.length > 2)) || (isImageEdit && imagePaths.some((path) => !path))) {
       const message = !moduleId
         ? "请先选择图片生成方案"
         : isImageEdit && (imageInputs.length < 1 || imageInputs.length > 2)
@@ -8415,7 +8438,7 @@ function CanvasWorkspace() {
       kind: "generation",
       prompt,
       negativePrompt,
-      promptSourceNodeId: positiveInput?.id ?? "",
+      promptSourceNodeId,
       sourceGeneratorId: targetId,
       workflowModuleId: moduleId,
       workflowModuleRevision: typeof target.content.workflowModuleRevision === "string"
@@ -8439,6 +8462,7 @@ function CanvasWorkspace() {
         upscaleEnabled: effectiveUpscaleEnabled,
         snapshot: imageRecoverySnapshot,
         sourceGeneratorId: targetId,
+        ...(import.meta.env.MODE === "web" ? { edgeSourceId: targetId } : {}),
         placeBelowSource: Boolean(placementSource),
       });
     } catch (error) {
@@ -8548,7 +8572,7 @@ function CanvasWorkspace() {
           comfyPromptId: result.promptId,
           comfyServerUrl: comfyUiServerUrlRef.current,
           sourceGeneratorId: targetId,
-          promptSourceNodeId: positiveInput?.id ?? "",
+          promptSourceNodeId,
           generationPrompt: prompt,
           generationNegativePrompt: negativePrompt,
           generationWorkflowModuleId: moduleId,
@@ -8573,6 +8597,19 @@ function CanvasWorkspace() {
       const createdNodes: CanvasFlowNode[] = [];
       const createdEdges: Edge[] = [];
       for (const [index, output] of additionalOutputs.entries()) {
+        const previewWidth = 420;
+        const previewHeight = Math.min(
+          1200,
+          Math.max(180, Math.round(previewWidth * height / width) + GENERATED_IMAGE_CHROME_HEIGHT),
+        );
+        const position = import.meta.env.MODE === "web" && placementSource
+          ? generatedPreviewPositionBelow(placementSource, [
+            ...nodesSnapshot.current.map(recordAtCurrentFlowPosition),
+            ...incomingPlacementReservations.current,
+            placeholder,
+            ...createdNodes.map(recordAtCurrentFlowPosition),
+          ], previewWidth, previewHeight)
+          : { x: target.x + target.width + 116 + index * 36, y: target.y + 36 + index * 36 };
         const preview = await invoke<CreateNodeResult>("create_node", {
           input: {
             canvasId: target.canvasId,
@@ -8580,13 +8617,10 @@ function CanvasWorkspace() {
             title: `图片预览 ${index + 2}`,
             content: imageContent(output),
             source: "comfyui",
-            x: target.x + target.width + 116 + index * 36,
-            y: target.y + 36 + index * 36,
-            width: 420,
-            height: Math.min(
-              1200,
-              Math.max(180, Math.round(420 * height / width) + GENERATED_IMAGE_CHROME_HEIGHT),
-            ),
+            x: position.x,
+            y: position.y,
+            width: previewWidth,
+            height: previewHeight,
           },
         });
         const edgeResult = await invoke<EdgeRecord>("create_edge", {
@@ -8962,7 +8996,16 @@ function CanvasWorkspace() {
       setNotice("无法重新生成：关联的图片生成节点已被删除");
       return;
     }
-    await executeImageNodeRef.current(generator.id, preview.id);
+    if (import.meta.env.MODE === "web") {
+      const promptRequest = imageRegenerationPrompt(preview.content);
+      if (!promptRequest) {
+        setNotice("无法重新生成：这张图片未记录原始提示词，请从文本节点发起生成");
+        return;
+      }
+      await executeImageNodeRef.current(generator.id, preview.id, promptRequest);
+    } else {
+      await executeImageNodeRef.current(generator.id, preview.id);
+    }
   }, []);
   regenerateGeneratedImageRef.current = regenerateGeneratedImage;
 

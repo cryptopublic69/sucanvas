@@ -88,6 +88,15 @@ test("desktop overview retains its existing initial render behavior", () => {
   assert.ok(!html.includes('src="blob:loaded-cover-0"'));
 });
 
+test("an active Web generation preview mounts immediately even at overview zoom", () => {
+  globalThis.previewTestZoom = 0.2;
+  const active = props(0);
+  active.data.record.content = { generationPlaceholder: true, status: "running" };
+  active.detail = () => React.createElement("span", { "data-preview": "live" });
+  assert.ok(renderToStaticMarkup(React.createElement(WebPresentation, active)).includes('data-preview="live"'));
+  assert.ok(!renderToStaticMarkup(React.createElement(DesktopPresentation, active)).includes('data-preview="live"'));
+});
+
 test("Web input overview uses its resident image preview while desktop keeps the original source", () => {
   const input = props(0);
   input.data.record.kind = "image";

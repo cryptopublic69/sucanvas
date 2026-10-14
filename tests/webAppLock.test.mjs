@@ -6,8 +6,10 @@ import ts from "typescript";
 const compile = (source) => ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText;
 const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(compile(source)).toString("base64")}`;
 const urls = moduleUrl(await readFile(new URL("../src/web/urls.ts", import.meta.url), "utf8"));
+const timeout = moduleUrl(await readFile(new URL("../src/web/requestTimeout.ts", import.meta.url), "utf8"));
 const source = (await readFile(new URL("../src/web/bridge.ts", import.meta.url), "utf8"))
   .replace('"./urls"', JSON.stringify(urls))
+  .replace('"./requestTimeout"', JSON.stringify(timeout))
   .replace('const devBackend = import.meta.env.DEV ? import.meta.env.SUCANVAS_WEB_DEV_BACKEND ?? "" : "";', 'const devBackend = "";');
 const { invoke, request, listen, closeEvents } = await import(moduleUrl(source));
 

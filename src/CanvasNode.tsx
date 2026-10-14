@@ -1637,13 +1637,14 @@ interface CanvasNodeData extends Record<string, unknown> {
   workflowModuleVisibleIds: string[];
   liveComfyPreviewUrl?: string;
   liveComfyPreviewMimeType?: string;
+  getLiveComfyPreview?: () => { url: string; mimeType: string } | undefined;
   onH3LoraPreferenceChange: (preference: H3LoraPreferencePatch) => void;
   onChange: (id: string, patch: NodePatch) => void;
   onSaveNode: (id: string) => Promise<void>;
   onMarkGeneratedVideoFullyPlayed: (id: string) => void;
   onExecutionCheck: (message: string, valid: boolean) => void;
   onExecute: (id: string, regeneration?: VideoRegenerationRequest, options?: VideoExecutionOptions) => Promise<void>;
-  onExecuteImage: (id: string) => Promise<void>;
+  onExecuteImage: (id: string, promptNodeId?: string) => Promise<void>;
   onBatchExecute: (id: string) => Promise<void>;
   onVideoUpscale: (id: string) => Promise<void>;
   onConfigureVideoUpscale: (id: string) => void;
@@ -4628,6 +4629,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     workflowModuleVisibleIds,
     liveComfyPreviewUrl,
     liveComfyPreviewMimeType,
+    getLiveComfyPreview,
     onH3LoraPreferenceChange,
     onChange,
     onSaveNode,
@@ -4680,10 +4682,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     updateNodeInternals,
   ]);
 
-  const [liveComfyPreview, setLiveComfyPreview] = useState(() => ({
-    url: liveComfyPreviewUrl,
-    mimeType: liveComfyPreviewMimeType,
-  }));
+  const [liveComfyPreview, setLiveComfyPreview] = useState(() =>
+    import.meta.env.MODE === "web" && getLiveComfyPreview
+      ? getLiveComfyPreview() ?? { url: undefined, mimeType: undefined }
+      : { url: liveComfyPreviewUrl, mimeType: liveComfyPreviewMimeType });
   const liveComfyPreviewPendingRef = useRef(liveComfyPreview);
   const generatedVideoPlaybackActiveRef = useRef(activeGeneratedVideoPlaybackIds.size > 0);
   const [liveComfyPreviewPaused, setLiveComfyPreviewPaused] = useState(
@@ -5313,13 +5315,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   useEffect(() => livePreviewResources.retain(liveComfyPreview.url), [liveComfyPreview.url]);
 
   useEffect(() => {
-    const nextPreview = {
+    const nextPreview = import.meta.env.MODE === "web" && getLiveComfyPreview
+      ? getLiveComfyPreview() ?? { url: undefined, mimeType: undefined } : {
       url: liveComfyPreviewUrl,
       mimeType: liveComfyPreviewMimeType,
     };
     liveComfyPreviewPendingRef.current = nextPreview;
     if (!generatedVideoPlaybackActiveRef.current) setLiveComfyPreview(nextPreview);
-  }, [liveComfyPreviewMimeType, liveComfyPreviewUrl]);
+  }, [getLiveComfyPreview, liveComfyPreviewMimeType, liveComfyPreviewUrl]);
 
   useEffect(() => {
     const updateLivePreview = (event: Event) => {
@@ -6600,11 +6603,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const executeConnectedVideo = async (configure = false) => {
     const targetIds = new Set(getEdges().filter((edge) => edge.source === id).map((edge) => edge.target));
     const targets = [...targetIds].map((targetId) => getNode(targetId))
-      .filter((node): node is CanvasFlowNode => node?.data.record.kind === "video-generation");
+      .filter((node): node is CanvasFlowNode => node?.data.record.kind === "video-generation"
+        || (import.meta.env.MODE === "web" && node?.data.record.kind === "image-generation"));
     if (targets.length !== 1) {
-      onExecutionCheck(targets.length
+      onExecutionCheck(import.meta.env.MODE === "web"
+        ? targets.length ? "当前文本连接了多个生成节点，请只保留一个后再开始" : "请先连接一个图片生成或视频生成节点"
+        : targets.length
         ? "当前节点连接了多个视频生成节点，请只保留一个后再播放"
         : "请先连接一个视频生成或智能视频生成节点", false);
+      return;
+    }
+    if (import.meta.env.MODE === "web" && targets[0].data.record.kind === "image-generation") {
+      onActivateTextInput(targets[0].id, id);
+      await onExecuteImage(targets[0].id, id);
       return;
     }
     if (configure) {
@@ -7042,8 +7053,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               event.stopPropagation();
               void executeConnectedVideo(event.altKey);
             }}
-            title="执行相连的视频生成节点；Alt＋点击调整生成参数"
-            aria-label="执行相连的视频生成节点"
+            title={import.meta.env.MODE === "web" ? "执行相连的图片或视频生成节点；视频支持 Alt＋点击调整生成参数" : "执行相连的视频生成节点；Alt＋点击调整生成参数"}
+            aria-label={import.meta.env.MODE === "web" ? "执行相连的图片或视频生成节点" : "执行相连的视频生成节点"}
           >
             <Play size={13} fill="currentColor" />
           </button>

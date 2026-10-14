@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
 const moduleUrl = async path => {
-  const input = await readFile(new URL(path, import.meta.url), "utf8");
+  let input = await readFile(new URL(path, import.meta.url), "utf8");
+  if (input.includes('"./requestTimeout"')) input = input.replace('"./requestTimeout"', JSON.stringify(await moduleUrl("../src/web/requestTimeout.ts")));
   const output = ts.transpileModule(input, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText;
   return `data:text/javascript;base64,${Buffer.from(output).toString("base64")}`;
 };
@@ -49,7 +50,8 @@ test("Web requests binary JPEGs with authentication, abort support and no persis
     assert.equal(new URL(url, "https://canvas.test").searchParams.get("source"), source);
     assert.equal(options.credentials, "same-origin");
     assert.equal(options.cache, "no-store");
-    assert.equal(options.signal, controller.signal);
+    assert.ok(options.signal instanceof AbortSignal);
+    assert.equal(options.signal.aborted, false);
     return { ok: true, blob: async () => blob };
   });
   assert.equal(await requestPosterBlob(source, controller.signal), blob);

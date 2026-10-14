@@ -1,3 +1,5 @@
+import { withRequestTimeout } from "./requestTimeout";
+
 export type InputImagePreview = { src: string; url: string; width: number; height: number };
 const previews = new Map<string, InputImagePreview>();
 const pending = new Map<string, Promise<InputImagePreview>>();
@@ -22,9 +24,11 @@ export function peekInputImagePreview(src: string): InputImagePreview | undefine
 }
 
 async function loadPreview(src: string): Promise<InputImagePreview> {
-  const response = await fetch(src, { credentials: "same-origin" });
-  if (!response.ok) throw new Error(`图片加载失败 (${response.status})`);
-  const blob = await response.blob();
+  const blob = await withRequestTimeout(async signal => {
+    const response = await fetch(src, { credentials: "same-origin", signal });
+    if (!response.ok) throw new Error(`图片加载失败 (${response.status})`);
+    return response.blob();
+  });
   const originalUrl = URL.createObjectURL(blob);
   let retainedOriginal = false;
   try {

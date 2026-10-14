@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
 
-const source = await readFile(new URL("../src/web/inputImageCache.ts", import.meta.url), "utf8");
+const timeoutSource = await readFile(new URL("../src/web/requestTimeout.ts", import.meta.url), "utf8");
+const timeoutCode = ts.transpileModule(timeoutSource, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText;
+const source = (await readFile(new URL("../src/web/inputImageCache.ts", import.meta.url), "utf8"))
+  .replace('"./requestTimeout"', JSON.stringify(`data:text/javascript;base64,${Buffer.from(timeoutCode).toString("base64")}`));
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText;
 const { requestInputImagePreview, peekInputImagePreview } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
 let fetches = 0;

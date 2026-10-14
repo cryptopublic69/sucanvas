@@ -37,6 +37,9 @@ try {
     foreach ($script in @('Start-Web.ps1', 'Stop-Web.ps1', 'Set-Password.ps1', 'Backup-Web.ps1', 'Restore-Web.ps1', 'Install-Autostart.ps1', 'Test-WebDeployment.ps1', 'Update-WebFiles.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $OutputDirectory 'scripts') -Force
     }
+    foreach ($launcher in @('Update-OnServer.ps1','Update-OnServer.bat')) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $launcher) -Destination $OutputDirectory -Force
+    }
     Copy-Item -LiteralPath $FfmpegPath -Destination (Join-Path $OutputDirectory 'tools/ffmpeg.exe') -Force
     $ffmpegRoot = Split-Path -Parent (Split-Path -Parent $FfmpegPath)
     foreach ($notice in @('LICENSE', 'README.txt')) {
@@ -52,6 +55,7 @@ try {
     Copy-Item -LiteralPath 'deploy/windows/README.md' -Destination (Join-Path $OutputDirectory 'README.md') -Force
     Copy-Item -LiteralPath 'deploy/windows/VALIDATION.md' -Destination (Join-Path $OutputDirectory 'VALIDATION.md') -Force
     Copy-Item -LiteralPath 'deploy/windows/UPDATE-SETTINGS-RESTORE.md' -Destination (Join-Path $OutputDirectory 'UPDATE-SETTINGS-RESTORE.md') -Force
+    Copy-Item -LiteralPath 'deploy/windows/UPDATE-ON-SERVER.md' -Destination (Join-Path $OutputDirectory 'UPDATE-ON-SERVER.md') -Force
     Copy-Item -LiteralPath 'deploy/windows/DEVELOPMENT.md' -Destination (Join-Path $OutputDirectory 'DEVELOPMENT.md') -Force
     $builtWeb = (Resolve-Path -LiteralPath 'dist-web').Path
     $indexFile = Get-Item -LiteralPath (Join-Path $builtWeb 'index.html')

@@ -6,7 +6,7 @@ import ts from "typescript";
 async function moduleUrl(path, replacements = []) {
   let source = await readFile(new URL(path, import.meta.url), "utf8");
   for (const [from, to] of replacements) source = source.replace(from, to);
-  for (const [specifier, path] of [["./web/posterExtractionQueue", "../src/web/posterExtractionQueue.ts"], ["./web/posterRequest", "../src/web/posterRequest.ts"]]) {
+  for (const [specifier, path] of [["./web/posterExtractionQueue", "../src/web/posterExtractionQueue.ts"], ["./web/posterRequest", "../src/web/posterRequest.ts"], ["./requestTimeout", "../src/web/requestTimeout.ts"]]) {
     if (source.includes(JSON.stringify(specifier))) source = source.replace(JSON.stringify(specifier), JSON.stringify(await moduleUrl(path)));
   }
   const output = ts.transpileModule(source, {

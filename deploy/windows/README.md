@@ -132,6 +132,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Install-Autostart.ps
 
 ## 更新
 
+108 的日常更新使用服务器本地入口 `F:\SuCanvas-Web-Update\Update-OnServer.bat`。开发机只上传更新包到同目录的 `package` 文件夹；上传完成后，通过现有开关停止服务，再在 108 本机双击该入口。备份、SHA-256 校验和替换全部在服务器本地磁盘执行，拒绝从 UNC 路径或映射网络盘运行。完成后通过原开关启动服务，并刷新网页人工验收。日志写入更新目录的 `logs`，结果写入 `deployment-result.json`。
+
+每次上传用完整的新包替换 `package`，不要混入旧包文件。包内有 `SuCanvasServer.exe` 时更新服务程序和前端；仅有 `web`、`web-assets.json`、`build-info.json` 和用于校验的 `config.json` 时只更新前端。完整备份仍保存在正式部署的 `backup/before-update-*`；更新包的配置不会覆盖现有配置，脚本不会自动启停服务。
+
 先停止当前部署。替换 EXE、web 和发布自带的 workflows；保留 config、data、现有 tools 和用户备份。需要升级 FFmpeg 时再单独更换 tools。程序复用现有 SQLite 初始化/迁移逻辑，启动时检查数据库完整性。更新前保留整份备份；迁移和新版页面仍需要人工验收。
 
 可使用新发布包中的脚本更新已有部署：

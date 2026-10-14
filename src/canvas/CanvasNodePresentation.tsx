@@ -19,7 +19,9 @@ export const CanvasNodePresentation = memo(function CanvasNodePresentation({ det
   const host = useRef<HTMLDivElement>(null);
   const updateInternals = useBatchedNodeInternals();
   const { record } = props.data;
-  const full = Boolean(props.selected || engaged || (!distant && ready));
+  const activeWebPreview = import.meta.env.MODE === "web"
+    && record.content.generationPlaceholder === true && record.content.status === "running";
+  const full = Boolean(activeWebPreview || props.selected || engaged || (!distant && ready));
   useEffect(() => { if (distant) setReady(false); }, [distant]);
   useEffect(() => {
     if (ready || distant || props.selected || engaged) return;
