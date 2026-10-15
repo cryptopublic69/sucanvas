@@ -2,6 +2,7 @@
 import type { OpenDialogOptions, SaveDialogOptions } from "@tauri-apps/plugin-dialog";
 import { downloadFilename, webApiUrl, webApiUrls } from "./urls";
 import { rpcTimeoutMs, withRequestTimeout } from "./requestTimeout";
+import { generationRequest, WebHttpError } from "./generationRequest";
 const devBackend = import.meta.env.DEV ? import.meta.env.SUCANVAS_WEB_DEV_BACKEND ?? "" : "";
 let serverOrigin = devBackend;
 type DragDropEvent =
@@ -26,8 +27,9 @@ export async function request<T>(path: string, options?: RequestInit, timeoutMs?
     if (!response.ok) {
       const text = await response.text();
       let message = text || `请求失败 (${response.status})`;
-      try { message = (JSON.parse(text) as { error?: string }).error || message; } catch { /* plain server response */ }
-      throw new Error(message);
+      try { message = (JSON.parse(text) as { error?: string }).error || message; }
+      catch { if (/<(?:!doctype|html|head|body)\b/i.test(text)) message = `服务器请求失败（HTTP ${response.status}）`; }
+      throw new WebHttpError(response.status, message);
     }
     const value = await response.json();
     if (["/api/auth/session", "/api/auth/login"].includes(path) && typeof value?.publicUrl === "string") {
@@ -75,9 +77,15 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
   if (command.startsWith("submit_comfyui_")) await (await import("./settings")).flushSettings();
   if (channel) await connectEvents();
   try {
+    const body = JSON.stringify({ args }, (_key, value) => typeof value === "string" && serverOrigin ? webApiUrl(value, window.location.origin, serverOrigin) : value);
+    if (command.startsWith("submit_comfyui_")) {
+      return await generationRequest<T>(request, command, body, {
+        onUnavailable: () => reportWebError(new Error("生成任务连接中断，请重新进入项目恢复 ComfyUI 任务；无需重新生成。")),
+      });
+    }
     const result = await request<{ result: T }>(`/api/invoke/${encodeURIComponent(command)}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ args }, (_key, value) => typeof value === "string" && serverOrigin ? webApiUrl(value, window.location.origin, serverOrigin) : value),
+      body,
     }, rpcTimeoutMs(command));
     if (["export_media_asset", "export_generated_video", "export_generated_image"].includes(command) && typeof result.result === "string") download(result.result);
     return result.result;

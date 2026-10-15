@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { openWebComfySocket, type ComfySocket } from "./web/comfySocket";
 import { resolveComfyOutputPath } from "./web/outputFiles";
 import { videoUpscaleFromValue } from "./video/videoUpscale";
 import { Settings as PresetSettingsIcon } from "lucide-react";
@@ -2312,7 +2313,8 @@ function comfyWebSocketUrl(serverUrl: string, clientId: string): string {
 function openComfyProgressSocket(
   clientId: string,
   serverUrl: string,
-): Promise<WebSocket | null> {
+): Promise<ComfySocket | null> {
+  if (import.meta.env.MODE === "web") return openWebComfySocket(comfyWebSocketUrl(serverUrl, clientId));
   return new Promise((resolve) => {
     const socket = new WebSocket(comfyWebSocketUrl(serverUrl, clientId));
     socket.binaryType = "blob";

@@ -6,10 +6,12 @@ import ts from "typescript";
 const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText).toString("base64")}`;
 const urls = moduleUrl(await readFile(new URL("../src/web/urls.ts", import.meta.url), "utf8"));
 const timeout = moduleUrl(await readFile(new URL("../src/web/requestTimeout.ts", import.meta.url), "utf8"));
+const generation = moduleUrl(await readFile(new URL("../src/web/generationRequest.ts", import.meta.url), "utf8"));
 const { downloadFilename } = await import(urls);
 const bridgeSource = (await readFile(new URL("../src/web/bridge.ts", import.meta.url), "utf8"))
   .replace('"./urls"', JSON.stringify(urls))
   .replace('"./requestTimeout"', JSON.stringify(timeout))
+  .replace('"./generationRequest"', JSON.stringify(generation))
   .replace('const devBackend = import.meta.env.DEV ? import.meta.env.SUCANVAS_WEB_DEV_BACKEND ?? "" : "";', 'const devBackend = "";');
 const { save, download } = await import(moduleUrl(bridgeSource));
 const previousWindow = globalThis.window;

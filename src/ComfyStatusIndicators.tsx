@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from "react";
+import type { ComfySocket } from "./web/comfySocket";
 import { invoke } from "@tauri-apps/api/core";
 import { Thermometer } from "lucide-react";
 import { openComfyProgressSocket } from "./CanvasNode";
@@ -65,7 +66,7 @@ export const ComfyStatusIndicators = memo(function ComfyStatusIndicators({ serve
 
   useEffect(() => {
     let disposed = false;
-    let socket: WebSocket | null = null;
+    let socket: ComfySocket | null = null;
     let reconnectTimer: number | null = null;
     const monitorClientId = `infinite-canvas-gpu-monitor-${crypto.randomUUID()}`;
 

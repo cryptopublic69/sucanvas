@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import type { ComfySocket } from "../web/comfySocket";
 import type { MutableRefObject, Dispatch, SetStateAction } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { comfyOutputFromContent, generationSnapshotFromContent, openComfyProgressSocket, recordAtCurrentFlowPosition } from "../CanvasNode";
@@ -67,7 +68,7 @@ export function useVideoUpscale(deps: Dependencies) {
     const sourceGeneratorId = typeof preview.content.sourceGeneratorId === "string" && preview.content.sourceGeneratorId ? preview.content.sourceGeneratorId : preview.id;
     const clientId = crypto.randomUUID();
     let placeholder: NodeRecord | undefined;
-    let socket: WebSocket | null = null;
+    let socket: ComfySocket | null = null;
     let preserveTask = false;
     let submitted = false;
     preparing.current.add(previewId);

@@ -1,6 +1,8 @@
 import { withSubmissionWaitNotice } from "./video/submissionWait";
+import type { ComfySocket } from "./web/comfySocket";
 import { generatedVideoDeletionPaths } from "./web/outputFiles";
 import { WebRequestTimeoutError } from "./web/requestTimeout";
+import { recoverableWebGenerationFailure } from "./web/generationRequest";
 import { imageRegenerationPrompt, type WebImagePromptRequest } from "./web/imageGenerationPrompt";
 import { deduplicateRegenerationPromptOptions } from "./video/regenerationPromptOptions";
 import { generationQueuePositions } from "./generationQueuePositions";
@@ -599,7 +601,7 @@ function CanvasWorkspace() {
   const ownedComfyClients = useRef(new Set<string>());
   const recoveringComfyClients = useRef(new Set<string>());
   const missingRecoveredTaskPolls = useRef(new Map<string, number>());
-  const recoveredComfySockets = useRef(new Map<string, WebSocket>());
+  const recoveredComfySockets = useRef(new Map<string, ComfySocket>());
   const connectingRecoveredComfyClients = useRef(new Set<string>());
   const externalFileDragActive = useRef(false);
   const recoveredNodeActiveKeys = useRef(new Map<string, string>());
@@ -2104,10 +2106,12 @@ function CanvasWorkspace() {
           && record.content.generationPlaceholder === true
           && status === "invalid"
           && /^图片(?:生成|放大)恢复失败：/.test(validationMessage);
+        const interruptedWebGeneration = import.meta.env.MODE === "web"
+          && recoverableWebGenerationFailure(record.content);
         return status === "running"
           || status === "cancelling"
           || (status === "invalid" && (
-            validationMessage === "生成任务已中断或未记录" || failedImageRecovery
+            validationMessage === "生成任务已中断或未记录" || failedImageRecovery || interruptedWebGeneration
           ));
       })
       .map(persistedComfyTaskFromPlaceholder)
@@ -4368,7 +4372,7 @@ function CanvasWorkspace() {
       ? `已为当前节点排队 ${queuedTaskCount} 个生成任务`
       : "正在上传素材并提交到远程 ComfyUI…");
 
-    let progressSocket: WebSocket | null = null;
+    let progressSocket: ComfySocket | null = null;
     let preserveComfyTaskRecord = false;
     try {
       progressSocket = await openComfyProgressSocket(clientId, comfyUiServerUrlRef.current);
@@ -5609,7 +5613,7 @@ function CanvasWorkspace() {
     });
     setNotice("正在上传当前预览并提交2采…");
 
-    let progressSocket: WebSocket | null = null;
+    let progressSocket: ComfySocket | null = null;
     let preserveComfyTaskRecord = false;
     try {
       progressSocket = await openComfyProgressSocket(clientId, comfyUiServerUrlRef.current);
@@ -8499,7 +8503,7 @@ function CanvasWorkspace() {
     setNotice(queuedTaskCount > 1
       ? `已为当前图片生成节点排队 ${queuedTaskCount} 个任务`
       : "正在提交 ComfyUI 图片任务…");
-    let progressSocket: WebSocket | null = null;
+    let progressSocket: ComfySocket | null = null;
     let preserveComfyTaskRecord = false;
     try {
       progressSocket = await openComfyProgressSocket(clientId, comfyUiServerUrlRef.current);
@@ -8808,7 +8812,7 @@ function CanvasWorkspace() {
         validationMessage: `正在放大图片（${megapixels.toFixed(1)} MP）…`,
       },
     });
-    let progressSocket: WebSocket | null = null;
+    let progressSocket: ComfySocket | null = null;
     let preserveComfyTaskRecord = false;
     try {
       progressSocket = await openComfyProgressSocket(clientId, comfyUiServerUrlRef.current);

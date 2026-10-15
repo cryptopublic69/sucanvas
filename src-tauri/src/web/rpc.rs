@@ -230,6 +230,8 @@ pub fn normalize_result(state: &WebState, value: &mut Value) {
 pub struct Request {
     #[serde(default = "empty_args")]
     args: Value,
+    #[serde(default, rename = "webTaskId")]
+    web_task_id: Option<String>,
 }
 fn empty_args() -> Value {
     json!({})
@@ -303,9 +305,26 @@ pub async fn invoke(
     if let Err(error) = normalize_args(&state, &mut input.args, "") {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response();
     }
+    if let Some(id) = input.web_task_id.as_deref() {
+        if !command.starts_with("submit_comfyui_") {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "此操作不支持后台生成任务"})),
+            )
+                .into_response();
+        }
+        match state.tasks.reserve(id, &command, &input.args) {
+            Ok(false) => return Json(json!({"taskId": id})).into_response(),
+            Ok(true) => {}
+            Err(error) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response()
+            }
+        }
+    }
     // An HTTP disconnect must not abort a generation already submitted to ComfyUI.
     let worker_state = state.clone();
-    let result = tokio::spawn(async move {
+    let task_id = input.web_task_id.clone();
+    let worker = tokio::spawn(async move {
         let mut result = super::dispatch::dispatch(&worker_state, &command, &input.args).await?;
         if command.starts_with("submit_comfyui_") || command == "get_comfyui_client_task_statuses" {
             super::media::reference_outputs(&mut result)?;
@@ -353,14 +372,23 @@ pub async fn invoke(
         if command == "export_app_backup" {
             super::backup::append_imported_inputs(&worker_state, &mut result)?;
         }
+        normalize_result(&worker_state, &mut result);
         Ok::<_, String>(result)
-    })
-    .await;
+    });
+    if let Some(id) = task_id {
+        let tasks = state.tasks.clone();
+        let worker_id = id.clone();
+        tokio::spawn(async move {
+            let result = worker
+                .await
+                .unwrap_or_else(|_| Err("服务任务失败，请查看服务器日志".into()));
+            tasks.finish(&worker_id, result);
+        });
+        return (StatusCode::ACCEPTED, Json(json!({"taskId": id}))).into_response();
+    }
+    let result = worker.await;
     match result {
-        Ok(Ok(mut value)) => {
-            normalize_result(&state, &mut value);
-            Json(json!({"result": value})).into_response()
-        }
+        Ok(Ok(value)) => Json(json!({"result": value})).into_response(),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,

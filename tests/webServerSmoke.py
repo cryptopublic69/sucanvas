@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,15 @@ VIDEO_CLIENT_ID = 'smoke-video-client'
 class ComfyStub(http.server.BaseHTTPRequestHandler):
     view_queries = []
     video_payload = None
+    generation_submissions = 0
+    def do_POST(self):
+        if self.path != '/prompt': self.send_error(404); return
+        json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        type(self).generation_submissions += 1
+        time.sleep(2)  # The browser request must finish before this response.
+        payload = json.dumps({'prompt_id': 'async-prompt'}).encode()
+        self.send_response(200); self.send_header('Content-Length', str(len(payload)))
+        self.end_headers(); self.wfile.write(payload)
     def log_message(self, *_): pass
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
@@ -38,6 +48,10 @@ class ComfyStub(http.server.BaseHTTPRequestHandler):
             self.view_queries.append(urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query))
             payload = self.video_payload if self.view_queries[-1].get('filename') == ['poster-fixture.mp4'] else PNG
         elif path == '/queue': payload = json.dumps({'queue_running': [], 'queue_pending': []}).encode()
+        elif path == '/history/async-prompt': payload = json.dumps({'async-prompt': {
+            'status': {'status_str': 'success'},
+            'outputs': {'42': {'images': [{'filename': 'async-generated.png', 'subfolder': '', 'type': 'output'}]}}
+        }}).encode()
         elif path == '/history': payload = json.dumps({'smoke-prompt': {
             'prompt': [1, 'smoke-prompt', {'sampler': {'inputs': {'seed': 42}}}, {'client_id': CLIENT_ID}],
             'status': {'status_str': 'success'},
@@ -214,6 +228,43 @@ def main():
             project = invoke('create_project', {'input': {'name': 'Web migration smoke'}})['canvas']['id']
             invoke('load_workspace', {'canvasId': project})
             workflows = invoke('list_workflow_modules', {'includeDeleted': False})
+            # A delayed ComfyUI submission must not hold the public HTTP request.
+            image_workflow = source / 'data/uploads/async-image-workflow.json'
+            image_workflow.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source / 'workflows/Krea2文生图_可选放大.json', image_workflow)
+            image_module = invoke('save_workflow_module', {'input': {
+                'name': 'Async image smoke', 'capability': 'image-generation', 'variant': 'image-generation',
+                'sourceWorkflowPath': str(image_workflow),
+            }})
+            workflows = invoke('list_workflow_modules', {'includeDeleted': False})
+            (comfy_output / 'async-generated.png').write_bytes(PNG)
+            task_id = str(uuid.uuid4())
+            task_path = '/api/generation-tasks/' + task_id
+            async_request = {'webTaskId': task_id, 'args': {'input': {
+                'serverUrl': 'http://ignored.invalid', 'workflowModuleId': image_module['id'],
+                'clientId': 'async-generation-client', 'prompt': 'test', 'seedMode': 'fixed',
+                'seed': '42', 'width': 512, 'height': 512,
+            }}}
+            started = time.monotonic()
+            status, body, _ = request('/api/invoke/submit_comfyui_image_workflow', async_request)
+            assert status == 202 and json.loads(body)['taskId'] == task_id, (status, body)
+            assert time.monotonic() - started < 1.5, 'Starting a Web task must not wait for generation'
+            assert request(task_path, anonymous=True)[0] == 401
+            assert json.loads(request(task_path)[1]) == {'pending': True}
+            # Repeating the same start after a lost response cannot submit again.
+            assert request('/api/invoke/submit_comfyui_image_workflow', async_request)[0] == 200
+            for _ in range(100):
+                status, body, headers = request(task_path)
+                result = json.loads(body)
+                if 'result' in result: break
+                assert result == {'pending': True}, result
+                time.sleep(.1)
+            else: raise AssertionError('Background generation did not complete')
+            assert result['result']['promptId'] == 'async-prompt'
+            assert result['result']['outputs'][0]['assetPath'] == 'sucanvas-output://async-generated.png'
+            assert headers['Cache-Control'] == 'no-store'
+            assert json.loads(request(task_path)[1]) == result, 'Results must survive a lost poll response'
+            assert ComfyStub.generation_submissions == 1
             assert workflows
             text = invoke('create_node', {'input': {'canvasId': project, 'kind': 'text', 'title': 'Test', 'content': {'text': 'portable'}, 'source': 'user'}})['node']
             assert text['content']['text'] == 'portable'

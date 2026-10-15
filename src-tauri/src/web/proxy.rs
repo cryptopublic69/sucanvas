@@ -116,6 +116,31 @@ pub async fn http(State(state): State<WebState>, request: Request<Body>) -> Resp
         Err(_) => (StatusCode::BAD_GATEWAY, "无法连接服务器配置的 ComfyUI").into_response(),
     }
 }
+const UPSTREAM_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+const UPSTREAM_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(35);
+const HEARTBEAT_MESSAGE: &str = r#"{"type":"sucanvas.websocket.heartbeat"}"#;
+type ComfyWebSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn connect_comfy(
+    url: &str,
+    deadline: std::time::Duration,
+) -> Result<ComfyWebSocket, StatusCode> {
+    match tokio::time::timeout(deadline, tokio_tungstenite::connect_async(url)).await {
+        Ok(Ok((socket, _))) => Ok(socket),
+        Ok(Err(error)) => {
+            eprintln!("[comfy-ws] upstream handshake failed: {error}");
+            Err(StatusCode::BAD_GATEWAY)
+        }
+        Err(_) => {
+            eprintln!("[comfy-ws] upstream handshake timed out");
+            Err(StatusCode::GATEWAY_TIMEOUT)
+        }
+    }
+}
+
 pub async fn websocket(
     State(state): State<WebState>,
     request: axum::http::HeaderMap,
@@ -133,34 +158,159 @@ pub async fn websocket(
         Ok(url) => url.replacen("http", "ws", 1),
         Err(status) => return status.into_response(),
     };
-    ws.on_upgrade(move |socket| relay(state, request, socket, url))
+    // Do not report an open browser socket until ComfyUI has accepted it.
+    let comfy = match connect_comfy(&url, UPSTREAM_CONNECT_TIMEOUT).await {
+        Ok(socket) => socket,
+        Err(status) => return status.into_response(),
+    };
+    if !state.auth.authenticated(&request) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    ws.on_upgrade(move |socket| relay(state, request, socket, comfy))
 }
+
+async fn send_browser(browser: &mut WebSocket, message: Message) -> bool {
+    matches!(
+        tokio::time::timeout(IO_TIMEOUT, browser.send(message)).await,
+        Ok(Ok(()))
+    )
+}
+
+async fn send_comfy(
+    comfy: &mut ComfyWebSocket,
+    message: tokio_tungstenite::tungstenite::Message,
+) -> bool {
+    matches!(
+        tokio::time::timeout(IO_TIMEOUT, comfy.send(message)).await,
+        Ok(Ok(()))
+    )
+}
+
 async fn relay(
     state: WebState,
     headers: axum::http::HeaderMap,
     mut browser: WebSocket,
-    url: String,
+    mut comfy: ComfyWebSocket,
 ) {
-    let Ok((mut comfy, _)) = tokio_tungstenite::connect_async(url).await else {
-        let _ = browser.send(Message::Close(None)).await;
-        return;
-    };
-    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
-    loop {
+    use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
+    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut upstream_seen = tokio::time::Instant::now();
+    let reason = loop {
+        if !state.auth.authenticated(&headers) {
+            break "session expired";
+        }
         tokio::select! {
-            _ = heartbeat.tick() => { if !state.auth.authenticated(&headers) { break; } },
+            _ = heartbeat.tick() => {
+                if upstream_seen.elapsed() >= UPSTREAM_STALE_AFTER {
+                    break "upstream heartbeat timeout";
+                }
+                if !send_comfy(&mut comfy, UpstreamMessage::Ping(Vec::new().into())).await {
+                    break "upstream heartbeat send failed or timed out";
+                }
+                // A JS-visible heartbeat detects a silently dead browser connection.
+                if !send_browser(&mut browser, Message::Text(HEARTBEAT_MESSAGE.into())).await {
+                    break "browser heartbeat send failed or timed out";
+                }
+            },
             message = browser.recv() => {
-                if !state.auth.authenticated(&headers) { break; }
-                let message = match message { Some(Ok(Message::Text(value))) => tokio_tungstenite::tungstenite::Message::Text(value.to_string().into()), Some(Ok(Message::Binary(value))) => tokio_tungstenite::tungstenite::Message::Binary(value), Some(Ok(Message::Ping(value))) => tokio_tungstenite::tungstenite::Message::Ping(value), Some(Ok(Message::Pong(value))) => tokio_tungstenite::tungstenite::Message::Pong(value), _ => break };
-                if comfy.send(message).await.is_err() { break; }
+                if !state.auth.authenticated(&headers) { break "session expired"; }
+                let message = match message {
+                    Some(Ok(Message::Text(value))) => UpstreamMessage::Text(value.to_string().into()),
+                    Some(Ok(Message::Binary(value))) => UpstreamMessage::Binary(value),
+                    // Each WebSocket transport handles its own ping/pong frames.
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                    Some(Err(error)) => {
+                        eprintln!("[comfy-ws] browser read failed: {error}");
+                        break "browser read failed";
+                    }
+                    _ => break "browser closed",
+                };
+                if !send_comfy(&mut comfy, message).await { break "upstream send failed or timed out"; }
             },
             message = comfy.next() => {
-                if !state.auth.authenticated(&headers) { break; }
-                let message = match message { Some(Ok(tokio_tungstenite::tungstenite::Message::Text(value))) => Message::Text(value.to_string().into()), Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(value))) => Message::Binary(value), Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(value))) => Message::Ping(value), Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(value))) => Message::Pong(value), _ => break };
-                if browser.send(message).await.is_err() { break; }
+                if !state.auth.authenticated(&headers) { break "session expired"; }
+                let message = match message {
+                    Some(Ok(UpstreamMessage::Text(value))) => Message::Text(value.to_string().into()),
+                    Some(Ok(UpstreamMessage::Binary(value))) => Message::Binary(value),
+                    Some(Ok(UpstreamMessage::Ping(_) | UpstreamMessage::Pong(_))) => {
+                        upstream_seen = tokio::time::Instant::now();
+                        continue;
+                    }
+                    Some(Err(error)) => {
+                        eprintln!("[comfy-ws] upstream read failed: {error}");
+                        break "upstream read failed";
+                    }
+                    _ => break "upstream closed",
+                };
+                upstream_seen = tokio::time::Instant::now();
+                if !send_browser(&mut browser, message).await { break "browser send failed or timed out"; }
             }
         }
+    };
+    if reason != "browser closed" {
+        eprintln!("[comfy-ws] relay stopped: {reason}");
     }
-    let _ = browser.close().await;
-    let _ = comfy.close(None).await;
+    let _ = tokio::time::timeout(IO_TIMEOUT, browser.close()).await;
+    let _ = tokio::time::timeout(IO_TIMEOUT, comfy.close(None)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn upstream_handshake_timeout_is_bounded() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let result = connect_comfy(&url, std::time::Duration::from_millis(30)).await;
+        assert_eq!(result.unwrap_err(), StatusCode::GATEWAY_TIMEOUT);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rejected_upstream_handshake_returns_bad_gateway() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let result = connect_comfy(&url, std::time::Duration::from_secs(2)).await;
+        assert_eq!(result.unwrap_err(), StatusCode::BAD_GATEWAY);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn accepted_upstream_preserves_monitor_messages() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    r#"{"type":"crystools.monitor","data":{"gpus":[]}}"#.into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let mut socket = connect_comfy(&url, std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        let message = socket.next().await.unwrap().unwrap();
+        assert!(message.to_text().unwrap().contains("crystools.monitor"));
+        server.await.unwrap();
+    }
 }
