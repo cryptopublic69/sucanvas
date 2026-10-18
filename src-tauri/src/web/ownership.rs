@@ -10,7 +10,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::Path,
     sync::Mutex,
 };
@@ -173,8 +173,12 @@ fn normalize_tree(connection: &Connection, root_id: &str) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
+// Generations remembered per ComfyUI client id (in memory, like sessions).
+const TASK_OWNER_LIMIT: usize = 20_000;
+
 pub struct Ownership {
     connection: Mutex<Connection>,
+    task_owners: Mutex<HashMap<String, String>>,
 }
 
 impl Ownership {
@@ -185,7 +189,25 @@ impl Ownership {
             .map_err(|e| e.to_string())?;
         Ok(Self {
             connection: Mutex::new(connection),
+            task_owners: Mutex::new(HashMap::new()),
         })
+    }
+
+    // Records who started a generation. A client id already claimed by
+    // another user is refused (false), so nobody can take over someone else's task.
+    pub fn remember_task(&self, client_id: &str, user_id: &str) -> bool {
+        let mut owners = self.task_owners.lock().unwrap();
+        if let Some(owner) = owners.get(client_id) {
+            return owner == user_id;
+        }
+        if owners.len() >= TASK_OWNER_LIMIT {
+            owners.clear();
+        }
+        owners.insert(client_id.to_owned(), user_id.to_owned());
+        true
+    }
+    pub fn task_owner(&self, client_id: &str) -> Option<String> {
+        self.task_owners.lock().unwrap().get(client_id).cloned()
     }
 
     // Owner and sharing of the root above `canvas_id`; None when the canvas does not exist.

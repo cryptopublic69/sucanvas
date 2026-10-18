@@ -173,13 +173,14 @@ pub fn migrate(database: &Path, app_lock: &Path) -> Result<(), String> {
 }
 
 // Local recovery (`--reset-admin-password`): the "admin" account gets a new
-// password and is enabled again, without a forced change on next sign-in.
+// password and is an enabled admin again, without a forced change on next
+// sign-in, so signing in as admin always works afterwards.
 pub fn reset_admin_password(database: &Path, password_hash: &str) -> Result<(), String> {
     let connection = open(database)?;
     let time = now();
     let changed = connection
         .execute(
-            "UPDATE users SET password_hash = ?1, disabled = 0, must_change_password = 0, password_changed_at = ?2, updated_at = ?2
+            "UPDATE users SET password_hash = ?1, role = 'admin', disabled = 0, must_change_password = 0, password_changed_at = ?2, updated_at = ?2
              WHERE username = ?3",
             params![password_hash, time, ADMIN_USERNAME],
         )
@@ -535,6 +536,7 @@ pub(crate) mod tests {
         let admin = users.by_username("admin").unwrap().unwrap().user;
         users.create("second", None, Role::Admin, "hash").unwrap();
         users.set_disabled(&admin.id, true).unwrap();
+        users.set_role(&admin.id, Role::User).unwrap();
         users
             .set_password(&admin.id, "temporary", true, None)
             .unwrap();
@@ -542,6 +544,7 @@ pub(crate) mod tests {
         let admin = users.by_username("admin").unwrap().unwrap();
         assert_eq!(admin.password_hash, "new-hash");
         assert!(!admin.user.disabled && !admin.user.must_change_password);
+        assert_eq!(admin.user.role, Role::Admin);
         let lock_before = std::fs::read(fixture.app_lock()).unwrap();
         Connection::open(fixture.database())
             .unwrap()

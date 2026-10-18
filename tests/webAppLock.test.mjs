@@ -31,19 +31,12 @@ function environment(t, status = 200) {
   return { requests, events };
 }
 
-test("re-entering a password checks the signed-in user's own password without a new session", async (t) => {
-  const { requests, events } = environment(t);
-  assert.equal(await invoke("verify_app_lock_password", { password: "应用锁密码" }), true);
+test("the Web keeps no password shortcut: application lock commands go to the server, which refuses them", async (t) => {
+  const { requests, events } = environment(t, 403);
+  await assert.rejects(invoke("verify_app_lock_password", { password: "应用锁密码" }));
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].path, "/api/auth/verify-password");
-  assert.equal(requests[0].options.credentials, "same-origin");
-  assert.deepEqual(JSON.parse(requests[0].options.body), { password: "应用锁密码" });
-  assert.deepEqual(events, []);
-});
-
-test("a wrong re-entered password reports the error without a session-expired event", async (t) => {
-  const { events } = environment(t, 400);
-  await assert.rejects(invoke("verify_app_lock_password", { password: "wrong" }), /密码错误/);
+  assert.equal(requests[0].path, "/api/invoke/verify_app_lock_password");
+  assert.ok(requests.every((entry) => !String(entry.path).includes("verify-password")));
   assert.deepEqual(events, []);
 });
 

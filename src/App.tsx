@@ -278,6 +278,14 @@ import {
   workflowSlotForVideoMode
 } from "./CanvasNode";
 import { ProjectHome } from "./projects/ProjectHome";
+import {
+  isAdministrator,
+  ownerLabel,
+  pasteAllowed,
+  readOnlyCanvas,
+  requestEditMode,
+  useAccess
+} from "./account/access";
 import { AppLockScreen } from "./security/AppLockScreen";
 import { BackupSettingsPanel } from "./settings/BackupSettingsPanel";
 import { GeneralSettingsPanel } from "./settings/GeneralSettingsPanel";
@@ -398,6 +406,9 @@ function isKrea2DiffusionModelName(value: string): boolean {
   return normalized.startsWith("Krea2\\") || normalized.startsWith("Kera2\\");
 }
 
+// Admin on another user's private canvas without edit mode (Web).
+const READ_ONLY_NOTICE = "这是其他用户的私有画布，开启编辑模式后才能修改";
+
 function CanvasWorkspace() {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasFlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -480,6 +491,15 @@ function CanvasWorkspace() {
   const [projectToDelete, setProjectToDelete] = useState<WorkspaceSnapshot | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectShared, setNewProjectShared] = useState(false);
+  const [sharingBusyId, setSharingBusyId] = useState<string | null>(null);
+  // Web accounts: role, edit mode and the open canvas's owner decide what the UI offers.
+  const { user: accessUser, editModeActive } = useAccess();
+  const globalAdmin = isAdministrator(accessUser);
+  const activeCanvasRecordRef = useRef<CanvasRecord | null>(null);
+  const canvasReadOnlyRef = useRef(false);
+  const canDeleteFilesRef = useRef(true);
+  canDeleteFilesRef.current = import.meta.env.MODE !== "web" || globalAdmin;
   const [projectColumns, setProjectColumns] = useState(() => {
     const saved = Number(window.localStorage.getItem("infinite-canvas:project-columns"));
     return Number.isFinite(saved) && saved >= 3 && saved <= 8 ? saved : 4;
@@ -2560,7 +2580,8 @@ function CanvasWorkspace() {
       (record) => record.content.generationPlaceholder !== true
         && (record.kind === "video" || record.kind === "generated-video"),
     );
-    if (!videoRecords.length) return Promise.resolve<VideoDeletionChoice>("node-only");
+    // Without file deletion rights there is nothing to choose: only the node goes.
+    if (!videoRecords.length || !canDeleteFilesRef.current) return Promise.resolve<VideoDeletionChoice>("node-only");
     const filePaths = videoFilePathsForRecords(videoRecords);
     return new Promise<VideoDeletionChoice>((resolve) => {
       setVideoDeletionRequest({
@@ -2605,7 +2626,7 @@ function CanvasWorkspace() {
     const imageRecords = records.filter(
       (record) => isDirectGeneratedImageOutput(record),
     );
-    if (!imageRecords.length) return Promise.resolve<VideoDeletionChoice>("node-only");
+    if (!imageRecords.length || !canDeleteFilesRef.current) return Promise.resolve<VideoDeletionChoice>("node-only");
     const filePaths = imageFilePathsForRecords(imageRecords);
     return new Promise<VideoDeletionChoice>((resolve) => {
       setImageDeletionRequest({
@@ -2711,8 +2732,14 @@ function CanvasWorkspace() {
   }, [changeNode, forgetComfyTask, unregisterComfyTask]);
 
   const deleteCanvasNodes = useCallback(
-    async (nodesToDelete: CanvasFlowNode[], deleteSourceFiles = false) => {
+    async (nodesToDelete: CanvasFlowNode[], requestedFileDeletion = false) => {
       if (!nodesToDelete.length || nodeDeletionInProgress.current) return;
+      if (canvasReadOnlyRef.current) {
+        setNotice(READ_ONLY_NOTICE);
+        return;
+      }
+      // Deleting the generated files themselves is admin-only on the Web.
+      const deleteSourceFiles = requestedFileDeletion && canDeleteFilesRef.current;
       nodeDeletionInProgress.current = true;
       const initialRecords = nodesToDelete.map((node) => node.data.record);
       const deletedOriginalImageIds = new Set(
@@ -6339,6 +6366,7 @@ function CanvasWorkspace() {
       nodes: copiedNodes,
       videoInputEdges,
       sourceCanvasId: copiedNodes[0].canvasId,
+      sourceOwnership: activeCanvasRecordRef.current,
       pasteCount: 0,
     };
     setNotice(
@@ -7195,6 +7223,16 @@ function CanvasWorkspace() {
   const pasteCopiedNodes = useCallback(async (placeAtViewportCenter = true) => {
     const clipboard = nodeClipboard.current;
     if (!activeProjectId || !clipboard?.nodes.length) return;
+    if (canvasReadOnlyRef.current) {
+      setNotice(READ_ONLY_NOTICE);
+      return;
+    }
+    // Front-end rule (CANVAS-012b decision 1): private content stays out of
+    // shared canvases and other users' canvases.
+    if (import.meta.env.MODE === "web" && !pasteAllowed(clipboard.sourceOwnership, activeCanvasRecordRef.current)) {
+      setNotice("不能把私有画布的内容粘贴到共享画布或其他用户的画布");
+      return;
+    }
 
     const pasteOffset = CANVAS_GRID_SIZE * 2 * (clipboard.pasteCount + 1);
     const sourceLeft = Math.min(...clipboard.nodes.map((node) => node.x));
@@ -7755,6 +7793,8 @@ function CanvasWorkspace() {
   }, [privateProjectVisibilityPassword, privateProjectVisibilityUnlockBusy]);
 
   useEffect(() => {
+    // Web accounts replace private-project hiding with server-side ownership.
+    if (import.meta.env.MODE === "web") return;
     const handlePrivateProjectVisibilityShortcut = (event: KeyboardEvent) => {
       if (!event.ctrlKey || event.altKey || event.shiftKey || event.repeat) return;
       if (event.key.toLowerCase() !== "h") return;
@@ -7783,16 +7823,31 @@ function CanvasWorkspace() {
     }
     try {
       const snapshot = await invoke<WorkspaceSnapshot>("create_project", {
-        input: { name },
+        input: import.meta.env.MODE === "web" ? { name, shared: newProjectShared } : { name },
       });
       setProjects((current) => [snapshot, ...current]);
       setCreateProjectOpen(false);
       setNewProjectName("");
+      setNewProjectShared(false);
       await openProject(snapshot.canvas.id);
     } catch (error) {
       reportError(error);
     }
-  }, [newProjectName, openProject, reportError]);
+  }, [newProjectName, newProjectShared, openProject, reportError]);
+
+  // Web, admin only: private <-> shared for a whole project tree.
+  const toggleProjectSharing = useCallback(async (project: WorkspaceSnapshot, shared: boolean) => {
+    setSharingBusyId(project.canvas.id);
+    try {
+      await invoke("set_canvas_sharing", { id: project.canvas.id, shared });
+      setProjects(await invoke<WorkspaceSnapshot[]>("list_project_summaries"));
+      setNotice(shared ? `“${project.canvas.name}”已设为共享` : `“${project.canvas.name}”已取消共享`);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setSharingBusyId(null);
+    }
+  }, [reportError]);
 
   const deleteProject = useCallback(async () => {
     if (!projectToDelete || deletingProjectId) return;
@@ -9365,6 +9420,10 @@ function CanvasWorkspace() {
   const importMedia = useCallback(
     async (paths: string[], screenPosition: { x: number; y: number }) => {
       if (!activeProjectId) return;
+      if (canvasReadOnlyRef.current) {
+        setNotice(READ_ONLY_NOTICE);
+        return;
+      }
       const flowPosition = screenToFlowPosition(screenPosition);
       const basePosition = {
         x: snapCanvasCoordinate(flowPosition.x),
@@ -10545,7 +10604,8 @@ function CanvasWorkspace() {
       project.canvas.name.toLocaleLowerCase().includes(normalizedPrivateProjectSearch),
     )
     : projects;
-  const visibleProjects = showPrivateProjects
+  // The Web server already returns only the canvases this user may see.
+  const visibleProjects = showPrivateProjects || import.meta.env.MODE === "web"
     ? projects
     : projects.filter((project) => !project.canvas.isPrivate);
 
@@ -10662,7 +10722,7 @@ function CanvasWorkspace() {
           className="project-dialog app-settings-dialog"
           onSubmit={(event) => {
             event.preventDefault();
-            if (activeSettingsSection === "general") void saveComfySettings();
+            if (activeSettingsSection === "general" && globalAdmin) void saveComfySettings();
             if (activeSettingsSection === "video-defaults") saveVideoGenerationDefaults();
             if (activeSettingsSection === "video-model") void saveH3ModelParameters();
             if (activeSettingsSection === "image-model") void saveKrea2ModelParameters();
@@ -10695,14 +10755,15 @@ function CanvasWorkspace() {
                 <Settings2 size={16} />
                 <span><strong>基础设置</strong><small>ComfyUI 映射目录</small></span>
               </button>
-              <button
+              {/* Workflow modules, model defaults and backups are server-wide: admins only on the Web. */}
+              {globalAdmin && <button
                 type="button"
                 className={activeSettingsSection === "workflows" ? "is-active" : ""}
                 onClick={() => setActiveSettingsSection("workflows")}
               >
                 <Clapperboard size={16} />
                 <span><strong>工作流方案</strong><small>多功能与多套方案</small></span>
-              </button>
+              </button>}
               <button
                 type="button"
                 className={activeSettingsSection === "video-defaults" ? "is-active" : ""}
@@ -10711,7 +10772,7 @@ function CanvasWorkspace() {
                 <SlidersHorizontal size={16} />
                 <span><strong>视频默认参数</strong><small>新节点的生成参数</small></span>
               </button>
-              <button
+              {globalAdmin && <button
                 type="button"
                 className={activeSettingsSection === "video-model" ? "is-active" : ""}
                 onClick={() => {
@@ -10742,8 +10803,8 @@ function CanvasWorkspace() {
               >
                 <SlidersHorizontal size={16} />
                 <span><strong>默认模型设置</strong><small>模型、音频与画面</small></span>
-              </button>
-              <button
+              </button>}
+              {globalAdmin && <button
                 type="button"
                 className={activeSettingsSection === "image-model" ? "is-active" : ""}
                 onClick={() => {
@@ -10766,23 +10827,24 @@ function CanvasWorkspace() {
               >
                 <ImageIcon size={16} />
                 <span><strong>图片模型参数</strong><small>按图片方案选择基础模型</small></span>
-              </button>
-              <button
+              </button>}
+              {globalAdmin && <button
                 type="button"
                 className={activeSettingsSection === "backup" ? "is-active" : ""}
                 onClick={() => setActiveSettingsSection("backup")}
               >
                 <DatabaseBackup size={16} />
                 <span><strong>数据备份</strong><small>整机迁移与恢复</small></span>
-              </button>
-              <button
+              </button>}
+              {/* Web accounts own their canvases on the server; private-project hiding is desktop-only. */}
+              {import.meta.env.MODE !== "web" && <button
                 type="button"
                 className={activeSettingsSection === "privacy" ? "is-active" : ""}
                 onClick={() => setActiveSettingsSection("privacy")}
               >
                 <FolderKanban size={16} />
                 <span><strong>私密项目</strong><small>隐藏与显示</small></span>
-              </button>
+              </button>}
               {/* Web accounts change passwords from the user menu; the app lock is desktop-only. */}
               {import.meta.env.MODE !== "web" && <button
                 type="button"
@@ -10807,9 +10869,10 @@ function CanvasWorkspace() {
                   setComfyInputRootDraft={setComfyInputRootDraft}
                   comfyOutputRootDraft={comfyOutputRootDraft}
                   setComfyOutputRootDraft={setComfyOutputRootDraft}
+                  showComfySettings={globalAdmin}
                 />
               )}
-              {activeSettingsSection === "workflows" && (
+              {activeSettingsSection === "workflows" && globalAdmin && (
                 <WorkflowSettingsPanel
                   showDeletedWorkflowModules={showDeletedWorkflowModules}
                   setShowDeletedWorkflowModules={setShowDeletedWorkflowModules}
@@ -10862,7 +10925,7 @@ function CanvasWorkspace() {
                   setVideoGenerationDefaultsDraft={setVideoGenerationDefaultsDraft}
                 />
               )}
-              {activeSettingsSection === "video-model" && (
+              {activeSettingsSection === "video-model" && globalAdmin && (
                 <VideoModelSettingsPanel
                   selectedWorkflowModule={selectedWorkflowModule}
                   workflowModules={workflowModules}
@@ -10877,7 +10940,7 @@ function CanvasWorkspace() {
                   h3ModelParametersDraft={h3ModelParametersDraft}
                 />
               )}
-              {activeSettingsSection === "image-model" && (
+              {activeSettingsSection === "image-model" && globalAdmin && (
                 <ImageModelSettingsPanel
                   selectedImageWorkflowModule={selectedImageWorkflowModule}
                   workflowModules={workflowModules}
@@ -10889,7 +10952,7 @@ function CanvasWorkspace() {
                   krea2DiffusionModelOptions={krea2DiffusionModelOptions}
                 />
               )}
-              {activeSettingsSection === "backup" && (
+              {activeSettingsSection === "backup" && globalAdmin && (
                 <BackupSettingsPanel
                   exportFullAppBackup={exportFullAppBackup}
                   appBackupBusy={appBackupBusy}
@@ -10899,7 +10962,7 @@ function CanvasWorkspace() {
                   appBackupMessageKind={appBackupMessageKind}
                 />
               )}
-              {activeSettingsSection === "privacy" && (
+              {activeSettingsSection === "privacy" && import.meta.env.MODE !== "web" && (
                 <PrivacySettingsPanel
                   showPrivateProjects={showPrivateProjects}
                   togglePrivateProjectVisibility={togglePrivateProjectVisibility}
@@ -10932,7 +10995,7 @@ function CanvasWorkspace() {
               )}
             </div>
           </div>
-          {(activeSettingsSection === "general"
+          {((activeSettingsSection === "general" && globalAdmin)
             || activeSettingsSection === "video-defaults"
             || activeSettingsSection === "video-model"
             || activeSettingsSection === "image-model") && (
@@ -11109,9 +11172,25 @@ function CanvasWorkspace() {
     document.body,
   );
 
+  const activeCanvasRecord = canvasPath[canvasPath.length - 1] ?? null;
+  activeCanvasRecordRef.current = activeCanvasRecord;
+  // Experience layer only: the server refuses these writes anyway.
+  const canvasReadOnly = import.meta.env.MODE === "web" && readOnlyCanvas(activeCanvasRecord, accessUser, editModeActive);
+  canvasReadOnlyRef.current = canvasReadOnly;
+  // Admin editing another user's private canvas (edit mode on).
+  const editingOthersCanvas = import.meta.env.MODE === "web" && editModeActive
+    && readOnlyCanvas(activeCanvasRecord, accessUser, false);
+
   if (!activeProjectId) {
     return (
       <ProjectHome
+        access={import.meta.env.MODE === "web" && accessUser ? {
+          user: accessUser,
+          newProjectShared,
+          setNewProjectShared,
+          toggleProjectSharing,
+          sharingBusyId,
+        } : undefined}
         comfyQueueIndicator={comfyQueueIndicator}
         projectColumns={projectColumns}
         setProjectColumns={setProjectColumns}
@@ -11188,6 +11267,21 @@ function CanvasWorkspace() {
         if (event.button === 1) setMiddlePanActive(true);
       }}
     >
+      {(canvasReadOnly || editingOthersCanvas) && activeCanvasRecord && (
+        <div className={`canvas-access-banner${editingOthersCanvas ? " is-editing" : ""}`} role="status">
+          <span>
+            {editingOthersCanvas
+              ? `正在编辑 ${ownerLabel(activeCanvasRecord) || "其他用户"} 的画布（编辑模式 30 分钟后自动关闭，修改会记录审计）`
+              : `${ownerLabel(activeCanvasRecord) || "其他用户"} 的私有画布 · 只读`}
+          </span>
+          <button
+            type="button"
+            onClick={() => void requestEditMode(!editingOthersCanvas).catch(reportError)}
+          >
+            {editingOthersCanvas ? "退出编辑模式" : "开启编辑模式"}
+          </button>
+        </div>
+      )}
       <ReactFlow<CanvasFlowNode, Edge>
         key={activeProjectId}
         className={[
@@ -11198,7 +11292,8 @@ function CanvasWorkspace() {
         edges={interactiveEdges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        nodesDraggable={!spacePanActive}
+        nodesDraggable={!spacePanActive && !canvasReadOnly}
+        nodesConnectable={!canvasReadOnly}
         onNodesChange={onNodesChange}
         onEdgesChange={handleEdgesChange}
         onConnect={connectNodes}

@@ -391,6 +391,12 @@ interface CanvasRecord {
   previewImagePath: string | null;
   createdAt: string;
   updatedAt: string;
+  // Web only: the root canvas's owner and sharing, added by the server.
+  rootCanvasId?: string;
+  ownerUserId?: string | null;
+  ownerUsername?: string | null;
+  ownerDisplayName?: string | null;
+  isShared?: boolean;
 }
 
 interface NodeRecord {
@@ -1691,6 +1697,8 @@ interface NodeClipboard {
   nodes: NodeRecord[];
   videoInputEdges: NodeClipboardEdge[];
   sourceCanvasId: string;
+  // Web: owner and sharing of the copied canvas, checked before pasting elsewhere.
+  sourceOwnership?: CanvasRecord | null;
   pasteCount: number;
 }
 

@@ -2,8 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import App from "../App";
 import { closeEvents } from "./bridge";
 import { flushSettings, loadSettings } from "./settings";
-import { currentUser, signOut, stageFor, type WebUser } from "./account";
+import { currentSession, signOut, stageFor, switchEditMode, type WebUser } from "./account";
 import { LoginScreen, PasswordChangeScreen, UserMenu } from "./AccountScreens";
+import { registerEditModeHandler, setAccessUser } from "../account/access";
 import "./web.css";
 
 // "password": the account must replace its temporary password before using the canvas.
@@ -17,16 +18,20 @@ export default function WebRoot() {
   const [notice, setNotice] = useState("");
   // The same decision runs after sign-in, after a forced change and on reload,
   // so a refreshed page lands where the action left it.
-  const enter = useCallback(async (next: WebUser) => {
+  const enter = useCallback(async (next: WebUser, editModeSeconds: number | null = null) => {
     setUser(next);
+    // The canvas reads role and edit mode from here; settings decide where to save.
+    setAccessUser(next, editModeSeconds);
     if (stageFor(next) === "password") { closeEvents(); setStage("password"); return; }
     await loadSettings();
     setStage("ready");
   }, []);
+  const leave = useCallback(() => { closeEvents(); setUser(null); setAccessUser(null); setChangingPassword(false); setStage("login"); }, []);
   useEffect(() => {
     let cancelled = false;
-    void currentUser().then((next) => cancelled ? undefined : enter(next)).catch(() => { if (!cancelled) setStage("login"); });
-    const expired = () => { closeEvents(); setUser(null); setChangingPassword(false); setStage("login"); setNotice("登录已失效，请重新登录"); };
+    registerEditModeHandler(switchEditMode);
+    void currentSession().then((session) => cancelled ? undefined : enter(session.user, session.editModeRemainingSeconds ?? null)).catch(() => { if (!cancelled) setStage("login"); });
+    const expired = () => { leave(); setNotice("登录已失效，请重新登录"); };
     const passwordRequired = () => { closeEvents(); setChangingPassword(false); setStage("password"); };
     const failure = (event: globalThis.Event) => setError(String((event as CustomEvent).detail));
     window.addEventListener("sucanvas:session-expired", expired);
@@ -34,23 +39,24 @@ export default function WebRoot() {
     window.addEventListener("sucanvas:web-error", failure);
     return () => {
       cancelled = true;
+      registerEditModeHandler(null);
       window.removeEventListener("sucanvas:session-expired", expired);
       window.removeEventListener("sucanvas:password-change-required", passwordRequired);
       window.removeEventListener("sucanvas:web-error", failure);
       closeEvents();
     };
-  }, [enter]);
+  }, [enter, leave]);
   async function logout() {
     // Settings are only writable with full access; a forced-change session has none.
     if (stage === "ready") await flushSettings();
     await signOut();
-    closeEvents(); setUser(null); setChangingPassword(false); setNotice(""); setStage("login");
+    leave(); setNotice("");
   }
   const signOutSafely = () => void logout().catch((logoutError) => setError(String(logoutError)));
   if (stage === "checking") return <main className="app-lock-screen is-loading"><p>正在连接画布…</p></main>;
   return <>
     {stage === "login" && <LoginScreen notice={notice} onSignedIn={async (next) => { setNotice(""); await enter(next); }} />}
-    {stage === "password" && <PasswordChangeScreen forced user={user} onDone={enter} onSignOut={signOutSafely} />}
+    {stage === "password" && <PasswordChangeScreen forced user={user} onDone={(next) => enter(next)} onSignOut={signOutSafely} />}
     {stage === "ready" && user && <>
       <App />
       <UserMenu user={user} onChangePassword={() => setChangingPassword(true)} onSignOut={signOutSafely} />

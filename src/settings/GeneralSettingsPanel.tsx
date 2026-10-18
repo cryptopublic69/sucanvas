@@ -14,6 +14,8 @@ type GeneralSettingsPanelProps = {
   setComfyInputRootDraft: React.Dispatch<React.SetStateAction<string>>;
   comfyOutputRootDraft: string;
   setComfyOutputRootDraft: React.Dispatch<React.SetStateAction<string>>;
+  // The ComfyUI connection is a server-wide setting (Web: admins only).
+  showComfySettings?: boolean;
 };
 
 export function GeneralSettingsPanel({
@@ -28,12 +30,13 @@ export function GeneralSettingsPanel({
   setComfyInputRootDraft,
   comfyOutputRootDraft,
   setComfyOutputRootDraft,
+  showComfySettings = true,
 }: GeneralSettingsPanelProps) {
   return (
     <section className="settings-pane general-settings-pane" aria-labelledby="general-settings-title">
       <div className="settings-pane-heading">
         <h3 id="general-settings-title">基础设置</h3>
-        <p>{import.meta.env.MODE === "web" ? "配置画布服务器连接的 ComfyUI 地址与映射目录，保存后立即生效。" : "配置远程 ComfyUI 的服务地址与 Windows 映射路径。"}</p>
+        <p>{!showComfySettings ? "调整界面显示；只保存在当前浏览器中。" : import.meta.env.MODE === "web" ? "配置画布服务器连接的 ComfyUI 地址与映射目录，保存后立即生效。" : "配置远程 ComfyUI 的服务地址与 Windows 映射路径。"}</p>
       </div>
       <section className="general-settings-group" aria-labelledby="appearance-settings-title">
         <div className="general-settings-group-heading">
@@ -62,7 +65,7 @@ export function GeneralSettingsPanel({
           </div>
         </section>
       </section>
-      <section className="general-settings-group comfyui-settings-group" aria-label="ComfyUI 配置">
+      {showComfySettings && <section className="general-settings-group comfyui-settings-group" aria-label="ComfyUI 配置">
         {comfySettingsError && <p role="alert">{comfySettingsError}</p>}
         <div className="comfyui-settings-fields">
           <label>
@@ -125,7 +128,7 @@ export function GeneralSettingsPanel({
             </small>
           </label>
         </div>
-      </section>
+      </section>}
     </section>
   );
 }

@@ -390,22 +390,6 @@ impl Auth {
         }
         Ok(user)
     }
-
-    // Re-entering the current password, e.g. before showing hidden projects.
-    pub async fn verify_password(&self, user_id: &str, password: String) -> Result<(), AuthError> {
-        let credential = self
-            .users
-            .by_id(user_id)
-            .map_err(AuthError::Internal)?
-            .ok_or(AuthError::Invalid)?;
-        let key = credential.user.username.to_ascii_lowercase();
-        self.acquire(&key)?;
-        if password.len() > 1024 || !self.verify(password, credential.password_hash).await {
-            return Err(AuthError::Rejected("密码错误".to_owned()));
-        }
-        self.limiter.lock().unwrap().clear(&key);
-        Ok(())
-    }
 }
 fn cookie_token(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -493,24 +477,6 @@ pub async fn change_password(
         .await
     {
         Ok(user) => Json(json!({"ok": true, "user": user_json(&user)})).into_response(),
-        Err(error) => error.into_response(),
-    }
-}
-#[derive(Deserialize)]
-pub struct PasswordCheck {
-    password: String,
-}
-pub async fn verify_password(
-    State(state): State<WebState>,
-    Extension(session): Extension<Session>,
-    Json(input): Json<PasswordCheck>,
-) -> Response {
-    match state
-        .auth
-        .verify_password(&session.user_id, input.password)
-        .await
-    {
-        Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(error) => error.into_response(),
     }
 }

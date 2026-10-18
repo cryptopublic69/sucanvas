@@ -53,6 +53,8 @@ pub enum Permission {
     },
     EdgeWrite(String),
     Records(RecordRefs),
+    // A ComfyUI task (by client id): its initiator or an admin.
+    TaskOwner(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +194,13 @@ pub fn check(
             return Err(Denied::Forbidden("只有管理员可以执行此操作".to_owned()));
         }
         Permission::Unavailable => return Err(Denied::Unavailable),
+        Permission::TaskOwner(_) if session.role == Role::Admin => {}
+        Permission::TaskOwner(client_id) => {
+            // Unknown ids (e.g. started before a restart) are admin-only too.
+            if store.task_owner(client_id).as_deref() != Some(session.user_id.as_str()) {
+                return Err(Denied::Forbidden("只能取消自己发起的生成任务".to_owned()));
+            }
+        }
         Permission::CanvasRead(id) => {
             canvas(store, session, id, Level::Read, &mut grant)?;
         }
@@ -423,6 +432,31 @@ pub(crate) mod tests {
         assert!(world
             .check(&world.admin, Permission::CanvasDelete(shared))
             .is_ok());
+    }
+
+    #[test]
+    fn only_initiators_and_admins_cancel_generation_tasks() {
+        let world = world();
+        assert!(world
+            .store()
+            .remember_task("client-1", &world.alice.user_id));
+        assert!(world
+            .store()
+            .remember_task("client-1", &world.alice.user_id));
+        // Another user cannot claim the same client id and then cancel it.
+        assert!(!world.store().remember_task("client-1", &world.bob.user_id));
+        let cancel = |id: &str| Permission::TaskOwner(id.to_owned());
+        assert!(world.check(&world.alice, cancel("client-1")).is_ok());
+        assert!(matches!(
+            world.check(&world.bob, cancel("client-1")),
+            Err(Denied::Forbidden(_))
+        ));
+        assert!(matches!(
+            world.check(&world.alice, cancel("client-unknown")),
+            Err(Denied::Forbidden(_))
+        ));
+        assert!(world.check(&world.admin, cancel("client-1")).is_ok());
+        assert!(world.check(&world.admin, cancel("client-unknown")).is_ok());
     }
 
     #[test]

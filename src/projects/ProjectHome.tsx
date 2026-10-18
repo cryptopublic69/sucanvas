@@ -17,6 +17,22 @@ import type {
   CanvasRecord,
   WorkspaceSnapshot
 } from "../CanvasNode";
+import {
+  canDeleteProject,
+  groupProjects,
+  ownerLabel,
+  projectSection,
+  type AccessUser
+} from "../account/access";
+
+// Web accounts: the home page groups canvases by owner and offers sharing.
+export type ProjectHomeAccess = {
+  user: AccessUser;
+  newProjectShared: boolean;
+  setNewProjectShared: (shared: boolean) => void;
+  toggleProjectSharing: (project: WorkspaceSnapshot, shared: boolean) => Promise<void>;
+  sharingBusyId: string | null;
+};
 
 function nodePreviewColor(kind: string): string {
   if (kind === "folder") return "#8b7cf6";
@@ -141,6 +157,7 @@ type ProjectHomeProps = {
   appSettingsDialog: React.ReactNode;
   privateProjectVisibilityUnlockDialog: React.ReactNode;
   globalNoticeToast: React.ReactNode;
+  access?: ProjectHomeAccess;
 };
 
 export function ProjectHome({
@@ -167,7 +184,115 @@ export function ProjectHome({
   appSettingsDialog,
   privateProjectVisibilityUnlockDialog,
   globalNoticeToast,
+  access,
 }: ProjectHomeProps) {
+  const groups = useMemo(
+    () => (access ? groupProjects(visibleProjects, access.user) : null),
+    [access, visibleProjects],
+  );
+  const gridStyle = { gridTemplateColumns: `repeat(${projectColumns}, minmax(0, 1fr))` };
+  const newProjectCard = (
+    <button
+      className="new-project-card"
+      onClick={() => setCreateProjectOpen(true)}
+      disabled={!projectHomeReady}
+    >
+      <span className="new-project-icon"><Plus size={26} /></span>
+      <strong>新建项目</strong>
+      <span>创建一张新的无限画布</span>
+    </button>
+  );
+  const deleteButton = (project: WorkspaceSnapshot) => (
+    <button
+      type="button"
+      className="project-delete"
+      aria-label={`删除项目：${project.canvas.name}`}
+      onClick={(event) => {
+        event.stopPropagation();
+        setProjectToDelete(project);
+      }}
+    >
+      删除 <Trash2 size={13} />
+    </button>
+  );
+  const renderCard = (project: WorkspaceSnapshot) => {
+    const section = access ? projectSection(project.canvas, access.user) : null;
+    const admin = access?.user.role === "admin";
+    const deletable = !access || canDeleteProject(project.canvas, access.user);
+    return (
+      <article
+        className="project-card"
+        key={project.canvas.id}
+        role="button"
+        tabIndex={0}
+        onClick={() => void openProject(project.canvas.id)}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          void openProject(project.canvas.id);
+        }}
+      >
+        <ProjectThumbnail project={project} />
+        <div className="project-card-info">
+          <div>
+            <strong>
+              <span className="project-name-text">{project.canvas.name}</span>
+              {!access && project.canvas.isPrivate && (
+                <span className="project-private-badge" title="私密项目">
+                  <LockKeyhole size={10} /> 私密
+                </span>
+              )}
+              {section === "shared" && <span className="project-access-badge is-shared" title="所有成员可编辑">共享</span>}
+              {section === "others" && (
+                <span className="project-access-badge is-readonly" title="其他用户的私有画布，开启编辑模式后才能修改">
+                  只读{ownerLabel(project.canvas) ? ` · ${ownerLabel(project.canvas)}` : ""}
+                </span>
+              )}
+            </strong>
+            <span>
+              更新于 {new Intl.DateTimeFormat("zh-CN", {
+                month: "numeric",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              }).format(new Date(project.canvas.updatedAt))}
+            </span>
+          </div>
+          {access ? (
+            <div className="project-card-actions">
+              {admin && (
+                <button
+                  type="button"
+                  className="project-share-toggle"
+                  disabled={access.sharingBusyId === project.canvas.id}
+                  aria-label={`${project.canvas.isShared ? "取消共享" : "设为共享"}：${project.canvas.name}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void access.toggleProjectSharing(project, !project.canvas.isShared);
+                  }}
+                >
+                  {project.canvas.isShared ? "取消共享" : "设为共享"}
+                </button>
+              )}
+              {deletable && deleteButton(project)}
+            </div>
+          ) : deleteButton(project)}
+        </div>
+      </article>
+    );
+  };
+  const section = (title: string, hint: string, projects: WorkspaceSnapshot[], first?: React.ReactNode) => (
+    <section className="project-owner-section" aria-label={title}>
+      <h2>{title}<small>{projects.length} 个 · {hint}</small></h2>
+      {projects.length || first ? (
+        <div className="project-grid" style={gridStyle}>
+          {first}
+          {projects.map(renderCard)}
+        </div>
+      ) : <p className="project-section-empty">暂无</p>}
+    </section>
+  );
   return (
     <main className="project-home">
       <header className="project-home-header">
@@ -227,69 +352,28 @@ export function ProjectHome({
           </span>
         </div>
 
-        <div
-          className="project-grid"
-          style={{ gridTemplateColumns: `repeat(${projectColumns}, minmax(0, 1fr))` }}
-        >
-          <button
-            className="new-project-card"
-            onClick={() => setCreateProjectOpen(true)}
-            disabled={!projectHomeReady}
-          >
-            <span className="new-project-icon"><Plus size={26} /></span>
-            <strong>新建项目</strong>
-            <span>创建一张新的无限画布</span>
-          </button>
-
-          {visibleProjects.map((project) => (
-            <article
-              className="project-card"
-              key={project.canvas.id}
-              role="button"
-              tabIndex={0}
-              onClick={() => void openProject(project.canvas.id)}
-              onKeyDown={(event) => {
-                if (event.target !== event.currentTarget) return;
-                if (event.key !== "Enter" && event.key !== " ") return;
-                event.preventDefault();
-                void openProject(project.canvas.id);
-              }}
-            >
-              <ProjectThumbnail project={project} />
-              <div className="project-card-info">
-                <div>
-                  <strong>
-                    <span className="project-name-text">{project.canvas.name}</span>
-                    {project.canvas.isPrivate && (
-                      <span className="project-private-badge" title="私密项目">
-                        <LockKeyhole size={10} /> 私密
-                      </span>
-                    )}
-                  </strong>
-                  <span>
-                    更新于 {new Intl.DateTimeFormat("zh-CN", {
-                      month: "numeric",
-                      day: "numeric",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    }).format(new Date(project.canvas.updatedAt))}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className="project-delete"
-                  aria-label={`删除项目：${project.canvas.name}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setProjectToDelete(project);
-                  }}
-                >
-                  删除 <Trash2 size={13} />
-                </button>
-              </div>
-            </article>
-          ))}
-        </div>
+        {groups ? (
+          <>
+            {section("我的画布", "只有你和管理员可见", groups.mine, newProjectCard)}
+            {section("共享画布", "所有成员都能编辑", groups.shared)}
+            {access?.user.role === "admin" && (
+              <section className="project-owner-section" aria-label="其他用户">
+                <h2>其他用户<small>私有画布，只读；进入后开启编辑模式才能修改</small></h2>
+                {groups.others.length ? groups.others.map((owner) => (
+                  <div className="project-owner-group" key={owner.key || "ownerless"}>
+                    <h3>{owner.label}<small>{owner.projects.length} 个</small></h3>
+                    <div className="project-grid" style={gridStyle}>{owner.projects.map(renderCard)}</div>
+                  </div>
+                )) : <p className="project-section-empty">暂无</p>}
+              </section>
+            )}
+          </>
+        ) : (
+          <div className="project-grid" style={gridStyle}>
+            {newProjectCard}
+            {visibleProjects.map(renderCard)}
+          </div>
+        )}
       </section>
 
       {createProjectOpen && (
@@ -317,6 +401,23 @@ export function ProjectHome({
                 maxLength={120}
               />
             </label>
+            {access && (
+              <fieldset className="project-visibility-choice">
+                <legend>谁能看到</legend>
+                {([[false, "私有", "只有你和管理员可见"], [true, "共享", "所有成员都能看到和编辑"]] as const).map(([shared, label, hint]) => (
+                  <label key={label} className={access.newProjectShared === shared ? "is-active" : ""}>
+                    <input
+                      type="radio"
+                      name="project-visibility"
+                      checked={access.newProjectShared === shared}
+                      onChange={() => access.setNewProjectShared(shared)}
+                    />
+                    <strong>{label}</strong>
+                    <small>{hint}</small>
+                  </label>
+                ))}
+              </fieldset>
+            )}
             <div className="project-dialog-actions">
               <button type="button" className="dialog-cancel" onClick={() => setCreateProjectOpen(false)}>
                 取消

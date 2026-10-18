@@ -1,6 +1,6 @@
 use super::{
     auth::{Denied, Grant, Session},
-    dispatch::{permissions, Command},
+    dispatch::{permissions, submitted_client_id, Command},
     WebState,
 };
 use axum::{
@@ -354,6 +354,15 @@ pub async fn invoke(
         Ok(grant) => grant,
         Err(denied) => return denied.into_response(),
     };
+    if let Some(client_id) = submitted_client_id(kind, &input.args) {
+        if !state
+            .auth
+            .ownership()
+            .remember_task(&client_id, &session.user_id)
+        {
+            return Denied::Forbidden("该生成任务 id 已被其他用户使用".to_owned()).into_response();
+        }
+    }
     remove_unused_workflow_fallback(command, &mut input.args);
     if command == "import_media" {
         let directory = match super::storage::input_root(&state) {

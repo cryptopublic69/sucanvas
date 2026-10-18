@@ -76,11 +76,6 @@ export class Channel<T> {
   toJSON() { return { __webChannel: this.id }; }
 }
 export async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  if (command === "verify_app_lock_password") {
-    // Confirms the signed-in user's own password (private project visibility).
-    await request("/api/auth/verify-password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: args.password }) });
-    return true as T;
-  }
   const channel = args.onSubmitted as Channel<unknown> | undefined;
   if (command.startsWith("submit_comfyui_")) await (await import("./settings")).flushSettings();
   if (channel) await connectEvents();

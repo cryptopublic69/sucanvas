@@ -8,11 +8,20 @@ export type WebUser = {
   role: "admin" | "user";
   mustChangePassword: boolean;
 };
-type UserResponse = { user: WebUser };
+type UserResponse = { user: WebUser; editModeRemainingSeconds?: number | null };
 const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 export async function currentUser(): Promise<WebUser> {
-  return (await request<UserResponse>("/api/auth/session")).user;
+  return (await currentSession()).user;
+}
+// The signed-in user plus the admin edit mode still left on this session.
+export async function currentSession(): Promise<UserResponse> {
+  return request<UserResponse>("/api/auth/session");
+}
+// Admin only: other users' private canvases become writable for 30 minutes.
+export async function switchEditMode(enabled: boolean): Promise<number | null> {
+  const response = await request<{ editModeRemainingSeconds: number | null }>("/api/auth/edit-mode", json({ enabled }));
+  return response.editModeRemainingSeconds ?? null;
 }
 export async function signIn(username: string, password: string): Promise<WebUser> {
   return (await request<UserResponse>("/api/auth/login", json({ username: username.trim(), password }))).user;

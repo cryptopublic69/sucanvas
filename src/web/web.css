@@ -10,6 +10,37 @@
 .web-notice { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); max-width: 80vw; z-index: 1500; background: #213b33; color: white; border-radius: 8px; padding: 12px 20px; }
 .web-notice button { margin-left: 14px; background: none; color: inherit; border: 0; cursor: pointer; }
 
+/* Canvas ownership: home page sections, access badges, sharing and the read-only banner. */
+.project-owner-section { margin-bottom: 34px; }
+.project-owner-section > h2 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px; color: #eceef4; font-size: calc(15px + var(--ui-font-adjust)); }
+.project-owner-section h2 small, .project-owner-group h3 small { color: #7d8496; font-size: calc(10.5px + var(--ui-font-adjust)); font-weight: 400; }
+.project-owner-group { margin-bottom: 20px; }
+.project-owner-group > h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; color: #c3c8d4; font-size: calc(12.5px + var(--ui-font-adjust)); }
+.project-section-empty { margin: 0; padding: 18px; color: #6f7687; background: rgba(255, 255, 255, .02); border: 1px dashed #2f3441; border-radius: 12px; font-size: calc(11px + var(--ui-font-adjust)); }
+.project-card-info .project-access-badge { display: inline-flex; flex: 0 0 auto; align-items: center; margin-left: 6px; padding: 2px 6px; border-radius: 999px; font-size: calc(8px + var(--ui-font-adjust)); font-weight: 700; }
+.project-access-badge.is-shared { color: #8fd8c0; background: rgba(78, 196, 160, .12); border: 1px solid rgba(78, 196, 160, .3); }
+.project-access-badge.is-readonly { color: #d9c08a; background: rgba(216, 173, 85, .1); border: 1px solid rgba(216, 173, 85, .3); }
+.project-card-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.project-share-toggle { height: 28px; padding: 0 8px; color: #a9b2c6; background: rgba(255, 255, 255, .04); border: 1px solid #343946; border-radius: 7px; cursor: pointer; font-size: calc(10.5px + var(--ui-font-adjust)); }
+.project-share-toggle:hover:not(:disabled) { color: white; border-color: #5a6275; }
+.project-visibility-choice { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 16px 0 0; padding: 0; border: 0; }
+.project-visibility-choice legend { margin-bottom: 7px; color: #8d94a4; font-size: calc(10.5px + var(--ui-font-adjust)); }
+.project-dialog .project-visibility-choice label { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 10px 12px; border: 1px solid #343946; border-radius: 10px; cursor: pointer; }
+.project-visibility-choice label.is-active { border-color: #7165c7; background: rgba(113, 101, 199, .1); }
+.project-visibility-choice input { position: absolute; opacity: 0; pointer-events: none; }
+.project-visibility-choice strong { color: #eceef4; font-size: calc(12px + var(--ui-font-adjust)); }
+.project-visibility-choice small { color: #7d8496; font-size: calc(10px + var(--ui-font-adjust)); }
+.canvas-access-banner { position: fixed; top: 12px; left: 50%; z-index: 1100; display: flex; align-items: center; gap: 12px; transform: translateX(-50%); padding: 8px 10px 8px 16px; color: #f2e4c4; background: rgba(70, 56, 24, .94); border: 1px solid rgba(216, 173, 85, .45); border-radius: 10px; box-shadow: 0 12px 30px rgba(0, 0, 0, .3); font-size: calc(11.5px + var(--ui-font-adjust)); }
+.canvas-access-banner.is-editing { color: #ffd9d9; background: rgba(86, 30, 36, .95); border-color: rgba(232, 100, 118, .5); }
+.canvas-access-banner button { height: 28px; padding: 0 10px; color: inherit; background: rgba(255, 255, 255, .1); border: 1px solid rgba(255, 255, 255, .25); border-radius: 7px; cursor: pointer; font-size: inherit; }
+.canvas-access-banner button:hover { background: rgba(255, 255, 255, .18); }
+:root[data-theme="light"] .project-owner-section > h2 { color: #242936; }
+:root[data-theme="light"] .project-owner-group > h3 { color: #3f4659; }
+:root[data-theme="light"] .project-section-empty { color: #7a8292; background: #f7f8fb; border-color: #d8dce6; }
+:root[data-theme="light"] .project-share-toggle { color: #4c5468; background: #fff; border-color: #d8dce6; }
+:root[data-theme="light"] .project-visibility-choice label { border-color: #d8dce6; }
+:root[data-theme="light"] .project-visibility-choice strong { color: #242936; }
+
 /* Accounts: sign-in, password change and the user menu. */
 .web-account-field { margin-top: 12px; }
 .web-account-secondary { height: 34px; margin-top: 8px; color: #a6abba; background: none; border: 1px solid #343946; border-radius: 9px; cursor: pointer; font-size: calc(11.5px + var(--ui-font-adjust)); }

@@ -94,7 +94,7 @@ pub async fn run() -> Result<(), String> {
             "--set-password" => set_password = true,
             "--reset-admin-password" => reset_admin_password = true,
             "--help" => {
-                println!("SuCanvasServer [--config <path>] [--set-password | --reset-admin-password]\nBoth password options read one line from stdin (never from the command line) and require the server to be stopped.\n--set-password sets the application lock (app-lock.json); it creates the first admin account on the next start but does not change an existing account.\n--reset-admin-password sets the password of the \"admin\" account and re-enables it. Paths are relative to config.json, not the current directory.");
+                println!("SuCanvasServer [--config <path>] [--set-password | --reset-admin-password]\nBoth password options read one line from stdin (never from the command line) and require the server to be stopped.\n--set-password sets the application lock (app-lock.json); it creates the first admin account on the next start but does not change an existing account.\n--reset-admin-password sets the password of the \"admin\" account and makes it an enabled admin again. Paths are relative to config.json, not the current directory.");
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument: {arg}")),
@@ -143,7 +143,7 @@ pub async fn run() -> Result<(), String> {
             &database_path,
             &crate::commands::hash_app_lock_password(password)?,
         )?;
-        println!("Password of the admin account reset; the account is enabled and no password change is required.");
+        println!("Password of the admin account reset; it is an enabled admin and no password change is required.");
         return Ok(());
     }
     auth::migrate_credentials(&data)?;
@@ -286,7 +286,6 @@ pub async fn run() -> Result<(), String> {
         )
         .route("/api/comfy/ws", get(proxy::websocket))
         .route("/api/comfy/{*path}", get(proxy::http))
-        .route("/api/auth/verify-password", post(auth::verify_password))
         .route("/api/auth/edit-mode", post(auth::edit_mode))
         .route(
             "/api/admin/users",
