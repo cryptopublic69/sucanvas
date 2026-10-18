@@ -3,6 +3,8 @@ import type { OpenDialogOptions, SaveDialogOptions } from "@tauri-apps/plugin-di
 import { downloadFilename, webApiUrl, webApiUrls } from "./urls";
 import { rpcTimeoutMs, withRequestTimeout } from "./requestTimeout";
 import { generationRequest, WebHttpError } from "./generationRequest";
+import { readLocalVideoMetadata } from "./localVideoMetadata";
+import { rememberUploadedVideoMetadata } from "../media/uploadedVideoMetadata";
 const devBackend = import.meta.env.DEV ? import.meta.env.SUCANVAS_WEB_DEV_BACKEND ?? "" : "";
 let serverOrigin = devBackend;
 type DragDropEvent =
@@ -160,7 +162,16 @@ export function getCurrentWebview() {
       if (!filesEvent(event)) return;
       event.preventDefault();
       const point = position(event);
-      try { const paths = await uploadFiles(Array.from(event.dataTransfer?.files ?? [])); dispatch({ type: "drop", paths, position: point }); }
+      try {
+        const files = Array.from(event.dataTransfer?.files ?? []);
+        // Read sizes locally while uploading; each read is capped, so a slow or unsupported file only skips its sizing.
+        const metadata = Promise.all(files.map((file) => readLocalVideoMetadata(file)));
+        const paths = await uploadFiles(files);
+        if (paths.length === files.length) {
+          (await metadata).forEach((value, index) => { if (value) rememberUploadedVideoMetadata(paths[index], value); });
+        }
+        dispatch({ type: "drop", paths, position: point });
+      }
       catch (error) { dispatch({ type: "leave" }); reportWebError(error); }
     };
     window.addEventListener("dragenter", enter); window.addEventListener("dragover", over);

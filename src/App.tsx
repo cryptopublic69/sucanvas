@@ -1,4 +1,6 @@
 import { withSubmissionWaitNotice } from "./video/submissionWait";
+import { takeUploadedVideoMetadata } from "./media/uploadedVideoMetadata";
+import { videoAssetLayout } from "./media/videoAssetLayout";
 import type { ComfySocket } from "./web/comfySocket";
 import { generatedVideoDeletionPaths } from "./web/outputFiles";
 import { WebRequestTimeoutError } from "./web/requestTimeout";
@@ -9411,6 +9413,24 @@ function CanvasWorkspace() {
                 });
               } catch {
                 // Fall back to the existing on-load ratio correction if metadata cannot be read here.
+              }
+            }
+          } else if (importedNode.kind === "video") {
+            // Web drops read the size locally before upload, so the node appears at its final size.
+            const metadata = takeUploadedVideoMetadata(path);
+            const layout = metadata ? videoAssetLayout(importedNode.width, metadata.width, metadata.height) : null;
+            if (layout) {
+              try {
+                importedNode = await invoke<NodeRecord>("update_node", {
+                  input: {
+                    id: importedNode.id,
+                    width: layout.width,
+                    height: layout.height,
+                    content: { ...importedNode.content, ...layout.content },
+                  },
+                });
+              } catch {
+                // Fall back to the existing on-load ratio correction.
               }
             }
           }

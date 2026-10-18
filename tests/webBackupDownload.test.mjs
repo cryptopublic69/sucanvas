@@ -7,11 +7,15 @@ const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(ts.tran
 const urls = moduleUrl(await readFile(new URL("../src/web/urls.ts", import.meta.url), "utf8"));
 const timeout = moduleUrl(await readFile(new URL("../src/web/requestTimeout.ts", import.meta.url), "utf8"));
 const generation = moduleUrl(await readFile(new URL("../src/web/generationRequest.ts", import.meta.url), "utf8"));
+const localVideoMetadata = moduleUrl(await readFile(new URL("../src/web/localVideoMetadata.ts", import.meta.url), "utf8"));
+const uploadedVideoMetadata = moduleUrl(await readFile(new URL("../src/media/uploadedVideoMetadata.ts", import.meta.url), "utf8"));
 const { downloadFilename } = await import(urls);
 const bridgeSource = (await readFile(new URL("../src/web/bridge.ts", import.meta.url), "utf8"))
   .replace('"./urls"', JSON.stringify(urls))
   .replace('"./requestTimeout"', JSON.stringify(timeout))
   .replace('"./generationRequest"', JSON.stringify(generation))
+  .replace('"./localVideoMetadata"', JSON.stringify(localVideoMetadata))
+  .replace('"../media/uploadedVideoMetadata"', JSON.stringify(uploadedVideoMetadata))
   .replace('const devBackend = import.meta.env.DEV ? import.meta.env.SUCANVAS_WEB_DEV_BACKEND ?? "" : "";', 'const devBackend = "";');
 const { save, download } = await import(moduleUrl(bridgeSource));
 const previousWindow = globalThis.window;

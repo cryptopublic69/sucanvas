@@ -3,6 +3,7 @@ import { openWebComfySocket, type ComfySocket } from "./web/comfySocket";
 import { resolveComfyOutputPath } from "./web/outputFiles";
 import { videoUpscaleFromValue } from "./video/videoUpscale";
 import { comfyOutputFromContent, videoUpscaleSourceUnavailableReason } from "./video/videoUpscaleSource";
+import { MATERIAL_NODE_LAYOUT_VERSION, MEDIA_NODE_CHROME_HEIGHT, mediaNodeHeightForAspectRatio } from "./media/videoAssetLayout";
 import { videoDurationAspectLabel, videoElapsedWithDuration } from "./video/videoDurationLabel";
 import { Settings as PresetSettingsIcon } from "lucide-react";
 import { useDropdownWheel } from "./useDropdownWheel";
@@ -2105,9 +2106,6 @@ const VIDEO_NODE_BODY_HORIZONTAL_PADDING = 28;
 // Execution row + gap + the media/text input badge below it. Reserve one
 // additional canvas grid row so the badge cannot be clipped by the footer.
 const VIDEO_NODE_EXECUTION_AREA_HEIGHT = 96;
-const MATERIAL_NOTE_HEIGHT = 37;
-const MATERIAL_NODE_LAYOUT_VERSION = 3;
-const MEDIA_NODE_CHROME_HEIGHT = 73 + MATERIAL_NOTE_HEIGHT;
 const IMAGE_NODE_CHROME_HEIGHT = 38;
 const IMAGE_RESIZE_DEFAULT_STORAGE_KEY = "infinite-canvas:image-resize-max-edge";
 const DEFAULT_IMAGE_RESIZE_MAX_EDGE = 2048;
@@ -2253,13 +2251,6 @@ const VIDEO_PREVIEW_COLOR_PRESETS = [
   { value: "#7a6728", highlight: "#f0c84b", label: "暗黄色" },
   { value: "#315b80", highlight: "#5bbcff", label: "暗蓝色" },
 ] as const;
-
-function mediaNodeHeightForAspectRatio(width: number, aspectRatio: number): number {
-  return Math.min(
-    2400,
-    Math.max(180, width / aspectRatio + MEDIA_NODE_CHROME_HEIGHT),
-  );
-}
 
 function videoInputMediaKind(record: NodeRecord): "image" | "audio" | "video" | null {
   if (record.kind === "image" || record.kind === "generated-image") return "image";
