@@ -20,8 +20,11 @@
   object-position: center;
 }
 
-/* Upscale progress of an uploaded video sits on the top edge of its footer. */
-.video-asset-footer > .video-execution-progress {
+/* Uploaded videos keep the upscale button after the file name, separated by a gap. */
+.node-footer > .video-asset-upscale-actions { flex: 0 0 auto; height: 20px; margin: -1px 0 -1px 6px; }
+/* Fit inside the footer's content box so the button does not make the footer taller. */
+.node-footer > .video-asset-upscale-actions > .generated-video-secondary-action { height: 20px; min-height: 0; }
+.node-footer > .video-asset-upscale-progress {
   top: 0;
   right: 0;
   bottom: auto;
