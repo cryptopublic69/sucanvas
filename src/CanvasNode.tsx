@@ -3,7 +3,15 @@ import { openWebComfySocket, type ComfySocket } from "./web/comfySocket";
 import { resolveComfyOutputPath } from "./web/outputFiles";
 import { videoUpscaleFromValue } from "./video/videoUpscale";
 import { comfyOutputFromContent, videoUpscaleSourceUnavailableReason } from "./video/videoUpscaleSource";
-import { MATERIAL_NODE_LAYOUT_VERSION, MEDIA_NODE_CHROME_HEIGHT, mediaNodeHeightForAspectRatio } from "./media/videoAssetLayout";
+import {
+  GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH,
+  GENERATED_VIDEO_PREVIEW_WIDTH,
+  MATERIAL_NODE_LAYOUT_VERSION,
+  MEDIA_NODE_CHROME_HEIGHT,
+  generatedVideoPreviewWidthForRatio,
+  mediaNodeHeightForAspectRatio,
+  videoAssetLayout,
+} from "./media/videoAssetLayout";
 import { videoDurationAspectLabel, videoElapsedWithDuration } from "./video/videoDurationLabel";
 import { Settings as PresetSettingsIcon } from "lucide-react";
 import { useDropdownWheel } from "./useDropdownWheel";
@@ -2115,8 +2123,6 @@ const GENERATED_VIDEO_FOOTER_HEIGHT = 38;
 const GENERATED_IMAGE_CHROME_HEIGHT = GENERATED_VIDEO_FOOTER_HEIGHT;
 const GENERATED_IMAGE_PREVIEW_LAYOUT_VERSION = 2;
 const LEGACY_GENERATED_VIDEO_PREVIEW_WIDTH = 360;
-const GENERATED_VIDEO_PREVIEW_WIDTH = 420;
-const GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH = 300;
 const BATCH_GENERATION_PREVIEW_GAP_OFFSET = 130;
 const GENERATED_VIDEO_PREVIEW_LAYOUT_VERSION = 5;
 const DEFAULT_GENERATED_VIDEO_ASPECT_RATIO = 16 / 9;
@@ -2282,12 +2288,6 @@ type VideoAspectRatio = typeof VIDEO_ASPECT_RATIO_OPTIONS[number]["value"];
 type RefImageSize = typeof REF_IMAGE_SIZE_OPTIONS[number];
 type FrameRole = "first" | "last";
 type SeedMode = "random" | "fixed";
-
-function generatedVideoPreviewWidthForRatio(aspectRatio: number): number {
-  return aspectRatio < 1
-    ? GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH
-    : GENERATED_VIDEO_PREVIEW_WIDTH;
-}
 
 function batchGenerationPreviewStep(previewWidth: number): number {
   const gap = previewWidth + BATCH_GENERATION_PREVIEW_GAP_OFFSET;
@@ -6359,10 +6359,16 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const applyNaturalMediaRatio = (naturalWidth: number, naturalHeight: number) => {
     if (savedAspectRatio || naturalWidth <= 0 || naturalHeight <= 0) return;
     const aspectRatio = naturalWidth / naturalHeight;
-    const fittedWidth = isImage && aspectRatio < 1
-      ? GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH
-      : record.width;
-    const fittedHeight = isGeneratedVideo
+    // Uploaded videos follow the generated-video preview widths, the same rule web uploads apply up front.
+    const videoLayout = isVideoAsset ? videoAssetLayout(naturalWidth, naturalHeight) : null;
+    const fittedWidth = videoLayout
+      ? videoLayout.width
+      : isImage && aspectRatio < 1
+        ? GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH
+        : record.width;
+    const fittedHeight = videoLayout
+      ? videoLayout.height
+      : isGeneratedVideo
       ? Math.min(
         2400,
         Math.max(180, fittedWidth / aspectRatio + GENERATED_VIDEO_FOOTER_HEIGHT),

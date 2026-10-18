@@ -9416,9 +9416,9 @@ function CanvasWorkspace() {
               }
             }
           } else if (importedNode.kind === "video") {
-            // Web drops read the size locally before upload, so the node appears at its final size.
+            // Web drops read the ratio locally before upload, so the node appears at its final generated-video-style size.
             const metadata = takeUploadedVideoMetadata(path);
-            const layout = metadata ? videoAssetLayout(importedNode.width, metadata.width, metadata.height) : null;
+            const layout = metadata ? videoAssetLayout(metadata.width, metadata.height) : null;
             if (layout) {
               try {
                 importedNode = await invoke<NodeRecord>("update_node", {
