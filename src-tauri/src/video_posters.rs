@@ -1,8 +1,12 @@
+#[cfg(feature = "desktop")]
 use std::{process::Stdio, time::Duration};
+#[cfg(feature = "desktop")]
 use tokio::{process::Command, sync::Semaphore};
 
+#[cfg(feature = "desktop")]
 static POSTER_SLOT: Semaphore = Semaphore::const_new(1);
 
+#[cfg(any(feature = "desktop", test))]
 fn validate_source(source: &str) -> Result<(), String> {
     #[cfg(feature = "server")]
     if std::path::Path::new(source).is_file() {
@@ -17,6 +21,7 @@ fn validate_source(source: &str) -> Result<(), String> {
 
 // Only one bounded decoder, without hardware decoding, temporary video copies,
 // or a visible console. The frontend persists the small JPEG in its poster cache.
+#[cfg(feature = "desktop")]
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn capture_video_poster(source: String) -> Result<Vec<u8>, String> {
     validate_source(&source)?;

@@ -1,5 +1,6 @@
+#[cfg(feature = "desktop")]
+use std::net::TcpListener as StdTcpListener;
 use std::{
-    net::TcpListener as StdTcpListener,
     path::Path as FsPath,
     sync::{Arc, RwLock},
 };
@@ -88,6 +89,7 @@ pub fn write_config(path: &FsPath, config: &ApiConfig) -> CanvasResult<()> {
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 pub async fn serve(listener: StdTcpListener, state: ApiState) -> CanvasResult<()> {
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;

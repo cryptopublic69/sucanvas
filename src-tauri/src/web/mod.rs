@@ -401,40 +401,36 @@ async fn events(State(state): State<WebState>, headers: HeaderMap) -> impl IntoR
     let stream = futures_util::stream::unfold(
         (receiver, state, headers),
         |(mut receiver, state, headers)| async move {
-            loop {
-                if !state.auth.authenticated(&headers) {
-                    return None;
+            if !state.auth.authenticated(&headers) {
+                return None;
+            }
+            match tokio::time::timeout(Duration::from_secs(15), receiver.recv()).await {
+                Ok(Ok(mut value)) => {
+                    if !state.auth.authenticated(&headers) {
+                        return None;
+                    }
+                    rpc::normalize_result(&state.clone().connection_snapshot(), &mut value);
+                    Some((
+                        Ok::<_, Infallible>(Event::default().data(value.to_string())),
+                        (receiver, state, headers),
+                    ))
                 }
-                match tokio::time::timeout(Duration::from_secs(15), receiver.recv()).await {
-                    Ok(Ok(mut value)) => {
-                        if !state.auth.authenticated(&headers) {
-                            return None;
-                        }
-                        rpc::normalize_result(&state.clone().connection_snapshot(), &mut value);
-                        return Some((
-                            Ok::<_, Infallible>(Event::default().data(value.to_string())),
-                            (receiver, state, headers),
-                        ));
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => None,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    if !state.auth.authenticated(&headers) {
+                        return None;
                     }
-                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
-                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                        if !state.auth.authenticated(&headers) {
-                            return None;
-                        }
-                        return Some((
-                            Ok(Event::default().data(
-                                json!({"event": "canvas://resync", "payload": null}).to_string(),
-                            )),
-                            (receiver, state, headers),
-                        ));
-                    }
-                    Err(_) => {
-                        return Some((
-                            Ok(Event::default().comment("heartbeat")),
-                            (receiver, state, headers),
-                        ))
-                    }
+                    Some((
+                        Ok(Event::default().data(
+                            json!({"event": "canvas://resync", "payload": null}).to_string(),
+                        )),
+                        (receiver, state, headers),
+                    ))
                 }
+                Err(_) => Some((
+                    Ok(Event::default().comment("heartbeat")),
+                    (receiver, state, headers),
+                )),
             }
         },
     );

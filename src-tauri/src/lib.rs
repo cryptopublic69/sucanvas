@@ -1,7 +1,7 @@
 mod api;
 #[cfg(all(feature = "desktop", feature = "server"))]
 compile_error!(
-    "Build desktop and server separately. For Web use --no-default-features --features server."
+    "desktop and server features are mutually exclusive. The default build is server; build desktop with --no-default-features --features desktop (npm run tauri dev/build does this)."
 );
 mod app_backup;
 mod commands;
