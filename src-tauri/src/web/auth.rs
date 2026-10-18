@@ -1,4 +1,5 @@
 use super::{
+    ownership::Ownership,
     users::{Role, UserRecord, Users},
     WebState,
 };
@@ -17,7 +18,7 @@ use serde_json::json;
 use std::{
     collections::HashMap,
     path::Path,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -39,13 +40,15 @@ pub struct Credentials {
     pub password_hash: String,
 }
 
+// Admin edit mode on another user's private canvas lasts this long per session.
+pub const EDIT_MODE_SECONDS: u64 = 30 * 60;
+
 #[derive(Clone, Debug)]
 pub struct Session {
     pub user_id: String,
     pub role: Role,
     pub must_change_password: bool,
     pub(super) expires_at: Instant,
-    #[allow(dead_code)] // CANVAS-012b: admin edit mode on another user's private canvas.
     pub admin_edit_until: Option<Instant>,
 }
 
@@ -55,32 +58,9 @@ pub enum Access {
     Granted(Session),
 }
 
-// Central permission check for Web endpoints. Every protected operation
-// names one of these; CANVAS-012b extends the enum with canvas categories.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Permission {
-    Admin,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct Forbidden;
-
-impl IntoResponse for Forbidden {
-    fn into_response(self) -> Response {
-        (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "只有管理员可以执行此操作", "code": "forbidden"})),
-        )
-            .into_response()
-    }
-}
-
-pub fn authorize(session: &Session, permission: Permission) -> Result<(), Forbidden> {
-    match permission {
-        Permission::Admin if session.role == Role::Admin => Ok(()),
-        Permission::Admin => Err(Forbidden),
-    }
-}
+// The permission categories (012a's Permission, extended with canvas
+// categories in 012b) and their check live in `authz`.
+pub use super::authz::{Denied, Grant, Permission};
 
 #[derive(Debug, PartialEq)]
 pub enum AuthError {
@@ -149,6 +129,10 @@ pub struct Auth {
     // Verified against when the username does not exist, so the response time
     // does not reveal which usernames are registered.
     dummy_hash: String,
+    ownership: Arc<Ownership>,
+    // Argon2 verifications performed (tests assert unknown users cost one too).
+    #[cfg(test)]
+    verifications: std::sync::atomic::AtomicUsize,
 }
 
 pub(super) fn read_hash(path: &Path) -> Result<String, String> {
@@ -203,31 +187,43 @@ pub fn migrate_credentials(data: &Path) -> Result<(), String> {
     Ok(())
 }
 
-async fn verify(password: String, hash: String) -> bool {
-    tokio::task::spawn_blocking(move || {
-        PasswordHash::new(&hash).is_ok_and(|hash| {
-            Argon2::default()
-                .verify_password(password.as_bytes(), &hash)
-                .is_ok()
-        })
-    })
-    .await
-    .unwrap_or(false)
-}
-
 impl Auth {
     pub fn open(database: &Path) -> Result<Self, String> {
         Ok(Self {
             users: Users::open(database)?,
+            ownership: Arc::new(Ownership::open(database)?),
             sessions: Mutex::new(HashMap::new()),
             limiter: Mutex::new(Limiter::default()),
             dummy_hash: crate::commands::hash_app_lock_password(&Uuid::new_v4().to_string())?,
+            #[cfg(test)]
+            verifications: std::sync::atomic::AtomicUsize::new(0),
         })
     }
     pub fn users(&self) -> &Users {
         &self.users
     }
-    fn session(&self, headers: &HeaderMap) -> Option<Session> {
+    pub fn ownership(&self) -> &Arc<Ownership> {
+        &self.ownership
+    }
+    // The one permission check for every Web operation (design §5).
+    pub fn authorize(&self, session: &Session, permission: &Permission) -> Result<Grant, Denied> {
+        super::authz::check(&self.ownership, session, permission)
+    }
+    async fn verify(&self, password: String, hash: String) -> bool {
+        #[cfg(test)]
+        self.verifications
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::task::spawn_blocking(move || {
+            PasswordHash::new(&hash).is_ok_and(|hash| {
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &hash)
+                    .is_ok()
+            })
+        })
+        .await
+        .unwrap_or(false)
+    }
+    pub(super) fn current(&self, headers: &HeaderMap) -> Option<Session> {
         let token = cookie_token(headers)?;
         let mut sessions = self.sessions.lock().unwrap();
         let now = Instant::now();
@@ -235,10 +231,20 @@ impl Auth {
         sessions.get(token).cloned()
     }
     pub fn authenticated(&self, headers: &HeaderMap) -> bool {
-        self.session(headers).is_some()
+        self.current(headers).is_some()
+    }
+    // Admin edit mode is kept per session and switches itself off after
+    // EDIT_MODE_SECONDS. Returns the new end time, or None for a missing session.
+    pub fn set_edit_mode(&self, headers: &HeaderMap, enabled: bool) -> Option<Option<Instant>> {
+        let token = cookie_token(headers)?;
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions.get_mut(token)?;
+        session.admin_edit_until =
+            enabled.then(|| Instant::now() + Duration::from_secs(EDIT_MODE_SECONDS));
+        Some(session.admin_edit_until)
     }
     pub fn access(&self, headers: &HeaderMap) -> Access {
-        match self.session(headers) {
+        match self.current(headers) {
             None => Access::Missing,
             Some(session) if session.must_change_password => Access::PasswordChangeRequired,
             Some(session) => Access::Granted(session),
@@ -311,7 +317,7 @@ impl Auth {
             || self.dummy_hash.clone(),
             |found| found.password_hash.clone(),
         );
-        let valid = verify(password, hash.clone()).await;
+        let valid = self.verify(password, hash.clone()).await;
         let Some(found) = found.filter(|_| valid) else {
             return Err(AuthError::Invalid);
         };
@@ -353,7 +359,10 @@ impl Auth {
         let key = credential.user.username.to_ascii_lowercase();
         self.acquire(&key)?;
         let same = current_password == new_password;
-        if !verify(current_password, credential.password_hash.clone()).await {
+        if !self
+            .verify(current_password, credential.password_hash.clone())
+            .await
+        {
             return Err(AuthError::Rejected("当前密码错误".to_owned()));
         }
         if same {
@@ -391,7 +400,7 @@ impl Auth {
             .ok_or(AuthError::Invalid)?;
         let key = credential.user.username.to_ascii_lowercase();
         self.acquire(&key)?;
-        if password.len() > 1024 || !verify(password, credential.password_hash).await {
+        if password.len() > 1024 || !self.verify(password, credential.password_hash).await {
             return Err(AuthError::Rejected("密码错误".to_owned()));
         }
         self.limiter.lock().unwrap().clear(&key);
@@ -526,14 +535,46 @@ pub async fn logout(State(state): State<WebState>, headers: HeaderMap) -> Respon
         .into_response()
 }
 pub async fn session(State(state): State<WebState>, headers: HeaderMap) -> Response {
-    let Some(session) = state.auth.session(&headers) else {
+    let Some(session) = state.auth.current(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let Ok(Some(user)) = state.auth.users.by_id(&session.user_id) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    Json(json!({"ok": true, "publicUrl": state.config.origin(), "comfyConfigured": !state.connection.snapshot().comfy_url.is_empty(), "user": user_json(&user.user)}))
+    Json(json!({"ok": true, "publicUrl": state.config.origin(), "comfyConfigured": !state.connection.snapshot().comfy_url.is_empty(), "user": user_json(&user.user), "editModeRemainingSeconds": edit_mode_remaining(&session)}))
         .into_response()
+}
+fn edit_mode_remaining(session: &Session) -> Option<u64> {
+    session
+        .admin_edit_until
+        .and_then(|until| until.checked_duration_since(Instant::now()))
+        .map(|left| left.as_secs())
+}
+#[derive(Deserialize)]
+pub struct EditMode {
+    enabled: bool,
+}
+// Admin only: allow writes to other users' private canvases for EDIT_MODE_SECONDS.
+pub async fn edit_mode(
+    State(state): State<WebState>,
+    Extension(session): Extension<Session>,
+    headers: HeaderMap,
+    Json(input): Json<EditMode>,
+) -> Response {
+    if let Err(denied) = state.auth.authorize(&session, &Permission::Admin) {
+        return denied.into_response();
+    }
+    match state.auth.set_edit_mode(&headers, input.enabled) {
+        Some(until) => {
+            let session = Session {
+                admin_edit_until: until,
+                ..session
+            };
+            Json(json!({"ok": true, "editModeRemainingSeconds": edit_mode_remaining(&session)}))
+                .into_response()
+        }
+        None => StatusCode::UNAUTHORIZED.into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -715,15 +756,16 @@ pub(crate) mod tests {
             wrong.into_response().status(),
             unknown.into_response().status()
         );
-        // The unknown username still runs a full Argon2 verification.
-        assert!(PasswordHash::new(&auth.dummy_hash).is_ok());
-        let started = Instant::now();
+        // Deterministic: an unknown username runs exactly one Argon2
+        // verification, like a wrong password does.
+        let count = || auth.verifications.load(std::sync::atomic::Ordering::SeqCst);
+        let before = count();
         let _ = auth.login("nobody2", "x".into()).await;
-        let unknown_time = started.elapsed();
-        let started = Instant::now();
+        assert_eq!(count() - before, 1, "unknown user");
+        let before = count();
         let _ = auth.login("admin", "x".into()).await;
-        let wrong_time = started.elapsed();
-        assert!(unknown_time * 4 > wrong_time && wrong_time * 4 > unknown_time);
+        assert_eq!(count() - before, 1, "wrong password");
+        assert!(PasswordHash::new(&auth.dummy_hash).is_ok());
     }
 
     #[tokio::test]
@@ -803,6 +845,7 @@ pub(crate) mod tests {
 
     #[test]
     fn only_admins_pass_the_admin_permission() {
+        let (_fixture, auth) = server();
         let session = |role| Session {
             user_id: "id".into(),
             role,
@@ -810,11 +853,13 @@ pub(crate) mod tests {
             expires_at: Instant::now(),
             admin_edit_until: None,
         };
-        assert!(authorize(&session(Role::Admin), Permission::Admin).is_ok());
-        assert_eq!(
-            authorize(&session(Role::User), Permission::Admin),
-            Err(Forbidden)
-        );
-        assert_eq!(Forbidden.into_response().status(), StatusCode::FORBIDDEN);
+        assert!(auth
+            .authorize(&session(Role::Admin), &Permission::Admin)
+            .is_ok());
+        let denied = auth
+            .authorize(&session(Role::User), &Permission::Admin)
+            .unwrap_err();
+        assert!(matches!(denied, Denied::Forbidden(_)));
+        assert_eq!(denied.into_response().status(), StatusCode::FORBIDDEN);
     }
 }

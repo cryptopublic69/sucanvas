@@ -160,7 +160,40 @@ pub fn migrate(database: &Path, app_lock: &Path) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    // Canvas ownership belongs to the same step: either both migrations land or neither.
+    let admin_id: String = transaction
+        .query_row(
+            "SELECT id FROM users WHERE role = 'admin' ORDER BY username = 'admin' DESC, created_at LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    super::ownership::migrate(&transaction, &admin_id)?;
     transaction.commit().map_err(|e| e.to_string())
+}
+
+// Local recovery (`--reset-admin-password`): the "admin" account gets a new
+// password and is enabled again, without a forced change on next sign-in.
+pub fn reset_admin_password(database: &Path, password_hash: &str) -> Result<(), String> {
+    let connection = open(database)?;
+    let time = now();
+    let changed = connection
+        .execute(
+            "UPDATE users SET password_hash = ?1, disabled = 0, must_change_password = 0, password_changed_at = ?2, updated_at = ?2
+             WHERE username = ?3",
+            params![password_hash, time, ADMIN_USERNAME],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("找不到用户名为 admin 的账号".to_owned());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum AdminChange {
+    Role(Role),
+    Disabled(bool),
 }
 
 pub struct Users {
@@ -274,25 +307,36 @@ impl Users {
     }
 
     // Role and disabled changes share the last-admin rule: at least one enabled
-    // admin must remain. Checked inside the write transaction.
-    fn update_admin_state(
-        &self,
-        id: &str,
-        role: Role,
-        disabled: bool,
-    ) -> Result<UserRecord, String> {
+    // admin must remain. The other column is read inside the write transaction
+    // and only the changed column is written, so concurrent changes compose.
+    fn update_admin_state(&self, id: &str, change: AdminChange) -> Result<UserRecord, String> {
         {
             let mut connection = self.connection.lock().unwrap();
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| e.to_string())?;
-            let exists = transaction
-                .query_row("SELECT 1 FROM users WHERE id = ?1", [id], |_| Ok(()))
+            let current = transaction
+                .query_row(
+                    "SELECT role, disabled FROM users WHERE id = ?1",
+                    [id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)? == "admin",
+                            row.get::<_, i64>(1)? != 0,
+                        ))
+                    },
+                )
                 .optional()
                 .map_err(|e| e.to_string())?;
-            if exists.is_none() {
+            let Some((is_admin, is_disabled)) = current else {
                 return Err("用户不存在".to_owned());
-            }
+            };
+            let (role, disabled) = match change {
+                AdminChange::Role(role) => (role, is_disabled),
+                AdminChange::Disabled(disabled) => {
+                    (if is_admin { Role::Admin } else { Role::User }, disabled)
+                }
+            };
             let other_admins: i64 = transaction
                 .query_row(
                     "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0 AND id <> ?1",
@@ -303,25 +347,28 @@ impl Users {
             if other_admins == 0 && (role != Role::Admin || disabled) {
                 return Err("至少需要保留一个启用的管理员".to_owned());
             }
-            transaction
-                .execute(
-                    "UPDATE users SET role = ?2, disabled = ?3, updated_at = ?4 WHERE id = ?1",
-                    params![id, role.as_str(), disabled as i64, now()],
-                )
-                .map_err(|e| e.to_string())?;
+            match change {
+                AdminChange::Role(role) => transaction.execute(
+                    "UPDATE users SET role = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, role.as_str(), now()],
+                ),
+                AdminChange::Disabled(disabled) => transaction.execute(
+                    "UPDATE users SET disabled = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, disabled as i64, now()],
+                ),
+            }
+            .map_err(|e| e.to_string())?;
             transaction.commit().map_err(|e| e.to_string())?;
         }
         self.user(id)
     }
 
     pub fn set_disabled(&self, id: &str, disabled: bool) -> Result<UserRecord, String> {
-        let user = self.user(id)?;
-        self.update_admin_state(id, user.role, disabled)
+        self.update_admin_state(id, AdminChange::Disabled(disabled))
     }
 
     pub fn set_role(&self, id: &str, role: Role) -> Result<UserRecord, String> {
-        let user = self.user(id)?;
-        self.update_admin_state(id, role, user.disabled)
+        self.update_admin_state(id, AdminChange::Role(role))
     }
 
     pub fn set_display_name(
@@ -444,6 +491,67 @@ pub(crate) mod tests {
                 "{bad}"
             );
         }
+    }
+
+    // 012a review: a role change and a disable running concurrently must not
+    // undo each other, so each writes only its own column (read inside the
+    // transaction). A trigger records which columns an UPDATE names.
+    #[test]
+    fn role_and_disabled_changes_write_only_their_own_column() {
+        let fixture = Fixture::new();
+        super::super::auth::write_password(&fixture.app_lock(), "原有应用锁密码").unwrap();
+        migrate(&fixture.database(), &fixture.app_lock()).unwrap();
+        let users = Users::open(&fixture.database()).unwrap();
+        let erin = users.create("erin", None, Role::User, "hash").unwrap();
+        let log = Connection::open(fixture.database()).unwrap();
+        log.execute_batch(
+            "CREATE TABLE touched (col TEXT);
+             CREATE TRIGGER role_touched AFTER UPDATE OF role ON users BEGIN INSERT INTO touched VALUES ('role'); END;
+             CREATE TRIGGER disabled_touched AFTER UPDATE OF disabled ON users BEGIN INSERT INTO touched VALUES ('disabled'); END;",
+        )
+        .unwrap();
+        let touched = || -> Vec<String> {
+            let mut statement = log.prepare("SELECT col FROM touched").unwrap();
+            let rows = statement.query_map([], |row| row.get(0)).unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        users.set_disabled(&erin.id, true).unwrap();
+        assert_eq!(touched(), vec!["disabled"]);
+        // A second handle (another request) changes the role in between: the
+        // earlier disable stays, and the role change keeps disabled as it is.
+        let other = Users::open(&fixture.database()).unwrap();
+        other.set_role(&erin.id, Role::Admin).unwrap();
+        assert_eq!(touched(), vec!["disabled", "role"]);
+        let erin = users.by_id(&erin.id).unwrap().unwrap().user;
+        assert!(erin.disabled && erin.role == Role::Admin);
+    }
+
+    #[test]
+    fn reset_admin_password_restores_access_to_the_admin_account() {
+        let fixture = Fixture::new();
+        super::super::auth::write_password(&fixture.app_lock(), "原有应用锁密码").unwrap();
+        migrate(&fixture.database(), &fixture.app_lock()).unwrap();
+        let users = Users::open(&fixture.database()).unwrap();
+        let admin = users.by_username("admin").unwrap().unwrap().user;
+        users.create("second", None, Role::Admin, "hash").unwrap();
+        users.set_disabled(&admin.id, true).unwrap();
+        users
+            .set_password(&admin.id, "temporary", true, None)
+            .unwrap();
+        reset_admin_password(&fixture.database(), "new-hash").unwrap();
+        let admin = users.by_username("admin").unwrap().unwrap();
+        assert_eq!(admin.password_hash, "new-hash");
+        assert!(!admin.user.disabled && !admin.user.must_change_password);
+        let lock_before = std::fs::read(fixture.app_lock()).unwrap();
+        Connection::open(fixture.database())
+            .unwrap()
+            .execute(
+                "UPDATE users SET username = 'renamed' WHERE username = 'admin'",
+                [],
+            )
+            .unwrap();
+        assert!(reset_admin_password(&fixture.database(), "x").is_err());
+        assert_eq!(std::fs::read(fixture.app_lock()).unwrap(), lock_before);
     }
 
     #[test]

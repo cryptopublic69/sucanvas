@@ -34,7 +34,7 @@ try {
     # A new package uses an empty data directory. Updating keeps its settings.
     Copy-Item -Path 'dist-web/*' -Destination (Join-Path $OutputDirectory 'web') -Recurse -Force
     Copy-Item -LiteralPath 'workflows' -Destination $OutputDirectory -Recurse -Force
-    foreach ($script in @('Start-Web.ps1', 'Stop-Web.ps1', 'Set-Password.ps1', 'Backup-Web.ps1', 'Restore-Web.ps1', 'Install-Autostart.ps1', 'Test-WebDeployment.ps1', 'Update-WebFiles.ps1')) {
+    foreach ($script in @('Start-Web.ps1', 'Stop-Web.ps1', 'Set-Password.ps1', 'Reset-AdminPassword.ps1', 'Backup-Web.ps1', 'Restore-Web.ps1', 'Install-Autostart.ps1', 'Test-WebDeployment.ps1', 'Update-WebFiles.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $OutputDirectory 'scripts') -Force
     }
     foreach ($launcher in @('Update-OnServer.ps1','Update-OnServer.bat')) {

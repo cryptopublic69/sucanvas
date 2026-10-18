@@ -1,11 +1,13 @@
 mod accounts;
 mod auth;
+mod authz;
 mod backup;
 mod config;
 mod connection;
 mod dispatch;
 mod files;
 mod media;
+mod ownership;
 mod posters;
 mod proxy;
 mod rpc;
@@ -33,7 +35,7 @@ use axum::{
         IntoResponse, Response,
     },
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use fs2::FileExt;
 use futures_util::StreamExt;
@@ -83,14 +85,16 @@ pub async fn run() -> Result<(), String> {
         .to_owned();
     let mut config_path = executable_root.join("config.json");
     let mut set_password = false;
+    let mut reset_admin_password = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" => {
                 config_path = PathBuf::from(args.next().ok_or("--config requires a file path")?)
             }
             "--set-password" => set_password = true,
+            "--reset-admin-password" => reset_admin_password = true,
             "--help" => {
-                println!("SuCanvasServer [--config <path>] [--set-password]\nPassword initialization reads one line from stdin. Paths are relative to config.json, not the current directory.");
+                println!("SuCanvasServer [--config <path>] [--set-password | --reset-admin-password]\nBoth password options read one line from stdin (never from the command line) and require the server to be stopped.\n--set-password sets the application lock (app-lock.json); it creates the first admin account on the next start but does not change an existing account.\n--reset-admin-password sets the password of the \"admin\" account and re-enables it. Paths are relative to config.json, not the current directory.");
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument: {arg}")),
@@ -119,7 +123,27 @@ pub async fn run() -> Result<(), String> {
             .read_line(&mut password)
             .map_err(|e| e.to_string())?;
         auth::write_password(&auth_path, password.trim_end_matches(['\r', '\n']))?;
-        println!("Application lock password updated.");
+        println!("Application lock password updated. Web sign-in uses accounts once they exist; to recover the admin account use --reset-admin-password.");
+        return Ok(());
+    }
+    if reset_admin_password {
+        // Local only (no HTTP route). server.lock above guarantees the server is
+        // stopped, so no signed-in session survives: sessions live in memory.
+        let mut password = String::new();
+        std::io::stdin()
+            .read_line(&mut password)
+            .map_err(|e| e.to_string())?;
+        let password = password.trim_end_matches(['\r', '\n']);
+        crate::commands::validate_new_app_lock_password(password)?;
+        let database_path = data.join("infinite-canvas.sqlite3");
+        // A deployment that never started this version gets its accounts first.
+        Database::open(&database_path).map_err(|e| e.to_string())?;
+        users::migrate(&database_path, &auth_path)?;
+        users::reset_admin_password(
+            &database_path,
+            &crate::commands::hash_app_lock_password(password)?,
+        )?;
+        println!("Password of the admin account reset; the account is enabled and no password change is required.");
         return Ok(());
     }
     auth::migrate_credentials(&data)?;
@@ -263,6 +287,7 @@ pub async fn run() -> Result<(), String> {
         .route("/api/comfy/ws", get(proxy::websocket))
         .route("/api/comfy/{*path}", get(proxy::http))
         .route("/api/auth/verify-password", post(auth::verify_password))
+        .route("/api/auth/edit-mode", post(auth::edit_mode))
         .route(
             "/api/admin/users",
             get(accounts::list).post(accounts::create),
@@ -389,7 +414,13 @@ async fn legacy_adapter(
         match state.auth.access(request.headers()) {
             auth::Access::Missing => return StatusCode::UNAUTHORIZED.into_response(),
             auth::Access::PasswordChangeRequired => return auth::password_change_required(),
-            auth::Access::Granted(_) => {}
+            // The /v1 integration interface is a global resource: the bearer
+            // token counts as admin; signed-in users must be admins.
+            auth::Access::Granted(session) => {
+                if let Err(denied) = state.auth.authorize(&session, &auth::Permission::Admin) {
+                    return denied.into_response();
+                }
+            }
         }
     }
     let _storage_guard = if !matches!(*request.method(), Method::GET | Method::HEAD) {
@@ -435,6 +466,33 @@ async fn legacy_adapter(
         Response::from_parts(parts, Body::from(bytes))
     }
 }
+// Routing for /api/events: progress goes to the user who started it, canvas
+// events to users who may read the canvas, anything else to admins only
+// (canvas://resync carries no content and reaches everyone). Returns the
+// message without its routing fields, or None when it must not be sent.
+fn deliverable(state: &WebState, session: &auth::Session, mut message: Value) -> Option<Value> {
+    deliverable_with(state.auth.ownership(), session, &message).then(|| {
+        if let Some(fields) = message.as_object_mut() {
+            fields.remove("canvasId");
+            fields.remove("userId");
+        }
+        message
+    })
+}
+fn deliverable_with(
+    ownership: &ownership::Ownership,
+    session: &auth::Session,
+    message: &Value,
+) -> bool {
+    if let Some(user_id) = message.get("userId").and_then(Value::as_str) {
+        return user_id == session.user_id;
+    }
+    if let Some(canvas_id) = message.get("canvasId").and_then(Value::as_str) {
+        return authz::may_read(ownership, session, canvas_id);
+    }
+    message.get("event").and_then(Value::as_str) == Some("canvas://resync")
+        || session.role == users::Role::Admin
+}
 async fn events(State(state): State<WebState>, headers: HeaderMap) -> impl IntoResponse {
     let receiver = state.handle.events.subscribe();
     let stream = futures_util::stream::unfold(
@@ -444,15 +502,18 @@ async fn events(State(state): State<WebState>, headers: HeaderMap) -> impl IntoR
                 return None;
             }
             match tokio::time::timeout(Duration::from_secs(15), receiver.recv()).await {
-                Ok(Ok(mut value)) => {
-                    if !state.auth.authenticated(&headers) {
-                        return None;
-                    }
-                    rpc::normalize_result(&state.clone().connection_snapshot(), &mut value);
-                    Some((
-                        Ok::<_, Infallible>(Event::default().data(value.to_string())),
-                        (receiver, state, headers),
-                    ))
+                Ok(Ok(message)) => {
+                    let session = state.auth.current(&headers)?;
+                    // Events the receiver may not see become a comment, so the
+                    // stream stays alive without revealing anything.
+                    let event = match deliverable(&state, &session, message) {
+                        Some(mut value) => {
+                            rpc::normalize_result(&state.clone().connection_snapshot(), &mut value);
+                            Event::default().data(value.to_string())
+                        }
+                        None => Event::default().comment("filtered"),
+                    };
+                    Some((Ok::<_, Infallible>(event), (receiver, state, headers)))
                 }
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => None,
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
@@ -504,8 +565,13 @@ async fn read_settings(State(state): State<WebState>) -> impl IntoResponse {
 }
 async fn write_settings(
     State(state): State<WebState>,
+    Extension(session): Extension<auth::Session>,
     Json(mut settings): Json<BTreeMap<String, String>>,
 ) -> Response {
+    // web-settings.json is shared by everyone; other users read it only (su item 4).
+    if let Err(denied) = state.auth.authorize(&session, &auth::Permission::Admin) {
+        return denied.into_response();
+    }
     settings.retain(|key, _| key.starts_with("infinite-canvas:"));
     let state = state.connection_snapshot();
     let _guard = state.settings_guard.lock().await;
@@ -513,5 +579,43 @@ async fn write_settings(
     match settings::write(&state.core.data_dir, &settings) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authz::tests::world;
+    use super::*;
+
+    // /api/events routing: A's private canvas never reaches B; admins see it;
+    // progress goes to its user; unrouted messages reach admins only.
+    #[test]
+    fn events_reach_only_receivers_who_may_read_their_canvas() {
+        let world = world();
+        let alices = world.project(&world.alice, false);
+        let shared = world.project(&world.bob, true);
+        let event = |canvas: &str| json!({"event": "canvas://node-updated", "payload": {"canvasId": canvas}, "canvasId": canvas});
+        let store = world.store();
+        assert!(deliverable_with(store, &world.alice, &event(&alices)));
+        assert!(!deliverable_with(store, &world.bob, &event(&alices)));
+        assert!(deliverable_with(store, &world.admin, &event(&alices)));
+        assert!(deliverable_with(store, &world.alice, &event(&shared)));
+        // Deleted canvas (or unknown id): admins only.
+        assert!(!deliverable_with(
+            store,
+            &world.alice,
+            &event("canvas:gone")
+        ));
+        assert!(deliverable_with(store, &world.admin, &event("canvas:gone")));
+        let progress =
+            json!({"event": "channel:abc", "payload": null, "userId": world.alice.user_id});
+        assert!(deliverable_with(store, &world.alice, &progress));
+        assert!(!deliverable_with(store, &world.bob, &progress));
+        assert!(!deliverable_with(store, &world.admin, &progress));
+        let unrouted = json!({"event": "canvas://node-deleted", "payload": "node:1"});
+        assert!(!deliverable_with(store, &world.alice, &unrouted));
+        assert!(deliverable_with(store, &world.admin, &unrouted));
+        let resync = json!({"event": "canvas://resync", "payload": {}});
+        assert!(deliverable_with(store, &world.bob, &resync));
     }
 }

@@ -333,15 +333,35 @@ async fn delete_edge(
     if !authorized(&headers, &state.token) {
         return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
     }
+    let canvas_id = state.database.edge_canvas_id(&edge_id).ok().flatten();
     match state.database.delete_edge(&edge_id) {
         Ok(()) => {
             if let Some(app_handle) = state.app_handle.as_ref() {
-                let _ = app_handle.emit("canvas://edge-deleted", edge_id.clone());
+                emit_removed(
+                    app_handle,
+                    "canvas://edge-deleted",
+                    canvas_id,
+                    edge_id.clone(),
+                );
             }
             Json(serde_json::json!({ "id": edge_id })).into_response()
         }
         Err(error) => api_error(status_for_error(&error), &error.to_string()),
     }
+}
+
+// Deletion events carry only the removed id; the server also needs the canvas
+// (looked up before deleting) to route them. Desktop events stay unchanged.
+#[cfg(feature = "desktop")]
+fn emit_removed(app_handle: &AppHandle, event: &str, _canvas_id: Option<String>, id: String) {
+    let _ = app_handle.emit(event, id);
+}
+#[cfg(not(feature = "desktop"))]
+fn emit_removed(app_handle: &AppHandle, event: &str, canvas_id: Option<String>, id: String) {
+    let _ = match canvas_id {
+        Some(canvas_id) => app_handle.emit_in_canvas(event, &canvas_id, id),
+        None => app_handle.emit(event, id),
+    };
 }
 
 async fn delete_node(
@@ -352,10 +372,16 @@ async fn delete_node(
     if !authorized(&headers, &state.token) {
         return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
     }
+    let canvas_id = state.database.node_canvas_id(&node_id).ok().flatten();
     match state.database.delete_node(&node_id) {
         Ok(()) => {
             if let Some(app_handle) = state.app_handle.as_ref() {
-                let _ = app_handle.emit("canvas://node-deleted", node_id.clone());
+                emit_removed(
+                    app_handle,
+                    "canvas://node-deleted",
+                    canvas_id,
+                    node_id.clone(),
+                );
             }
             Json(serde_json::json!({ "id": node_id })).into_response()
         }

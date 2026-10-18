@@ -149,8 +149,16 @@ pub(super) async fn read(State(state): State<WebState>) -> Json<Connection> {
 }
 pub(super) async fn write(
     State(state): State<WebState>,
+    axum::Extension(session): axum::Extension<super::auth::Session>,
     Json(input): Json<Connection>,
 ) -> Response {
+    // The ComfyUI connection is a global resource: admins only.
+    if let Err(denied) = state
+        .auth
+        .authorize(&session, &super::auth::Permission::Admin)
+    {
+        return denied.into_response();
+    }
     match state.connection.save(input) {
         Ok(saved) => {
             let state = state.connection_snapshot();

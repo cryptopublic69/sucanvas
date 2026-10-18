@@ -335,6 +335,56 @@ impl Database {
             .collect()
     }
 
+    // Web only: root projects matching an ownership condition over `canvases`
+    // columns that only the server migration adds. The condition is a constant
+    // from the Web ownership module, never user input.
+    #[cfg(feature = "server")]
+    pub fn list_projects_where(
+        &self,
+        condition: &str,
+        parameters: &[String],
+        summaries: bool,
+    ) -> CanvasResult<Vec<WorkspaceSnapshot>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT canvases.id
+                 FROM canvases
+                 LEFT JOIN canvas_folders ON canvas_folders.child_canvas_id = canvases.id
+                 WHERE canvas_folders.child_canvas_id IS NULL AND {condition}
+                 ORDER BY canvases.updated_at DESC, canvases.created_at DESC"
+        ))?;
+        let ids = statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                load_workspace_from_connection(&connection, &id).map(|snapshot| {
+                    if summaries {
+                        snapshot.into_summary()
+                    } else {
+                        snapshot
+                    }
+                })
+            })
+            .collect()
+    }
+
+    // Canvas of a node or edge before it is removed, so the deletion event can
+    // still be routed to the viewers of that canvas.
+    pub fn node_canvas_id(&self, id: &str) -> CanvasResult<Option<String>> {
+        Ok(get_node_by_id(&*self.lock()?, id)?.map(|node| node.canvas_id))
+    }
+    pub fn edge_canvas_id(&self, id: &str) -> CanvasResult<Option<String>> {
+        Ok(self
+            .lock()?
+            .query_row("SELECT canvas_id FROM edges WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?)
+    }
+
     pub fn list_all_projects(&self) -> CanvasResult<Vec<WorkspaceSnapshot>> {
         let connection = self.lock()?;
         let mut statement = connection

@@ -1,9 +1,13 @@
-use super::WebState;
+use super::{
+    auth::{Denied, Grant, Session},
+    dispatch::{permissions, Command},
+    WebState,
+};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
+    Extension, Json,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
@@ -13,7 +17,12 @@ pub fn argument<T: DeserializeOwned>(args: &Value, key: &str) -> Result<T, Strin
     serde_json::from_value(args.get(key).cloned().unwrap_or(Value::Null))
         .map_err(|e| format!("Invalid argument {key}: {e}"))
 }
-pub fn channel(state: &WebState, args: &Value) -> impl Fn(()) + Send + Sync + 'static {
+// Progress for a submitted generation reaches every tab of the user who started it.
+pub fn channel(
+    state: &WebState,
+    args: &Value,
+    user_id: &str,
+) -> impl Fn(()) + Send + Sync + 'static {
     let id = args
         .get("onSubmitted")
         .and_then(|v| v.get("__webChannel"))
@@ -21,9 +30,73 @@ pub fn channel(state: &WebState, args: &Value) -> impl Fn(()) + Send + Sync + 's
         .unwrap_or("")
         .to_owned();
     let handle = state.handle.clone();
+    let user_id = user_id.to_owned();
     move |_| {
-        let _ = handle.emit(&format!("channel:{id}"), Value::Null);
+        let _ = handle.emit_to_user(&format!("channel:{id}"), &user_id, Value::Null);
     }
+}
+
+fn authorize_command(
+    state: &WebState,
+    session: &Session,
+    command: Command,
+    args: &Value,
+) -> Result<Grant, Denied> {
+    let mut grant = Grant::default();
+    for permission in permissions(&state.core.active_canvas_id, session, command, args)
+        .map_err(Denied::Invalid)?
+    {
+        let granted = state.auth.authorize(session, &permission)?;
+        for owner in granted.audit {
+            if !grant.audit.contains(&owner) {
+                grant.audit.push(owner);
+            }
+        }
+        for root in granted.written_roots {
+            if !grant.written_roots.contains(&root) {
+                grant.written_roots.push(root);
+            }
+        }
+    }
+    Ok(grant)
+}
+
+// After a successful command: child canvases follow their root's ownership,
+// admin writes to other users' private canvases are audited, and project
+// records carry their owner for the Web home page.
+fn finish_command(
+    state: &WebState,
+    session: &Session,
+    command: Command,
+    grant: &Grant,
+    result: &mut Value,
+) -> Result<(), String> {
+    let ownership = state.auth.ownership();
+    for root in &grant.written_roots {
+        ownership.normalize(root)?;
+    }
+    if !grant.audit.is_empty() {
+        let username = state
+            .auth
+            .users()
+            .by_id(&session.user_id)?
+            .map(|credential| credential.user.username)
+            .unwrap_or_default();
+        for owner in &grant.audit {
+            ownership.audit(&session.user_id, &username, owner, command.name())?;
+        }
+    }
+    if matches!(
+        command,
+        Command::ListProjects
+            | Command::ListProjectSummaries
+            | Command::LoadWorkspace
+            | Command::InspectWorkspace
+            | Command::CreateProject
+    ) {
+        ownership.annotate(result)?;
+    }
+    Ok(())
 }
 
 pub fn export_path(state: &WebState, resource: &str) -> Result<PathBuf, String> {
@@ -249,28 +322,22 @@ fn remove_unused_workflow_fallback(command: &str, args: &mut Value) {
         input.insert("workflowPath".into(), Value::String(String::new()));
     }
 }
-// The single application password is replaced by user accounts on the Web:
-// turning the lock off or rewriting app-lock.json must not be reachable.
-fn app_lock_command(command: &str) -> bool {
-    matches!(
-        command,
-        "disable_app_lock" | "set_app_lock_password" | "verify_app_lock_password"
-    )
-}
 pub async fn invoke(
     State(state): State<WebState>,
-    Path(command): Path<String>,
+    Extension(session): Extension<Session>,
+    Path(name): Path<String>,
     Json(mut input): Json<Request>,
 ) -> Response {
-    if app_lock_command(&command) {
+    let Some(kind) = Command::parse(&name) else {
         return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "Web 版已改为用户登录，请在用户菜单中修改密码。", "code": "app_lock_unavailable"})),
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Unknown command: {name}")})),
         )
             .into_response();
-    }
+    };
+    let command = kind.name();
     let _storage_guard = if matches!(
-        command.as_str(),
+        command,
         "import_media" | "export_app_backup" | "stage_app_backup_restore"
     ) || command.contains("node")
         || command.starts_with("delete_")
@@ -281,7 +348,13 @@ pub async fn invoke(
         None
     };
     let state = state.connection_snapshot();
-    remove_unused_workflow_fallback(&command, &mut input.args);
+    // Every command declares its permission category (dispatch::permissions)
+    // and is checked before anything else touches its arguments or the disk.
+    let grant = match authorize_command(&state, &session, kind, &input.args) {
+        Ok(grant) => grant,
+        Err(denied) => return denied.into_response(),
+    };
+    remove_unused_workflow_fallback(command, &mut input.args);
     if command == "import_media" {
         let directory = match super::storage::input_root(&state) {
             Ok(root) => root.join(super::storage::IMPORT_FOLDER),
@@ -315,7 +388,7 @@ pub async fn invoke(
             )
                 .into_response();
         }
-        match state.tasks.reserve(id, &command, &input.args) {
+        match state.tasks.reserve(id, command, &input.args) {
             Ok(false) => return Json(json!({"taskId": id})).into_response(),
             Ok(true) => {}
             Err(error) => {
@@ -327,7 +400,9 @@ pub async fn invoke(
     let worker_state = state.clone();
     let task_id = input.web_task_id.clone();
     let worker = tokio::spawn(async move {
-        let mut result = super::dispatch::dispatch(&worker_state, &command, &input.args).await?;
+        let mut result =
+            super::dispatch::dispatch(&worker_state, &session, kind, &input.args).await?;
+        finish_command(&worker_state, &session, kind, &grant, &mut result)?;
         if command.starts_with("submit_comfyui_") || command == "get_comfyui_client_task_statuses" {
             super::media::reference_outputs(&mut result)?;
         }
@@ -424,18 +499,6 @@ mod tests {
         ] {
             assert!(comfy_source_url(value, origin, upstream).is_none());
         }
-    }
-    #[test]
-    fn web_refuses_application_lock_commands() {
-        for command in [
-            "disable_app_lock",
-            "set_app_lock_password",
-            "verify_app_lock_password",
-        ] {
-            assert!(app_lock_command(command), "{command}");
-        }
-        assert!(!app_lock_command("get_app_lock_status"));
-        assert!(!app_lock_command("load_workspace"));
     }
     #[test]
     fn filesystem_boundary_rejects_parent_traversal() {

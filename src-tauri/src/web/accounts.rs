@@ -2,7 +2,7 @@
 // `AdminCommand`; `execute` checks the permission the command declares before
 // running it, so no handler carries its own role check.
 use super::{
-    auth::{authorize, Auth, Forbidden, Permission, Session},
+    auth::{Auth, Denied, Permission, Session},
     users::Role,
     WebState,
 };
@@ -58,20 +58,20 @@ impl AdminCommand {
 
 #[derive(Debug)]
 pub enum AdminError {
-    Forbidden(Forbidden),
+    Denied(Denied),
     Rejected(String),
 }
 
-impl From<Forbidden> for AdminError {
-    fn from(error: Forbidden) -> Self {
-        AdminError::Forbidden(error)
+impl From<Denied> for AdminError {
+    fn from(error: Denied) -> Self {
+        AdminError::Denied(error)
     }
 }
 
 impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
         match self {
-            AdminError::Forbidden(error) => error.into_response(),
+            AdminError::Denied(error) => error.into_response(),
             AdminError::Rejected(error) => {
                 let status = if error == "用户不存在" {
                     StatusCode::NOT_FOUND
@@ -105,7 +105,7 @@ pub async fn execute(
     actor: &Session,
     command: AdminCommand,
 ) -> Result<Value, AdminError> {
-    authorize(actor, command.permission())?;
+    auth.authorize(actor, &command.permission())?;
     let users = auth.users();
     match command {
         AdminCommand::List => to_json(users.list().map_err(rejected)?),
