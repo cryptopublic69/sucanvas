@@ -359,9 +359,9 @@ async fn relay(
             format!("relay #{generation} upstream did not reach EOF within {IO_TIMEOUT:?}"),
         );
     }
-    let _ = tokio::time::timeout(IO_TIMEOUT, browser.close()).await;
-    // Released only after the upstream has finished, so a waiting handover can proceed.
+    // Released as soon as the upstream reached EOF; the browser close may still block.
     drop(ticket);
+    let _ = tokio::time::timeout(IO_TIMEOUT, browser.close()).await;
 }
 
 #[cfg(test)]
