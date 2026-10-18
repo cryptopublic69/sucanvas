@@ -1,3 +1,4 @@
+mod accounts;
 mod auth;
 mod backup;
 mod config;
@@ -11,6 +12,7 @@ mod rpc;
 mod settings;
 mod storage;
 mod tasks;
+mod users;
 mod ws_handover;
 
 use crate::{
@@ -136,7 +138,6 @@ pub async fn run() -> Result<(), String> {
         }
     }
     auth::migrate_credentials(&data)?;
-    let auth = Arc::new(auth::Auth::read(&auth_path)?);
     // Restore settings before accepting requests or mounting the canvas. Web
     // clients must never have to flush imported settings while reloading.
     settings::restore_frontend_settings(&data)?;
@@ -160,6 +161,11 @@ pub async fn run() -> Result<(), String> {
     let database =
         Database::open(&data.join("infinite-canvas.sqlite3")).map_err(|e| e.to_string())?;
     database.verify_integrity().map_err(|e| e.to_string())?;
+    // Accounts: the first start creates "admin" from app-lock.json; a failed
+    // migration stops the server before it accepts requests.
+    let database_path = data.join("infinite-canvas.sqlite3");
+    users::migrate(&database_path, &auth_path)?;
+    let auth = Arc::new(auth::Auth::open(&database_path)?);
     let active_canvas_id = Arc::new(RwLock::new(DEFAULT_CANVAS_ID.to_owned()));
     let selection = Arc::new(RwLock::new(CanvasSelectionState::default()));
     let (event_sender, _) = tokio::sync::broadcast::channel(512);
@@ -256,6 +262,24 @@ pub async fn run() -> Result<(), String> {
         )
         .route("/api/comfy/ws", get(proxy::websocket))
         .route("/api/comfy/{*path}", get(proxy::http))
+        .route("/api/auth/verify-password", post(auth::verify_password))
+        .route(
+            "/api/admin/users",
+            get(accounts::list).post(accounts::create),
+        )
+        .route(
+            "/api/admin/users/{id}/password",
+            post(accounts::reset_password),
+        )
+        .route(
+            "/api/admin/users/{id}/disabled",
+            post(accounts::set_disabled),
+        )
+        .route("/api/admin/users/{id}/role", post(accounts::set_role))
+        .route(
+            "/api/admin/users/{id}/display-name",
+            post(accounts::set_display_name),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_session,
@@ -269,6 +293,7 @@ pub async fn run() -> Result<(), String> {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/session", get(auth::session))
+        .route("/api/auth/password", post(auth::change_password))
         .fallback_service(
             ServeDir::new(&web).not_found_service(ServeFile::new(web.join("index.html"))),
         )
@@ -294,13 +319,20 @@ pub async fn run() -> Result<(), String> {
 
 async fn require_session(
     State(state): State<WebState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    if !state.auth.authenticated(request.headers()) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "请登录"}))).into_response();
+    match state.auth.access(request.headers()) {
+        auth::Access::Missing => {
+            (StatusCode::UNAUTHORIZED, Json(json!({"error": "请登录"}))).into_response()
+        }
+        // Only session, logout and the password change stay reachable.
+        auth::Access::PasswordChangeRequired => auth::password_change_required(),
+        auth::Access::Granted(session) => {
+            request.extensions_mut().insert(session);
+            next.run(request).await
+        }
     }
-    next.run(request).await
 }
 fn same_origin(state: &WebState, headers: &HeaderMap) -> bool {
     headers
@@ -353,8 +385,12 @@ async fn legacy_adapter(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v == format!("Bearer {}", state.token));
-    if !bearer && !state.auth.authenticated(request.headers()) {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if !bearer {
+        match state.auth.access(request.headers()) {
+            auth::Access::Missing => return StatusCode::UNAUTHORIZED.into_response(),
+            auth::Access::PasswordChangeRequired => return auth::password_change_required(),
+            auth::Access::Granted(_) => {}
+        }
     }
     let _storage_guard = if !matches!(*request.method(), Method::GET | Method::HEAD) {
         Some(state.media_guard.clone().lock_owned().await)

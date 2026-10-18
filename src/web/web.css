@@ -7,6 +7,28 @@
 :root[data-theme="light"] .web-logout:hover { color: #30374a; background: #f2f4f8; }
 .web-error { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); max-width: 80vw; z-index: 1500; background: #492527; color: white; border-radius: 8px; padding: 12px 20px; }
 .web-error button { margin-left: 14px; background: none; color: inherit; border: 0; cursor: pointer; }
+.web-notice { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); max-width: 80vw; z-index: 1500; background: #213b33; color: white; border-radius: 8px; padding: 12px 20px; }
+.web-notice button { margin-left: 14px; background: none; color: inherit; border: 0; cursor: pointer; }
+
+/* Accounts: sign-in, password change and the user menu. */
+.web-account-field { margin-top: 12px; }
+.web-account-secondary { height: 34px; margin-top: 8px; color: #a6abba; background: none; border: 1px solid #343946; border-radius: 9px; cursor: pointer; font-size: calc(11.5px + var(--ui-font-adjust)); }
+.web-account-secondary:hover:not(:disabled) { color: white; background: #20242f; }
+.web-password-dialog { z-index: 1400; background: rgba(6, 8, 13, .72); }
+.web-user-menu-popup { position: fixed; left: 13px; bottom: 52px; z-index: 1300; display: flex; min-width: 190px; flex-direction: column; padding: 6px; background: #151821; border: 1px solid #343946; border-radius: 12px; box-shadow: 0 18px 44px rgba(0, 0, 0, .35); }
+.web-user-menu-header { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px 9px; margin-bottom: 4px; border-bottom: 1px solid #2a2f3a; }
+.web-user-menu-header strong { color: #eceef4; font-size: calc(12.5px + var(--ui-font-adjust)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.web-user-menu-header small { color: #7d8496; font-size: calc(10.5px + var(--ui-font-adjust)); }
+.web-user-menu-popup button { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; color: #c3c8d4; background: none; border: 0; border-radius: 8px; cursor: pointer; font-size: calc(12px + var(--ui-font-adjust)); text-align: left; }
+.web-user-menu-popup button:hover, .web-user-menu-popup button:focus-visible { color: white; background: #232837; outline: none; }
+:root[data-theme="light"] .web-account-secondary { color: #626b80; border-color: #d8dce6; }
+:root[data-theme="light"] .web-account-secondary:hover:not(:disabled) { color: #30374a; background: #f2f4f8; }
+:root[data-theme="light"] .web-password-dialog { background: rgba(214, 219, 230, .72); }
+:root[data-theme="light"] .web-user-menu-popup { background: #fff; border-color: #d8dce6; box-shadow: 0 12px 32px rgba(68, 77, 103, .16); }
+:root[data-theme="light"] .web-user-menu-header { border-bottom-color: #e6e9f0; }
+:root[data-theme="light"] .web-user-menu-header strong { color: #242936; }
+:root[data-theme="light"] .web-user-menu-popup button { color: #3f4659; }
+:root[data-theme="light"] .web-user-menu-popup button:hover, :root[data-theme="light"] .web-user-menu-popup button:focus-visible { color: #1f2433; background: #f2f4f8; }
 
 /* Match the player and still bounds so releasing the player does not shift the crop. */
 .canvas-node.kind-generated-video > .media-node-body .lazy-video-preview > img,

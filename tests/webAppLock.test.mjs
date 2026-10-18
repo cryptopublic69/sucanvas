@@ -31,20 +31,34 @@ function environment(t, status = 200) {
   return { requests, events };
 }
 
-test("the existing application lock unlocks through the server session endpoint", async (t) => {
+test("re-entering a password checks the signed-in user's own password without a new session", async (t) => {
   const { requests, events } = environment(t);
   assert.equal(await invoke("verify_app_lock_password", { password: "应用锁密码" }), true);
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].path, "/api/auth/login");
+  assert.equal(requests[0].path, "/api/auth/verify-password");
   assert.equal(requests[0].options.credentials, "same-origin");
   assert.deepEqual(JSON.parse(requests[0].options.body), { password: "应用锁密码" });
   assert.deepEqual(events, []);
 });
 
-test("a wrong unlock password stays on the lock screen without a session-expired event", async (t) => {
-  const { events } = environment(t, 401);
+test("a wrong re-entered password reports the error without a session-expired event", async (t) => {
+  const { events } = environment(t, 400);
   await assert.rejects(invoke("verify_app_lock_password", { password: "wrong" }), /密码错误/);
   assert.deepEqual(events, []);
+});
+
+test("an account that must change its password is sent to the password page", async (t) => {
+  const events = [];
+  t.mock.method(globalThis, "fetch", async () => ({ status: 403, ok: false, text: async () => JSON.stringify({ error: "请先修改初始密码", code: "password_change_required" }) }));
+  const previous = globalThis.window;
+  globalThis.window = { location: { origin: "http://127.0.0.1:1422" }, dispatchEvent: (event) => events.push(event.type) };
+  t.after(() => { if (previous === undefined) delete globalThis.window; else globalThis.window = previous; });
+  await assert.rejects(request("/api/settings"), /请先修改初始密码/);
+  assert.deepEqual(events, ["sucanvas:password-change-required"]);
+  // Other refusals (e.g. a regular user calling an admin endpoint) do not redirect.
+  t.mock.method(globalThis, "fetch", async () => ({ status: 403, ok: false, text: async () => JSON.stringify({ error: "只有管理员可以执行此操作", code: "forbidden" }) }));
+  await assert.rejects(request("/api/admin/users"), /只有管理员/);
+  assert.deepEqual(events, ["sucanvas:password-change-required"]);
 });
 
 test("protected request rejection returns the Web shell to the application lock", async (t) => {

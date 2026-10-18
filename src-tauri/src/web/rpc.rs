@@ -249,11 +249,26 @@ fn remove_unused_workflow_fallback(command: &str, args: &mut Value) {
         input.insert("workflowPath".into(), Value::String(String::new()));
     }
 }
+// The single application password is replaced by user accounts on the Web:
+// turning the lock off or rewriting app-lock.json must not be reachable.
+fn app_lock_command(command: &str) -> bool {
+    matches!(
+        command,
+        "disable_app_lock" | "set_app_lock_password" | "verify_app_lock_password"
+    )
+}
 pub async fn invoke(
     State(state): State<WebState>,
     Path(command): Path<String>,
     Json(mut input): Json<Request>,
 ) -> Response {
+    if app_lock_command(&command) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Web 版已改为用户登录，请在用户菜单中修改密码。", "code": "app_lock_unavailable"})),
+        )
+            .into_response();
+    }
     let _storage_guard = if matches!(
         command.as_str(),
         "import_media" | "export_app_backup" | "stage_app_backup_restore"
@@ -266,19 +281,6 @@ pub async fn invoke(
         None
     };
     let state = state.connection_snapshot();
-    if command == "disable_app_lock" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Web 应用锁同时保护网络接口，不能关闭；可以在设置中修改密码。"})),
-        )
-            .into_response();
-    }
-    if command == "set_app_lock_password" {
-        return match argument(&input.args, "input") {
-            Ok(password) => super::auth::change_password(state, password).await,
-            Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response(),
-        };
-    }
     remove_unused_workflow_fallback(&command, &mut input.args);
     if command == "import_media" {
         let directory = match super::storage::input_root(&state) {
@@ -422,6 +424,18 @@ mod tests {
         ] {
             assert!(comfy_source_url(value, origin, upstream).is_none());
         }
+    }
+    #[test]
+    fn web_refuses_application_lock_commands() {
+        for command in [
+            "disable_app_lock",
+            "set_app_lock_password",
+            "verify_app_lock_password",
+        ] {
+            assert!(app_lock_command(command), "{command}");
+        }
+        assert!(!app_lock_command("get_app_lock_status"));
+        assert!(!app_lock_command("load_workspace"));
     }
     #[test]
     fn filesystem_boundary_rejects_parent_traversal() {

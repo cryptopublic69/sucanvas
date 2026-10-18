@@ -10783,14 +10783,15 @@ function CanvasWorkspace() {
                 <FolderKanban size={16} />
                 <span><strong>私密项目</strong><small>隐藏与显示</small></span>
               </button>
-              <button
+              {/* Web accounts change passwords from the user menu; the app lock is desktop-only. */}
+              {import.meta.env.MODE !== "web" && <button
                 type="button"
                 className={activeSettingsSection === "security" ? "is-active" : ""}
                 onClick={() => setActiveSettingsSection("security")}
               >
                 <LockKeyhole size={16} />
                 <span><strong>应用锁</strong><small>密码与验证</small></span>
-              </button>
+              </button>}
             </nav>
             <div className="app-settings-content">
               {activeSettingsSection === "general" && (
@@ -10910,7 +10911,7 @@ function CanvasWorkspace() {
                   changeProjectPrivacy={changeProjectPrivacy}
                 />
               )}
-              {activeSettingsSection === "security" && (
+              {activeSettingsSection === "security" && import.meta.env.MODE !== "web" && (
                 <SecuritySettingsPanel
                   appLockEnabled={appLockEnabled}
                   appLockStatusReady={appLockStatusReady}

@@ -29,7 +29,12 @@ export async function request<T>(path: string, options?: RequestInit, timeoutMs?
     if (!response.ok) {
       const text = await response.text();
       let message = text || `请求失败 (${response.status})`;
-      try { message = (JSON.parse(text) as { error?: string }).error || message; }
+      try {
+        const body = JSON.parse(text) as { error?: string; code?: string };
+        message = body.error || message;
+        // A fresh or reset account must set its own password before anything else.
+        if (response.status === 403 && body.code === "password_change_required") window.dispatchEvent(new Event("sucanvas:password-change-required"));
+      }
       catch { if (/<(?:!doctype|html|head|body)\b/i.test(text)) message = `服务器请求失败（HTTP ${response.status}）`; }
       throw new WebHttpError(response.status, message);
     }
@@ -72,7 +77,8 @@ export class Channel<T> {
 }
 export async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
   if (command === "verify_app_lock_password") {
-    await request("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: args.password }) });
+    // Confirms the signed-in user's own password (private project visibility).
+    await request("/api/auth/verify-password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: args.password }) });
     return true as T;
   }
   const channel = args.onSubmitted as Channel<unknown> | undefined;
