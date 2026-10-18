@@ -11,6 +11,7 @@ mod rpc;
 mod settings;
 mod storage;
 mod tasks;
+mod ws_handover;
 
 use crate::{
     api::{self, ApiState},
@@ -57,6 +58,7 @@ pub(crate) struct WebState {
     settings_guard: Arc<tokio::sync::Mutex<()>>,
     media_guard: Arc<tokio::sync::Mutex<()>>,
     tasks: Arc<tasks::Tasks>,
+    comfy_relays: Arc<ws_handover::Registry>,
 }
 
 impl WebState {
@@ -230,6 +232,7 @@ pub async fn run() -> Result<(), String> {
         settings_guard: Arc::new(tokio::sync::Mutex::new(())),
         media_guard: Arc::new(tokio::sync::Mutex::new(())),
         tasks: Arc::new(tasks::Tasks::default()),
+        comfy_relays: Arc::default(),
     };
     if let Err(error) = storage::migrate(&state) {
         // Keep the settings UI and existing project references available for

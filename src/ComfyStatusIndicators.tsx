@@ -34,6 +34,17 @@ function comfyGpuMonitorFromSocketData(data: unknown): ComfyGpuMonitor | null {
   }
 }
 
+const MONITOR_SILENCE_MS = 20_000;
+
+function isCrystoolsMonitorMessage(data: unknown): boolean {
+  if (typeof data !== "string") return false;
+  try {
+    return comfyStatusMessage(data)?.type === "crystools.monitor";
+  } catch {
+    return false;
+  }
+}
+
 export const ComfyStatusIndicators = memo(function ComfyStatusIndicators({ serverUrl, showGpu = true }: { serverUrl: string; showGpu?: boolean }) {
   const [comfyQueueCounts, setComfyQueueCounts] = useState<ComfyQueueSummary>({
     runningCount: 0,
@@ -68,7 +79,11 @@ export const ComfyStatusIndicators = memo(function ComfyStatusIndicators({ serve
     let disposed = false;
     let socket: ComfySocket | null = null;
     let reconnectTimer: number | null = null;
-    const monitorClientId = `infinite-canvas-gpu-monitor-${crypto.randomUUID()}`;
+    const newMonitorClientId = () => `infinite-canvas-gpu-monitor-${crypto.randomUUID()}`;
+    let monitorClientId = newMonitorClientId();
+    // Silence detection only applies once this ComfyUI has proven it sends crystools data.
+    let monitorSeen = false;
+    let lastMonitorAt = 0;
 
     const reconnect = () => {
       if (disposed) return;
@@ -85,7 +100,12 @@ export const ComfyStatusIndicators = memo(function ComfyStatusIndicators({ serve
         return;
       }
       socket = nextSocket;
+      lastMonitorAt = Date.now();
       nextSocket.addEventListener("message", (event) => {
+        if (isCrystoolsMonitorMessage(event.data)) {
+          monitorSeen = true;
+          lastMonitorAt = Date.now();
+        }
         const nextMonitor = comfyGpuMonitorFromSocketData(event.data);
         if (nextMonitor && !disposed) setComfyGpuMonitor((current) =>
           current?.temperatureCelsius === nextMonitor.temperatureCelsius
@@ -97,11 +117,21 @@ export const ComfyStatusIndicators = memo(function ComfyStatusIndicators({ serve
         reconnect();
       }, { once: true });
     };
+    // An open socket that ComfyUI no longer addresses stays silent forever; a fresh
+    // clientId cannot collide with an upstream registration that is still finishing.
+    const silenceWatch = window.setInterval(() => {
+      if (disposed || !monitorSeen || !socket || socket.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - lastMonitorAt < MONITOR_SILENCE_MS) return;
+      console.warn("[comfy-ws] GPU monitor silent, reconnecting with a new client id");
+      monitorClientId = newMonitorClientId();
+      socket.close();
+    }, 5000);
 
     setComfyGpuMonitor(null);
     void connect();
     return () => {
       disposed = true;
+      window.clearInterval(silenceWatch);
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
     };

@@ -9,6 +9,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
+use std::sync::Arc;
+use tokio::sync::Notify;
+
+use super::ws_handover::{log, RelayTicket};
 
 fn upstream(state: &WebState, suffix: &str) -> Result<String, StatusCode> {
     if state.config.comfy_url.is_empty() {
@@ -127,17 +131,70 @@ type ComfyWebSocket =
 async fn connect_comfy(
     url: &str,
     deadline: std::time::Duration,
+    client_id: &str,
 ) -> Result<ComfyWebSocket, StatusCode> {
     match tokio::time::timeout(deadline, tokio_tungstenite::connect_async(url)).await {
         Ok(Ok((socket, _))) => Ok(socket),
         Ok(Err(error)) => {
-            eprintln!("[comfy-ws] upstream handshake failed: {error}");
+            log(client_id, format!("upstream handshake failed: {error}"));
             Err(StatusCode::BAD_GATEWAY)
         }
         Err(_) => {
-            eprintln!("[comfy-ws] upstream handshake timed out");
+            log(client_id, "upstream handshake timed out");
             Err(StatusCode::GATEWAY_TIMEOUT)
         }
+    }
+}
+
+fn client_id(uri: &axum::http::Uri) -> String {
+    uri.query()
+        .and_then(|query| reqwest::Url::parse(&format!("http://localhost/?{query}")).ok())
+        .and_then(|url| {
+            url.query_pairs()
+                .find(|(key, _)| key == "clientId")
+                .map(|(_, value)| value.into_owned())
+        })
+        .unwrap_or_default()
+}
+
+/// Closes the upstream socket and reads it until TCP EOF. aiohttp only closes the
+/// transport via `call_soon` after the handler's `finally` has already run, so EOF
+/// proves that ComfyUI has released the clientId.
+async fn close_upstream(comfy: &mut ComfyWebSocket) -> bool {
+    tokio::time::timeout(IO_TIMEOUT, async {
+        let _ = comfy.close(None).await;
+        while let Some(Ok(_)) = comfy.next().await {}
+    })
+    .await
+    .is_ok()
+}
+
+/// An accepted upstream whose browser upgrade has not started yet. If the upgrade
+/// never runs, the upstream is still retired in order before the ticket is released.
+struct PendingRelay {
+    client_id: String,
+    comfy: Option<ComfyWebSocket>,
+    ticket: Option<RelayTicket>,
+}
+
+impl Drop for PendingRelay {
+    fn drop(&mut self) {
+        let (Some(mut comfy), Ok(runtime)) =
+            (self.comfy.take(), tokio::runtime::Handle::try_current())
+        else {
+            return;
+        };
+        let ticket = self.ticket.take();
+        let client_id = std::mem::take(&mut self.client_id);
+        runtime.spawn(async move {
+            if !close_upstream(&mut comfy).await {
+                log(
+                    &client_id,
+                    "upstream did not reach EOF after an abandoned upgrade",
+                );
+            }
+            drop(ticket);
+        });
     }
 }
 
@@ -158,15 +215,45 @@ pub async fn websocket(
         Ok(url) => url.replacen("http", "ws", 1),
         Err(status) => return status.into_response(),
     };
+    let client_id = client_id(&uri);
+    // Only an authenticated request may retire the relay that owns a clientId.
+    if !state.auth.authenticated(&request) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     // Do not report an open browser socket until ComfyUI has accepted it.
-    let comfy = match connect_comfy(&url, UPSTREAM_CONNECT_TIMEOUT).await {
-        Ok(socket) => socket,
+    let connected = if client_id.is_empty() {
+        connect_comfy(&url, UPSTREAM_CONNECT_TIMEOUT, &client_id)
+            .await
+            .map(|comfy| (comfy, None))
+    } else {
+        state
+            .comfy_relays
+            .handover(&client_id, || {
+                connect_comfy(&url, UPSTREAM_CONNECT_TIMEOUT, &client_id)
+            })
+            .await
+            .map(|(comfy, ticket)| (comfy, Some(ticket)))
+    };
+    let (comfy, ticket) = match connected {
+        Ok(connected) => connected,
         Err(status) => return status.into_response(),
+    };
+    let mut pending = PendingRelay {
+        client_id,
+        comfy: Some(comfy),
+        ticket,
     };
     if !state.auth.authenticated(&request) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.on_upgrade(move |socket| relay(state, request, socket, comfy))
+    ws.on_upgrade(move |socket| async move {
+        let client_id = std::mem::take(&mut pending.client_id);
+        let ticket = pending.ticket.take();
+        let Some(comfy) = pending.comfy.take() else {
+            return;
+        };
+        relay(state, request, socket, comfy, client_id, ticket).await
+    })
 }
 
 async fn send_browser(browser: &mut WebSocket, message: Message) -> bool {
@@ -186,13 +273,24 @@ async fn send_comfy(
     )
 }
 
+async fn superseded(stop: &Option<Arc<Notify>>) {
+    match stop {
+        Some(stop) => stop.notified().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn relay(
     state: WebState,
     headers: axum::http::HeaderMap,
     mut browser: WebSocket,
     mut comfy: ComfyWebSocket,
+    client_id: String,
+    ticket: Option<RelayTicket>,
 ) {
     use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
+    let stop = ticket.as_ref().map(RelayTicket::stop_signal);
+    let generation = ticket.as_ref().map_or(0, RelayTicket::generation);
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut upstream_seen = tokio::time::Instant::now();
@@ -201,6 +299,7 @@ async fn relay(
             break "session expired";
         }
         tokio::select! {
+            _ = superseded(&stop) => break "superseded",
             _ = heartbeat.tick() => {
                 if upstream_seen.elapsed() >= UPSTREAM_STALE_AFTER {
                     break "upstream heartbeat timeout";
@@ -221,7 +320,7 @@ async fn relay(
                     // Each WebSocket transport handles its own ping/pong frames.
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                     Some(Err(error)) => {
-                        eprintln!("[comfy-ws] browser read failed: {error}");
+                        log(&client_id, format!("browser read failed: {error}"));
                         break "browser read failed";
                     }
                     _ => break "browser closed",
@@ -238,7 +337,7 @@ async fn relay(
                         continue;
                     }
                     Some(Err(error)) => {
-                        eprintln!("[comfy-ws] upstream read failed: {error}");
+                        log(&client_id, format!("upstream read failed: {error}"));
                         break "upstream read failed";
                     }
                     _ => break "upstream closed",
@@ -249,10 +348,17 @@ async fn relay(
         }
     };
     if reason != "browser closed" {
-        eprintln!("[comfy-ws] relay stopped: {reason}");
+        log(&client_id, format!("relay #{generation} stopped: {reason}"));
     }
     let _ = tokio::time::timeout(IO_TIMEOUT, browser.close()).await;
-    let _ = tokio::time::timeout(IO_TIMEOUT, comfy.close(None)).await;
+    if !close_upstream(&mut comfy).await {
+        log(
+            &client_id,
+            format!("relay #{generation} upstream did not reach EOF within {IO_TIMEOUT:?}"),
+        );
+    }
+    // Released only after the upstream has finished, so a waiting handover can proceed.
+    drop(ticket);
 }
 
 #[cfg(test)]
@@ -269,7 +375,7 @@ mod tests {
             let (_socket, _) = listener.accept().await.unwrap();
             std::future::pending::<()>().await;
         });
-        let result = connect_comfy(&url, std::time::Duration::from_millis(30)).await;
+        let result = connect_comfy(&url, std::time::Duration::from_millis(30), "").await;
         assert_eq!(result.unwrap_err(), StatusCode::GATEWAY_TIMEOUT);
         server.abort();
     }
@@ -287,7 +393,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let result = connect_comfy(&url, std::time::Duration::from_secs(2)).await;
+        let result = connect_comfy(&url, std::time::Duration::from_secs(2), "").await;
         assert_eq!(result.unwrap_err(), StatusCode::BAD_GATEWAY);
         server.await.unwrap();
     }
@@ -306,11 +412,161 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let mut socket = connect_comfy(&url, std::time::Duration::from_secs(2))
+        let mut socket = connect_comfy(&url, std::time::Duration::from_secs(2), "")
             .await
             .unwrap();
         let message = socket.next().await.unwrap().unwrap();
         assert!(message.to_text().unwrap().contains("crystools.monitor"));
         server.await.unwrap();
+    }
+
+    type Sockets = Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>,
+        >,
+    >;
+
+    /// Mimics ComfyUI 0.37 `websocket_handler`: a reused clientId replaces the old
+    /// entry without closing it, `finally` pops the clientId unconditionally, and the
+    /// TCP connection closes only after that pop.
+    async fn fake_comfy(
+        finally_delay: std::time::Duration,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let sockets: Sockets = Default::default();
+        let broadcast = sockets.clone();
+        let server = tokio::spawn(async move {
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    let targets: Vec<_> = broadcast.lock().unwrap().values().cloned().collect();
+                    for target in targets {
+                        let _ = target.send(r#"{"type":"crystools.monitor","data":{}}"#.to_owned());
+                    }
+                }
+            });
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let sockets = sockets.clone();
+                tokio::spawn(async move {
+                    // Read the clientId from the request line without consuming it.
+                    let mut head = [0; 512];
+                    let read = stream.peek(&mut head).await.unwrap();
+                    let head = String::from_utf8_lossy(&head[..read]);
+                    let sid = head
+                        .split_once("clientId=")
+                        .and_then(|(_, rest)| rest.split([' ', '&']).next())
+                        .unwrap_or_default()
+                        .to_owned();
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+                    sockets.lock().unwrap().insert(sid.clone(), sender);
+                    loop {
+                        tokio::select! {
+                            Some(text) = receiver.recv() => {
+                                if ws.send(tokio_tungstenite::tungstenite::Message::Text(text.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            message = ws.next() => match message {
+                                Some(Ok(_)) => continue,
+                                _ => break,
+                            },
+                        }
+                    }
+                    tokio::time::sleep(finally_delay).await;
+                    sockets.lock().unwrap().remove(&sid);
+                    drop(ws);
+                });
+            }
+        });
+        (base, server)
+    }
+
+    async fn count_for(comfy: &mut ComfyWebSocket, window: std::time::Duration) -> usize {
+        let mut count = 0;
+        let deadline = tokio::time::Instant::now() + window;
+        while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, comfy.next()).await {
+            if message
+                .to_text()
+                .is_ok_and(|text| text.contains("crystools.monitor"))
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// The relay loop reduced to its upstream half: forward until superseded, then
+    /// retire the upstream exactly like `relay` does.
+    async fn upstream_only_relay(mut comfy: ComfyWebSocket, ticket: RelayTicket) -> &'static str {
+        let stop = Some(ticket.stop_signal());
+        let reason = loop {
+            tokio::select! {
+                _ = superseded(&stop) => break "superseded",
+                message = comfy.next() => if !matches!(message, Some(Ok(_))) { break "upstream closed" },
+            }
+        };
+        assert!(close_upstream(&mut comfy).await);
+        drop(ticket);
+        reason
+    }
+
+    #[tokio::test]
+    async fn fake_upstream_reproduces_the_detached_client() {
+        let (base, server) = fake_comfy(std::time::Duration::from_millis(200)).await;
+        let url = format!("{base}?clientId=same");
+        let mut old = connect_comfy(&url, std::time::Duration::from_secs(2), "same")
+            .await
+            .unwrap();
+        let mut new = connect_comfy(&url, std::time::Duration::from_secs(2), "same")
+            .await
+            .unwrap();
+        assert!(count_for(&mut new, std::time::Duration::from_millis(200)).await > 0);
+        // Without a handover the old connection finishes after the new one registered.
+        assert!(close_upstream(&mut old).await);
+        // Discard broadcasts that were already queued before the old `finally` ran.
+        count_for(&mut new, std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            count_for(&mut new, std::time::Duration::from_millis(500)).await,
+            0
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn handover_keeps_the_new_relay_subscribed() {
+        let (base, server) = fake_comfy(std::time::Duration::from_millis(200)).await;
+        let url = format!("{base}?clientId=same");
+        let registry = Arc::new(super::super::ws_handover::Registry::default());
+        let (old, old_ticket) = registry
+            .handover("same", || {
+                connect_comfy(&url, std::time::Duration::from_secs(2), "same")
+            })
+            .await
+            .unwrap();
+        // Browser A vanished without a close frame, so its relay is still running.
+        let old_relay = tokio::spawn(upstream_only_relay(old, old_ticket));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (mut new, _new_ticket) = registry
+            .handover("same", || {
+                connect_comfy(&url, std::time::Duration::from_secs(2), "same")
+            })
+            .await
+            .unwrap();
+        assert_eq!(old_relay.await.unwrap(), "superseded");
+        for _ in 0..3 {
+            assert!(count_for(&mut new, std::time::Duration::from_millis(300)).await > 0);
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn client_id_is_read_from_the_query() {
+        let uri: axum::http::Uri = "/api/comfy/ws?foo=1&clientId=abc%2Ddef".parse().unwrap();
+        assert_eq!(client_id(&uri), "abc-def");
+        let uri: axum::http::Uri = "/api/comfy/ws".parse().unwrap();
+        assert_eq!(client_id(&uri), "");
     }
 }
