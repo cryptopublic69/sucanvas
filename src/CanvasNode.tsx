@@ -3,6 +3,7 @@ import { openWebComfySocket, type ComfySocket } from "./web/comfySocket";
 import { resolveComfyOutputPath } from "./web/outputFiles";
 import { videoUpscaleFromValue } from "./video/videoUpscale";
 import { comfyOutputFromContent, videoUpscaleSourceUnavailableReason } from "./video/videoUpscaleSource";
+import { videoDurationAspectLabel, videoElapsedWithDuration } from "./video/videoDurationLabel";
 import { Settings as PresetSettingsIcon } from "lucide-react";
 import { useDropdownWheel } from "./useDropdownWheel";
 import { CanvasNodePresentation } from "./canvas/CanvasNodePresentation";
@@ -5254,9 +5255,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     : null;
   const generatedVideoFooterStatus = isGenerationPlaceholder
     ? placeholderActive ? "处理中" : "未完成"
-    : `${formattedGenerationElapsed(record.content)}${generatedVideoSnapshot
-      ? ` / ${generatedVideoSnapshot.durationSeconds}秒`
-      : ""}`;
+    : videoElapsedWithDuration(formattedGenerationElapsed(record.content), generatedVideoSnapshot?.durationSeconds);
   // Uploaded videos show the upscale button after the file name in their node footer on the Web only.
   const showVideoAssetUpscale = isVideoAsset && import.meta.env.MODE === "web";
   const videoAssetUpscaleUnavailable = showVideoAssetUpscale ? videoUpscaleSourceUnavailableReason(record) : "";
@@ -7823,7 +7822,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     </div>
                     <div>
                       <span>基础</span>
-                      <strong>{generatedVideoSnapshot.durationSeconds} 秒 · {generatedVideoSnapshot.aspectRatio}</strong>
+                      <strong>{videoDurationAspectLabel(generatedVideoSnapshot.durationSeconds, generatedVideoSnapshot.aspectRatio)}</strong>
                     </div>
                     <div>
                       <span>耗时</span>
