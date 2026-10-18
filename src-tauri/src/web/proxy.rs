@@ -350,13 +350,16 @@ async fn relay(
     if reason != "browser closed" {
         log(&client_id, format!("relay #{generation} stopped: {reason}"));
     }
-    let _ = tokio::time::timeout(IO_TIMEOUT, browser.close()).await;
+    // Retire the upstream first. A browser that vanished silently can block for the
+    // full send timeout plus the close timeout below; doing that before releasing the
+    // clientId would push a waiting handover past RETIRE_TIMEOUT and reopen the race.
     if !close_upstream(&mut comfy).await {
         log(
             &client_id,
             format!("relay #{generation} upstream did not reach EOF within {IO_TIMEOUT:?}"),
         );
     }
+    let _ = tokio::time::timeout(IO_TIMEOUT, browser.close()).await;
     // Released only after the upstream has finished, so a waiting handover can proceed.
     drop(ticket);
 }

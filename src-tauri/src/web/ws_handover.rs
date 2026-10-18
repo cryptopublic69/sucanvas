@@ -17,13 +17,16 @@ use std::{
 };
 use tokio::sync::{watch, Notify};
 
+// Retiring plus connecting upstream must fit inside the browser's 12 s connect timeout.
 const RETIRE_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub(super) fn log(client_id: &str, message: impl std::fmt::Display) {
+    // The trailing characters are unique; the GPU monitor id shares a fixed prefix.
     let short = client_id
         .char_indices()
-        .nth(8)
-        .map_or(client_id, |(end, _)| &client_id[..end]);
+        .rev()
+        .nth(7)
+        .map_or(client_id, |(start, _)| &client_id[start..]);
     eprintln!(
         "{} [comfy-ws] [{}] {message}",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
