@@ -19,3 +19,14 @@
   object-fit: cover;
   object-position: center;
 }
+
+/* Upscale progress of an uploaded video sits on the top edge of its footer. */
+.video-asset-footer > .video-execution-progress {
+  top: 0;
+  right: 0;
+  bottom: auto;
+  left: 0;
+  height: 3px;
+  border-radius: 0;
+  pointer-events: none;
+}

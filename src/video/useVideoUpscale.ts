@@ -2,10 +2,11 @@ import { useCallback, useRef, useState } from "react";
 import type { ComfySocket } from "../web/comfySocket";
 import type { MutableRefObject, Dispatch, SetStateAction } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { comfyOutputFromContent, generationSnapshotFromContent, openComfyProgressSocket, recordAtCurrentFlowPosition } from "../CanvasNode";
+import { generationSnapshotFromContent, openComfyProgressSocket, recordAtCurrentFlowPosition } from "../CanvasNode";
 import type { CanvasFlowNode, ComfySubmitResult, GenerationSnapshot, JsonObject, NodePatch, NodeRecord, PersistedComfyTask, WorkflowModuleDefaultMap, WorkflowModuleRecord } from "../CanvasNode";
 import { videoUpscaleDefaults, videoUpscaleGenerationSnapshot, videoUpscaleModule, videoUpscaleParameterError } from "./videoUpscale";
 import type { VideoUpscaleDraft, VideoUpscaleSnapshot } from "./videoUpscale";
+import { videoUpscaleSourceFromRecord, videoUpscaleSourceUnavailableReason } from "./videoUpscaleSource";
 
 type Dependencies = {
   nodesSnapshot: MutableRefObject<CanvasFlowNode[]>;
@@ -35,7 +36,9 @@ export function useVideoUpscale(deps: Dependencies) {
   const preparing = useRef(new Set<string>());
   const configure = useCallback((previewId: string) => {
     const preview = deps.nodesSnapshot.current.find((node) => node.id === previewId)?.data.record;
-    if (!preview || preview.kind !== "generated-video" || preview.content.generationPlaceholder === true) return;
+    if (!preview || (preview.kind !== "generated-video" && preview.kind !== "video") || preview.content.generationPlaceholder === true) return;
+    const unavailable = preview.kind === "video" ? videoUpscaleSourceUnavailableReason(preview) : "";
+    if (unavailable) { deps.notice(unavailable); return; }
     const module = videoUpscaleModule(deps.modules, deps.defaults, deps.visibleIds);
     if (!module) { deps.notice("没有可用的视频超分模块，请在设置的工作流方案中导入并启用"); return; }
     setDraft({ previewId, previewTitle: preview.title, workflowModuleId: module.id, parameters: videoUpscaleDefaults(module) });
@@ -44,10 +47,11 @@ export function useVideoUpscale(deps: Dependencies) {
   const execute = useCallback(async (previewId: string, configured?: VideoUpscaleDraft) => {
     if (preparing.current.has(previewId)) return;
     const node = deps.nodesSnapshot.current.find((candidate) => candidate.id === previewId);
-    if (!node || node.data.record.kind !== "generated-video" || node.data.record.content.generationPlaceholder === true) return;
+    if (!node || (node.data.record.kind !== "generated-video" && node.data.record.kind !== "video") || node.data.record.content.generationPlaceholder === true) return;
     const preview = recordAtCurrentFlowPosition(node);
-    const source = comfyOutputFromContent(preview.content);
-    if (!source) { deps.notice("当前预览缺少远程视频文件信息，无法执行超分"); return; }
+    // Generated previews use their ComfyUI output; uploaded videos their sucanvas-imports input.
+    const source = videoUpscaleSourceFromRecord(preview);
+    if (!source) { deps.notice(videoUpscaleSourceUnavailableReason(preview)); return; }
     const module = configured
       ? deps.modules.find((candidate) => candidate.id === configured.workflowModuleId && !candidate.deletedAt && candidate.capability === "video-upscale" && deps.visibleIds.includes(candidate.id))
       : videoUpscaleModule(deps.modules, deps.defaults, deps.visibleIds);
@@ -55,7 +59,7 @@ export function useVideoUpscale(deps: Dependencies) {
     const parameters = configured?.parameters ?? videoUpscaleDefaults(module);
     const parameterError = videoUpscaleParameterError(module, parameters);
     if (parameterError) { deps.notice(parameterError); return; }
-    const originalSnapshot = generationSnapshotFromContent(preview.content);
+    const originalSnapshot = preview.kind === "generated-video" ? generationSnapshotFromContent(preview.content) : null;
     const ratio = typeof preview.content.aspectRatio === "number" && preview.content.aspectRatio > 0
       ? preview.content.aspectRatio : preview.width / Math.max(1, preview.height - 38);
     const processing: VideoUpscaleSnapshot = {

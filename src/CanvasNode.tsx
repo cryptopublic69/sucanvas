@@ -2,6 +2,7 @@ import { Fragment } from "react";
 import { openWebComfySocket, type ComfySocket } from "./web/comfySocket";
 import { resolveComfyOutputPath } from "./web/outputFiles";
 import { videoUpscaleFromValue } from "./video/videoUpscale";
+import { comfyOutputFromContent, videoUpscaleSourceUnavailableReason } from "./video/videoUpscaleSource";
 import { Settings as PresetSettingsIcon } from "lucide-react";
 import { useDropdownWheel } from "./useDropdownWheel";
 import { CanvasNodePresentation } from "./canvas/CanvasNodePresentation";
@@ -2112,6 +2113,9 @@ const DEFAULT_IMAGE_RESIZE_MAX_EDGE = 2048;
 const MIN_IMAGE_RESIZE_MAX_EDGE = 32;
 const MAX_IMAGE_RESIZE_MAX_EDGE = 16_384;
 const GENERATED_VIDEO_FOOTER_HEIGHT = 38;
+// Uploaded videos get the upscale footer below their material note on the Web only.
+const VIDEO_ASSET_FOOTER_HEIGHT = import.meta.env.MODE === "web" ? GENERATED_VIDEO_FOOTER_HEIGHT : 0;
+const VIDEO_ASSET_FOOTER_LAYOUT_VERSION = 1;
 const GENERATED_IMAGE_CHROME_HEIGHT = GENERATED_VIDEO_FOOTER_HEIGHT;
 const GENERATED_IMAGE_PREVIEW_LAYOUT_VERSION = 2;
 const LEGACY_GENERATED_VIDEO_PREVIEW_WIDTH = 360;
@@ -2252,10 +2256,10 @@ const VIDEO_PREVIEW_COLOR_PRESETS = [
   { value: "#315b80", highlight: "#5bbcff", label: "暗蓝色" },
 ] as const;
 
-function mediaNodeHeightForAspectRatio(width: number, aspectRatio: number): number {
+function mediaNodeHeightForAspectRatio(width: number, aspectRatio: number, extraChromeHeight = 0): number {
   return Math.min(
     2400,
-    Math.max(180, width / aspectRatio + MEDIA_NODE_CHROME_HEIGHT),
+    Math.max(180, width / aspectRatio + MEDIA_NODE_CHROME_HEIGHT + extraChromeHeight),
   );
 }
 
@@ -2988,16 +2992,6 @@ function persistedComfyTaskFromPlaceholder(record: NodeRecord): PersistedComfyTa
     ...((sourcePreviewId || imageTask) ? { sourceGeneratorId } : {}),
     placeholderNodeId: record.id,
   };
-}
-
-function comfyOutputFromContent(content: JsonObject): ComfyOutputFile | null {
-  const filename = typeof content.filename === "string" ? content.filename : "";
-  const subfolder = typeof content.subfolder === "string" ? content.subfolder : "";
-  const fileType = typeof content.fileType === "string" ? content.fileType : "output";
-  const url = typeof content.videoUrl === "string"
-    ? content.videoUrl
-    : typeof content.imageUrl === "string" ? content.imageUrl : "";
-  return filename && url ? { filename, subfolder, fileType, url } : null;
 }
 
 function cacheBustedGeneratedVideoUrl(content: JsonObject): string {
@@ -5186,7 +5180,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       ? GENERATED_IMAGE_CHROME_HEIGHT
     : isImage
       ? IMAGE_NODE_CHROME_HEIGHT
-      : MEDIA_NODE_CHROME_HEIGHT;
+      : MEDIA_NODE_CHROME_HEIGHT + (isVideoAsset ? VIDEO_ASSET_FOOTER_HEIGHT : 0);
   const generatedVideoUrl = cacheBustedGeneratedVideoUrl(record.content);
   const generatedImageUrl = isGeneratedImage && typeof record.content.imageUrl === "string"
     ? record.content.imageUrl
@@ -5266,6 +5260,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     : `${formattedGenerationElapsed(record.content)}${generatedVideoSnapshot
       ? ` / ${generatedVideoSnapshot.durationSeconds}秒`
       : ""}`;
+  const showVideoAssetUpscale = isVideoAsset && VIDEO_ASSET_FOOTER_HEIGHT > 0;
+  const videoAssetUpscaleUnavailable = showVideoAssetUpscale ? videoUpscaleSourceUnavailableReason(record) : "";
+  const videoAssetFooterStatus = executionRunning
+    ? validationMessage || "正在执行视频超分…"
+    : validationMessage || (videoAssetUpscaleUnavailable ? "无法超分" : "视频素材");
   const isImageUpscalePreview = isGeneratedImage
     && typeof record.content.sourcePreviewId === "string";
   const generatedImageWasUpscaled = isGeneratedImage
@@ -5405,16 +5404,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   }, [id, isGeneratedImage, onChange, record.content, record.width, savedAspectRatio]);
 
   useEffect(() => {
-    if ((!isImage && !isVideoAsset) || !savedAspectRatio || record.content.materialNodeLayoutVersion === MATERIAL_NODE_LAYOUT_VERSION) return;
+    const videoFooterFitted = !isVideoAsset || !VIDEO_ASSET_FOOTER_HEIGHT
+      || record.content.videoAssetFooterLayoutVersion === VIDEO_ASSET_FOOTER_LAYOUT_VERSION;
+    if ((!isImage && !isVideoAsset) || !savedAspectRatio || (record.content.materialNodeLayoutVersion === MATERIAL_NODE_LAYOUT_VERSION && videoFooterFitted)) return;
     const fittedHeight = Math.min(
       2400,
-      record.width / savedAspectRatio + (isImage ? IMAGE_NODE_CHROME_HEIGHT : MEDIA_NODE_CHROME_HEIGHT),
+      record.width / savedAspectRatio + (isImage ? IMAGE_NODE_CHROME_HEIGHT : MEDIA_NODE_CHROME_HEIGHT + (isVideoAsset ? VIDEO_ASSET_FOOTER_HEIGHT : 0)),
     );
     onChange(id, {
       height: fittedHeight,
       content: {
         ...record.content,
         materialNodeLayoutVersion: MATERIAL_NODE_LAYOUT_VERSION,
+        ...(isVideoAsset && VIDEO_ASSET_FOOTER_HEIGHT ? { videoAssetFooterLayoutVersion: VIDEO_ASSET_FOOTER_LAYOUT_VERSION } : {}),
       },
     });
   }, [id, isImage, isVideoAsset, onChange, record.content, record.width, savedAspectRatio]);
@@ -6386,7 +6388,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         )
       : isImage
         ? Math.min(2400, fittedWidth / aspectRatio + IMAGE_NODE_CHROME_HEIGHT)
-        : mediaNodeHeightForAspectRatio(fittedWidth, aspectRatio);
+        : mediaNodeHeightForAspectRatio(fittedWidth, aspectRatio, isVideoAsset ? VIDEO_ASSET_FOOTER_HEIGHT : 0);
     onChange(id, {
       content: {
         ...record.content,
@@ -6395,6 +6397,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         naturalHeight,
         ...(isGeneratedImage ? { generatedImagePreviewLayoutVersion: GENERATED_IMAGE_PREVIEW_LAYOUT_VERSION } : {}),
         ...((isImage || isVideoAsset) ? { materialNodeLayoutVersion: MATERIAL_NODE_LAYOUT_VERSION } : {}),
+        ...(isVideoAsset && VIDEO_ASSET_FOOTER_HEIGHT ? { videoAssetFooterLayoutVersion: VIDEO_ASSET_FOOTER_LAYOUT_VERSION } : {}),
       },
       width: fittedWidth,
       height: fittedHeight,
@@ -7631,6 +7634,45 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             />
           </label>
         </div>
+      )}
+      {showVideoAssetUpscale && (
+        <footer className="generated-video-footer video-asset-footer">
+          {executionRunning && (
+            <div
+              className={`video-execution-progress ${executionProgress === null ? "is-indeterminate" : ""}`}
+              role="progressbar"
+              aria-label="视频超分进度"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={executionProgress ?? undefined}
+            >
+              <span style={executionProgress === null ? undefined : { width: `${executionProgress}%` }} />
+            </div>
+          )}
+          <div className="generated-video-footer-status">
+            <span className="source-dot" />
+            <span title={videoAssetFooterStatus}>{videoAssetFooterStatus}</span>
+          </div>
+          <span className="generated-video-footer-spacer" />
+          <div className="generated-video-actions" aria-label="视频素材操作" title={executionRunning ? undefined : videoAssetUpscaleUnavailable || undefined}>
+            <button
+              type="button"
+              className={`nodrag node-action generated-video-secondary-action ${executionRunning ? "is-cancel" : ""}`}
+              disabled={executionCancelling || (!executionRunning && Boolean(videoAssetUpscaleUnavailable))}
+              onClick={(event) => {
+                if (executionRunning) void onCancelExecution(id);
+                else if (event.altKey) onConfigureVideoUpscale(id);
+                else void onVideoUpscale(id);
+              }}
+              title={executionRunning ? "取消这次超分" : videoAssetUpscaleUnavailable || "点击使用工作流默认参数超分；Alt+点击设置超分参数"}
+              aria-label={executionRunning ? "取消超分" : "超分当前视频"}
+            >
+              {executionRunning
+                ? <Square size={11} fill="currentColor" />
+                : <Sparkles size={12} />}
+            </button>
+          </div>
+        </footer>
       )}
       {isGeneratedVideo && (
         <footer className="generated-video-footer">
@@ -11125,6 +11167,7 @@ export type {
   CanvasRecord,
   CanvasUndoEntry,
   ComfyClientTaskStatus,
+  ComfyOutputFile,
   ComfyQueueSummary,
   ComfySubmitResult,
   CreateNodeResult,
