@@ -1,6 +1,6 @@
 # SuCanvas Web：Windows 便携部署
 
-Web 开发分支为 `windows-web`。现有桌面入口仍使用默认 `desktop` 构建；Web 服务使用独立 `server` 构建，不启动 Tauri/WebView。部署包不需要 Node、Rust 或 Docker。需要 Windows 10/11 或相应的 Windows Server x64 系统，以及可连接的 ComfyUI（使用生成功能时）。
+Web 开发分支为 `windows-web`。Cargo 默认构建 Web 服务（`server` feature），不启动 Tauri/WebView；桌面版已冻结，需单独使用 `--no-default-features --features desktop` 构建，`npm run tauri dev`/`npm run tauri build` 会自动传入这两个参数。部署包不需要 Node、Rust 或 Docker。需要 Windows 10/11 或相应的 Windows Server x64 系统，以及可连接的 ComfyUI（使用生成功能时）。
 
 Web 更新长期记录在 [UPDATELOG.md](../../UPDATELOG.md)，按日期和 `windows-web` 标记维护，记录迁移要求、验证结果与人工验收情况。
 

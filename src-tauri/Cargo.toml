@@ -16,7 +16,7 @@ name = "infinite_canvas_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["desktop"]
+default = ["server"]
 desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog"]
 server = ["axum/ws", "axum/multipart", "tower-http/fs", "dep:tokio-tungstenite", "dep:futures-util", "dep:fs2", "dep:tower"]
 

@@ -9,7 +9,7 @@
     "build:web": "tsc && vite build --mode web --outDir dist-web",
     "dev:web": "vite --mode web",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "node scripts/tauri-desktop.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
