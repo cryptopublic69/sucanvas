@@ -53,6 +53,36 @@ test("regular users keep settings in the browser and never write them back", asy
   assert.deepEqual(bridgeModule.calls.filter((call) => call.error), []);
 });
 
+// CANVAS-012c5 item 1: settings in one browser are kept per user.
+test("users on one browser keep separate settings; old shared keys go to the first sign-in only", async (t) => {
+  const store = browser(t, { "infinite-canvas:theme": "light", "infinite-canvas:project-columns": "5" });
+  bridgeModule.setServer({ "infinite-canvas:theme": "dark" });
+  const settings = await settingsModule();
+  const alice = { id: "u-alice", username: "alice", displayName: null, role: "user" };
+  const bob = { id: "u-bob", username: "bob", displayName: null, role: "user" };
+  access.setAccessUser(alice);
+  await settings.loadSettings();
+  assert.equal(store.get("infinite-canvas:theme"), "light", "first sign-in takes over the old keys");
+  assert.equal(store.get(settings.LEGACY_KEY), "u-alice");
+  access.setAccessUser(bob);
+  await settings.loadSettings();
+  assert.equal(store.get("infinite-canvas:theme"), "dark", "bob does not get alice's theme");
+  assert.equal(store.has("infinite-canvas:project-columns"), false);
+  assert.equal(store.get("sucanvas-user:u-alice:infinite-canvas:theme"), "light", "alice's copy is put away");
+  store.set("infinite-canvas:project-columns", "2"); // bob changes something
+  access.setAccessUser(alice);
+  await settings.loadSettings();
+  assert.equal(store.get("infinite-canvas:theme"), "light");
+  assert.equal(store.get("infinite-canvas:project-columns"), "5", "alice gets her own value back");
+  access.setAccessUser(bob);
+  await settings.loadSettings();
+  assert.equal(store.get("infinite-canvas:project-columns"), "2", "bob's change survived");
+  assert.equal(store.get(settings.OWNER_KEY), "u-bob");
+  // The migration happens once: a later browser state without an owner is not handed over again.
+  assert.equal(store.get(settings.LEGACY_KEY), "u-alice");
+  assert.deepEqual(bridgeModule.calls.filter((call) => call.method === "PUT"), []);
+});
+
 test("admins mirror the server and write changes back", async (t) => {
   const store = browser(t, { "infinite-canvas:theme": "light", "infinite-canvas:leftover": "x" });
   access.setAccessUser({ id: "u0", username: "admin", displayName: null, role: "admin" });
