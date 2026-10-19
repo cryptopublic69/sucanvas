@@ -212,6 +212,7 @@ mod tests {
             comfy_url: "http://127.0.0.1:8188".into(),
             comfy_input_directory: String::new(),
             comfy_output_directory: String::new(),
+            trusted_proxies: super::super::config::default_trusted_proxies(),
         };
         let path = root.join("config.json");
         fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();

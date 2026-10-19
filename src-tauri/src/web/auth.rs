@@ -8,7 +8,7 @@ use argon2::{
     Argon2,
 };
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::HashMap,
+    net::{IpAddr, SocketAddr},
     path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -30,6 +31,11 @@ const SESSION_LIMIT: usize = 1024;
 // usernames cannot turn the limiter into an unbounded Argon2 workload.
 pub const LOGIN_LIMIT_PER_USERNAME: usize = 5;
 pub const LOGIN_LIMIT_TOTAL: usize = 60;
+// Per source address (c5 item 3), well below the site-wide cap: one address
+// alone cannot use up the site's attempts and lock everybody else out. An
+// address over its limit is refused before it counts against the site.
+pub const LOGIN_LIMIT_PER_IP: usize = 15;
+const _: () = assert!(LOGIN_LIMIT_PER_IP < LOGIN_LIMIT_TOTAL);
 const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 const INVALID_LOGIN: &str = "用户名或密码错误";
 pub const PASSWORD_CHANGE_REQUIRED: &str = "password_change_required";
@@ -96,16 +102,26 @@ impl IntoResponse for AuthError {
 struct Limiter {
     total: Vec<Instant>,
     by_username: HashMap<String, Vec<Instant>>,
+    by_ip: HashMap<IpAddr, Vec<Instant>>,
 }
 
 impl Limiter {
-    fn acquire(&mut self, key: &str, now: Instant) -> bool {
+    // `ip`: the client address (None for checks that have no request, such
+    // as a password change by a signed-in session).
+    fn acquire(&mut self, key: &str, ip: Option<IpAddr>, now: Instant) -> bool {
         let recent = |time: &Instant| now.saturating_duration_since(*time) < LOGIN_WINDOW;
         self.total.retain(recent);
         self.by_username.retain(|_, times| {
             times.retain(recent);
             !times.is_empty()
         });
+        self.by_ip.retain(|_, times| {
+            times.retain(recent);
+            !times.is_empty()
+        });
+        if ip.is_some_and(|ip| self.by_ip.get(&ip).map_or(0, Vec::len) >= LOGIN_LIMIT_PER_IP) {
+            return false;
+        }
         let used = self.by_username.get(key).map_or(0, Vec::len);
         if self.total.len() >= LOGIN_LIMIT_TOTAL || used >= LOGIN_LIMIT_PER_USERNAME {
             return false;
@@ -115,6 +131,9 @@ impl Limiter {
             .entry(key.to_owned())
             .or_default()
             .push(now);
+        if let Some(ip) = ip {
+            self.by_ip.entry(ip).or_default().push(now);
+        }
         true
     }
     fn clear(&mut self, key: &str) {
@@ -290,22 +309,38 @@ impl Auth {
             }
         }
     }
-    fn acquire(&self, key: &str) -> Result<(), AuthError> {
-        if self.limiter.lock().unwrap().acquire(key, Instant::now()) {
+    fn acquire(&self, key: &str, ip: Option<IpAddr>) -> Result<(), AuthError> {
+        if self
+            .limiter
+            .lock()
+            .unwrap()
+            .acquire(key, ip, Instant::now())
+        {
             Ok(())
         } else {
             Err(AuthError::RateLimited)
         }
     }
 
+    #[cfg(test)]
     pub async fn login(
         &self,
         username: &str,
         password: String,
     ) -> Result<(String, UserRecord), AuthError> {
+        self.login_from(username, password, None).await
+    }
+
+    // `ip`: the client address the request came from (see client_ip).
+    pub async fn login_from(
+        &self,
+        username: &str,
+        password: String,
+        ip: Option<IpAddr>,
+    ) -> Result<(String, UserRecord), AuthError> {
         let username = username.trim();
         let key = username.to_ascii_lowercase();
-        self.acquire(&key)?;
+        self.acquire(&key, ip)?;
         if username.len() > 64 || password.len() > 1024 {
             return Err(AuthError::Invalid);
         }
@@ -357,7 +392,7 @@ impl Auth {
             .map_err(AuthError::Internal)?
             .ok_or(AuthError::Invalid)?;
         let key = credential.user.username.to_ascii_lowercase();
-        self.acquire(&key)?;
+        self.acquire(&key, None)?;
         let same = current_password == new_password;
         if !self
             .verify(current_password, credential.password_hash.clone())
@@ -433,8 +468,37 @@ pub struct Login {
     username: String,
     password: String,
 }
-pub async fn login(State(state): State<WebState>, Json(input): Json<Login>) -> Response {
-    match state.auth.login(&input.username, input.password).await {
+// The address a login attempt is counted against. X-Forwarded-For is only
+// believed when the connection comes from a configured trusted proxy (the
+// local Caddy, config `trustedProxies`); its last entry is the address that
+// proxy saw. Anything else, or a malformed header, counts as the peer itself.
+pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpAddr]) -> IpAddr {
+    let peer = peer.to_canonical();
+    if !trusted.iter().any(|proxy| proxy.to_canonical() == peer) {
+        return peer;
+    }
+    headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .last()
+        .and_then(|last| last.trim().parse::<IpAddr>().ok())
+        .map_or(peer, |ip| ip.to_canonical())
+}
+
+pub async fn login(
+    State(state): State<WebState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(input): Json<Login>,
+) -> Response {
+    let ip = client_ip(peer.ip(), &headers, &state.config.trusted_proxies);
+    match state
+        .auth
+        .login_from(&input.username, input.password, Some(ip))
+        .await
+    {
         Ok((token, user)) => unlocked_response(
             &state,
             token,
@@ -756,15 +820,78 @@ pub(crate) mod tests {
         let mut limiter = Limiter::default();
         let start = Instant::now();
         for _ in 0..LOGIN_LIMIT_PER_USERNAME {
-            assert!(limiter.acquire("a", start));
+            assert!(limiter.acquire("a", None, start));
         }
-        assert!(!limiter.acquire("a", start));
-        assert!(limiter.acquire("a", start + LOGIN_WINDOW));
+        assert!(!limiter.acquire("a", None, start));
+        assert!(limiter.acquire("a", None, start + LOGIN_WINDOW));
         let mut limiter = Limiter::default();
         for index in 0..LOGIN_LIMIT_TOTAL {
-            assert!(limiter.acquire(&format!("user{index}"), start));
+            assert!(limiter.acquire(&format!("user{index}"), None, start));
         }
-        assert!(!limiter.acquire("fresh", start));
+        assert!(!limiter.acquire("fresh", None, start));
+    }
+
+    // c5 item 3: one address spraying random usernames is stopped at
+    // LOGIN_LIMIT_PER_IP without using up the site-wide budget, so a user
+    // from another address still gets in.
+    #[test]
+    fn one_address_cannot_use_up_the_site_wide_limit() {
+        let mut limiter = Limiter::default();
+        let start = Instant::now();
+        let attacker: IpAddr = "203.0.113.7".parse().unwrap();
+        let mut accepted = 0;
+        for index in 0..LOGIN_LIMIT_TOTAL * 2 {
+            if limiter.acquire(&format!("random{index}"), Some(attacker), start) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, LOGIN_LIMIT_PER_IP);
+        let colleague: IpAddr = "198.51.100.20".parse().unwrap();
+        assert!(limiter.acquire("alice", Some(colleague), start));
+        assert!(limiter.acquire("random0", Some(attacker), start + LOGIN_WINDOW));
+    }
+
+    // X-Forwarded-For is believed only from a trusted proxy, and then its
+    // last entry (what the proxy saw); a client cannot spoof its address.
+    #[test]
+    fn forwarded_addresses_are_trusted_only_from_the_proxy() {
+        let caddy: IpAddr = "127.0.0.1".parse().unwrap();
+        let trusted = [caddy, "::1".parse().unwrap()];
+        let forwarded = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", value.parse().unwrap());
+            headers
+        };
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        assert_eq!(
+            client_ip(caddy, &forwarded("203.0.113.7"), &trusted),
+            ip("203.0.113.7")
+        );
+        // A spoofed first entry is ignored: the proxy appended the real one.
+        assert_eq!(
+            client_ip(caddy, &forwarded("1.2.3.4, 203.0.113.7"), &trusted),
+            ip("203.0.113.7")
+        );
+        assert_eq!(
+            client_ip(ip("::1"), &forwarded("198.51.100.20"), &trusted),
+            ip("198.51.100.20")
+        );
+        assert_eq!(
+            client_ip(
+                ip("::ffff:127.0.0.1"),
+                &forwarded("198.51.100.20"),
+                &trusted
+            ),
+            ip("198.51.100.20")
+        );
+        // Directly connected clients cannot choose their address.
+        let direct = ip("192.168.5.50");
+        assert_eq!(client_ip(direct, &forwarded("10.9.9.9"), &trusted), direct);
+        // Malformed or missing headers fall back to the peer.
+        assert_eq!(client_ip(caddy, &forwarded("not-an-ip"), &trusted), caddy);
+        assert_eq!(client_ip(caddy, &HeaderMap::new(), &trusted), caddy);
+        // Without trusted proxies nobody's header counts.
+        assert_eq!(client_ip(caddy, &forwarded("203.0.113.7"), &[]), caddy);
     }
 
     #[tokio::test]

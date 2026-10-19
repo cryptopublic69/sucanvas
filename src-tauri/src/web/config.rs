@@ -22,9 +22,28 @@ pub struct Config {
     pub comfy_output_directory: String,
     #[serde(default = "default_upload")]
     pub max_upload_bytes: usize,
+    // Proxies whose X-Forwarded-For is believed for login rate limiting
+    // (c5 item 3). Default: this machine only, where the deployment's Caddy
+    // connects from; `[]` trusts nobody.
+    // Not written back when default: saving settings must not add a field an
+    // older server (deny_unknown_fields) would refuse after a rollback.
+    #[serde(
+        default = "default_trusted_proxies",
+        skip_serializing_if = "is_default_trusted_proxies"
+    )]
+    pub trusted_proxies: Vec<std::net::IpAddr>,
+}
+fn is_default_trusted_proxies(value: &[std::net::IpAddr]) -> bool {
+    value == default_trusted_proxies().as_slice()
 }
 fn default_upload() -> usize {
     1024 * 1024 * 1024
+}
+pub(super) fn default_trusted_proxies() -> Vec<std::net::IpAddr> {
+    vec![
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+    ]
 }
 pub(super) fn validate_comfy_url(value: &str) -> Result<(), String> {
     if value.is_empty() {
@@ -169,5 +188,24 @@ mod tests {
         ] {
             assert!(read_config(Some(json!([origin]))).is_err(), "{origin}");
         }
+    }
+
+    // c5 item 3: existing config.json files (no trustedProxies) trust the
+    // local proxy only, and saving them back adds no new field, so an older
+    // server (deny_unknown_fields) still starts after a rollback.
+    #[test]
+    fn trusted_proxies_default_to_this_machine_and_are_not_written_back() {
+        let config = read_config(None).unwrap();
+        let local: Vec<std::net::IpAddr> =
+            vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()];
+        assert_eq!(config.trusted_proxies, local);
+        let saved = serde_json::to_value(&config).unwrap();
+        assert!(saved.get("trustedProxies").is_none());
+        let mut custom = config.clone();
+        custom.trusted_proxies = vec![];
+        assert_eq!(
+            serde_json::to_value(&custom).unwrap()["trustedProxies"],
+            json!([])
+        );
     }
 }

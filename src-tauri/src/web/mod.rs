@@ -386,12 +386,16 @@ pub async fn run() -> Result<(), String> {
         listener.local_addr().unwrap(),
         state.config.origin()
     );
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .map_err(|e| e.to_string())
+    // The peer address is needed for login rate limiting (auth::client_ip).
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 async fn require_session(
