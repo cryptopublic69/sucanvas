@@ -61,9 +61,10 @@ export function previewKind(name: string): "image" | "video" | "audio" | "file" 
   if (["mp3", "wav", "flac", "ogg", "m4a", "aac"].includes(extension)) return "audio";
   return "file";
 }
-// Trashed files are not served; only files still in place get a preview.
+// Only files /api/resource serves get a preview: not trashed ones, and not
+// task copies (ComfyUI input/infinite-canvas*, outside its folders).
 export function previewUrl(item: MediaItem) {
-  return item.trashedAt ? null : `/api/resource?resource=${encodeURIComponent(item.reference)}`;
+  return item.trashedAt || item.category === "task-temp" ? null : `/api/resource?resource=${encodeURIComponent(item.reference)}`;
 }
 // Days until a trashed file is removed for good (never below 0).
 export function daysLeft(trashedAt: string, retentionDays: number, now = Date.now()) {

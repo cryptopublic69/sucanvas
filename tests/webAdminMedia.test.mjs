@@ -39,9 +39,11 @@ test("sizes, categories and preview kinds read naturally", () => {
   assert.deepEqual(["a.PNG", "b.mp4", "c.wav", "d.json"].map(media.previewKind), ["image", "video", "audio", "file"]);
 });
 
-test("trashed files get no preview; files in place are served by reference", () => {
+test("trashed files and task copies get no preview; files in place are served by reference", () => {
   assert.equal(media.previewUrl(item("a.png")), "/api/resource?resource=sucanvas-input%3A%2F%2Fsucanvas-imports%2Fa.png");
   assert.equal(media.previewUrl(item("a.png", { trashedAt: "2026-10-01T00:00:00Z" })), null);
+  // /api/resource does not serve ComfyUI input/infinite-canvas*: an <img> would 404.
+  assert.equal(media.previewUrl(item("t.png", { category: "task-temp", reference: "sucanvas-input://infinite-canvas/x/t.png" })), null);
 });
 
 test("days left in the trash count down to zero", () => {
