@@ -18,6 +18,9 @@ pub const HEARTBEAT_SECONDS: u64 = 20;
 pub const TIMEOUT_SECONDS: u64 = 60;
 // How often the server looks for expired tabs.
 pub const SWEEP_SECONDS: u64 = 5;
+// Tabs kept per user; beyond this the one with the oldest heartbeat goes, so
+// random tab ids from a signed-in user cannot grow the table (c5 item 7).
+pub const MAX_TABS_PER_USER: usize = 20;
 pub const PRESENCE_EVENT: &str = "presence://changed";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -102,14 +105,30 @@ impl Presence {
         now: Instant,
     ) -> Vec<PresentUser> {
         self.change(|tabs| {
+            let user_id = user.user_id.clone();
             tabs.insert(
-                (user.user_id.clone(), tab_id.to_owned()),
+                (user_id.clone(), tab_id.to_owned()),
                 Tab {
                     canvas_id: canvas_id.to_owned(),
                     user,
                     last_seen: now,
                 },
             );
+            loop {
+                let mine = tabs.iter().filter(|((owner, _), _)| *owner == user_id);
+                if mine.clone().count() <= MAX_TABS_PER_USER {
+                    break;
+                }
+                // Never the tab that just sent this heartbeat.
+                let oldest = mine
+                    .filter(|((_, id), _)| id != tab_id)
+                    .min_by_key(|(_, tab)| tab.last_seen)
+                    .map(|(key, _)| key.clone());
+                match oldest {
+                    Some(key) => tabs.remove(&key),
+                    None => break,
+                };
+            }
             users_by_canvas(tabs).remove(canvas_id).unwrap_or_default()
         })
     }
@@ -245,6 +264,50 @@ mod tests {
             pushed(&mut events),
             [("c1".to_owned(), vec!["bob".to_owned()])]
         );
+    }
+
+    // c5 item 7: one user's tabs are capped at MAX_TABS_PER_USER, the oldest
+    // heartbeat goes first; other users' tabs are untouched.
+    #[test]
+    fn each_user_keeps_at_most_the_newest_tabs() {
+        let (presence, _events) = presence();
+        let start = Instant::now();
+        presence.heartbeat("c0", "bob-tab", user("bob"), start);
+        for n in 0..=MAX_TABS_PER_USER {
+            let canvas = if n == 0 { "c-old" } else { "c1" };
+            presence.heartbeat(
+                canvas,
+                &format!("tab-{n}"),
+                user("alice"),
+                start + Duration::from_secs(n as u64 + 1),
+            );
+        }
+        let tabs = presence.tabs.lock().unwrap();
+        let alice: Vec<&str> = tabs
+            .keys()
+            .filter(|(owner, _)| owner == "alice")
+            .map(|(_, id)| id.as_str())
+            .collect();
+        assert_eq!(alice.len(), MAX_TABS_PER_USER);
+        assert!(!alice.contains(&"tab-0"), "the oldest tab was dropped");
+        assert!(tabs.contains_key(&("bob".to_owned(), "bob-tab".to_owned())));
+        drop(tabs);
+        assert!(presence.users("c-old").is_empty());
+        assert_eq!(ids(&presence.users("c1")), ["alice"]);
+        // An older tab coming back counts as new and evicts the next oldest.
+        presence.heartbeat(
+            "c1",
+            "tab-0",
+            user("alice"),
+            start + Duration::from_secs(100),
+        );
+        let tabs = presence.tabs.lock().unwrap();
+        assert_eq!(
+            tabs.keys().filter(|(owner, _)| owner == "alice").count(),
+            MAX_TABS_PER_USER
+        );
+        assert!(!tabs.contains_key(&("alice".to_owned(), "tab-1".to_owned())));
+        assert_eq!(MAX_TABS_PER_USER, 20);
     }
 
     #[test]
