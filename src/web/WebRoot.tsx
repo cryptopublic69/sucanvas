@@ -5,7 +5,8 @@ import { flushSettings, loadSettings } from "./settings";
 import { currentSession, signOut, stageFor, switchEditMode, type WebUser } from "./account";
 import { LoginScreen, PasswordChangeScreen, UserMenu } from "./AccountScreens";
 import { UsersPage } from "./UsersPage";
-import { registerEditModeHandler, setAccessUser } from "../account/access";
+import { registerAssignableUsersHandler, registerEditModeHandler, setAccessUser } from "../account/access";
+import { listUsers } from "./adminUsers";
 import "./web.css";
 
 // "password": the account must replace its temporary password before using the canvas.
@@ -42,6 +43,8 @@ export default function WebRoot() {
   useEffect(() => {
     let cancelled = false;
     registerEditModeHandler(switchEditMode);
+    // "画布设置" owner list: enabled accounts (the server refuses disabled ones too).
+    registerAssignableUsersHandler(async () => (await listUsers()).filter((user) => !user.disabled));
     void currentSession().then((session) => cancelled ? undefined : enter(session.user, session.editModeRemainingSeconds ?? null)).catch(() => { if (!cancelled) setStage("login"); });
     const expired = () => { leave(); setNotice("登录已失效，请重新登录"); };
     const passwordRequired = () => { closeEvents(); setChangingPassword(false); setStage("password"); };
@@ -52,6 +55,7 @@ export default function WebRoot() {
     return () => {
       cancelled = true;
       registerEditModeHandler(null);
+      registerAssignableUsersHandler(null);
       window.removeEventListener("sucanvas:session-expired", expired);
       window.removeEventListener("sucanvas:password-change-required", passwordRequired);
       window.removeEventListener("sucanvas:web-error", failure);

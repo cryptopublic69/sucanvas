@@ -14,6 +14,9 @@ const previewSource = await readFile(new URL("../src/web/previewCache.ts", impor
 const previewModule = inline(ts.transpileModule(previewSource, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText);
 const { versionedPreviewUrl } = await import(previewModule);
 const source = await readFile(new URL("../src/canvas/CanvasNodePresentation.tsx", import.meta.url), "utf8");
+// The real read-only context (default false), bound to the real React.
+const readOnlySource = (await readFile(new URL("../src/canvas/readOnly.ts", import.meta.url), "utf8")).replace('"react"', JSON.stringify(realModule("react")));
+const readOnlyModule = inline(ts.transpileModule(readOnlySource, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText);
 async function presentation(mode) {
   const replacements = [
     ['"react"', JSON.stringify(realModule("react"))],
@@ -23,6 +26,7 @@ async function presentation(mode) {
     ['"./useBatchedNodeInternals"', JSON.stringify(inline('export const useBatchedNodeInternals=()=>()=>{};'))],
     ['"../videoPosterCache"', JSON.stringify(inline('export const posterMemoryCache={peek:src=>globalThis.previewTestCovers.get(src)}; export const requestCachedVideoPoster=()=>{ throw new Error("Loaded covers must not require asynchronous reads for the initial render"); };'))],
     ['"../web/previewCache"', JSON.stringify(previewModule)],
+    ['"./readOnly"', JSON.stringify(readOnlyModule)],
     ['"../web/SessionImagePreview"', JSON.stringify(inline(`import React from ${JSON.stringify(realModule("react"))}; export const SessionImagePreview=props=>React.createElement("img",{...props,src:globalThis.previewTestImages?.get(props.src)?.url});`))],
     ['"../web/useVideoStill"', JSON.stringify(inline(`export const useVideoStill=src=>${mode === "web" ? 'globalThis.previewTestStills?.get(src) || ""' : '""'};`))],
   ];

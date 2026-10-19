@@ -4,9 +4,10 @@
 use super::{
     auth::{Permission, Session},
     authz::{NodeScope, RecordRefs},
+    canvases,
     ownership::Ownership,
     rpc::{argument, channel},
-    users::Role,
+    users::{Actor, Role},
     WebState,
 };
 use crate::{
@@ -70,6 +71,10 @@ commands! {
     UpdateProject => "update_project",
     SetProjectPrivate => "set_project_private",
     SetCanvasSharing => "set_canvas_sharing",
+    // Web only (CANVAS-012c2).
+    AdminDeleteProject => "admin_delete_project",
+    SetCanvasOwner => "set_canvas_owner",
+    CopySharedProject => "copy_shared_project",
     SetProjectPreviewImage => "set_project_preview_image",
     DeleteProject => "delete_project",
     CreateNode => "create_node",
@@ -297,6 +302,10 @@ pub fn permissions(
         | RestoreWorkflowModuleBundle
         | SetProjectPrivate
         | SetCanvasSharing
+        // Any project, other users' private ones included, without edit mode;
+        // always audited (architect, 012c2 item 1).
+        | AdminDeleteProject
+        | SetCanvasOwner
         // Permanently deleting generated files stays admin-only until deletion
         // is checked against the canvases that reference each file.
         | DeleteVideoFiles
@@ -340,6 +349,9 @@ pub fn permissions(
             input::<UpdateProjectInput>(args)?.id,
         )],
         DeleteProject => vec![Permission::CanvasDelete(argument(args, "id")?)],
+        // Reading the source is enough; the copy is the caller's own, and the
+        // command itself refuses anything but shared projects.
+        CopySharedProject => vec![Permission::CanvasRead(argument(args, "id")?)],
         CreateEmptyFolder => vec![Permission::CanvasWrite(argument::<String>(
             &args["input"],
             "canvasId",
@@ -478,6 +490,15 @@ fn listed(state: &WebState, session: &Session, summaries: bool) -> Result<Value,
             .map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())
+}
+
+fn actor_username(state: &WebState, session: &Session) -> Result<String, String> {
+    state
+        .auth
+        .users()
+        .by_id(&session.user_id)?
+        .map(|credential| credential.user.username)
+        .ok_or_else(|| "用户不存在".to_owned())
 }
 
 // Runs a command whose permissions were already granted.
@@ -656,6 +677,69 @@ pub async fn dispatch(
             State(&state.core),
         )?)
         .map_err(|e| e.to_string()),
+        Command::AdminDeleteProject => {
+            let username = actor_username(state, session)?;
+            let actor = Actor {
+                id: &session.user_id,
+                username: &username,
+            };
+            let deleted = canvases::admin_delete(
+                state.auth.ownership(),
+                &actor,
+                &argument::<String>(args, "id")?,
+            )?;
+            // Same /v1 fallback as the desktop delete_project. Media files
+            // are deliberately left alone (CANVAS-012c4 handles them).
+            let mut active = state
+                .core
+                .active_canvas_id
+                .write()
+                .map_err(|_| "active project lock is poisoned".to_owned())?;
+            if *active == deleted.id {
+                *active = state
+                    .core
+                    .database
+                    .list_projects()
+                    .map_err(|e| e.to_string())?
+                    .first()
+                    .map(|project| project.canvas.id.clone())
+                    .unwrap_or_else(|| crate::models::DEFAULT_CANVAS_ID.to_owned());
+            }
+            serde_json::to_value(deleted).map_err(|e| e.to_string())
+        }
+        Command::SetCanvasOwner => {
+            let username = actor_username(state, session)?;
+            let actor = Actor {
+                id: &session.user_id,
+                username: &username,
+            };
+            let owner = canvases::set_owner(
+                state.auth.ownership(),
+                &actor,
+                &argument::<String>(args, "id")?,
+                &argument::<String>(args, "userId")?,
+            )?;
+            Ok(serde_json::json!({
+                "rootCanvasId": owner.root_id,
+                "ownerUserId": owner.owner_user_id,
+                "isShared": owner.is_shared,
+            }))
+        }
+        Command::CopySharedProject => {
+            let copy = canvases::copy_shared(
+                state.auth.ownership(),
+                &session.user_id,
+                &argument::<String>(args, "id")?,
+            )?;
+            serde_json::to_value(
+                state
+                    .core
+                    .database
+                    .load_project(&copy)
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        }
         Command::CreateNode => {
             let mut node: CreateNodeInput = input(args)?;
             // A missing canvas id means the active canvas (admins only, see permissions).
@@ -983,6 +1067,8 @@ mod tests {
             "restore_workflow_module_bundle",
             "set_project_private",
             "set_canvas_sharing",
+            "admin_delete_project",
+            "set_canvas_owner",
             "delete_video_files",
             "delete_image_files",
         ] {
@@ -1030,6 +1116,7 @@ mod tests {
         rows.extend([
             ("load_workspace", json!({"canvasId": "canvas:a"}), "canvas-read"),
             ("inspect_workspace", json!({"canvasId": "canvas:a"}), "canvas-read"),
+            ("copy_shared_project", json!({"id": "canvas:a"}), "canvas-read"),
             ("update_project", json!({"input": {"id": "canvas:a", "name": "n"}}), "canvas-write"),
             ("create_empty_folder", json!({"input": {"canvasId": "canvas:a", "x": 0.0, "y": 0.0}}), "canvas-write"),
             ("import_media", json!({"canvasId": "canvas:a"}), "canvas-write"),

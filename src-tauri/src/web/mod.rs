@@ -2,6 +2,7 @@ mod accounts;
 mod auth;
 mod authz;
 mod backup;
+mod canvases;
 mod config;
 mod connection;
 mod dispatch;

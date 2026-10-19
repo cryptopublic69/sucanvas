@@ -7436,6 +7436,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         <button
           type="button"
           className="nodrag folder-node-body"
+          data-read-only-safe=""
           onClick={() => onOpenFolder(id)}
           title={`打开目录“${record.title}”`}
           aria-label={`打开目录“${record.title}”`}

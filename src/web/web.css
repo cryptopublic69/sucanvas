@@ -34,6 +34,17 @@
 .canvas-access-banner.is-editing { color: #ffd9d9; background: rgba(86, 30, 36, .95); border-color: rgba(232, 100, 118, .5); }
 .canvas-access-banner button { height: 28px; padding: 0 10px; color: inherit; background: rgba(255, 255, 255, .1); border: 1px solid rgba(255, 255, 255, .25); border-radius: 7px; cursor: pointer; font-size: inherit; }
 .canvas-access-banner button:hover { background: rgba(255, 255, 255, .18); }
+/* CANVAS-012c2: read-only nodes (admin, other user's private canvas, no edit mode). */
+.react-flow.is-canvas-read-only :is(.node-resize-handle, .node-resize-line, .video-ratio-resizer, .video-generation-height-resizer) { display: none !important; }
+.canvas-node-detail-host.is-read-only :is(textarea, input, select) { caret-color: transparent; cursor: default; }
+.canvas-node-detail-host.is-read-only :is(button, [role="button"]):not([data-read-only-safe]) { cursor: not-allowed; opacity: .55; }
+.project-card-actions .project-settings-button { display: inline-flex; align-items: center; gap: 4px; }
+.project-delete-owner-warning { margin: 6px 0 0; padding: 8px 10px; color: #ffd9d9; background: rgba(232, 100, 118, .12); border: 1px solid rgba(232, 100, 118, .4); border-radius: 8px; font-weight: 600; }
+.canvas-settings-dialog > label { display: flex; flex-direction: column; gap: 6px; }
+.canvas-settings-dialog select { height: 34px; padding: 0 8px; color: #e0e3ea; background: #0f1117; border: 1px solid #343946; border-radius: 8px; }
+.canvas-settings-error { margin: 8px 0 0; color: #f1a3ad; }
+:root[data-theme="light"] .canvas-settings-dialog select { color: #242936; background: #fff; border-color: #d8dce6; }
+:root[data-theme="light"] .project-delete-owner-warning { color: #8a2431; background: #fdecee; }
 :root[data-theme="light"] .project-owner-section > h2 { color: #242936; }
 :root[data-theme="light"] .project-owner-group > h3 { color: #3f4659; }
 :root[data-theme="light"] .project-section-empty { color: #7a8292; background: #f7f8fb; border-color: #d8dce6; }

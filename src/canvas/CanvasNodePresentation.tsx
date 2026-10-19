@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState } from "react";
-import type { ComponentType } from "react";
+import type { ComponentType, SyntheticEvent } from "react";
+import { readOnlyClickBlocked, useCanvasReadOnly } from "./readOnly";
 import { Handle, Position, useStore } from "@xyflow/react";
 import type { NodeProps } from "@xyflow/react";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -14,6 +15,7 @@ import { useVideoStill } from "../web/useVideoStill";
 type Props = NodeProps<CanvasFlowNode> & { detail: ComponentType<NodeProps<CanvasFlowNode>> };
 export const CanvasNodePresentation = memo(function CanvasNodePresentation({ detail: Detail, ...props }: Props) {
   const distant = useStore((state) => state.transform[2] < 0.35);
+  const readOnly = useCanvasReadOnly();
   const [ready, setReady] = useState(false);
   const [engaged, setEngaged] = useState(false);
   const host = useRef<HTMLDivElement>(null);
@@ -58,6 +60,23 @@ export const CanvasNodePresentation = memo(function CanvasNodePresentation({ det
     else cancel = nodeRenderQueue.enqueue(readCover);
     return () => { cancel(); cancelRead?.(); release?.(); };
   }, [full, video]);
+  if (full && readOnly) {
+    const swallow = (event: SyntheticEvent) => { event.preventDefault(); event.stopPropagation(); };
+    return <div
+      ref={host}
+      className="canvas-node-detail-host is-read-only"
+      onFocusCapture={() => setEngaged(true)}
+      onDoubleClickCapture={(event) => { setEngaged(true); swallow(event); }}
+      onClickCapture={(event) => { if (readOnlyClickBlocked(event.target)) swallow(event); }}
+      onChangeCapture={(event) => event.stopPropagation()}
+      onBeforeInputCapture={swallow}
+      onPasteCapture={swallow}
+      onCutCapture={swallow}
+      onDropCapture={swallow}
+    >
+      <Detail {...props} />
+    </div>;
+  }
   if (full) return <div ref={host} className="canvas-node-detail-host" onFocusCapture={() => setEngaged(true)} onDoubleClickCapture={() => setEngaged(true)}><Detail {...props} /></div>;
   const residentPoster = import.meta.env.MODE === "web" ? posterMemoryCache.peek(video)?.url : "";
   const thumbnail = image || still || residentPoster || (poster?.src === video ? poster.url : "");

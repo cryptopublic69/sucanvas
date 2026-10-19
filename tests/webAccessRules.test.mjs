@@ -28,11 +28,12 @@ test("home page sections: mine, shared, and (admin) other users by owner", () =>
   assert.equal(access.groupProjects(projects, null).mine.length, 4);
 });
 
-test("delete buttons: shared canvases only for admins, never for other users' private canvases", () => {
+test("delete buttons: shared canvases only for admins; admins may delete other users' private canvases (012c2)", () => {
   assert.equal(access.canDeleteProject(canvas("u-alice"), alice), true);
   assert.equal(access.canDeleteProject(canvas("u-alice", true), alice), false);
   assert.equal(access.canDeleteProject(canvas("u-alice", true), admin), true);
-  assert.equal(access.canDeleteProject(canvas("u-alice"), admin), false);
+  assert.equal(access.canDeleteProject(canvas("u-alice"), admin), true);
+  assert.equal(access.canDeleteProject(canvas("u-bob"), alice), false);
   assert.equal(access.canDeleteProject(canvas(null), admin), true);
   assert.equal(access.canDeleteProject(canvas("u-bob", true), null), true);
 });

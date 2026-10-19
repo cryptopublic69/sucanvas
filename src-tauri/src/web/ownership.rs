@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 ";
 
-fn table_exists(connection: &Connection, table: &str) -> Result<bool, String> {
+pub(super) fn table_exists(connection: &Connection, table: &str) -> Result<bool, String> {
     connection
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -130,7 +130,10 @@ pub(super) fn root_of(connection: &Connection, canvas_id: &str) -> Result<Option
     Err("画布层级过深".to_owned())
 }
 
-fn owner_of(connection: &Connection, canvas_id: &str) -> Result<Option<CanvasOwner>, String> {
+pub(super) fn owner_of(
+    connection: &Connection,
+    canvas_id: &str,
+) -> Result<Option<CanvasOwner>, String> {
     let Some(root_id) = root_of(connection, canvas_id)? else {
         return Ok(None);
     };
@@ -152,7 +155,7 @@ fn owner_of(connection: &Connection, canvas_id: &str) -> Result<Option<CanvasOwn
 
 // Children copy the root's owner and sharing; covers subtrees re-created by
 // undo, where the insert trigger only sees one level at a time.
-fn normalize_tree(connection: &Connection, root_id: &str) -> Result<(), String> {
+pub(super) fn normalize_tree(connection: &Connection, root_id: &str) -> Result<(), String> {
     connection
         .execute(
             "WITH RECURSIVE tree(id, depth) AS (
@@ -173,7 +176,7 @@ fn normalize_tree(connection: &Connection, root_id: &str) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
-fn insert_audit(
+pub(super) fn insert_audit(
     connection: &Connection,
     user_id: &str,
     username: &str,
@@ -307,6 +310,12 @@ impl Ownership {
             connection: Mutex::new(connection),
             task_owners: Mutex::new(HashMap::new()),
         })
+    }
+
+    // The ownership connection, for whole-tree operations that must run in
+    // one transaction (web/canvases.rs: admin delete, owner change, copy).
+    pub(super) fn connection(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.connection.lock().unwrap()
     }
 
     // Records who started a generation. A client id already claimed by

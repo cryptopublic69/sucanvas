@@ -54,6 +54,17 @@ export function useAccess() {
   return { user: snapshot.user, editModeActive: snapshot.editModeUntil > Date.now() };
 }
 
+// Accounts an admin may hand a canvas to (enabled only). WebRoot provides the
+// request so shared code never imports the Web API.
+export type AssignableUser = { id: string; username: string; displayName: string | null; role: "admin" | "user" };
+let assignableUsersHandler: (() => Promise<AssignableUser[]>) | null = null;
+export function registerAssignableUsersHandler(handler: typeof assignableUsersHandler) {
+  assignableUsersHandler = handler;
+}
+export async function assignableUsers(): Promise<AssignableUser[]> {
+  return assignableUsersHandler ? assignableUsersHandler() : [];
+}
+
 // No user means the desktop (or the Web before sign-in): nothing is restricted.
 export function isAdministrator(user: AccessUser | null) {
   return !user || user.role === "admin";
@@ -85,13 +96,21 @@ export function groupProjects<T extends { canvas: CanvasOwnership }>(projects: T
   groups.others = [...owners.values()].sort((a, b) => (a.key ? 0 : 1) - (b.key ? 0 : 1) || a.label.localeCompare(b.label, "zh-CN"));
   return groups;
 }
-// Delete button on the home page. Other users' private canvases are deleted
-// from inside the canvas in edit mode, not from the overview.
+// Delete button on the home page. Admins may delete any project; other users'
+// private ones go through the separate, audited admin delete (CANVAS-012c2).
 export function canDeleteProject(canvas: CanvasOwnership, user: AccessUser | null) {
   if (!user) return true;
-  if (canvas.isShared) return user.role === "admin";
-  if (canvas.ownerUserId === user.id) return true;
-  return user.role === "admin" && !canvas.ownerUserId;
+  if (user.role === "admin") return true;
+  return !canvas.isShared && canvas.ownerUserId === user.id;
+}
+// Confirmation text for deleting another user's private canvas, else null.
+export function othersPrivateDeleteWarning(canvas: CanvasOwnership, user: AccessUser | null) {
+  if (!user || user.role !== "admin" || projectSection(canvas, user) !== "others") return null;
+  return `这是 ${ownerLabel(canvas) || "其他用户"} 的私有画布，删除后不可恢复。`;
+}
+// Anyone may copy a shared project into their own canvases.
+export function canCopyProject(canvas: CanvasOwnership, user: AccessUser | null) {
+  return Boolean(user && canvas.isShared);
 }
 // An admin looking at someone else's private canvas reads it until edit mode is on.
 export function readOnlyCanvas(canvas: CanvasOwnership | null | undefined, user: AccessUser | null, editMode: boolean) {

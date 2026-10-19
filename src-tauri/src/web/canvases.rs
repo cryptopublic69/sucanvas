@@ -1,0 +1,730 @@
+// Whole-canvas operations for the Web (CANVAS-012c2): admin delete, owner
+// change and copying a shared canvas into the caller's own canvases. Each runs
+// in one IMMEDIATE transaction on the ownership connection with foreign keys
+// on, so the change and its audit row land together or not at all.
+use super::ownership::{
+    insert_audit, normalize_tree, owner_of, root_of, Actor, CanvasOwner, Ownership,
+    ROOT_DEPTH_LIMIT,
+};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use serde::Serialize;
+use serde_json::Value;
+use std::collections::HashMap;
+use uuid::Uuid;
+
+const OWNERLESS: &str = "(无主)";
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedCanvas {
+    pub id: String,
+    pub name: String,
+    pub owner_username: Option<String>,
+}
+
+fn error(error: impl ToString) -> String {
+    error.to_string()
+}
+
+fn begin(connection: &mut Connection) -> Result<Transaction<'_>, String> {
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON")
+        .map_err(error)?;
+    connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(error)
+}
+
+struct RootInfo {
+    name: String,
+    owner_id: Option<String>,
+    owner_username: Option<String>,
+    is_shared: bool,
+}
+
+fn root_info(connection: &Connection, root_id: &str) -> Result<RootInfo, String> {
+    connection
+        .query_row(
+            "SELECT canvases.name, canvases.owner_user_id, users.username, canvases.is_shared
+             FROM canvases LEFT JOIN users ON users.id = canvases.owner_user_id
+             WHERE canvases.id = ?1",
+            [root_id],
+            |row| {
+                Ok(RootInfo {
+                    name: row.get(0)?,
+                    owner_id: row.get(1)?,
+                    owner_username: row.get(2)?,
+                    is_shared: row.get::<_, i64>(3)? != 0,
+                })
+            },
+        )
+        .optional()
+        .map_err(error)?
+        .ok_or_else(|| "画布不存在".to_owned())
+}
+
+// Delete and owner change act on a whole project: folders follow their root.
+fn project_root(connection: &Connection, canvas_id: &str) -> Result<String, String> {
+    let root = root_of(connection, canvas_id)?.ok_or_else(|| "画布不存在".to_owned())?;
+    if root != canvas_id {
+        return Err("只能对整个画布项目执行此操作".to_owned());
+    }
+    Ok(root)
+}
+
+// Admin delete of any project, other users' private ones included, without
+// edit mode (architect, 012c2 item 1). Only canvas records go: unlike the
+// desktop delete_project this does not touch media files (left to c4).
+pub fn admin_delete(
+    store: &Ownership,
+    actor: &Actor<'_>,
+    canvas_id: &str,
+) -> Result<DeletedCanvas, String> {
+    let mut connection = store.connection();
+    let transaction = begin(&mut connection)?;
+    let root = project_root(&transaction, canvas_id)?;
+    let info = root_info(&transaction, &root)?;
+    crate::db::delete_canvas_tree(&transaction, &root).map_err(error)?;
+    let command = format!(
+        "admin_delete_project name={} owner={}",
+        info.name,
+        info.owner_username.as_deref().unwrap_or(OWNERLESS)
+    );
+    insert_audit(
+        &transaction,
+        actor.id,
+        actor.username,
+        &root,
+        info.owner_id.as_deref(),
+        &command,
+    )?;
+    transaction.commit().map_err(error)?;
+    Ok(DeletedCanvas {
+        id: root,
+        name: info.name,
+        owner_username: info.owner_username,
+    })
+}
+
+// Admin: give a project (with its folders) to another enabled account.
+// Sharing is unchanged; giving it to its current owner changes nothing.
+pub fn set_owner(
+    store: &Ownership,
+    actor: &Actor<'_>,
+    canvas_id: &str,
+    user_id: &str,
+) -> Result<CanvasOwner, String> {
+    let mut connection = store.connection();
+    let transaction = begin(&mut connection)?;
+    let root = project_root(&transaction, canvas_id)?;
+    let info = root_info(&transaction, &root)?;
+    let target: Option<(String, bool)> = transaction
+        .query_row(
+            "SELECT username, disabled FROM users WHERE id = ?1",
+            [user_id],
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((target_username, disabled)) = target else {
+        return Err("用户不存在".to_owned());
+    };
+    if disabled {
+        return Err("画布只能转给启用的用户".to_owned());
+    }
+    if info.owner_id.as_deref() != Some(user_id) {
+        transaction
+            .execute(
+                "UPDATE canvases SET owner_user_id = ?2 WHERE id = ?1",
+                params![root, user_id],
+            )
+            .map_err(error)?;
+        normalize_tree(&transaction, &root)?;
+        let command = format!(
+            "set_canvas_owner name={} from={} to={target_username}",
+            info.name,
+            info.owner_username.as_deref().unwrap_or(OWNERLESS)
+        );
+        insert_audit(
+            &transaction,
+            actor.id,
+            actor.username,
+            &root,
+            info.owner_id.as_deref(),
+            &command,
+        )?;
+    }
+    let owner = owner_of(&transaction, &root)?.ok_or_else(|| "画布不存在".to_owned())?;
+    transaction.commit().map_err(error)?;
+    Ok(owner)
+}
+
+// Ids inside node content and edge metadata (childCanvasId, promptNodeId, ...)
+// are rewritten wherever a string equals a copied canvas, node or edge id;
+// prompt set ids only under "promptSetId". Media paths are left untouched, so
+// the copy references the same files.
+fn remap(
+    value: &mut Value,
+    ids: &HashMap<String, String>,
+    prompt_sets: &mut HashMap<String, String>,
+) {
+    match value {
+        Value::String(text) => {
+            if let Some(new) = ids.get(text.as_str()) {
+                *text = new.clone();
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                remap(item, ids, prompt_sets);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                match item {
+                    Value::String(text) if key == "promptSetId" && !text.is_empty() => {
+                        *text = prompt_set(prompt_sets, text);
+                    }
+                    _ => remap(item, ids, prompt_sets),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn prompt_set(prompt_sets: &mut HashMap<String, String>, old: &str) -> String {
+    prompt_sets
+        .entry(old.to_owned())
+        .or_insert_with(|| Uuid::new_v4().to_string())
+        .clone()
+}
+
+fn remapped_json(
+    text: &str,
+    ids: &HashMap<String, String>,
+    prompt_sets: &mut HashMap<String, String>,
+) -> Result<String, String> {
+    let mut value: Value = serde_json::from_str(text).map_err(error)?;
+    remap(&mut value, ids, prompt_sets);
+    serde_json::to_string(&value).map_err(error)
+}
+
+fn mapped<'a>(ids: &'a HashMap<String, String>, id: &str) -> Result<&'a str, String> {
+    ids.get(id)
+        .map(String::as_str)
+        .ok_or_else(|| format!("画布数据不一致，找不到 {id}"))
+}
+
+struct NodeRow {
+    id: String,
+    canvas_id: String,
+    kind: String,
+    title: String,
+    content: String,
+    source: String,
+    geometry: (f64, f64, f64, f64),
+    status: String,
+}
+
+struct EdgeRow {
+    id: String,
+    canvas_id: String,
+    source: String,
+    target: String,
+    kind: String,
+    metadata: String,
+}
+
+// Copies a shared project (whole folder tree) into `owner_user_id`'s private
+// canvases. Returns the new root canvas id; the source is not modified.
+pub fn copy_shared(
+    store: &Ownership,
+    owner_user_id: &str,
+    canvas_id: &str,
+) -> Result<String, String> {
+    let mut connection = store.connection();
+    let transaction = begin(&mut connection)?;
+    let root = root_of(&transaction, canvas_id)?.ok_or_else(|| "画布不存在".to_owned())?;
+    let info = root_info(&transaction, &root)?;
+    if !info.is_shared {
+        return Err("只能复制共享画布".to_owned());
+    }
+    // Parent canvases first, so folder links always find both ends.
+    let tree: Vec<String> = {
+        let mut statement = transaction
+            .prepare(
+                "WITH RECURSIVE tree(id, depth) AS (
+                     SELECT ?1, 0
+                     UNION
+                     SELECT canvas_folders.child_canvas_id, tree.depth + 1 FROM tree
+                     JOIN nodes ON nodes.canvas_id = tree.id
+                     JOIN canvas_folders ON canvas_folders.folder_node_id = nodes.id
+                     WHERE tree.depth < ?2
+                 )
+                 SELECT id FROM tree GROUP BY id ORDER BY MIN(depth)",
+            )
+            .map_err(error)?;
+        let rows = statement
+            .query_map(params![root, ROOT_DEPTH_LIMIT as i64], |row| row.get(0))
+            .map_err(error)?;
+        rows.collect::<Result<_, _>>().map_err(error)?
+    };
+    let mut ids: HashMap<String, String> = tree
+        .iter()
+        .map(|id| (id.clone(), format!("canvas:{}", Uuid::new_v4())))
+        .collect();
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut folders = Vec::new();
+    let mut bindings = Vec::new();
+    for canvas in &tree {
+        let mut statement = transaction
+            .prepare(
+                "SELECT id, canvas_id, kind, title, content_json, source, x, y, width, height, status
+                 FROM nodes WHERE canvas_id = ?1 ORDER BY created_at, id",
+            )
+            .map_err(error)?;
+        let rows = statement
+            .query_map([canvas], |row| {
+                Ok(NodeRow {
+                    id: row.get(0)?,
+                    canvas_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    title: row.get(3)?,
+                    content: row.get(4)?,
+                    source: row.get(5)?,
+                    geometry: (row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?),
+                    status: row.get(10)?,
+                })
+            })
+            .map_err(error)?;
+        nodes.extend(rows.collect::<Result<Vec<_>, _>>().map_err(error)?);
+        let mut statement = transaction
+            .prepare(
+                "SELECT id, canvas_id, source_node_id, target_node_id, kind, metadata_json
+                 FROM edges WHERE canvas_id = ?1 ORDER BY created_at, id",
+            )
+            .map_err(error)?;
+        let rows = statement
+            .query_map([canvas], |row| {
+                Ok(EdgeRow {
+                    id: row.get(0)?,
+                    canvas_id: row.get(1)?,
+                    source: row.get(2)?,
+                    target: row.get(3)?,
+                    kind: row.get(4)?,
+                    metadata: row.get(5)?,
+                })
+            })
+            .map_err(error)?;
+        edges.extend(rows.collect::<Result<Vec<_>, _>>().map_err(error)?);
+        let mut statement = transaction
+            .prepare(
+                "SELECT canvas_folders.folder_node_id, canvas_folders.child_canvas_id
+                 FROM canvas_folders JOIN nodes ON nodes.id = canvas_folders.folder_node_id
+                 WHERE nodes.canvas_id = ?1",
+            )
+            .map_err(error)?;
+        let rows = statement
+            .query_map([canvas], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(error)?;
+        folders.extend(rows.collect::<Result<Vec<_>, _>>().map_err(error)?);
+        let mut statement = transaction
+            .prepare(
+                "SELECT prompt_set_id, prompt_set_title, scene_key, scene_title, node_id
+                 FROM prompt_scene_bindings WHERE canvas_id = ?1",
+            )
+            .map_err(error)?;
+        let rows = statement
+            .query_map([canvas], |row| {
+                Ok((
+                    canvas.clone(),
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(error)?;
+        bindings.extend(rows.collect::<Result<Vec<_>, _>>().map_err(error)?);
+    }
+    for node in &nodes {
+        ids.insert(node.id.clone(), format!("node:{}", Uuid::new_v4()));
+    }
+    for edge in &edges {
+        ids.insert(edge.id.clone(), format!("edge:{}", Uuid::new_v4()));
+    }
+    let mut prompt_sets = HashMap::new();
+    let now = chrono::Utc::now().to_rfc3339();
+    for canvas in &tree {
+        let (name, is_private, preview): (String, i64, Option<String>) = transaction
+            .query_row(
+                "SELECT name, is_private, preview_image_path FROM canvases WHERE id = ?1",
+                [canvas],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(error)?;
+        let name = if *canvas == root {
+            format!("{name} 副本")
+        } else {
+            name
+        };
+        transaction
+            .execute(
+                "INSERT INTO canvases (id, name, is_private, preview_image_path, created_at, updated_at, is_shared, owner_user_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, 0, ?6)",
+                params![mapped(&ids, canvas)?, name, is_private, preview, now, owner_user_id],
+            )
+            .map_err(error)?;
+    }
+    for node in &nodes {
+        let (x, y, width, height) = node.geometry;
+        // request_id is unique per generation request and stays with the source.
+        transaction
+            .execute(
+                "INSERT INTO nodes (id, canvas_id, kind, title, content_json, source, request_id, x, y, width, height, status, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+                params![
+                    mapped(&ids, &node.id)?,
+                    mapped(&ids, &node.canvas_id)?,
+                    node.kind,
+                    node.title,
+                    remapped_json(&node.content, &ids, &mut prompt_sets)?,
+                    node.source,
+                    x,
+                    y,
+                    width,
+                    height,
+                    node.status,
+                    now
+                ],
+            )
+            .map_err(error)?;
+    }
+    for edge in &edges {
+        transaction
+            .execute(
+                "INSERT INTO edges (id, canvas_id, source_node_id, target_node_id, kind, metadata_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    mapped(&ids, &edge.id)?,
+                    mapped(&ids, &edge.canvas_id)?,
+                    mapped(&ids, &edge.source)?,
+                    mapped(&ids, &edge.target)?,
+                    edge.kind,
+                    remapped_json(&edge.metadata, &ids, &mut prompt_sets)?,
+                    now
+                ],
+            )
+            .map_err(error)?;
+    }
+    for (folder_node, child_canvas) in &folders {
+        transaction
+            .execute(
+                "INSERT INTO canvas_folders (folder_node_id, child_canvas_id, created_at) VALUES (?1, ?2, ?3)",
+                params![mapped(&ids, folder_node)?, mapped(&ids, child_canvas)?, now],
+            )
+            .map_err(error)?;
+    }
+    for (canvas, prompt_set_id, prompt_set_title, scene_key, scene_title, node) in &bindings {
+        transaction
+            .execute(
+                "INSERT INTO prompt_scene_bindings (prompt_set_id, prompt_set_title, canvas_id, scene_key, scene_title, node_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![
+                    prompt_set(&mut prompt_sets, prompt_set_id),
+                    prompt_set_title,
+                    mapped(&ids, canvas)?,
+                    scene_key,
+                    scene_title,
+                    mapped(&ids, node)?,
+                    now
+                ],
+            )
+            .map_err(error)?;
+    }
+    let new_root = mapped(&ids, &root)?.to_owned();
+    normalize_tree(&transaction, &new_root)?;
+    transaction.commit().map_err(error)?;
+    Ok(new_root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::auth::Permission;
+    use super::super::authz::{
+        check,
+        tests::{world, World},
+        Denied,
+    };
+    use super::*;
+    use serde_json::json;
+
+    fn admin(world: &World) -> Actor<'_> {
+        Actor {
+            id: &world.admin.user_id,
+            username: "admin",
+        }
+    }
+    fn db(world: &World) -> Connection {
+        Connection::open(world.fixture.database()).unwrap()
+    }
+    fn count(world: &World, sql: &str, id: &str) -> i64 {
+        db(world).query_row(sql, [id], |row| row.get(0)).unwrap()
+    }
+    fn audit(world: &World) -> Vec<(String, Option<String>, String)> {
+        let connection = db(world);
+        let mut statement = connection
+            .prepare("SELECT canvas_id, canvas_owner_user_id, command FROM audit_log ORDER BY id")
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn admins_delete_other_users_private_projects_without_edit_mode_and_audit_it() {
+        let world = world();
+        let alices = world.project(&world.alice, false);
+        let child = world.folder(&alices);
+        // Regular users are refused the admin category; admins need no edit mode.
+        assert!(matches!(
+            check(world.store(), &world.alice, &Permission::Admin),
+            Err(Denied::Forbidden(_))
+        ));
+        assert!(world.admin.admin_edit_until.is_none());
+        assert!(check(world.store(), &world.admin, &Permission::Admin).is_ok());
+        // A folder canvas is not a project; nothing is deleted.
+        assert_eq!(
+            admin_delete(world.store(), &admin(&world), &child).unwrap_err(),
+            "只能对整个画布项目执行此操作"
+        );
+        assert!(admin_delete(world.store(), &admin(&world), "canvas:missing").is_err());
+        assert!(audit(&world).is_empty());
+        let deleted = admin_delete(world.store(), &admin(&world), &alices).unwrap();
+        assert_eq!(deleted.owner_username.as_deref(), Some("alice"));
+        for canvas in [&alices, &child] {
+            assert_eq!(
+                count(
+                    &world,
+                    "SELECT COUNT(*) FROM canvases WHERE id = ?1",
+                    canvas
+                ),
+                0
+            );
+            assert_eq!(
+                count(
+                    &world,
+                    "SELECT COUNT(*) FROM nodes WHERE canvas_id = ?1",
+                    canvas
+                ),
+                0
+            );
+        }
+        assert_eq!(
+            audit(&world),
+            vec![(
+                alices.clone(),
+                Some(world.alice.user_id.clone()),
+                "admin_delete_project name=project owner=alice".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn admins_move_projects_to_enabled_users_keeping_sharing() {
+        let world = world();
+        let alices = world.project(&world.alice, false);
+        let child = world.folder(&alices);
+        let shared = world.project(&world.alice, true);
+        world
+            .auth
+            .users()
+            .set_disabled(&world.bob.user_id, true)
+            .unwrap();
+        assert_eq!(
+            set_owner(world.store(), &admin(&world), &alices, &world.bob.user_id).unwrap_err(),
+            "画布只能转给启用的用户"
+        );
+        assert!(set_owner(world.store(), &admin(&world), &alices, "nobody").is_err());
+        assert!(set_owner(world.store(), &admin(&world), &child, &world.alice.user_id).is_err());
+        assert!(audit(&world).is_empty());
+        world
+            .auth
+            .users()
+            .set_disabled(&world.bob.user_id, false)
+            .unwrap();
+        let owner = set_owner(world.store(), &admin(&world), &alices, &world.bob.user_id).unwrap();
+        assert_eq!(
+            owner.owner_user_id.as_deref(),
+            Some(world.bob.user_id.as_str())
+        );
+        let bob = Some(world.bob.user_id.clone());
+        assert_eq!(world.columns(&alices), (bob.clone(), 0));
+        assert_eq!(world.columns(&child), (bob.clone(), 0));
+        set_owner(world.store(), &admin(&world), &shared, &world.bob.user_id).unwrap();
+        assert_eq!(world.columns(&shared), (bob, 1));
+        // Same owner again: no change, no audit row.
+        set_owner(world.store(), &admin(&world), &shared, &world.bob.user_id).unwrap();
+        let rows = audit(&world);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].2, "set_canvas_owner name=project from=alice to=bob");
+        assert_eq!(rows[0].1.as_deref(), Some(world.alice.user_id.as_str()));
+    }
+
+    #[test]
+    fn copying_a_shared_project_gives_the_caller_a_private_copy_with_new_ids() {
+        let world = world();
+        let bobs = world.project(&world.bob, true);
+        let child = world.folder(&bobs);
+        let first = world.node(&bobs).id;
+        let second = world.node(&bobs).id;
+        world
+            .db
+            .create_edge(
+                serde_json::from_value(json!({"canvasId": bobs, "sourceNodeId": first, "targetNodeId": second, "metadata": {"from": first}}))
+                    .unwrap(),
+            )
+            .unwrap();
+        let content = json!({"assetPath": "sucanvas-output://2026-10-19/clip.mp4", "promptNodeId": second, "promptSetId": "set-1"});
+        let connection = db(&world);
+        connection
+            .execute(
+                "UPDATE nodes SET content_json = ?2 WHERE id = ?1",
+                params![first, content.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO prompt_scene_bindings (prompt_set_id, prompt_set_title, canvas_id, scene_key, scene_title, node_id, created_at, updated_at)
+                 VALUES ('set-1', 'T', ?1, 's1', 'S', ?2, 'now', 'now')",
+                params![bobs, first],
+            )
+            .unwrap();
+        let source_ids: Vec<String> = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id FROM nodes UNION SELECT id FROM edges UNION SELECT id FROM canvases",
+                )
+                .unwrap();
+            let rows = statement.query_map([], |row| row.get(0)).unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        let source_nodes = count(
+            &world,
+            "SELECT COUNT(*) FROM nodes WHERE canvas_id IN (?1)",
+            &bobs,
+        ) + count(
+            &world,
+            "SELECT COUNT(*) FROM nodes WHERE canvas_id = ?1",
+            &child,
+        );
+
+        // Private canvases cannot be copied.
+        let alices = world.project(&world.alice, false);
+        assert_eq!(
+            copy_shared(world.store(), &world.bob.user_id, &alices).unwrap_err(),
+            "只能复制共享画布"
+        );
+
+        let copy = copy_shared(world.store(), &world.alice.user_id, &bobs).unwrap();
+        let alice = Some(world.alice.user_id.clone());
+        assert_eq!(world.columns(&copy), (alice.clone(), 0));
+        let name: String = connection
+            .query_row("SELECT name FROM canvases WHERE id = ?1", [&copy], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(name, "project 副本");
+        let copied_child: String = connection
+            .query_row(
+                "SELECT canvas_folders.child_canvas_id FROM canvas_folders JOIN nodes ON nodes.id = canvas_folders.folder_node_id WHERE nodes.canvas_id = ?1",
+                [&copy],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(copied_child, child);
+        assert_eq!(world.columns(&copied_child), (alice, 0));
+        assert_eq!(
+            count(
+                &world,
+                "SELECT COUNT(*) FROM nodes WHERE canvas_id = ?1",
+                &copy
+            ) + count(
+                &world,
+                "SELECT COUNT(*) FROM nodes WHERE canvas_id = ?1",
+                &copied_child
+            ),
+            source_nodes
+        );
+        assert_eq!(
+            count(
+                &world,
+                "SELECT COUNT(*) FROM edges WHERE canvas_id = ?1",
+                &copy
+            ),
+            1
+        );
+        // No copied record points back at the source: every id was remapped.
+        let mut texts: Vec<String> = Vec::new();
+        for sql in [
+            "SELECT content_json FROM nodes WHERE canvas_id IN (?1, ?2)",
+            "SELECT metadata_json FROM edges WHERE canvas_id IN (?1, ?2)",
+            "SELECT node_id || ' ' || prompt_set_id FROM prompt_scene_bindings WHERE canvas_id IN (?1, ?2)",
+        ] {
+            let mut statement = connection.prepare(sql).unwrap();
+            let rows = statement
+                .query_map(params![copy, copied_child], |row| row.get::<_, String>(0))
+                .unwrap();
+            texts.extend(rows.map(Result::unwrap));
+        }
+        for id in &source_ids {
+            for text in &texts {
+                assert!(!text.contains(id.as_str()), "{id} still in {text}");
+            }
+        }
+        // Media references are identical; the prompt set got a new id in both places.
+        let (copied_content, binding_set): (String, String) = connection
+            .query_row(
+                "SELECT nodes.content_json, prompt_scene_bindings.prompt_set_id FROM nodes
+                 JOIN prompt_scene_bindings ON prompt_scene_bindings.node_id = nodes.id WHERE nodes.canvas_id = ?1",
+                [&copy],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let copied_content: Value = serde_json::from_str(&copied_content).unwrap();
+        assert_eq!(
+            copied_content["assetPath"],
+            "sucanvas-output://2026-10-19/clip.mp4"
+        );
+        assert_eq!(copied_content["promptSetId"], binding_set.as_str());
+        assert_ne!(binding_set, "set-1");
+        // The source is unchanged.
+        assert_eq!(world.columns(&bobs), (Some(world.bob.user_id.clone()), 1));
+        assert_eq!(
+            count(
+                &world,
+                "SELECT COUNT(*) FROM nodes WHERE canvas_id = ?1",
+                &bobs
+            ) + count(
+                &world,
+                "SELECT COUNT(*) FROM nodes WHERE canvas_id = ?1",
+                &child
+            ),
+            source_nodes
+        );
+        assert_eq!(
+            count(
+                &world,
+                "SELECT COUNT(*) FROM prompt_scene_bindings WHERE prompt_set_id = ?1",
+                "set-1"
+            ),
+            1
+        );
+    }
+}

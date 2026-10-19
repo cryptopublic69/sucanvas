@@ -10,7 +10,9 @@ import {
   Trash2
 } from "lucide-react";
 import {
-  useMemo
+  useEffect,
+  useMemo,
+  useState
 } from "react";
 import suCanvasLogo from "../../src-tauri/icons/128x128@2x.png";
 import type {
@@ -18,21 +20,94 @@ import type {
   WorkspaceSnapshot
 } from "../CanvasNode";
 import {
+  assignableUsers,
+  canCopyProject,
   canDeleteProject,
   groupProjects,
+  othersPrivateDeleteWarning,
   ownerLabel,
   projectSection,
-  type AccessUser
+  type AccessUser,
+  type AssignableUser
 } from "../account/access";
 
-// Web accounts: the home page groups canvases by owner and offers sharing.
+// Web accounts: the home page groups canvases by owner; admins manage owner
+// and sharing in "画布设置"; shared canvases can be copied.
 export type ProjectHomeAccess = {
   user: AccessUser;
   newProjectShared: boolean;
   setNewProjectShared: (shared: boolean) => void;
-  toggleProjectSharing: (project: WorkspaceSnapshot, shared: boolean) => Promise<void>;
+  saveCanvasSettings: (project: WorkspaceSnapshot, settings: { ownerUserId: string; shared: boolean }) => Promise<boolean>;
   sharingBusyId: string | null;
+  copySharedProject: (project: WorkspaceSnapshot) => Promise<void>;
+  copyingProjectId: string | null;
 };
+
+function CanvasSettingsDialog({ project, access, onClose }: { project: WorkspaceSnapshot; access: ProjectHomeAccess; onClose: () => void }) {
+  const [users, setUsers] = useState<AssignableUser[] | null>(null);
+  const [ownerUserId, setOwnerUserId] = useState(project.canvas.ownerUserId ?? "");
+  const [shared, setShared] = useState(Boolean(project.canvas.isShared));
+  const [loadError, setLoadError] = useState("");
+  const busy = access.sharingBusyId === project.canvas.id;
+  useEffect(() => {
+    let cancelled = false;
+    assignableUsers()
+      .then((list) => { if (!cancelled) setUsers(list); })
+      .catch((error) => { if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error)); });
+    return () => { cancelled = true; };
+  }, []);
+  const owners = users ?? [];
+  // A current owner that is disabled or unknown stays visible until changed.
+  const currentMissing = Boolean(project.canvas.ownerUserId) && users !== null
+    && !owners.some((user) => user.id === project.canvas.ownerUserId);
+  const changed = ownerUserId !== (project.canvas.ownerUserId ?? "") || shared !== Boolean(project.canvas.isShared);
+  return (
+    <div className="project-dialog-backdrop" onMouseDown={() => { if (!busy) onClose(); }}>
+      <form
+        className="project-dialog canvas-settings-dialog"
+        aria-label={`画布设置：${project.canvas.name}`}
+        onMouseDown={(event) => event.stopPropagation()}
+        onSubmit={(event) => {
+          event.preventDefault();
+          void access.saveCanvasSettings(project, { ownerUserId, shared }).then((saved) => { if (saved) onClose(); });
+        }}
+      >
+        <div className="project-dialog-icon"><Settings2 size={22} /></div>
+        <div>
+          <h2>画布设置</h2>
+          <p>“{project.canvas.name}”及其中的全部目录一起生效。</p>
+        </div>
+        <label>
+          归属用户
+          <select value={ownerUserId} onChange={(event) => setOwnerUserId(event.currentTarget.value)} disabled={busy || users === null} aria-label="归属用户">
+            {!project.canvas.ownerUserId && <option value="">（无主画布）</option>}
+            {currentMissing && <option value={project.canvas.ownerUserId ?? ""}>{ownerLabel(project.canvas) || "当前归属"}（已停用）</option>}
+            {owners.map((user) => (
+              <option key={user.id} value={user.id}>{user.displayName ? `${user.displayName}（${user.username}）` : user.username}{user.role === "admin" ? " · 管理员" : ""}</option>
+            ))}
+          </select>
+        </label>
+        <fieldset className="project-visibility-choice">
+          <legend>谁能看到</legend>
+          {([[false, "私有", "只有归属用户和管理员可见"], [true, "共享", "所有成员都能看到和编辑"]] as const).map(([value, label, hint]) => (
+            <label key={label} className={shared === value ? "is-active" : ""}>
+              <input type="radio" name="canvas-settings-visibility" checked={shared === value} onChange={() => setShared(value)} disabled={busy} />
+              <strong>{label}</strong>
+              <small>{hint}</small>
+            </label>
+          ))}
+        </fieldset>
+        {loadError && <p className="canvas-settings-error" role="alert">读取用户列表失败：{loadError}</p>}
+        <div className="project-dialog-actions">
+          <button type="button" className="dialog-cancel" onClick={onClose} disabled={busy}>取消</button>
+          <button type="submit" className="primary-button" disabled={busy || !changed || !ownerUserId && Boolean(project.canvas.ownerUserId)}>
+            {busy ? "正在保存…" : "保存"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
 
 function nodePreviewColor(kind: string): string {
   if (kind === "folder") return "#8b7cf6";
@@ -190,6 +265,8 @@ export function ProjectHome({
     () => (access ? groupProjects(visibleProjects, access.user) : null),
     [access, visibleProjects],
   );
+  const [settingsProject, setSettingsProject] = useState<WorkspaceSnapshot | null>(null);
+  const deleteWarning = access && projectToDelete ? othersPrivateDeleteWarning(projectToDelete.canvas, access.user) : null;
   const gridStyle = { gridTemplateColumns: `repeat(${projectColumns}, minmax(0, 1fr))` };
   const newProjectCard = (
     <button
@@ -261,18 +338,34 @@ export function ProjectHome({
           </div>
           {access ? (
             <div className="project-card-actions">
+              {canCopyProject(project.canvas, access.user) && (
+                <button
+                  type="button"
+                  className="project-share-toggle project-copy-button"
+                  disabled={access.copyingProjectId === project.canvas.id}
+                  aria-label={`复制到我的画布：${project.canvas.name}`}
+                  title="复制一份到“我的画布”（私有）；图片和视频引用同一文件"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void access.copySharedProject(project);
+                  }}
+                >
+                  {access.copyingProjectId === project.canvas.id ? "复制中…" : "复制"}
+                </button>
+              )}
               {admin && (
                 <button
                   type="button"
-                  className="project-share-toggle"
+                  className="project-share-toggle project-settings-button"
                   disabled={access.sharingBusyId === project.canvas.id}
-                  aria-label={`${project.canvas.isShared ? "取消共享" : "设为共享"}：${project.canvas.name}`}
+                  aria-label={`画布设置：${project.canvas.name}`}
+                  title="归属用户、私有/共享"
                   onClick={(event) => {
                     event.stopPropagation();
-                    void access.toggleProjectSharing(project, !project.canvas.isShared);
+                    setSettingsProject(project);
                   }}
                 >
-                  {project.canvas.isShared ? "取消共享" : "设为共享"}
+                  <Settings2 size={12} /> 设置
                 </button>
               )}
               {deletable && deleteButton(project)}
@@ -358,7 +451,7 @@ export function ProjectHome({
             {section("共享画布", "所有成员都能编辑", groups.shared)}
             {access?.user.role === "admin" && (
               <section className="project-owner-section" aria-label="其他用户">
-                <h2>其他用户<small>私有画布，只读；进入后开启编辑模式才能修改</small></h2>
+                <h2>其他用户<small>私有画布，进入后只读，开启编辑模式才能修改；可在此直接删除或改设置</small></h2>
                 {groups.others.length ? groups.others.map((owner) => (
                   <div className="project-owner-group" key={owner.key || "ownerless"}>
                     <h3>{owner.label}<small>{owner.projects.length} 个</small></h3>
@@ -448,8 +541,10 @@ export function ProjectHome({
             <div className="project-dialog-icon"><Trash2 size={22} /></div>
             <div>
               <h2 id="delete-project-title">确认删除项目？</h2>
+              {deleteWarning && <p className="project-delete-owner-warning">{deleteWarning}</p>}
               <p id="delete-project-description">
                 “{projectToDelete.canvas.name}”中的所有节点和连线都会被永久删除，此操作无法撤销。
+                {deleteWarning ? "图片和视频文件不会被删除。" : ""}
               </p>
             </div>
             <div className="project-dialog-actions">
@@ -474,6 +569,9 @@ export function ProjectHome({
             </div>
           </div>
         </div>
+      )}
+      {access && settingsProject && (
+        <CanvasSettingsDialog project={settingsProject} access={access} onClose={() => setSettingsProject(null)} />
       )}
       {appSettingsDialog}
       {privateProjectVisibilityUnlockDialog}

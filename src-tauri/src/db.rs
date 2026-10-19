@@ -4740,7 +4740,8 @@ fn unique_folder_title(
     unreachable!("folder suffix search is unbounded")
 }
 
-fn delete_canvas_tree(connection: &Connection, canvas_id: &str) -> CanvasResult<()> {
+// pub(crate): the Web admin delete runs it inside its own audited transaction.
+pub(crate) fn delete_canvas_tree(connection: &Connection, canvas_id: &str) -> CanvasResult<()> {
     let mut statement = connection.prepare(
         "SELECT canvas_folders.child_canvas_id
          FROM canvas_folders

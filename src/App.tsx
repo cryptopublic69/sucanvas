@@ -282,10 +282,12 @@ import {
   isAdministrator,
   ownerLabel,
   pasteAllowed,
+  projectSection,
   readOnlyCanvas,
   requestEditMode,
   useAccess
 } from "./account/access";
+import { CanvasReadOnlyContext } from "./canvas/readOnly";
 import { AppLockScreen } from "./security/AppLockScreen";
 import { BackupSettingsPanel } from "./settings/BackupSettingsPanel";
 import { GeneralSettingsPanel } from "./settings/GeneralSettingsPanel";
@@ -493,6 +495,7 @@ function CanvasWorkspace() {
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectShared, setNewProjectShared] = useState(false);
   const [sharingBusyId, setSharingBusyId] = useState<string | null>(null);
+  const [copyingProjectId, setCopyingProjectId] = useState<string | null>(null);
   // Web accounts: role, edit mode and the open canvas's owner decide what the UI offers.
   const { user: accessUser, editModeActive } = useAccess();
   const globalAdmin = isAdministrator(accessUser);
@@ -593,6 +596,12 @@ function CanvasWorkspace() {
   const [folderGroupingBusy, setFolderGroupingBusy] = useState(false);
   const [videoDeletionRequest, setVideoDeletionRequest] = useState<VideoDeletionRequest | null>(null);
   const [imageDeletionRequest, setImageDeletionRequest] = useState<ImageDeletionRequest | null>(null);
+  // Without file deletion rights (Web, regular users): confirm removing the node only.
+  const [nodeOnlyDeletionRequest, setNodeOnlyDeletionRequest] = useState<{
+    count: number;
+    media: "视频" | "图片";
+    resolve: (choice: VideoDeletionChoice) => void;
+  } | null>(null);
   const [videoRegenerationDraft, setVideoRegenerationDraft] = useState<VideoRegenerationDraft | null>(null);
   const [videoRegenerationInformationOpen, setVideoRegenerationInformationOpen] = useState(false);
   const [videoRegenerationPresets, setVideoRegenerationPresets] = useState<VideoRegenerationPresetCollection>(
@@ -2585,8 +2594,11 @@ function CanvasWorkspace() {
       (record) => record.content.generationPlaceholder !== true
         && (record.kind === "video" || record.kind === "generated-video"),
     );
-    // Without file deletion rights there is nothing to choose: only the node goes.
-    if (!videoRecords.length || !canDeleteFilesRef.current) return Promise.resolve<VideoDeletionChoice>("node-only");
+    if (!videoRecords.length) return Promise.resolve<VideoDeletionChoice>("node-only");
+    // Without file deletion rights only the node can go; confirm that once.
+    if (!canDeleteFilesRef.current) {
+      return new Promise<VideoDeletionChoice>((resolve) => setNodeOnlyDeletionRequest({ count: videoRecords.length, media: "视频", resolve }));
+    }
     const filePaths = videoFilePathsForRecords(videoRecords);
     return new Promise<VideoDeletionChoice>((resolve) => {
       setVideoDeletionRequest({
@@ -2631,7 +2643,10 @@ function CanvasWorkspace() {
     const imageRecords = records.filter(
       (record) => isDirectGeneratedImageOutput(record),
     );
-    if (!imageRecords.length || !canDeleteFilesRef.current) return Promise.resolve<VideoDeletionChoice>("node-only");
+    if (!imageRecords.length) return Promise.resolve<VideoDeletionChoice>("node-only");
+    if (!canDeleteFilesRef.current) {
+      return new Promise<VideoDeletionChoice>((resolve) => setNodeOnlyDeletionRequest({ count: imageRecords.length, media: "图片", resolve }));
+    }
     const filePaths = imageFilePathsForRecords(imageRecords);
     return new Promise<VideoDeletionChoice>((resolve) => {
       setImageDeletionRequest({
@@ -7840,17 +7855,48 @@ function CanvasWorkspace() {
     }
   }, [newProjectName, newProjectShared, openProject, reportError]);
 
-  // Web, admin only: private <-> shared for a whole project tree.
-  const toggleProjectSharing = useCallback(async (project: WorkspaceSnapshot, shared: boolean) => {
+  // Web, admin only: one "画布设置" dialog for owner and private <-> shared
+  // (whole project tree). Returns whether everything was saved.
+  const saveCanvasSettings = useCallback(async (
+    project: WorkspaceSnapshot,
+    settings: { ownerUserId: string; shared: boolean },
+  ) => {
     setSharingBusyId(project.canvas.id);
+    let saved = false;
     try {
-      await invoke("set_canvas_sharing", { id: project.canvas.id, shared });
+      if (settings.ownerUserId && settings.ownerUserId !== project.canvas.ownerUserId) {
+        await invoke("set_canvas_owner", { id: project.canvas.id, userId: settings.ownerUserId });
+      }
+      if (settings.shared !== Boolean(project.canvas.isShared)) {
+        await invoke("set_canvas_sharing", { id: project.canvas.id, shared: settings.shared });
+      }
+      saved = true;
+      setNotice(`已保存“${project.canvas.name}”的画布设置`);
+    } catch (error) {
+      reportError(error);
+    }
+    // Re-read either way: a failed second step may follow a saved first one.
+    try {
       setProjects(await invoke<WorkspaceSnapshot[]>("list_project_summaries"));
-      setNotice(shared ? `“${project.canvas.name}”已设为共享` : `“${project.canvas.name}”已取消共享`);
     } catch (error) {
       reportError(error);
     } finally {
       setSharingBusyId(null);
+    }
+    return saved;
+  }, [reportError]);
+
+  // Web: copy a shared project into the caller's own private canvases.
+  const copySharedProject = useCallback(async (project: WorkspaceSnapshot) => {
+    setCopyingProjectId(project.canvas.id);
+    try {
+      const snapshot = await invoke<WorkspaceSnapshot>("copy_shared_project", { id: project.canvas.id });
+      setProjects((current) => [snapshot, ...current]);
+      setNotice(`已复制到我的画布：“${snapshot.canvas.name}”`);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setCopyingProjectId(null);
     }
   }, [reportError]);
 
@@ -7860,7 +7906,10 @@ function CanvasWorkspace() {
     const projectName = projectToDelete.canvas.name;
     setDeletingProjectId(projectId);
     try {
-      await invoke("delete_project", { id: projectId });
+      // Another user's private canvas: the separate, audited admin delete.
+      const othersPrivate = import.meta.env.MODE === "web" && accessUser?.role === "admin"
+        && projectSection(projectToDelete.canvas, accessUser) === "others";
+      await invoke(othersPrivate ? "admin_delete_project" : "delete_project", { id: projectId });
       setProjects((current) => current.filter((project) => project.canvas.id !== projectId));
       window.localStorage.removeItem(`infinite-canvas:canvas-background:${projectId}`);
       setProjectToDelete(null);
@@ -7870,7 +7919,7 @@ function CanvasWorkspace() {
     } finally {
       setDeletingProjectId(null);
     }
-  }, [deletingProjectId, projectToDelete, reportError]);
+  }, [accessUser, deletingProjectId, projectToDelete, reportError]);
 
   const canvasEventHandlers = useRef({ makeFlowNode, reportError, scheduleContentGraphReconciliation, screenToFlowPosition });
   canvasEventHandlers.current = { makeFlowNode, reportError, scheduleContentGraphReconciliation, screenToFlowPosition };
@@ -9077,6 +9126,8 @@ function CanvasWorkspace() {
 
   const openCanvasContextMenu = useCallback((event: MouseEvent | ReactMouseEvent) => {
     event.preventDefault();
+    // Read-only canvas: every item in this menu would write.
+    if (canvasReadOnlyRef.current) return;
     const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
     const menuWidth = uiFontSize === "medium" ? 220 : 190;
     const menuHeight = uiFontSize === "medium" ? 410 : 360;
@@ -9091,6 +9142,7 @@ function CanvasWorkspace() {
   const openNodeContextMenu = useCallback((event: ReactMouseEvent, node: CanvasFlowNode) => {
     event.preventDefault();
     event.stopPropagation();
+    if (canvasReadOnlyRef.current) return;
     const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
     const selectedNodeIds = node.selected
       ? nodesSnapshot.current.filter((candidate) => candidate.selected).map((candidate) => candidate.id)
@@ -11193,8 +11245,10 @@ function CanvasWorkspace() {
           user: accessUser,
           newProjectShared,
           setNewProjectShared,
-          toggleProjectSharing,
+          saveCanvasSettings,
           sharingBusyId,
+          copySharedProject,
+          copyingProjectId,
         } : undefined}
         comfyQueueIndicator={comfyQueueIndicator}
         projectColumns={projectColumns}
@@ -11277,7 +11331,7 @@ function CanvasWorkspace() {
           <span>
             {editingOthersCanvas
               ? `正在编辑 ${ownerLabel(activeCanvasRecord) || "其他用户"} 的画布（编辑模式 30 分钟后自动关闭，修改会记录审计）`
-              : `${ownerLabel(activeCanvasRecord) || "其他用户"} 的私有画布 · 只读`}
+              : `${ownerLabel(activeCanvasRecord) || "其他用户"} 的私有画布 · 只读，节点不可编辑`}
           </span>
           <button
             type="button"
@@ -11287,11 +11341,13 @@ function CanvasWorkspace() {
           </button>
         </div>
       )}
+      <CanvasReadOnlyContext.Provider value={canvasReadOnly}>
       <ReactFlow<CanvasFlowNode, Edge>
         key={activeProjectId}
         className={[
           spacePanActive ? "is-space-pan-active" : "",
           middlePanActive ? "is-middle-pan-active" : "",
+          canvasReadOnly ? "is-canvas-read-only" : "",
         ].filter(Boolean).join(" ") || undefined}
         nodes={visibleNodes}
         edges={interactiveEdges}
@@ -11584,6 +11640,7 @@ function CanvasWorkspace() {
           </div>
         )}
       </ReactFlow>
+      </CanvasReadOnlyContext.Provider>
       {privateProjectVisibilityUnlockDialog}
       {videoDeletionRequest && createPortal(
         <div
@@ -11641,6 +11698,50 @@ function CanvasWorkspace() {
                   同时删除文件
                 </button>
               )}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+      {nodeOnlyDeletionRequest && createPortal(
+        <div
+          className="project-dialog-backdrop"
+          onMouseDown={() => { nodeOnlyDeletionRequest.resolve("cancel"); setNodeOnlyDeletionRequest(null); }}
+        >
+          <div
+            className="project-dialog project-delete-dialog node-only-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-node-only-title"
+            aria-describedby="delete-node-only-description"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-dialog-icon"><Trash2 size={22} /></div>
+            <div>
+              <h2 id="delete-node-only-title">
+                {nodeOnlyDeletionRequest.count > 1 ? `确定删除这 ${nodeOnlyDeletionRequest.count} 个节点？` : "确定删除这个节点？"}
+              </h2>
+              <p id="delete-node-only-description">
+                只删除画布上的{nodeOnlyDeletionRequest.media}节点，{nodeOnlyDeletionRequest.media}文件不会被删除。删除后可以用 Ctrl+Z 撤销。
+              </p>
+            </div>
+            <div className="project-dialog-actions">
+              <button
+                type="button"
+                className="dialog-cancel"
+                autoFocus
+                onClick={() => { nodeOnlyDeletionRequest.resolve("cancel"); setNodeOnlyDeletionRequest(null); }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="dialog-danger"
+                onClick={() => { nodeOnlyDeletionRequest.resolve("node-only"); setNodeOnlyDeletionRequest(null); }}
+              >
+                <Trash2 size={14} />
+                删除节点
+              </button>
             </div>
           </div>
         </div>,
