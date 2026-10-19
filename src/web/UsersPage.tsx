@@ -3,7 +3,7 @@ import { Copy, KeyRound, Pencil, Trash2, UserPlus, X } from "lucide-react";
 import { userLabel, type WebUser } from "./account";
 import {
   createUser, defaultTransferTarget, deleteUser, formatUserTime, generateTemporaryPassword, listUsers, resetUserPassword,
-  setUserDisabled, setUserDisplayName, setUserRole, type ManagedUser,
+  setUserDisabled, setUserDisplayName, setUserRole, transferCandidates, type ManagedUser,
 } from "./adminUsers";
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -212,11 +212,11 @@ export function UsersPage({ actor, onClose }: { actor: WebUser; onClose: () => v
               <label className="web-admin-field">
                 该用户的画布转给
                 <select value={transferTo} onChange={(event) => setTransferTo(event.currentTarget.value)} disabled={busy} aria-label="画布转给">
-                  {(users ?? []).filter((user) => user.id !== deleting.id).map((user) => (
-                    <option key={user.id} value={user.id}>{user.username}{user.displayName ? `（${user.displayName}）` : ""} · {roleLabel(user.role)}{user.disabled ? " · 已停用" : ""}</option>
+                  {transferCandidates(users ?? [], deleting.id).map((user) => (
+                    <option key={user.id} value={user.id}>{user.username}{user.displayName ? `（${user.displayName}）` : ""} · {roleLabel(user.role)}</option>
                   ))}
                 </select>
-                <small>私有画布和共享画布都会转过去，共享状态不变。</small>
+                <small>私有画布和共享画布都会转过去，共享状态不变。只能转给启用的用户。</small>
               </label>
             </>}
             {dialogError && <div className="web-admin-message is-error" role="alert">{dialogError}</div>}

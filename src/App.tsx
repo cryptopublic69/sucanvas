@@ -1236,6 +1236,11 @@ function CanvasWorkspace() {
       let modules = await invoke<WorkflowModuleRecord[]>("list_workflow_modules", {
         includeDeleted: true,
       });
+      // Seeding is desktop-only. The built-in sources are desktop workflow paths
+      // the server cannot reach (admins get "outside the configured storage
+      // directories"), and saving modules is admin-only (regular users get a
+      // 403 on every load). The Web installs modules from bundles instead.
+      if (import.meta.env.MODE === "web") return modules;
       if (!modules.some((module) => module.capability === "video-generation")) {
         const created = await invoke<WorkflowModuleRecord>("save_workflow_module", {
           input: {

@@ -56,6 +56,22 @@ test("canvases go to the admin account by default, or to the acting admin when a
   assert.equal(admin.defaultTransferTarget([user("b", "boss", "admin"), user("c", "carol")], "c", "b"), "b");
 });
 
+test("only enabled accounts can receive a deleted user's canvases", () => {
+  const users = [user("a", "admin", "admin", { disabled: true }), user("b", "boss", "admin"), user("c", "carol"), user("d", "dave", "user", { disabled: true })];
+  assert.deepEqual(admin.transferCandidates(users, "c").map((u) => u.id), ["b"]);
+  // A disabled "admin" account is skipped in favour of the acting admin.
+  assert.equal(admin.defaultTransferTarget(users, "c", "b"), "b");
+  assert.equal(admin.defaultTransferTarget([user("c", "carol"), user("d", "dave", "user", { disabled: true })], "c", "x"), "");
+});
+
+test("the Web never seeds built-in workflow modules (desktop paths, admin-only save)", async () => {
+  const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const start = app.indexOf("const loadOrCreate = async () => {");
+  const guard = app.indexOf('if (import.meta.env.MODE === "web") return modules;', start);
+  const firstSave = app.indexOf('invoke<WorkflowModuleRecord>("save_workflow_module"', start);
+  assert.ok(start > 0 && guard > start && guard < firstSave, "guard must precede the first seeding save");
+});
+
 test("temporary passwords use an unambiguous alphabet without modulo bias", () => {
   for (let round = 0; round < 50; round += 1) {
     const password = admin.generateTemporaryPassword();

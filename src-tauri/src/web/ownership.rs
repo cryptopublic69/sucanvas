@@ -198,6 +198,29 @@ fn insert_audit(
         .map_err(|e| e.to_string())
 }
 
+// The admin doing an account change (012c1).
+pub struct Actor<'a> {
+    pub id: &'a str,
+    pub username: &'a str,
+}
+
+// Account changes (create, reset, disable/enable, role, display name) are
+// audited inside the caller's transaction. Only usernames and the action are
+// written, never passwords or the new display name. audit_log.canvas_id is
+// NOT NULL (012b-1 schema) and these rows concern no canvas, so they use ''
+// instead of rebuilding the table. Without audit_log (a database the canvas
+// migration never ran on, e.g. account-only test fixtures) nothing is written.
+pub(super) fn audit_account(
+    connection: &Connection,
+    actor: &Actor<'_>,
+    command: &str,
+) -> Result<(), String> {
+    if !table_exists(connection, "audit_log")? {
+        return Ok(());
+    }
+    insert_audit(connection, actor.id, actor.username, "", None, command)
+}
+
 pub(super) struct UserDeletion<'a> {
     pub actor_id: &'a str,
     pub actor_username: &'a str,
@@ -209,8 +232,10 @@ pub(super) struct UserDeletion<'a> {
 
 // Deleting a user (012c1), inside the deletion transaction: every canvas they
 // own, private or shared, moves to the target with its sharing unchanged. The
-// audit log gets one row per moved root plus one for the deletion itself
-// (canvas_id ''), with usernames as text so the rows outlive the account.
+// audit log gets one row per moved root plus one for the deletion itself, with
+// usernames as text so the rows outlive the account. The deletion row has
+// canvas_id '' because audit_log.canvas_id is NOT NULL and the table is not
+// rebuilt for it (architect, 012c1 review).
 // Returns the moved root canvases.
 pub(super) fn transfer_on_delete(
     connection: &Connection,

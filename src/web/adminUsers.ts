@@ -64,11 +64,18 @@ export function generateTemporaryPassword(length = 12, fill: (values: Uint32Arra
   return password;
 }
 
+// Who may receive a deleted user's canvases: enabled accounts other than the
+// one being deleted (the server refuses disabled receivers too).
+export function transferCandidates(users: ManagedUser[], deletingId: string) {
+  return users.filter((user) => user.id !== deletingId && !user.disabled);
+}
+
 // Canvases of a deleted user go to the "admin" account by default; when that
-// is the one being deleted, to the admin doing the deletion.
+// is the one being deleted (or disabled), to the admin doing the deletion.
 export function defaultTransferTarget(users: ManagedUser[], deletingId: string, actorId: string) {
-  const admin = users.find((user) => user.username.toLowerCase() === "admin" && user.id !== deletingId);
-  return admin?.id ?? (actorId !== deletingId ? actorId : users.find((user) => user.id !== deletingId)?.id ?? "");
+  const candidates = transferCandidates(users, deletingId);
+  const admin = candidates.find((user) => user.username.toLowerCase() === "admin");
+  return admin?.id ?? candidates.find((user) => user.id === actorId)?.id ?? candidates[0]?.id ?? "";
 }
 
 export function formatUserTime(value: string | null) {

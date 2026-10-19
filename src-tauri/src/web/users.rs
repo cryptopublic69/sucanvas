@@ -1,5 +1,7 @@
 // Web user accounts. The table lives in the canvas database so it travels with
 // existing backups; only the server creates or migrates it (desktop keeps app-lock).
+use super::ownership::audit_account;
+pub use super::ownership::Actor;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::Serialize;
 use std::{path::Path, sync::Mutex};
@@ -202,6 +204,16 @@ pub fn reset_admin_password(database: &Path, password_hash: &str) -> Result<(), 
     Ok(())
 }
 
+fn username_of(connection: &Connection, id: &str) -> Result<String, String> {
+    connection
+        .query_row("SELECT username FROM users WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "用户不存在".to_owned())
+}
+
 #[derive(Clone, Copy)]
 enum AdminChange {
     Role(Role),
@@ -256,6 +268,8 @@ impl Users {
         Ok(users)
     }
 
+    // Unaudited variants exist for tests only; admin commands use the `_as` ones.
+    #[cfg(test)]
     pub fn create(
         &self,
         username: &str,
@@ -263,12 +277,36 @@ impl Users {
         role: Role,
         password_hash: &str,
     ) -> Result<UserRecord, String> {
+        self.create_audited(username, display_name, role, password_hash, None)
+    }
+
+    // Admin command: the account and its audit row land together.
+    pub fn create_as(
+        &self,
+        actor: &Actor<'_>,
+        username: &str,
+        display_name: Option<String>,
+        role: Role,
+        password_hash: &str,
+    ) -> Result<UserRecord, String> {
+        self.create_audited(username, display_name, role, password_hash, Some(actor))
+    }
+
+    fn create_audited(
+        &self,
+        username: &str,
+        display_name: Option<String>,
+        role: Role,
+        password_hash: &str,
+        actor: Option<&Actor<'_>>,
+    ) -> Result<UserRecord, String> {
         validate_username(username)?;
         let display_name = normalize_display_name(display_name)?;
         let id = {
-            let connection = self.connection.lock().unwrap();
-            insert(
-                &connection,
+            let mut connection = self.connection.lock().unwrap();
+            let transaction = connection.transaction().map_err(|e| e.to_string())?;
+            let id = insert(
+                &transaction,
                 username,
                 display_name.as_deref(),
                 password_hash,
@@ -282,7 +320,13 @@ impl Users {
                     "用户名已存在".to_owned()
                 }
                 error => error.to_string(),
-            })?
+            })?;
+            if let Some(actor) = actor {
+                let command = format!("create_user username={username} role={}", role.as_str());
+                audit_account(&transaction, actor, &command)?;
+            }
+            transaction.commit().map_err(|e| e.to_string())?;
+            id
         };
         self.user(&id)
     }
@@ -301,19 +345,50 @@ impl Users {
         must_change_password: bool,
         expected_hash: Option<&str>,
     ) -> Result<UserRecord, String> {
-        let changed = {
-            let connection = self.connection.lock().unwrap();
+        self.set_password_audited(id, password_hash, must_change_password, expected_hash, None)
+    }
+
+    // Admin reset: temporary password, forced change, audited (without the password).
+    pub fn reset_password_as(
+        &self,
+        actor: &Actor<'_>,
+        id: &str,
+        password_hash: &str,
+    ) -> Result<UserRecord, String> {
+        self.set_password_audited(id, password_hash, true, None, Some(actor))
+    }
+
+    fn set_password_audited(
+        &self,
+        id: &str,
+        password_hash: &str,
+        must_change_password: bool,
+        expected_hash: Option<&str>,
+        actor: Option<&Actor<'_>>,
+    ) -> Result<UserRecord, String> {
+        {
+            let mut connection = self.connection.lock().unwrap();
+            let transaction = connection.transaction().map_err(|e| e.to_string())?;
             let time = now();
-            connection
+            let changed = transaction
                 .execute(
                     "UPDATE users SET password_hash = ?2, must_change_password = ?3, password_changed_at = ?4, updated_at = ?4
                      WHERE id = ?1 AND (?5 IS NULL OR password_hash = ?5)",
                     params![id, password_hash, must_change_password as i64, time, expected_hash],
                 )
-                .map_err(|e| e.to_string())?
-        };
-        if changed == 0 {
-            return Err("密码已被修改，请重试".to_owned());
+                .map_err(|e| e.to_string())?;
+            if changed == 0 {
+                return Err(if expected_hash.is_some() {
+                    "密码已被修改，请重试".to_owned()
+                } else {
+                    "用户不存在".to_owned()
+                });
+            }
+            if let Some(actor) = actor {
+                let command = format!("reset_password username={}", username_of(&transaction, id)?);
+                audit_account(&transaction, actor, &command)?;
+            }
+            transaction.commit().map_err(|e| e.to_string())?;
         }
         self.user(id)
     }
@@ -321,7 +396,12 @@ impl Users {
     // Role and disabled changes share the last-admin rule: at least one enabled
     // admin must remain. The other column is read inside the write transaction
     // and only the changed column is written, so concurrent changes compose.
-    fn update_admin_state(&self, id: &str, change: AdminChange) -> Result<UserRecord, String> {
+    fn update_admin_state(
+        &self,
+        id: &str,
+        change: AdminChange,
+        actor: Option<&Actor<'_>>,
+    ) -> Result<UserRecord, String> {
         {
             let mut connection = self.connection.lock().unwrap();
             let transaction = connection
@@ -370,17 +450,48 @@ impl Users {
                 ),
             }
             .map_err(|e| e.to_string())?;
+            if let Some(actor) = actor {
+                let username = username_of(&transaction, id)?;
+                let command = match change {
+                    AdminChange::Role(role) => {
+                        format!("set_role username={username} role={}", role.as_str())
+                    }
+                    AdminChange::Disabled(true) => format!("disable_user username={username}"),
+                    AdminChange::Disabled(false) => format!("enable_user username={username}"),
+                };
+                audit_account(&transaction, actor, &command)?;
+            }
             transaction.commit().map_err(|e| e.to_string())?;
         }
         self.user(id)
     }
 
+    #[cfg(test)]
     pub fn set_disabled(&self, id: &str, disabled: bool) -> Result<UserRecord, String> {
-        self.update_admin_state(id, AdminChange::Disabled(disabled))
+        self.update_admin_state(id, AdminChange::Disabled(disabled), None)
     }
 
+    #[cfg(test)]
     pub fn set_role(&self, id: &str, role: Role) -> Result<UserRecord, String> {
-        self.update_admin_state(id, AdminChange::Role(role))
+        self.update_admin_state(id, AdminChange::Role(role), None)
+    }
+
+    pub fn set_disabled_as(
+        &self,
+        actor: &Actor<'_>,
+        id: &str,
+        disabled: bool,
+    ) -> Result<UserRecord, String> {
+        self.update_admin_state(id, AdminChange::Disabled(disabled), Some(actor))
+    }
+
+    pub fn set_role_as(
+        &self,
+        actor: &Actor<'_>,
+        id: &str,
+        role: Role,
+    ) -> Result<UserRecord, String> {
+        self.update_admin_state(id, AdminChange::Role(role), Some(actor))
     }
 
     // One transaction: the last-admin rule, moving the user's canvases to
@@ -389,11 +500,11 @@ impl Users {
     // at the user would make the delete fail instead of leaving a dangling owner.
     pub fn delete(
         &self,
+        actor: &Actor<'_>,
         id: &str,
         transfer_to: &str,
-        actor_id: &str,
-        actor_username: &str,
     ) -> Result<DeletedUser, String> {
+        let (actor_id, actor_username) = (actor.id, actor.username);
         if id == transfer_to {
             return Err("画布不能转给要删除的用户".to_owned());
         }
@@ -423,9 +534,13 @@ impl Users {
         let Some((username, is_admin, disabled)) = account(id)? else {
             return Err("用户不存在".to_owned());
         };
-        let Some((target_username, _, _)) = account(transfer_to)? else {
+        let Some((target_username, _, target_disabled)) = account(transfer_to)? else {
             return Err("接收画布的用户不存在".to_owned());
         };
+        // A disabled account cannot sign in, so its canvases would be orphaned in practice.
+        if target_disabled {
+            return Err("画布只能转给启用的用户".to_owned());
+        }
         if is_admin && !disabled {
             let other_admins: i64 = transaction
                 .query_row(
@@ -462,23 +577,30 @@ impl Users {
         })
     }
 
-    pub fn set_display_name(
+    pub fn set_display_name_as(
         &self,
+        actor: &Actor<'_>,
         id: &str,
         display_name: Option<String>,
     ) -> Result<UserRecord, String> {
         let display_name = normalize_display_name(display_name)?;
-        let changed = {
-            let connection = self.connection.lock().unwrap();
-            connection
+        {
+            let mut connection = self.connection.lock().unwrap();
+            let transaction = connection.transaction().map_err(|e| e.to_string())?;
+            let username = username_of(&transaction, id)?;
+            transaction
                 .execute(
                     "UPDATE users SET display_name = ?2, updated_at = ?3 WHERE id = ?1",
                     params![id, display_name, now()],
                 )
-                .map_err(|e| e.to_string())?
-        };
-        if changed == 0 {
-            return Err("用户不存在".to_owned());
+                .map_err(|e| e.to_string())?;
+            // The new display name itself is not written to the audit log.
+            audit_account(
+                &transaction,
+                actor,
+                &format!("set_display_name username={username}"),
+            )?;
+            transaction.commit().map_err(|e| e.to_string())?;
         }
         self.user(id)
     }

@@ -3,7 +3,7 @@
 // running it, so no handler carries its own role check.
 use super::{
     auth::{Auth, Denied, Permission, Session},
-    users::Role,
+    users::{Actor, Role},
     WebState,
 };
 use axum::{
@@ -113,6 +113,16 @@ pub async fn execute(
 ) -> Result<Value, AdminError> {
     auth.authorize(actor, &command.permission())?;
     let users = auth.users();
+    // Every change is audited under the acting admin's username.
+    let actor_username = users
+        .by_id(&actor.user_id)
+        .map_err(rejected)?
+        .map(|credential| credential.user.username)
+        .ok_or_else(|| rejected("用户不存在".to_owned()))?;
+    let who = Actor {
+        id: &actor.user_id,
+        username: &actor_username,
+    };
     match command {
         AdminCommand::List => to_json(users.list().map_err(rejected)?),
         AdminCommand::Create {
@@ -124,7 +134,7 @@ pub async fn execute(
             let hash = temporary_hash(temporary_password).await?;
             to_json(
                 users
-                    .create(username.trim(), display_name, role, &hash)
+                    .create_as(&who, username.trim(), display_name, role, &hash)
                     .map_err(rejected)?,
             )
         }
@@ -134,7 +144,7 @@ pub async fn execute(
         } => {
             let hash = temporary_hash(temporary_password).await?;
             let user = users
-                .set_password(&id, &hash, true, None)
+                .reset_password_as(&who, &id, &hash)
                 .map_err(rejected)?;
             auth.revoke_user(&id, None);
             to_json(user)
@@ -143,7 +153,9 @@ pub async fn execute(
             if disabled && id == actor.user_id {
                 return Err(rejected("不能停用自己的账号".to_owned()));
             }
-            let user = users.set_disabled(&id, disabled).map_err(rejected)?;
+            let user = users
+                .set_disabled_as(&who, &id, disabled)
+                .map_err(rejected)?;
             if disabled {
                 auth.revoke_user(&id, None);
             }
@@ -153,27 +165,20 @@ pub async fn execute(
             if role != Role::Admin && id == actor.user_id {
                 return Err(rejected("不能取消自己的管理员身份".to_owned()));
             }
-            let user = users.set_role(&id, role).map_err(rejected)?;
+            let user = users.set_role_as(&who, &id, role).map_err(rejected)?;
             auth.update_role(&id, role);
             to_json(user)
         }
         AdminCommand::SetDisplayName { id, display_name } => to_json(
             users
-                .set_display_name(&id, display_name)
+                .set_display_name_as(&who, &id, display_name)
                 .map_err(rejected)?,
         ),
         AdminCommand::Delete { id, transfer_to } => {
             if id == actor.user_id {
                 return Err(rejected("不能删除自己的账号".to_owned()));
             }
-            let actor_username = users
-                .by_id(&actor.user_id)
-                .map_err(rejected)?
-                .map(|credential| credential.user.username)
-                .ok_or_else(|| rejected("用户不存在".to_owned()))?;
-            let deleted = users
-                .delete(&id, &transfer_to, &actor.user_id, &actor_username)
-                .map_err(rejected)?;
+            let deleted = users.delete(&who, &id, &transfer_to).map_err(rejected)?;
             auth.revoke_user(&id, None);
             to_json(deleted)
         }
@@ -689,6 +694,133 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    // 012c1 review: canvases may only go to an enabled account.
+    #[tokio::test]
+    async fn delete_only_transfers_to_enabled_users() {
+        let world = world();
+        let alices = world.project(&world.alice, false);
+        world
+            .auth
+            .users()
+            .set_disabled(&world.bob.user_id, true)
+            .unwrap();
+        let delete = |transfer_to: String| {
+            execute(
+                &world.auth,
+                &world.admin,
+                AdminCommand::Delete {
+                    id: world.alice.user_id.clone(),
+                    transfer_to,
+                },
+            )
+        };
+        match delete(world.bob.user_id.clone()).await.unwrap_err() {
+            AdminError::Rejected(error) => assert_eq!(error, "画布只能转给启用的用户"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            world.columns(&alices),
+            (Some(world.alice.user_id.clone()), 0)
+        );
+        assert!(world
+            .auth
+            .users()
+            .by_id(&world.alice.user_id)
+            .unwrap()
+            .is_some());
+        assert!(audit_rows(&world).is_empty());
+        world
+            .auth
+            .users()
+            .set_disabled(&world.bob.user_id, false)
+            .unwrap();
+        delete(world.bob.user_id.clone()).await.unwrap();
+        assert_eq!(world.columns(&alices), (Some(world.bob.user_id.clone()), 0));
+    }
+
+    // 012c1 review: create, reset, disable/enable, role and display name are
+    // audited with usernames and the action only; refused changes write nothing.
+    #[tokio::test]
+    async fn account_changes_are_audited_without_passwords() {
+        let world = world();
+        let run = |command| execute(&world.auth, &world.admin, command);
+        let created = run(AdminCommand::Create {
+            username: "dora".into(),
+            display_name: Some("朵拉的显示名".into()),
+            role: Role::User,
+            temporary_password: "第一个临时密码".into(),
+        })
+        .await
+        .unwrap();
+        let id = created["id"].as_str().unwrap().to_owned();
+        run(AdminCommand::ResetPassword {
+            id: id.clone(),
+            temporary_password: "第二个临时密码".into(),
+        })
+        .await
+        .unwrap();
+        for disabled in [true, false] {
+            run(AdminCommand::SetDisabled {
+                id: id.clone(),
+                disabled,
+            })
+            .await
+            .unwrap();
+        }
+        run(AdminCommand::SetRole {
+            id: id.clone(),
+            role: Role::Admin,
+        })
+        .await
+        .unwrap();
+        run(AdminCommand::SetDisplayName {
+            id: id.clone(),
+            display_name: Some("新的显示名".into()),
+        })
+        .await
+        .unwrap();
+        // Refused: own account, too-short password, unknown user.
+        assert!(run(AdminCommand::SetDisabled {
+            id: world.admin.user_id.clone(),
+            disabled: true,
+        })
+        .await
+        .is_err());
+        assert!(run(AdminCommand::ResetPassword {
+            id: id.clone(),
+            temporary_password: "ab".into(),
+        })
+        .await
+        .is_err());
+        assert!(run(AdminCommand::SetDisplayName {
+            id: "nobody".into(),
+            display_name: None,
+        })
+        .await
+        .is_err());
+        let audit = audit_rows(&world);
+        let commands: Vec<&str> = audit.iter().map(|row| row.3.as_str()).collect();
+        assert_eq!(
+            commands,
+            [
+                "create_user username=dora role=user",
+                "reset_password username=dora",
+                "disable_user username=dora",
+                "enable_user username=dora",
+                "set_role username=dora role=admin",
+                "set_display_name username=dora",
+            ]
+        );
+        for row in &audit {
+            assert_eq!(row.0, "admin");
+            assert_eq!(row.1, "");
+            assert_eq!(row.2, None);
+            for secret in ["临时密码", "显示名"] {
+                assert!(!row.3.contains(secret), "{}", row.3);
+            }
+        }
     }
 
     // A failure after the canvases moved (here: the final DELETE) rolls the
