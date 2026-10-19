@@ -185,9 +185,25 @@ pub async fn execute(
     }
 }
 
+// Deleted or disabled accounts leave every canvas at once (CANVAS-012c3).
+fn leaving_user(command: &AdminCommand) -> Option<String> {
+    match command {
+        AdminCommand::Delete { id, .. } | AdminCommand::SetDisabled { id, disabled: true } => {
+            Some(id.clone())
+        }
+        _ => None,
+    }
+}
+
 async fn respond(state: &WebState, actor: &Session, command: AdminCommand) -> Response {
+    let leaving = leaving_user(&command);
     match execute(&state.auth, actor, command).await {
-        Ok(result) => Json(json!({"result": result})).into_response(),
+        Ok(result) => {
+            if let Some(id) = leaving {
+                state.presence.remove_user(&id);
+            }
+            Json(json!({"result": result})).into_response()
+        }
         Err(error) => error.into_response(),
     }
 }
@@ -857,6 +873,40 @@ mod tests {
             .by_id(&world.alice.user_id)
             .unwrap()
             .is_some());
+    }
+
+    // 012c3: deleting or disabling an account clears its presence at once;
+    // enabling, role and name changes do not.
+    #[test]
+    fn deleted_and_disabled_accounts_leave_presence() {
+        let id = || "u1".to_owned();
+        assert_eq!(
+            leaving_user(&AdminCommand::Delete {
+                id: id(),
+                transfer_to: "u2".into()
+            }),
+            Some(id())
+        );
+        assert_eq!(
+            leaving_user(&AdminCommand::SetDisabled {
+                id: id(),
+                disabled: true
+            }),
+            Some(id())
+        );
+        for command in [
+            AdminCommand::SetDisabled {
+                id: id(),
+                disabled: false,
+            },
+            AdminCommand::SetRole {
+                id: id(),
+                role: Role::Admin,
+            },
+            AdminCommand::List,
+        ] {
+            assert_eq!(leaving_user(&command), None, "{command:?}");
+        }
     }
 
     #[tokio::test]

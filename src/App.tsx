@@ -79,6 +79,7 @@ import {
   Trash2,
   Upload,
   Unlink2,
+  Users,
   X
 } from "lucide-react";
 import {
@@ -288,6 +289,15 @@ import {
   useAccess
 } from "./account/access";
 import { CanvasReadOnlyContext } from "./canvas/readOnly";
+import {
+  ACCESS_EVENT,
+  accessChangeAction,
+  accessChangeNotice,
+  othersPresent,
+  presenceLabel,
+  useCanvasPresence,
+  type AccessChange
+} from "./account/presence";
 import { AppLockScreen } from "./security/AppLockScreen";
 import { BackupSettingsPanel } from "./settings/BackupSettingsPanel";
 import { GeneralSettingsPanel } from "./settings/GeneralSettingsPanel";
@@ -498,6 +508,13 @@ function CanvasWorkspace() {
   const [copyingProjectId, setCopyingProjectId] = useState<string | null>(null);
   // Web accounts: role, edit mode and the open canvas's owner decide what the UI offers.
   const { user: accessUser, editModeActive } = useAccess();
+  // CANVAS-012c3: who else is on the canvas on screen (Web accounts only).
+  const presentUsers = useCanvasPresence(
+    canvasPath.length ? canvasPath[canvasPath.length - 1].id : null,
+    import.meta.env.MODE === "web" && Boolean(accessUser),
+  );
+  const openRootIdRef = useRef<string | null>(null);
+  openRootIdRef.current = canvasPath[0]?.id ?? null;
   const globalAdmin = isAdministrator(accessUser);
   const activeCanvasRecordRef = useRef<CanvasRecord | null>(null);
   const canvasReadOnlyRef = useRef(false);
@@ -7749,11 +7766,19 @@ function CanvasWorkspace() {
     void openProject(target.id, canvasPath.slice(0, index), true);
   }, [canvasPath, openProject]);
 
-  const returnToProjects = useCallback(async () => {
+  // `discardPending`: the project was deleted or is no longer readable
+  // (CANVAS-012c3); unsaved patches are dropped instead of being refused.
+  const returnToProjects = useCallback(async (discardPending = false) => {
     try {
       ++openProjectSequence.current;
       if (activeProjectIdRef.current) saveCanvasViewport(window.localStorage, activeProjectIdRef.current, getViewport());
-      await flushPendingPatches();
+      if (discardPending) {
+        saveTimers.current.forEach((timer) => window.clearTimeout(timer));
+        saveTimers.current.clear();
+        pendingPatches.current.clear();
+      } else {
+        await flushPendingPatches();
+      }
       const snapshots = await invoke<WorkspaceSnapshot[]>("list_project_summaries");
       undoStack.current = [];
       try {
@@ -7775,6 +7800,47 @@ function CanvasWorkspace() {
       reportError(error);
     }
   }, [getViewport, flushPendingPatches, reportError, resetReactFlowGraphState, setEdges, setNodes]);
+
+  // CANVAS-012c3: a project was deleted, moved or re-shared by an admin. The
+  // server only tells users whose access changed. An open project that is gone
+  // or no longer readable is left with a notice; otherwise lists refresh and
+  // the open project picks up its new owner/sharing.
+  const returnToProjectsRef = useRef(returnToProjects);
+  returnToProjectsRef.current = returnToProjects;
+  useEffect(() => {
+    if (import.meta.env.MODE !== "web") return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<AccessChange>(ACCESS_EVENT, (event) => {
+      if (disposed) return;
+      const change = event.payload;
+      if (accessChangeAction(change, openRootIdRef.current) === "leave") {
+        // A global toast: the canvas notice is not shown on the project list.
+        void returnToProjectsRef.current(true).then(() => showGlobalNotice(accessChangeNotice(change)));
+        return;
+      }
+      void invoke<WorkspaceSnapshot[]>("list_project_summaries").then((snapshots) => {
+        if (disposed) return;
+        setProjects(snapshots);
+        const root = snapshots.find((project) => project.canvas.id === change.canvasId)?.canvas;
+        if (!root || openRootIdRef.current !== change.canvasId) return;
+        const ownership = {
+          ownerUserId: root.ownerUserId,
+          ownerUsername: root.ownerUsername,
+          ownerDisplayName: root.ownerDisplayName,
+          isShared: root.isShared,
+        };
+        setCanvasPath((path) => path.map((record) => ({ ...record, ...ownership })));
+      }).catch(() => undefined);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [showGlobalNotice]);
 
   const togglePrivateProjectVisibility = useCallback(() => {
     if (showPrivateProjects) {
@@ -11238,6 +11304,7 @@ function CanvasWorkspace() {
 
   const activeCanvasRecord = canvasPath[canvasPath.length - 1] ?? null;
   activeCanvasRecordRef.current = activeCanvasRecord;
+  const presentOthers = othersPresent(presentUsers, accessUser?.id);
   // Experience layer only: the server refuses these writes anyway.
   const canvasReadOnly = import.meta.env.MODE === "web" && readOnlyCanvas(activeCanvasRecord, accessUser, editModeActive);
   canvasReadOnlyRef.current = canvasReadOnly;
@@ -11333,19 +11400,29 @@ function CanvasWorkspace() {
         if (event.button === 1) setMiddlePanActive(true);
       }}
     >
-      {(canvasReadOnly || editingOthersCanvas) && activeCanvasRecord && (
-        <div className={`canvas-access-banner${editingOthersCanvas ? " is-editing" : ""}`} role="status">
-          <span>
-            {editingOthersCanvas
-              ? `正在编辑 ${ownerLabel(activeCanvasRecord) || "其他用户"} 的画布（编辑模式 30 分钟后自动关闭，修改会记录审计）`
-              : `${ownerLabel(activeCanvasRecord) || "其他用户"} 的私有画布 · 只读，节点不可编辑`}
-          </span>
-          <button
-            type="button"
-            onClick={() => void requestEditMode(!editingOthersCanvas).catch(reportError)}
-          >
-            {editingOthersCanvas ? "退出编辑模式" : "开启编辑模式"}
-          </button>
+      {(((canvasReadOnly || editingOthersCanvas) && activeCanvasRecord) || presentOthers.length > 0) && (
+        <div className="canvas-top-notices">
+          {(canvasReadOnly || editingOthersCanvas) && activeCanvasRecord && (
+            <div className={`canvas-access-banner${editingOthersCanvas ? " is-editing" : ""}`} role="status">
+              <span>
+                {editingOthersCanvas
+                  ? `正在编辑 ${ownerLabel(activeCanvasRecord) || "其他用户"} 的画布（编辑模式 30 分钟后自动关闭，修改会记录审计）`
+                  : `${ownerLabel(activeCanvasRecord) || "其他用户"} 的私有画布 · 只读，节点不可编辑`}
+              </span>
+              <button
+                type="button"
+                onClick={() => void requestEditMode(!editingOthersCanvas).catch(reportError)}
+              >
+                {editingOthersCanvas ? "退出编辑模式" : "开启编辑模式"}
+              </button>
+            </div>
+          )}
+          {presentOthers.length > 0 && (
+            <div className="canvas-presence" role="status" title="同一节点被两人同时修改时，后保存的会覆盖先保存的">
+              <Users size={13} aria-hidden="true" />
+              <span>{presenceLabel(presentOthers)}</span>
+            </div>
+          )}
         </div>
       )}
       <CanvasReadOnlyContext.Provider value={canvasReadOnly}>

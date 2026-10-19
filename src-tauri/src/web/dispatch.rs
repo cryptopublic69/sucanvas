@@ -5,7 +5,8 @@ use super::{
     auth::{Permission, Session},
     authz::{NodeScope, RecordRefs},
     canvases,
-    ownership::Ownership,
+    ownership::{CanvasOwner, Ownership},
+    presence,
     rpc::{argument, channel},
     users::{Actor, Role},
     WebState,
@@ -75,6 +76,9 @@ commands! {
     AdminDeleteProject => "admin_delete_project",
     UpdateCanvasSettings => "update_canvas_settings",
     CopyProject => "copy_project",
+    // Web only (CANVAS-012c3).
+    PresenceHeartbeat => "presence_heartbeat",
+    PresenceLeave => "presence_leave",
     SetProjectPreviewImage => "set_project_preview_image",
     DeleteProject => "delete_project",
     CreateNode => "create_node",
@@ -354,6 +358,11 @@ pub fn permissions(
         // Whoever may read a project may copy it; the copy is the caller's own
         // and private (012c2 rework). Read access is decided by the root.
         CopyProject => vec![Permission::CanvasRead(argument(args, "id")?)],
+        // Being on a canvas is reading it, not writing: no edit mode, no audit,
+        // so an admin viewing someone's private canvas read-only is shown too.
+        PresenceHeartbeat => vec![Permission::CanvasRead(argument(args, "canvasId")?)],
+        // Only ever removes the caller's own tab.
+        PresenceLeave => vec![Permission::Authenticated],
         CreateEmptyFolder => vec![Permission::CanvasWrite(argument::<String>(
             &args["input"],
             "canvasId",
@@ -501,6 +510,36 @@ fn actor_username(state: &WebState, session: &Session) -> Result<String, String>
         .by_id(&session.user_id)?
         .map(|credential| credential.user.username)
         .ok_or_else(|| "用户不存在".to_owned())
+}
+
+// CANVAS-012c3: after a project was deleted, moved or re-shared, tell each
+// user whose access changed (their tabs only): open views close on
+// "deleted"/"revoked", home lists refresh. Users who never had access hear nothing.
+fn notify_access_change(state: &WebState, before: &CanvasOwner, after: Option<&CanvasOwner>) {
+    let Ok(users) = state.auth.users().list() else {
+        return;
+    };
+    fn readers(owner: &CanvasOwner) -> canvases::Readers<'_> {
+        canvases::Readers {
+            owner: owner.owner_user_id.as_deref(),
+            shared: owner.is_shared,
+        }
+    }
+    for (user, reason) in canvases::access_changes(readers(before), after.map(readers), &users) {
+        let _ = state.handle.emit_to_user(
+            canvases::ACCESS_EVENT,
+            &user,
+            serde_json::json!({"canvasId": before.root_id, "reason": reason}),
+        );
+    }
+}
+
+fn project_owner(state: &WebState, id: &str) -> Result<CanvasOwner, String> {
+    state
+        .auth
+        .ownership()
+        .owner(id)?
+        .ok_or_else(|| "画布不存在".to_owned())
 }
 
 // Runs a command whose permissions were already granted.
@@ -665,12 +704,7 @@ pub async fn dispatch(
         Command::SetCanvasSharing => {
             let id: String = argument(args, "id")?;
             let shared: bool = argument(args, "shared")?;
-            let root = state
-                .auth
-                .ownership()
-                .owner(&id)?
-                .ok_or("画布不存在")?
-                .root_id;
+            let before = project_owner(state, &id)?;
             let username = actor_username(state, session)?;
             let actor = Actor {
                 id: &session.user_id,
@@ -679,22 +713,30 @@ pub async fn dispatch(
             let owner = canvases::update_settings(
                 state.auth.ownership(),
                 &actor,
-                &root,
+                &before.root_id,
                 None,
                 Some(shared),
             )?;
+            notify_access_change(state, &before, Some(&owner));
             Ok(serde_json::json!({"rootCanvasId": owner.root_id, "isShared": owner.is_shared}))
         }
         Command::SetProjectPreviewImage => serde_json::to_value(
             commands::set_project_preview_image(input(args)?, State(&state.core))?,
         )
         .map_err(|e| e.to_string()),
-        Command::DeleteProject => serde_json::to_value(commands::delete_project(
-            argument(args, "id")?,
-            State(&state.core),
-        )?)
-        .map_err(|e| e.to_string()),
+        Command::DeleteProject => {
+            let id: String = argument(args, "id")?;
+            let before = project_owner(state, &id)?;
+            let result =
+                serde_json::to_value(commands::delete_project(id.clone(), State(&state.core))?)
+                    .map_err(|e| e.to_string())?;
+            if before.root_id == id {
+                notify_access_change(state, &before, None);
+            }
+            Ok(result)
+        }
         Command::AdminDeleteProject => {
+            let before = project_owner(state, &argument::<String>(args, "id")?)?;
             let username = actor_username(state, session)?;
             let actor = Actor {
                 id: &session.user_id,
@@ -722,9 +764,13 @@ pub async fn dispatch(
                     .map(|project| project.canvas.id.clone())
                     .unwrap_or_else(|| crate::models::DEFAULT_CANVAS_ID.to_owned());
             }
+            drop(active);
+            notify_access_change(state, &before, None);
             serde_json::to_value(deleted).map_err(|e| e.to_string())
         }
         Command::UpdateCanvasSettings => {
+            let id: String = argument(args, "id")?;
+            let before = project_owner(state, &id)?;
             let username = actor_username(state, session)?;
             let actor = Actor {
                 id: &session.user_id,
@@ -733,10 +779,11 @@ pub async fn dispatch(
             let owner = canvases::update_settings(
                 state.auth.ownership(),
                 &actor,
-                &argument::<String>(args, "id")?,
+                &id,
                 argument::<Option<String>>(args, "ownerUserId")?.as_deref(),
                 argument::<Option<bool>>(args, "isShared")?,
             )?;
+            notify_access_change(state, &before, Some(&owner));
             Ok(serde_json::json!({
                 "rootCanvasId": owner.root_id,
                 "ownerUserId": owner.owner_user_id,
@@ -757,6 +804,35 @@ pub async fn dispatch(
                     .map_err(|e| e.to_string())?,
             )
             .map_err(|e| e.to_string())
+        }
+        Command::PresenceHeartbeat => {
+            let user = state
+                .auth
+                .users()
+                .by_id(&session.user_id)?
+                .ok_or_else(|| "用户不存在".to_owned())?
+                .user;
+            let users = state.presence.heartbeat(
+                &argument::<String>(args, "canvasId")?,
+                &argument::<String>(args, "tabId")?,
+                presence::PresentUser {
+                    user_id: user.id,
+                    username: user.username,
+                    display_name: user.display_name,
+                },
+                std::time::Instant::now(),
+            );
+            Ok(serde_json::json!({
+                "users": users,
+                "heartbeatSeconds": presence::HEARTBEAT_SECONDS,
+                "timeoutSeconds": presence::TIMEOUT_SECONDS,
+            }))
+        }
+        Command::PresenceLeave => {
+            state
+                .presence
+                .leave(&session.user_id, &argument::<String>(args, "tabId")?);
+            Ok(Value::Null)
         }
         Command::CreateNode => {
             let mut node: CreateNodeInput = input(args)?;
@@ -1121,6 +1197,7 @@ mod tests {
             "get_runtime_info",
             "submit_comfyui_video_upscale",
             "capture_video_poster",
+            "presence_leave",
         ] {
             rows.push((name, none.clone(), "authenticated"));
         }
@@ -1135,6 +1212,7 @@ mod tests {
             ("load_workspace", json!({"canvasId": "canvas:a"}), "canvas-read"),
             ("inspect_workspace", json!({"canvasId": "canvas:a"}), "canvas-read"),
             ("copy_project", json!({"id": "canvas:a"}), "canvas-read"),
+            ("presence_heartbeat", json!({"canvasId": "canvas:a", "tabId": "t"}), "canvas-read"),
             ("update_project", json!({"input": {"id": "canvas:a", "name": "n"}}), "canvas-write"),
             ("create_empty_folder", json!({"input": {"canvasId": "canvas:a", "x": 0.0, "y": 0.0}}), "canvas-write"),
             ("import_media", json!({"canvasId": "canvas:a"}), "canvas-write"),
@@ -1215,6 +1293,27 @@ mod tests {
             }
         }
         assert_eq!(table.len(), Command::ALL.len());
+    }
+
+    // 012c3: a heartbeat is a read. A read-only admin (no edit mode) on someone
+    // else's private canvas may send it, nothing is audited or written, and a
+    // user who cannot read the canvas is refused as if it did not exist.
+    #[test]
+    fn presence_heartbeats_are_reads_even_for_read_only_admins() {
+        let world = super::super::authz::tests::world();
+        let alices = world.project(&world.alice, false);
+        let active = std::sync::RwLock::new("canvas:active".to_owned());
+        let args = json!({"canvasId": alices, "tabId": "t"});
+        let granted =
+            permissions(&active, &world.admin, Command::PresenceHeartbeat, &args).unwrap();
+        assert_eq!(granted, vec![Permission::CanvasRead(alices.clone())]);
+        assert!(world.admin.admin_edit_until.is_none());
+        let grant = super::super::authz::check(world.store(), &world.admin, &granted[0]).unwrap();
+        assert!(grant.audit.is_empty() && grant.written_roots.is_empty());
+        assert!(matches!(
+            super::super::authz::check(world.store(), &world.bob, &granted[0]),
+            Err(super::super::authz::Denied::NotFound)
+        ));
     }
 
     #[test]

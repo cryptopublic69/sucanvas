@@ -10,6 +10,7 @@ mod files;
 mod media;
 mod ownership;
 mod posters;
+mod presence;
 mod proxy;
 mod rpc;
 mod settings;
@@ -64,6 +65,7 @@ pub(crate) struct WebState {
     media_guard: Arc<tokio::sync::Mutex<()>>,
     tasks: Arc<tasks::Tasks>,
     comfy_relays: Arc<ws_handover::Registry>,
+    presence: Arc<presence::Presence>,
 }
 
 impl WebState {
@@ -252,6 +254,7 @@ pub async fn run() -> Result<(), String> {
         auth,
         connection: Arc::new(connection::Store::new(config_path, config.clone())),
         config: Arc::new(config),
+        presence: Arc::new(presence::Presence::new(handle.clone())),
         handle,
         downloads,
         token,
@@ -265,6 +268,15 @@ pub async fn run() -> Result<(), String> {
         tasks: Arc::new(tasks::Tasks::default()),
         comfy_relays: Arc::default(),
     };
+    // Presence: tabs without a heartbeat for presence::TIMEOUT_SECONDS leave.
+    let sweeper = state.presence.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(presence::SWEEP_SECONDS));
+        loop {
+            interval.tick().await;
+            sweeper.sweep(std::time::Instant::now());
+        }
+    });
     if let Err(error) = storage::migrate(&state) {
         // Keep the settings UI and existing project references available for
         // correcting an unavailable mapping. Saving settings retries migration.

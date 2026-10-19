@@ -30,6 +30,13 @@
 .project-visibility-choice input { position: absolute; opacity: 0; pointer-events: none; }
 .project-visibility-choice strong { color: #eceef4; font-size: calc(12px + var(--ui-font-adjust)); }
 .project-visibility-choice small { color: #7d8496; font-size: calc(10px + var(--ui-font-adjust)); }
+/* CANVAS-012c3: read-only banner and "XX 也在这张画布" stack at the top centre. */
+.canvas-top-notices { position: fixed; top: 12px; left: 50%; z-index: 1100; display: flex; flex-direction: column; align-items: center; gap: 6px; transform: translateX(-50%); pointer-events: none; }
+.canvas-top-notices > * { pointer-events: auto; }
+.canvas-top-notices > .canvas-access-banner { position: static; transform: none; }
+.canvas-presence { display: flex; align-items: center; gap: 7px; max-width: 70vw; padding: 6px 12px; color: #cfe9ff; background: rgba(24, 48, 72, .92); border: 1px solid rgba(110, 170, 230, .45); border-radius: 999px; box-shadow: 0 10px 24px rgba(0, 0, 0, .25); font-size: calc(11.5px + var(--ui-font-adjust)); white-space: nowrap; }
+.canvas-presence span { overflow: hidden; text-overflow: ellipsis; }
+:root[data-theme="light"] .canvas-presence { color: #1d4f7a; background: #eaf4ff; border-color: #b9d6f2; box-shadow: 0 8px 20px rgba(68, 77, 103, .12); }
 .canvas-access-banner { position: fixed; top: 12px; left: 50%; z-index: 1100; display: flex; align-items: center; gap: 12px; transform: translateX(-50%); padding: 8px 10px 8px 16px; color: #f2e4c4; background: rgba(70, 56, 24, .94); border: 1px solid rgba(216, 173, 85, .45); border-radius: 10px; box-shadow: 0 12px 30px rgba(0, 0, 0, .3); font-size: calc(11.5px + var(--ui-font-adjust)); }
 .canvas-access-banner.is-editing { color: #ffd9d9; background: rgba(86, 30, 36, .95); border-color: rgba(232, 100, 118, .5); }
 .canvas-access-banner button { height: 28px; padding: 0 10px; color: inherit; background: rgba(255, 255, 255, .1); border: 1px solid rgba(255, 255, 255, .25); border-radius: 7px; cursor: pointer; font-size: inherit; }

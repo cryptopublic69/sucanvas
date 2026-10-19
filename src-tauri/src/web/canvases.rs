@@ -7,6 +7,7 @@ use super::ownership::{
     insert_audit, normalize_tree, owner_of, root_of, Actor, CanvasOwner, Ownership,
     ROOT_DEPTH_LIMIT,
 };
+use super::users::{Role, UserRecord};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 use serde_json::Value;
@@ -14,6 +15,50 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 const OWNERLESS: &str = "(无主)";
+
+// Pushed to each affected user after a project was deleted, moved or its
+// sharing changed (CANVAS-012c3): payload {canvasId, reason}.
+pub const ACCESS_EVENT: &str = "canvas://access-changed";
+
+// Who may read a project: its owner, everyone when shared, admins always.
+#[derive(Clone, Copy, Debug)]
+pub struct Readers<'a> {
+    pub owner: Option<&'a str>,
+    pub shared: bool,
+}
+
+impl Readers<'_> {
+    fn reads(&self, user: &UserRecord) -> bool {
+        user.role == Role::Admin || self.shared || self.owner == Some(user.id.as_str())
+    }
+}
+
+// Users to tell about a change, with the reason: "deleted" / "revoked" for
+// those who could read the project and no longer can (an open view must
+// close), "changed" for those who still or newly can (lists refresh).
+// Users who could not read it before and cannot now hear nothing about it;
+// disabled accounts have no sessions and are skipped.
+pub fn access_changes(
+    before: Readers<'_>,
+    after: Option<Readers<'_>>,
+    users: &[UserRecord],
+) -> Vec<(String, &'static str)> {
+    users
+        .iter()
+        .filter(|user| !user.disabled)
+        .filter_map(|user| {
+            let could = before.reads(user);
+            let can = after.is_some_and(|after| after.reads(user));
+            let reason = match (could, can, after.is_some()) {
+                (true, false, false) => "deleted",
+                (true, false, true) => "revoked",
+                (_, true, _) => "changed",
+                (false, false, _) => return None,
+            };
+            Some((user.id.clone(), reason))
+        })
+        .collect()
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -547,6 +592,80 @@ mod tests {
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .unwrap();
         rows.map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn access_change_events_reach_exactly_the_users_whose_access_changed() {
+        let account = |id: &str, role: Role, disabled: bool| UserRecord {
+            id: id.to_owned(),
+            username: id.to_owned(),
+            display_name: None,
+            role,
+            disabled,
+            must_change_password: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+            password_changed_at: None,
+        };
+        let users = [
+            account("admin", Role::Admin, false),
+            account("alice", Role::User, false),
+            account("bob", Role::User, false),
+            account("carol", Role::User, true),
+        ];
+        let private = |owner| Readers {
+            owner: Some(owner),
+            shared: false,
+        };
+        let shared = |owner| Readers {
+            owner: Some(owner),
+            shared: true,
+        };
+        let changes = |before, after| access_changes(before, after, &users);
+        let pairs = |list: &[(&str, &'static str)]| -> Vec<(String, &'static str)> {
+            list.iter()
+                .map(|(user, reason)| (user.to_string(), *reason))
+                .collect()
+        };
+        // Deleting alice's private canvas: bob never saw it and hears nothing.
+        assert_eq!(
+            changes(private("alice"), None),
+            pairs(&[("admin", "deleted"), ("alice", "deleted")])
+        );
+        assert_eq!(
+            changes(shared("alice"), None),
+            pairs(&[
+                ("admin", "deleted"),
+                ("alice", "deleted"),
+                ("bob", "deleted")
+            ])
+        );
+        // Moving it to bob: alice loses it, bob gains it.
+        assert_eq!(
+            changes(private("alice"), Some(private("bob"))),
+            pairs(&[
+                ("admin", "changed"),
+                ("alice", "revoked"),
+                ("bob", "changed")
+            ])
+        );
+        // Private -> shared: everyone may read it now; shared -> private: bob loses it.
+        assert_eq!(
+            changes(private("alice"), Some(shared("alice"))),
+            pairs(&[
+                ("admin", "changed"),
+                ("alice", "changed"),
+                ("bob", "changed")
+            ])
+        );
+        assert_eq!(
+            changes(shared("alice"), Some(private("alice"))),
+            pairs(&[
+                ("admin", "changed"),
+                ("alice", "changed"),
+                ("bob", "revoked")
+            ])
+        );
     }
 
     #[test]
