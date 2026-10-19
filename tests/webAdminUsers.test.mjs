@@ -96,7 +96,7 @@ test("user times show local date and minutes, and tolerate missing values", () =
 test("only admins get the user management entry and page", async () => {
   const root = await readFile(new URL("../src/web/WebRoot.tsx", import.meta.url), "utf8");
   assert.match(root, /onManageUsers=\{user\.role === "admin" \? /);
-  assert.match(root, /managingUsers && user\.role === "admin" && <UsersPage/);
+  assert.match(root, /adminPage === "users" && user\.role === "admin" && <UsersPage/);
   const menu = await readFile(new URL("../src/web/AccountScreens.tsx", import.meta.url), "utf8");
   assert.match(menu, /\{onManageUsers && <button[^>]*>.*用户管理<\/button>\}/);
 });

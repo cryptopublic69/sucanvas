@@ -132,6 +132,20 @@
 .web-admin-hint.is-danger { color: #f1c0c6; }
 .web-admin-secret { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 12px 14px; background: #0f1117; border: 1px dashed #5a6275; border-radius: 10px; }
 .web-admin-secret code { flex: 1; color: #fff; font-family: ui-monospace, Consolas, monospace; font-size: calc(16px + var(--ui-font-adjust)); letter-spacing: .06em; user-select: all; word-break: break-all; }
+/* 素材清理 (CANVAS-012c4) */
+.web-media-summary { margin: 8px 0 0; line-height: 1.6; }
+.web-media-summary .web-admin-muted { margin-left: 6px; }
+.web-media-tabs, .web-media-toolbar { display: flex; align-items: center; gap: 8px; max-width: 1180px; margin: 0 auto 12px; }
+.web-media-tabs button { height: 30px; padding: 0 14px; color: #a9b2c6; background: none; border: 1px solid #343946; border-radius: 999px; cursor: pointer; }
+.web-media-tabs button.is-active { color: white; background: #6c5fd1; border-color: #7d70e0; }
+.web-media-toolbar select, .web-media-toolbar input { height: 32px; padding: 0 8px; color: #e0e3ea; background: #0f1117; border: 1px solid #343946; border-radius: 7px; }
+.web-media-toolbar input { width: 220px; }
+.web-media-selection { margin-left: auto; color: #8d94a4; white-space: nowrap; }
+.web-media-table td strong { display: inline-block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+.web-media-thumb { display: block; width: 44px; height: 44px; object-fit: cover; background: #0f1117; border: 1px solid #2a2f3a; border-radius: 6px; }
+.web-media-thumb.is-icon { display: grid; place-items: center; color: #7d8496; }
+:root[data-theme="light"] .web-media-toolbar select, :root[data-theme="light"] .web-media-toolbar input { color: #242936; background: #fff; border-color: #d8dce6; }
+:root[data-theme="light"] .web-media-thumb { background: #f7f8fb; border-color: #e6e9f0; }
 :root[data-theme="light"] .web-admin-page { color: #3f4659; background: #f4f6fa; }
 :root[data-theme="light"] .web-admin-header h1, :root[data-theme="light"] .web-admin-table strong, :root[data-theme="light"] .web-admin-dialog h2 { color: #242936; }
 :root[data-theme="light"] .web-admin-table, :root[data-theme="light"] .web-admin-dialog { background: #fff; border-color: #d8dce6; }

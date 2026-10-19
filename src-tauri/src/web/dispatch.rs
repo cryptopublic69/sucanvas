@@ -79,6 +79,11 @@ commands! {
     // Web only (CANVAS-012c3).
     PresenceHeartbeat => "presence_heartbeat",
     PresenceLeave => "presence_leave",
+    // Web only (CANVAS-012c4): orphan media cleanup.
+    ListMediaCleanup => "list_media_cleanup",
+    TrashMediaFiles => "trash_media_files",
+    RestoreMediaFiles => "restore_media_files",
+    PurgeMediaFiles => "purge_media_files",
     SetProjectPreviewImage => "set_project_preview_image",
     DeleteProject => "delete_project",
     CreateNode => "create_node",
@@ -315,7 +320,12 @@ pub fn permissions(
         // Permanently deleting generated files stays admin-only until deletion
         // is checked against the canvases that reference each file.
         | DeleteVideoFiles
-        | DeleteImageFiles => vec![Permission::Admin],
+        | DeleteImageFiles
+        // Orphan media of every user: listing names other users' files.
+        | ListMediaCleanup
+        | TrashMediaFiles
+        | RestoreMediaFiles
+        | PurgeMediaFiles => vec![Permission::Admin],
         // Users cancel the generations they started; admins cancel any.
         CancelComfyuiWorkflow => vec![Permission::TaskOwner(argument(args, "clientId")?)],
         // Global state: only the admin's is recorded; others get a no-op (see dispatch).
@@ -510,6 +520,44 @@ fn actor_username(state: &WebState, session: &Session) -> Result<String, String>
         .by_id(&session.user_id)?
         .map(|credential| credential.user.username)
         .ok_or_else(|| "用户不存在".to_owned())
+}
+
+#[derive(Clone, Copy)]
+enum MediaAction {
+    Trash,
+    Restore,
+    Purge,
+}
+
+// CANVAS-012c4: moves, restores or purges the named files on a blocking
+// thread. The registry re-checks every file itself (registered, unreferenced
+// past the grace period, inside a media root); the request only names them.
+async fn media_action(
+    state: &WebState,
+    session: &Session,
+    args: &Value,
+    action: MediaAction,
+) -> Result<Value, String> {
+    let references: Vec<String> = argument(args, "references")?;
+    let username = actor_username(state, session)?;
+    let user_id = session.user_id.clone();
+    let media = state.media.clone();
+    let roots = state.media_roots();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let actor = Actor {
+            id: &user_id,
+            username: &username,
+        };
+        let now = chrono::Utc::now();
+        match action {
+            MediaAction::Trash => media.trash(&actor, &roots, &references, now),
+            MediaAction::Restore => media.restore(&actor, &roots, &references, now),
+            MediaAction::Purge => media.purge(&actor, &roots, &references),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    serde_json::to_value(outcome).map_err(|e| e.to_string())
 }
 
 // CANVAS-012c3: after a project was deleted, moved or re-shared, tell each
@@ -727,9 +775,9 @@ pub async fn dispatch(
         Command::DeleteProject => {
             let id: String = argument(args, "id")?;
             let before = project_owner(state, &id)?;
-            let result =
-                serde_json::to_value(commands::delete_project(id.clone(), State(&state.core))?)
-                    .map_err(|e| e.to_string())?;
+            // Media files stay; the orphan cleanup decides about them (012c4).
+            commands::delete_project_records(&id, &state.core)?;
+            let result = Value::Null;
             if before.root_id == id {
                 notify_access_change(state, &before, None);
             }
@@ -834,6 +882,20 @@ pub async fn dispatch(
                 .leave(&session.user_id, &argument::<String>(args, "tabId")?);
             Ok(Value::Null)
         }
+        Command::ListMediaCleanup => {
+            let media = state.media.clone();
+            let roots = state.media_roots();
+            let listing =
+                tokio::task::spawn_blocking(move || media.list(&roots, chrono::Utc::now()))
+                    .await
+                    .map_err(|e| e.to_string())??;
+            serde_json::to_value(listing).map_err(|e| e.to_string())
+        }
+        Command::TrashMediaFiles => media_action(state, session, args, MediaAction::Trash).await,
+        Command::RestoreMediaFiles => {
+            media_action(state, session, args, MediaAction::Restore).await
+        }
+        Command::PurgeMediaFiles => media_action(state, session, args, MediaAction::Purge).await,
         Command::CreateNode => {
             let mut node: CreateNodeInput = input(args)?;
             // A missing canvas id means the active canvas (admins only, see permissions).
@@ -881,9 +943,12 @@ pub async fn dispatch(
             .await?,
         )
         .map_err(|e| e.to_string()),
+        // CANVAS-012c4: nobody deletes Resize files right away on the Web.
+        // Unreferenced ones start their grace period and reach the admin's
+        // cleanup list later; nothing is removed now, hence 0.
         Command::CleanupResizeImages => {
-            serde_json::to_value(commands::cleanup_resize_images(State(&state.core)).await?)
-                .map_err(|e| e.to_string())
+            state.refresh_media(Some(session.user_id.clone()));
+            Ok(Value::from(0))
         }
         Command::ResizeImage => serde_json::to_value(
             commands::resize_image(
@@ -1165,6 +1230,10 @@ mod tests {
             "update_canvas_settings",
             "delete_video_files",
             "delete_image_files",
+            "list_media_cleanup",
+            "trash_media_files",
+            "restore_media_files",
+            "purge_media_files",
         ] {
             rows.push((name, none.clone(), "admin"));
         }
@@ -1314,6 +1383,36 @@ mod tests {
             super::super::authz::check(world.store(), &world.bob, &granted[0]),
             Err(super::super::authz::Denied::NotFound)
         ));
+    }
+
+    // 012c4: the orphan media commands are admin only (403 for everyone else,
+    // whatever they name); a read-only admin may use them.
+    #[test]
+    fn media_cleanup_commands_are_admin_only() {
+        let world = super::super::authz::tests::world();
+        let active = std::sync::RwLock::new("canvas:active".to_owned());
+        let args = json!({"references": ["sucanvas-input://sucanvas-imports/a.png"]});
+        for command in [
+            Command::ListMediaCleanup,
+            Command::TrashMediaFiles,
+            Command::RestoreMediaFiles,
+            Command::PurgeMediaFiles,
+        ] {
+            for user in [&world.alice, &world.bob] {
+                let granted = permissions(&active, user, command, &args).unwrap();
+                assert_eq!(granted, vec![Permission::Admin]);
+                let denied =
+                    super::super::authz::check(world.store(), user, &granted[0]).unwrap_err();
+                assert!(matches!(denied, super::super::authz::Denied::Forbidden(_)));
+                assert_eq!(
+                    axum::response::IntoResponse::into_response(denied).status(),
+                    axum::http::StatusCode::FORBIDDEN
+                );
+            }
+            assert!(world.admin.admin_edit_until.is_none());
+            let granted = permissions(&active, &world.admin, command, &args).unwrap();
+            assert!(super::super::authz::check(world.store(), &world.admin, &granted[0]).is_ok());
+        }
     }
 
     #[test]

@@ -484,11 +484,24 @@ pub fn set_project_preview_image(
         .map_err(|error| error.to_string())
 }
 
+// The Web deletes projects through delete_project_records and leaves Resize
+// files to its orphan media cleanup (CANVAS-012c4).
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 #[cfg_attr(feature = "desktop", tauri::command(async))]
 pub fn delete_project(id: String, state: State<'_, ApplicationState>) -> Result<(), String> {
+    delete_project_records(&id, &state)?;
+    if let Err(error) = cleanup_unreferenced_resize_images(&state.data_dir, &state.database) {
+        eprintln!("Failed to clean orphaned Resize images after project deletion: {error}");
+    }
+    Ok(())
+}
+
+// The project and the active-canvas fallback, without touching media files
+// (the Web leaves those to its orphan media cleanup, CANVAS-012c4).
+pub(crate) fn delete_project_records(id: &str, state: &ApplicationState) -> Result<(), String> {
     state
         .database
-        .delete_project(&id)
+        .delete_project(id)
         .map_err(|error| error.to_string())?;
 
     let deleted_active_project = state
@@ -509,9 +522,6 @@ pub fn delete_project(id: String, state: State<'_, ApplicationState>) -> Result<
             .active_canvas_id
             .write()
             .map_err(|_| "active project lock is poisoned".to_owned())? = fallback_id;
-    }
-    if let Err(error) = cleanup_unreferenced_resize_images(&state.data_dir, &state.database) {
-        eprintln!("Failed to clean orphaned Resize images after project deletion: {error}");
     }
     Ok(())
 }
@@ -909,6 +919,8 @@ fn resized_image_name(original_name: &str, width: u32, height: u32) -> String {
     format!("{stem}-{width}x{height}.png")
 }
 
+// Immediate deletion: desktop only. The Web goes through the grace period.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 pub(crate) fn cleanup_unreferenced_resize_images(
     data_dir: &Path,
     database: &crate::db::Database,
@@ -969,6 +981,7 @@ pub(crate) fn cleanup_unreferenced_resize_images(
     Ok(removed)
 }
 
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn cleanup_resize_images(state: State<'_, ApplicationState>) -> Result<usize, String> {
     let data_dir = state.data_dir.clone();

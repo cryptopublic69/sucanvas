@@ -5,16 +5,19 @@ import { flushSettings, loadSettings } from "./settings";
 import { currentSession, signOut, stageFor, switchEditMode, type WebUser } from "./account";
 import { LoginScreen, PasswordChangeScreen, UserMenu } from "./AccountScreens";
 import { UsersPage } from "./UsersPage";
+import { MediaCleanupPage } from "./MediaCleanupPage";
 import { registerAssignableUsersHandler, registerEditModeHandler, setAccessUser } from "../account/access";
 import { listUsers } from "./adminUsers";
 import "./web.css";
 
 // "password": the account must replace its temporary password before using the canvas.
 type Stage = "checking" | "login" | "password" | "ready";
-const USERS_HASH = "#users";
-function showUsersHash(open: boolean) {
+// Admin pages reopen after a reload: "#users" user management, "#media" media cleanup.
+type AdminPage = "users" | "media";
+const ADMIN_HASHES: Record<string, AdminPage> = { "#users": "users", "#media": "media" };
+function showAdminHash(page: AdminPage | null) {
   const { pathname, search } = window.location;
-  window.history.replaceState(window.history.state, "", open ? `${pathname}${search}${USERS_HASH}` : `${pathname}${search}`);
+  window.history.replaceState(window.history.state, "", page ? `${pathname}${search}#${page}` : `${pathname}${search}`);
 }
 
 export default function WebRoot() {
@@ -23,7 +26,7 @@ export default function WebRoot() {
   const [changingPassword, setChangingPassword] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [managingUsers, setManagingUsers] = useState(false);
+  const [adminPage, setAdminPage] = useState<AdminPage | null>(null);
   // The same decision runs after sign-in, after a forced change and on reload,
   // so a refreshed page lands where the action left it.
   const enter = useCallback(async (next: WebUser, editModeSeconds: number | null = null) => {
@@ -32,14 +35,14 @@ export default function WebRoot() {
     setAccessUser(next, editModeSeconds);
     if (stageFor(next) === "password") { closeEvents(); setStage("password"); return; }
     await loadSettings();
-    // "#users" reopens the admin's user management page after a reload.
-    if (window.location.hash === USERS_HASH) {
-      if (next.role === "admin") setManagingUsers(true); else showUsersHash(false);
+    const page = ADMIN_HASHES[window.location.hash];
+    if (page) {
+      if (next.role === "admin") setAdminPage(page); else showAdminHash(null);
     }
     setStage("ready");
   }, []);
-  const leave = useCallback(() => { closeEvents(); setUser(null); setAccessUser(null); setChangingPassword(false); setManagingUsers(false); setStage("login"); }, []);
-  const showUsers = (open: boolean) => { setManagingUsers(open); showUsersHash(open); };
+  const leave = useCallback(() => { closeEvents(); setUser(null); setAccessUser(null); setChangingPassword(false); setAdminPage(null); setStage("login"); }, []);
+  const showAdminPage = (page: AdminPage | null) => { setAdminPage(page); showAdminHash(page); };
   useEffect(() => {
     let cancelled = false;
     registerEditModeHandler(switchEditMode);
@@ -76,8 +79,10 @@ export default function WebRoot() {
     {stage === "ready" && user && <>
       <App />
       <UserMenu user={user} onChangePassword={() => setChangingPassword(true)} onSignOut={signOutSafely}
-        onManageUsers={user.role === "admin" ? () => showUsers(true) : undefined} />
-      {managingUsers && user.role === "admin" && <UsersPage actor={user} onClose={() => showUsers(false)} />}
+        onManageUsers={user.role === "admin" ? () => showAdminPage("users") : undefined}
+        onCleanMedia={user.role === "admin" ? () => showAdminPage("media") : undefined} />
+      {adminPage === "users" && user.role === "admin" && <UsersPage actor={user} onClose={() => showAdminPage(null)} />}
+      {adminPage === "media" && user.role === "admin" && <MediaCleanupPage onClose={() => showAdminPage(null)} />}
       {changingPassword && <PasswordChangeScreen forced={false} user={user}
         onDone={(next) => { setUser(next); setChangingPassword(false); setError(""); setNotice("密码已修改，此账号在其他设备上的登录已退出"); }}
         onCancel={() => setChangingPassword(false)} />}

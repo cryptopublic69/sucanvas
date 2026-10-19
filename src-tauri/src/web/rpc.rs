@@ -100,6 +100,21 @@ fn finish_command(
     Ok(())
 }
 
+// Commands after which files may have lost their last reference: the
+// registry is refreshed with the caller as `released_by` (CANVAS-012c4).
+// Anything missed here is caught by the periodic refresh, without a name.
+fn releases_media(command: Command) -> bool {
+    matches!(
+        command,
+        Command::DeleteNode
+            | Command::DeleteNodesUndoable
+            | Command::ReplaceNodeAndDeleteUndoable
+            | Command::DeleteFolderTree
+            | Command::DeleteProject
+            | Command::AdminDeleteProject
+    )
+}
+
 pub fn export_path(state: &WebState, resource: &str) -> Result<PathBuf, String> {
     let relative = resource
         .strip_prefix("sucanvas-export://")
@@ -413,8 +428,28 @@ pub async fn invoke(
         let mut result =
             super::dispatch::dispatch(&worker_state, &session, kind, &input.args).await?;
         finish_command(&worker_state, &session, kind, &grant, &mut result)?;
+        if releases_media(kind) {
+            worker_state.refresh_media(Some(session.user_id.clone()));
+        }
         if command.starts_with("submit_comfyui_") || command == "get_comfyui_client_task_statuses" {
             super::media::reference_outputs(&mut result)?;
+            // Registered on return so a node deleted before any refresh still
+            // leaves a file the cleanup knows about. Off the async workers
+            // (status polls must not wait for a running refresh); failure
+            // only loses that registration.
+            let (media, roots, outputs, user_id) = (
+                worker_state.media.clone(),
+                worker_state.media_roots(),
+                result.clone(),
+                session.user_id.clone(),
+            );
+            tokio::task::spawn_blocking(move || {
+                if let Err(error) =
+                    media.register_outputs(&roots, &outputs, &user_id, chrono::Utc::now())
+                {
+                    eprintln!("生成结果登记失败：{error}");
+                }
+            });
         }
         if command == "import_media" {
             let physical_asset = result["node"]["content"]["assetPath"]
@@ -445,6 +480,16 @@ pub async fn invoke(
                     ],
                 )
                 .map_err(|e| e.to_string())?;
+            let reference = super::storage::encode(&worker_state, &physical_asset);
+            if let Err(error) = worker_state.media.register(
+                &worker_state.media_roots(),
+                &reference,
+                "upload",
+                &session.user_id,
+                chrono::Utc::now(),
+            ) {
+                eprintln!("导入素材登记失败：{error}");
+            }
             result["node"] = serde_json::to_value(node).map_err(|e| e.to_string())?;
             if let Some(source) = input.args["path"].as_str() {
                 let path = PathBuf::from(source);

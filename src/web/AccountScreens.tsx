@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Eye, EyeOff, KeyRound, LogOut, UserRound, Users } from "lucide-react";
+import { Eye, EyeOff, HardDrive, KeyRound, LogOut, UserRound, Users } from "lucide-react";
 import suCanvasLogo from "../../src-tauri/icons/128x128@2x.png";
 import { changeOwnPassword, newPasswordProblem, signIn, userLabel, type WebUser } from "./account";
+import { formatBytes, listMediaCleanup } from "./adminMedia";
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -115,12 +116,22 @@ export function PasswordChangeScreen({ user, forced, onDone, onCancel, onSignOut
   );
 }
 
-// `onManageUsers` is passed for admins only; regular users never get the entry.
-export function UserMenu({ user, onChangePassword, onManageUsers, onSignOut }: {
-  user: WebUser; onChangePassword: () => void; onManageUsers?: () => void; onSignOut: () => void;
+// `onManageUsers` / `onCleanMedia` are passed for admins only; regular users never get the entries.
+export function UserMenu({ user, onChangePassword, onManageUsers, onCleanMedia, onSignOut }: {
+  user: WebUser; onChangePassword: () => void; onManageUsers?: () => void; onCleanMedia?: () => void; onSignOut: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  // "可清理 N 个 · X": read when the admin opens the menu.
+  const [cleanable, setCleanable] = useState("");
   const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open || !onCleanMedia) return;
+    let cancelled = false;
+    void listMediaCleanup()
+      .then((listing) => { if (!cancelled) setCleanable(listing.candidates.length ? `${listing.candidates.length} 个 · ${formatBytes(listing.candidateBytes)}` : ""); })
+      .catch(() => { if (!cancelled) setCleanable(""); });
+    return () => { cancelled = true; };
+  }, [open, onCleanMedia]);
   useEffect(() => {
     if (!open) return;
     const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
@@ -139,6 +150,8 @@ export function UserMenu({ user, onChangePassword, onManageUsers, onSignOut }: {
             <small>{user.displayName ? `${user.username} · ` : ""}{user.role === "admin" ? "管理员" : "成员"}</small>
           </div>
           {onManageUsers && <button type="button" role="menuitem" onClick={() => { setOpen(false); onManageUsers(); }}><Users size={14} aria-hidden="true" />用户管理</button>}
+          {onCleanMedia && <button type="button" role="menuitem" onClick={() => { setOpen(false); onCleanMedia(); }}><HardDrive size={14} aria-hidden="true" />素材清理
+            {cleanable && <span className="web-admin-badge" data-testid="media-badge">{cleanable}</span>}</button>}
           <button type="button" role="menuitem" onClick={() => { setOpen(false); onChangePassword(); }}><KeyRound size={14} aria-hidden="true" />修改密码</button>
           <button type="button" role="menuitem" onClick={() => { setOpen(false); onSignOut(); }}><LogOut size={14} aria-hidden="true" />退出登录</button>
         </div>

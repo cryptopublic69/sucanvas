@@ -8,6 +8,7 @@ mod connection;
 mod dispatch;
 mod files;
 mod media;
+mod media_cleanup;
 mod ownership;
 mod posters;
 mod presence;
@@ -66,6 +67,7 @@ pub(crate) struct WebState {
     tasks: Arc<tasks::Tasks>,
     comfy_relays: Arc<ws_handover::Registry>,
     presence: Arc<presence::Presence>,
+    media: Arc<media_cleanup::MediaRegistry>,
 }
 
 impl WebState {
@@ -76,6 +78,33 @@ impl WebState {
             PathBuf::from(&self.config.comfy_input_directory).join(storage::IMPORT_FOLDER);
         self.core = Arc::new(core);
         self
+    }
+
+    // Media folders of the current configuration (a ComfyUI folder that is
+    // not configured is simply not managed).
+    fn media_roots(&self) -> media_cleanup::MediaRoots {
+        let configured =
+            |directory: &str| (!directory.trim().is_empty()).then(|| PathBuf::from(directory));
+        media_cleanup::MediaRoots {
+            input: configured(&self.config.comfy_input_directory),
+            output: configured(&self.config.comfy_output_directory),
+            data: self.core.data_dir.clone(),
+        }
+    }
+
+    // Recomputes media references in the background; `actor` is the user
+    // whose deletion may have released files. Failures only delay cleanup.
+    fn refresh_media(&self, actor: Option<String>) {
+        let state = self.clone().connection_snapshot();
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) =
+                state
+                    .media
+                    .refresh(&state.media_roots(), chrono::Utc::now(), actor.as_deref())
+            {
+                eprintln!("素材登记刷新失败：{error}");
+            }
+        });
     }
 }
 
@@ -193,6 +222,7 @@ pub async fn run() -> Result<(), String> {
     let database_path = data.join("infinite-canvas.sqlite3");
     users::migrate(&database_path, &auth_path)?;
     let auth = Arc::new(auth::Auth::open(&database_path)?);
+    let media = Arc::new(media_cleanup::MediaRegistry::open(&database_path)?);
     let active_canvas_id = Arc::new(RwLock::new(DEFAULT_CANVAS_ID.to_owned()));
     let selection = Arc::new(RwLock::new(CanvasSelectionState::default()));
     let (event_sender, _) = tokio::sync::broadcast::channel(512);
@@ -255,6 +285,7 @@ pub async fn run() -> Result<(), String> {
         connection: Arc::new(connection::Store::new(config_path, config.clone())),
         config: Arc::new(config),
         presence: Arc::new(presence::Presence::new(handle.clone())),
+        media,
         handle,
         downloads,
         token,
@@ -282,6 +313,17 @@ pub async fn run() -> Result<(), String> {
         // correcting an unavailable mapping. Saving settings retries migration.
         eprintln!("旧素材迁移未完成，保留原数据：{error}");
     }
+    // Orphan media: register stock and new references, start grace periods,
+    // expire old trash; at start and every media_cleanup::REFRESH_HOURS.
+    let refresher = state.clone();
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(media_cleanup::REFRESH_HOURS * 3600));
+        loop {
+            interval.tick().await;
+            refresher.refresh_media(None);
+        }
+    });
     let protected = Router::new()
         .route("/api/invoke/{command}", post(rpc::invoke))
         .route("/api/generation-tasks/{id}", get(tasks::read))

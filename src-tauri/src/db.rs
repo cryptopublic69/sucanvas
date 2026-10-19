@@ -385,6 +385,8 @@ impl Database {
             .optional()?)
     }
 
+    // Desktop only since the Web stopped deleting Resize files (CANVAS-012c4).
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn list_all_projects(&self) -> CanvasResult<Vec<WorkspaceSnapshot>> {
         let connection = self.lock()?;
         let mut statement = connection
