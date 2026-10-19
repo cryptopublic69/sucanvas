@@ -1,6 +1,36 @@
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createWebDevProxy, webDevOriginGuard } from "./scripts/web/dev-proxy.mjs";
+
+// src/startup-theme.js must run before the app, synchronously, and the Web
+// CSP allows same-origin scripts only (no inline). In a build it is emitted
+// unchanged into the (versioned) assets folder under a content hash, so it is
+// part of the release manifest and never served stale; dev serves the source.
+function startupTheme(): Plugin {
+  const source = () => readFileSync(new URL("./src/startup-theme.js", import.meta.url), "utf8");
+  let src = "/src/startup-theme.js";
+  let fileName = "";
+  return {
+    name: "startup-theme",
+    configResolved(config) {
+      if (config.command !== "build") return;
+      fileName = `${config.build.assetsDir}/startup-theme-${createHash("sha256").update(source()).digest("hex").slice(0, 10)}.js`;
+      src = `/${fileName}`;
+    },
+    generateBundle() {
+      this.emitFile({ type: "asset", fileName, source: source() });
+    },
+    transformIndexHtml: {
+      order: "post",
+      // End of <head>: after the startup styles and after the module entry
+      // tag (which Test-WebDeployment.ps1 reads as the first script); being
+      // classic, it still runs before any module script.
+      handler: () => [{ tag: "script", attrs: { src }, injectTo: "head" }],
+    },
+  };
+}
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -13,7 +43,7 @@ export default defineConfig(async ({ mode, command }) => {
   if (mode === "web" && command === "build" && !/^[A-Za-z0-9_-]+$/.test(assetVersion)) throw new Error("Invalid Web asset version");
   const webBackend = webEnvironment.SUCANVAS_WEB_BACKEND || "http://127.0.0.1:18742";
   return ({
-  plugins: [react(), ...(mode === "web" ? [{
+  plugins: [react(), startupTheme(), ...(mode === "web" ? [{
     name: "web-app-icon",
     transformIndexHtml: {
       order: "pre" as const,
