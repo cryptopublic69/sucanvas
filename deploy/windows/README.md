@@ -35,7 +35,7 @@ SuCanvas-Web/
 
 ## 首次启动和人工测试
 
-在部署包目录运行以下命令。密码通过隐藏输入传给程序，Argon2 密码哈希保存在 data/app-lock.json。首次启动时，服务用这个哈希创建 `admin` 账号（密码相同），之后 Web 登录使用用户名 + 密码，`Set-Password.ps1` 不再改变已有账号的密码。
+在部署包目录运行以下命令。密码通过隐藏输入传给程序，Argon2 密码哈希保存在 data/app-lock.json。首次启动时，服务用这个哈希创建 `admin` 账号（密码相同），之后 Web 登录使用用户名 + 密码，`Set-Password.ps1` 不再改变已有账号的密码。其他账号由 admin 在网页左下角用户菜单 →「用户管理」里创建、重置密码、停用或删除；删除账号时，它的画布（私有和共享）转给指定用户。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Set-Password.ps1

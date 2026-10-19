@@ -173,6 +173,97 @@ fn normalize_tree(connection: &Connection, root_id: &str) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
+fn insert_audit(
+    connection: &Connection,
+    user_id: &str,
+    username: &str,
+    canvas_id: &str,
+    canvas_owner_user_id: Option<&str>,
+    command: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO audit_log (created_at, user_id, username, canvas_id, canvas_owner_user_id, command)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                chrono::Utc::now().to_rfc3339(),
+                user_id,
+                username,
+                canvas_id,
+                canvas_owner_user_id,
+                command
+            ],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+pub(super) struct UserDeletion<'a> {
+    pub actor_id: &'a str,
+    pub actor_username: &'a str,
+    pub user_id: &'a str,
+    pub username: &'a str,
+    pub target_id: &'a str,
+    pub target_username: &'a str,
+}
+
+// Deleting a user (012c1), inside the deletion transaction: every canvas they
+// own, private or shared, moves to the target with its sharing unchanged. The
+// audit log gets one row per moved root plus one for the deletion itself
+// (canvas_id ''), with usernames as text so the rows outlive the account.
+// Returns the moved root canvases.
+pub(super) fn transfer_on_delete(
+    connection: &Connection,
+    deletion: &UserDeletion<'_>,
+) -> Result<Vec<String>, String> {
+    if !table_exists(connection, "canvases")? {
+        return Ok(Vec::new());
+    }
+    let roots = {
+        let mut statement = connection
+            .prepare(
+                "SELECT id FROM canvases WHERE owner_user_id = ?1
+                 AND id NOT IN (SELECT child_canvas_id FROM canvas_folders) ORDER BY id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([deletion.user_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
+    connection
+        .execute(
+            "UPDATE canvases SET owner_user_id = ?2 WHERE owner_user_id = ?1",
+            params![deletion.user_id, deletion.target_id],
+        )
+        .map_err(|e| e.to_string())?;
+    let detail = format!(
+        "username={} transfer_to={}",
+        deletion.username, deletion.target_username
+    );
+    for root in &roots {
+        normalize_tree(connection, root)?;
+        insert_audit(
+            connection,
+            deletion.actor_id,
+            deletion.actor_username,
+            root,
+            Some(deletion.user_id),
+            &format!("delete_user:transfer {detail}"),
+        )?;
+    }
+    insert_audit(
+        connection,
+        deletion.actor_id,
+        deletion.actor_username,
+        "",
+        Some(deletion.user_id),
+        &format!("delete_user {detail} canvases={}", roots.len()),
+    )?;
+    Ok(roots)
+}
+
 // Generations remembered per ComfyUI client id (in memory, like sessions).
 const TASK_OWNER_LIMIT: usize = 20_000;
 
@@ -333,23 +424,14 @@ impl Ownership {
         canvas: &CanvasOwner,
         command: &str,
     ) -> Result<(), String> {
-        self.connection
-            .lock()
-            .unwrap()
-            .execute(
-                "INSERT INTO audit_log (created_at, user_id, username, canvas_id, canvas_owner_user_id, command)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    chrono::Utc::now().to_rfc3339(),
-                    user_id,
-                    username,
-                    canvas.root_id,
-                    canvas.owner_user_id,
-                    command
-                ],
-            )
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        insert_audit(
+            &self.connection.lock().unwrap(),
+            user_id,
+            username,
+            &canvas.root_id,
+            canvas.owner_user_id.as_deref(),
+            command,
+        )
     }
 
     // Root canvases a regular user may list (SQL layer): their own and shared ones.

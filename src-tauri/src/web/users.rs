@@ -51,6 +51,17 @@ pub struct UserRecord {
     pub password_changed_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedUser {
+    pub id: String,
+    pub username: String,
+    pub transferred_to: String,
+    pub transferred_to_username: String,
+    // Root canvases (what the home page lists) that changed owner.
+    pub transferred_canvases: usize,
+}
+
 pub struct Credential {
     pub user: UserRecord,
     pub password_hash: String,
@@ -370,6 +381,85 @@ impl Users {
 
     pub fn set_role(&self, id: &str, role: Role) -> Result<UserRecord, String> {
         self.update_admin_state(id, AdminChange::Role(role))
+    }
+
+    // One transaction: the last-admin rule, moving the user's canvases to
+    // `transfer_to`, the audit rows and the delete either all land or none do.
+    // Foreign keys are enforced on this connection, so a canvas still pointing
+    // at the user would make the delete fail instead of leaving a dangling owner.
+    pub fn delete(
+        &self,
+        id: &str,
+        transfer_to: &str,
+        actor_id: &str,
+        actor_username: &str,
+    ) -> Result<DeletedUser, String> {
+        if id == transfer_to {
+            return Err("画布不能转给要删除的用户".to_owned());
+        }
+        let mut connection = self.connection.lock().unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON")
+            .map_err(|e| e.to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let account = |user_id: &str| {
+            transaction
+                .query_row(
+                    "SELECT username, role, disabled FROM users WHERE id = ?1",
+                    [user_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)? == "admin",
+                            row.get::<_, i64>(2)? != 0,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|e| e.to_string())
+        };
+        let Some((username, is_admin, disabled)) = account(id)? else {
+            return Err("用户不存在".to_owned());
+        };
+        let Some((target_username, _, _)) = account(transfer_to)? else {
+            return Err("接收画布的用户不存在".to_owned());
+        };
+        if is_admin && !disabled {
+            let other_admins: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0 AND id <> ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if other_admins == 0 {
+                return Err("至少需要保留一个启用的管理员".to_owned());
+            }
+        }
+        let moved = super::ownership::transfer_on_delete(
+            &transaction,
+            &super::ownership::UserDeletion {
+                actor_id,
+                actor_username,
+                user_id: id,
+                username: &username,
+                target_id: transfer_to,
+                target_username: &target_username,
+            },
+        )?;
+        transaction
+            .execute("DELETE FROM users WHERE id = ?1", [id])
+            .map_err(|e| e.to_string())?;
+        transaction.commit().map_err(|e| e.to_string())?;
+        Ok(DeletedUser {
+            id: id.to_owned(),
+            username,
+            transferred_to: transfer_to.to_owned(),
+            transferred_to_username: target_username,
+            transferred_canvases: moved.len(),
+        })
     }
 
     pub fn set_display_name(

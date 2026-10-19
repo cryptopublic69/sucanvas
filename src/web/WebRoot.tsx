@@ -4,11 +4,17 @@ import { closeEvents } from "./bridge";
 import { flushSettings, loadSettings } from "./settings";
 import { currentSession, signOut, stageFor, switchEditMode, type WebUser } from "./account";
 import { LoginScreen, PasswordChangeScreen, UserMenu } from "./AccountScreens";
+import { UsersPage } from "./UsersPage";
 import { registerEditModeHandler, setAccessUser } from "../account/access";
 import "./web.css";
 
 // "password": the account must replace its temporary password before using the canvas.
 type Stage = "checking" | "login" | "password" | "ready";
+const USERS_HASH = "#users";
+function showUsersHash(open: boolean) {
+  const { pathname, search } = window.location;
+  window.history.replaceState(window.history.state, "", open ? `${pathname}${search}${USERS_HASH}` : `${pathname}${search}`);
+}
 
 export default function WebRoot() {
   const [stage, setStage] = useState<Stage>("checking");
@@ -16,6 +22,7 @@ export default function WebRoot() {
   const [changingPassword, setChangingPassword] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [managingUsers, setManagingUsers] = useState(false);
   // The same decision runs after sign-in, after a forced change and on reload,
   // so a refreshed page lands where the action left it.
   const enter = useCallback(async (next: WebUser, editModeSeconds: number | null = null) => {
@@ -24,9 +31,14 @@ export default function WebRoot() {
     setAccessUser(next, editModeSeconds);
     if (stageFor(next) === "password") { closeEvents(); setStage("password"); return; }
     await loadSettings();
+    // "#users" reopens the admin's user management page after a reload.
+    if (window.location.hash === USERS_HASH) {
+      if (next.role === "admin") setManagingUsers(true); else showUsersHash(false);
+    }
     setStage("ready");
   }, []);
-  const leave = useCallback(() => { closeEvents(); setUser(null); setAccessUser(null); setChangingPassword(false); setStage("login"); }, []);
+  const leave = useCallback(() => { closeEvents(); setUser(null); setAccessUser(null); setChangingPassword(false); setManagingUsers(false); setStage("login"); }, []);
+  const showUsers = (open: boolean) => { setManagingUsers(open); showUsersHash(open); };
   useEffect(() => {
     let cancelled = false;
     registerEditModeHandler(switchEditMode);
@@ -59,7 +71,9 @@ export default function WebRoot() {
     {stage === "password" && <PasswordChangeScreen forced user={user} onDone={(next) => enter(next)} onSignOut={signOutSafely} />}
     {stage === "ready" && user && <>
       <App />
-      <UserMenu user={user} onChangePassword={() => setChangingPassword(true)} onSignOut={signOutSafely} />
+      <UserMenu user={user} onChangePassword={() => setChangingPassword(true)} onSignOut={signOutSafely}
+        onManageUsers={user.role === "admin" ? () => showUsers(true) : undefined} />
+      {managingUsers && user.role === "admin" && <UsersPage actor={user} onClose={() => showUsers(false)} />}
       {changingPassword && <PasswordChangeScreen forced={false} user={user}
         onDone={(next) => { setUser(next); setChangingPassword(false); setError(""); setNotice("密码已修改，此账号在其他设备上的登录已退出"); }}
         onCancel={() => setChangingPassword(false)} />}

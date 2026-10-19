@@ -1,4 +1,4 @@
-// Admin user management (UI arrives in CANVAS-012c). Every operation is an
+// Admin user management (UI: src/web/UsersPage.tsx). Every operation is an
 // `AdminCommand`; `execute` checks the permission the command declares before
 // running it, so no handler carries its own role check.
 use super::{
@@ -40,6 +40,11 @@ pub enum AdminCommand {
         id: String,
         display_name: Option<String>,
     },
+    // The user's canvases (private and shared) move to `transfer_to`.
+    Delete {
+        id: String,
+        transfer_to: String,
+    },
 }
 
 impl AdminCommand {
@@ -51,7 +56,8 @@ impl AdminCommand {
             | AdminCommand::ResetPassword { .. }
             | AdminCommand::SetDisabled { .. }
             | AdminCommand::SetRole { .. }
-            | AdminCommand::SetDisplayName { .. } => Permission::Admin,
+            | AdminCommand::SetDisplayName { .. }
+            | AdminCommand::Delete { .. } => Permission::Admin,
         }
     }
 }
@@ -156,6 +162,21 @@ pub async fn execute(
                 .set_display_name(&id, display_name)
                 .map_err(rejected)?,
         ),
+        AdminCommand::Delete { id, transfer_to } => {
+            if id == actor.user_id {
+                return Err(rejected("不能删除自己的账号".to_owned()));
+            }
+            let actor_username = users
+                .by_id(&actor.user_id)
+                .map_err(rejected)?
+                .map(|credential| credential.user.username)
+                .ok_or_else(|| rejected("用户不存在".to_owned()))?;
+            let deleted = users
+                .delete(&id, &transfer_to, &actor.user_id, &actor_username)
+                .map_err(rejected)?;
+            auth.revoke_user(&id, None);
+            to_json(deleted)
+        }
     }
 }
 
@@ -267,6 +288,23 @@ pub async fn set_display_name(
     };
     respond(&state, &actor, command).await
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteInput {
+    transfer_to_user_id: String,
+}
+pub async fn delete(
+    State(state): State<WebState>,
+    Extension(actor): Extension<Session>,
+    Path(id): Path<String>,
+    Json(input): Json<DeleteInput>,
+) -> Response {
+    let command = AdminCommand::Delete {
+        id,
+        transfer_to: input.transfer_to_user_id,
+    };
+    respond(&state, &actor, command).await
+}
 
 #[cfg(test)]
 mod tests {
@@ -274,6 +312,7 @@ mod tests {
         tests::{add_user, headers, server},
         Access, AuthError,
     };
+    use super::super::authz::tests::{session, world, World};
     use super::*;
 
     async fn signed_in(auth: &Auth, username: &str, password: &str) -> (String, Session) {
@@ -308,6 +347,10 @@ mod tests {
             AdminCommand::SetDisplayName {
                 id: id.into(),
                 display_name: Some("x".into()),
+            },
+            AdminCommand::Delete {
+                id: id.into(),
+                transfer_to: id.into(),
             },
         ]
     }
@@ -482,6 +525,206 @@ mod tests {
                 .user
                 .disabled
         );
+    }
+
+    fn audit_rows(world: &World) -> Vec<(String, String, Option<String>, String)> {
+        let connection = rusqlite::Connection::open(world.fixture.database()).unwrap();
+        let mut statement = connection
+            .prepare("SELECT username, canvas_id, canvas_owner_user_id, command FROM audit_log ORDER BY id")
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    // 012c1: everything carol owned (private, shared, child canvases) goes to
+    // bob with sharing unchanged; her sessions end; older audit rows that
+    // name her keep the username text.
+    #[tokio::test]
+    async fn deleting_a_user_moves_every_canvas_to_the_target_and_ends_sessions() {
+        let world = world();
+        let carol = add_user(&world.auth, "carol", "初始密码");
+        let (token, _) = world.auth.login("carol", "初始密码".into()).await.unwrap();
+        let carols = session(&carol.id, Role::User);
+        let private = world.project(&carols, false);
+        let child = world.folder(&private);
+        let shared = world.project(&carols, true);
+        let alices = world.project(&world.alice, false);
+        world
+            .store()
+            .audit(
+                &carol.id,
+                "carol",
+                &world.store().owner(&shared).unwrap().unwrap(),
+                "earlier",
+            )
+            .unwrap();
+        let result = execute(
+            &world.auth,
+            &world.admin,
+            AdminCommand::Delete {
+                id: carol.id.clone(),
+                transfer_to: world.bob.user_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["username"], "carol");
+        assert_eq!(result["transferredToUsername"], "bob");
+        assert_eq!(result["transferredCanvases"], 2);
+        let bob = Some(world.bob.user_id.clone());
+        assert_eq!(world.columns(&private), (bob.clone(), 0));
+        assert_eq!(world.columns(&child), (bob.clone(), 0));
+        assert_eq!(world.columns(&shared), (bob, 1));
+        assert_eq!(
+            world.columns(&alices),
+            (Some(world.alice.user_id.clone()), 0)
+        );
+        assert!(world.auth.users().by_id(&carol.id).unwrap().is_none());
+        assert!(!world.auth.authenticated(&headers(&token)));
+        assert_eq!(
+            world
+                .auth
+                .login("carol", "初始密码".into())
+                .await
+                .unwrap_err(),
+            AuthError::Invalid
+        );
+        let audit = audit_rows(&world);
+        assert_eq!(audit[0].0, "carol");
+        assert_eq!(audit[0].3, "earlier");
+        let mut moved: Vec<_> = audit[1..3].iter().map(|row| row.1.clone()).collect();
+        moved.sort();
+        let mut expected = vec![private, shared];
+        expected.sort();
+        assert_eq!(moved, expected);
+        for row in &audit[1..] {
+            assert_eq!(row.0, "admin");
+            assert_eq!(row.2.as_deref(), Some(carol.id.as_str()));
+            assert!(
+                row.3.contains("username=carol transfer_to=bob"),
+                "{}",
+                row.3
+            );
+        }
+        assert_eq!(audit[3].1, "");
+        assert!(audit[3].3.ends_with("canvases=2"));
+        assert_eq!(audit.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_self_the_last_admin_and_bad_targets_without_changes() {
+        let world = world();
+        let alices = world.project(&world.alice, false);
+        let refused = |actor: Session, id: String, transfer_to: String| {
+            let auth = &world.auth;
+            async move {
+                execute(auth, &actor, AdminCommand::Delete { id, transfer_to })
+                    .await
+                    .unwrap_err()
+                    .into_response()
+                    .status()
+            }
+        };
+        let admin_id = world.admin.user_id.clone();
+        let alice_id = world.alice.user_id.clone();
+        // Own account, unknown or identical target, unknown user.
+        assert_eq!(
+            refused(world.admin.clone(), admin_id.clone(), alice_id.clone()).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            refused(world.admin.clone(), alice_id.clone(), "nobody".into()).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            refused(world.admin.clone(), alice_id.clone(), alice_id.clone()).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            refused(world.admin.clone(), "nobody".into(), admin_id.clone()).await,
+            StatusCode::NOT_FOUND
+        );
+        // A disabled second admin cannot delete the only enabled one.
+        let heidi = world
+            .auth
+            .users()
+            .create("heidi", None, Role::Admin, "hash")
+            .unwrap();
+        world.auth.users().set_disabled(&heidi.id, true).unwrap();
+        assert_eq!(
+            refused(
+                session(&heidi.id, Role::Admin),
+                admin_id.clone(),
+                heidi.id.clone()
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        // Regular users are refused before anything is looked up.
+        assert_eq!(
+            refused(
+                world.bob.clone(),
+                alice_id.clone(),
+                world.bob.user_id.clone()
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(world.auth.users().list().unwrap().len(), 4);
+        assert_eq!(world.columns(&alices), (Some(alice_id), 0));
+        assert!(audit_rows(&world).is_empty());
+        // Once heidi is enabled, the original admin may go.
+        world.auth.users().set_disabled(&heidi.id, false).unwrap();
+        execute(
+            &world.auth,
+            &session(&heidi.id, Role::Admin),
+            AdminCommand::Delete {
+                id: admin_id,
+                transfer_to: heidi.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    // A failure after the canvases moved (here: the final DELETE) rolls the
+    // whole deletion back: owners, audit rows and the account stay as they were.
+    #[tokio::test]
+    async fn a_failed_delete_rolls_back_the_canvas_transfer() {
+        let world = world();
+        let alices = world.project(&world.alice, false);
+        rusqlite::Connection::open(world.fixture.database())
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER block_delete BEFORE DELETE ON users BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+            )
+            .unwrap();
+        let error = execute(
+            &world.auth,
+            &world.admin,
+            AdminCommand::Delete {
+                id: world.alice.user_id.clone(),
+                transfer_to: world.admin.user_id.clone(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            world.columns(&alices),
+            (Some(world.alice.user_id.clone()), 0)
+        );
+        assert!(audit_rows(&world).is_empty());
+        assert!(world
+            .auth
+            .users()
+            .by_id(&world.alice.user_id)
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

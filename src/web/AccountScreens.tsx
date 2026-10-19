@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Eye, EyeOff, KeyRound, LogOut, UserRound } from "lucide-react";
+import { Eye, EyeOff, KeyRound, LogOut, UserRound, Users } from "lucide-react";
 import suCanvasLogo from "../../src-tauri/icons/128x128@2x.png";
 import { changeOwnPassword, newPasswordProblem, signIn, userLabel, type WebUser } from "./account";
 
@@ -115,7 +115,10 @@ export function PasswordChangeScreen({ user, forced, onDone, onCancel, onSignOut
   );
 }
 
-export function UserMenu({ user, onChangePassword, onSignOut }: { user: WebUser; onChangePassword: () => void; onSignOut: () => void }) {
+// `onManageUsers` is passed for admins only; regular users never get the entry.
+export function UserMenu({ user, onChangePassword, onManageUsers, onSignOut }: {
+  user: WebUser; onChangePassword: () => void; onManageUsers?: () => void; onSignOut: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -135,6 +138,7 @@ export function UserMenu({ user, onChangePassword, onSignOut }: { user: WebUser;
             <strong>{label}</strong>
             <small>{user.displayName ? `${user.username} · ` : ""}{user.role === "admin" ? "管理员" : "成员"}</small>
           </div>
+          {onManageUsers && <button type="button" role="menuitem" onClick={() => { setOpen(false); onManageUsers(); }}><Users size={14} aria-hidden="true" />用户管理</button>}
           <button type="button" role="menuitem" onClick={() => { setOpen(false); onChangePassword(); }}><KeyRound size={14} aria-hidden="true" />修改密码</button>
           <button type="button" role="menuitem" onClick={() => { setOpen(false); onSignOut(); }}><LogOut size={14} aria-hidden="true" />退出登录</button>
         </div>

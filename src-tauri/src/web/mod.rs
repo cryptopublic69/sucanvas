@@ -304,6 +304,7 @@ pub async fn run() -> Result<(), String> {
             "/api/admin/users/{id}/display-name",
             post(accounts::set_display_name),
         )
+        .route("/api/admin/users/{id}/delete", post(accounts::delete))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_session,

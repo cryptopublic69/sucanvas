@@ -359,7 +359,7 @@ pub(crate) mod tests {
             check(self.store(), session, &permission)
         }
         // Child canvas created by grouping two nodes into a folder (shared db.rs code).
-        fn folder(&self, canvas: &str) -> String {
+        pub(crate) fn folder(&self, canvas: &str) -> String {
             let first = self.node(canvas).id;
             let second = self.node(canvas).id;
             self.db
@@ -377,7 +377,7 @@ pub(crate) mod tests {
                 )
                 .unwrap()
         }
-        fn columns(&self, canvas: &str) -> (Option<String>, i64) {
+        pub(crate) fn columns(&self, canvas: &str) -> (Option<String>, i64) {
             rusqlite::Connection::open(self.fixture.database())
                 .unwrap()
                 .query_row(
