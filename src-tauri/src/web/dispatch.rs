@@ -71,7 +71,6 @@ commands! {
     UndoDeleteFolderTree => "undo_delete_folder_tree",
     UpdateProject => "update_project",
     SetProjectPrivate => "set_project_private",
-    SetCanvasSharing => "set_canvas_sharing",
     // Web only (CANVAS-012c2).
     AdminDeleteProject => "admin_delete_project",
     UpdateCanvasSettings => "update_canvas_settings",
@@ -310,7 +309,6 @@ pub fn permissions(
         | ImportWorkflowModuleBundle
         | RestoreWorkflowModuleBundle
         | SetProjectPrivate
-        | SetCanvasSharing
         // Any project, other users' private ones included, without edit mode;
         // always audited (architect, 012c2 item 1).
         | AdminDeleteProject
@@ -747,27 +745,6 @@ pub async fn dispatch(
             State(&state.core),
         )?)
         .map_err(|e| e.to_string()),
-        // Kept for compatibility (the Web UI uses update_canvas_settings);
-        // same audited path, applied to the project the canvas belongs to.
-        Command::SetCanvasSharing => {
-            let id: String = argument(args, "id")?;
-            let shared: bool = argument(args, "shared")?;
-            let before = project_owner(state, &id)?;
-            let username = actor_username(state, session)?;
-            let actor = Actor {
-                id: &session.user_id,
-                username: &username,
-            };
-            let owner = canvases::update_settings(
-                state.auth.ownership(),
-                &actor,
-                &before.root_id,
-                None,
-                Some(shared),
-            )?;
-            notify_access_change(state, &before, Some(&owner));
-            Ok(serde_json::json!({"rootCanvasId": owner.root_id, "isShared": owner.is_shared}))
-        }
         Command::SetProjectPreviewImage => serde_json::to_value(
             commands::set_project_preview_image(input(args)?, State(&state.core))?,
         )
@@ -1225,7 +1202,6 @@ mod tests {
             "import_workflow_module_bundle",
             "restore_workflow_module_bundle",
             "set_project_private",
-            "set_canvas_sharing",
             "admin_delete_project",
             "update_canvas_settings",
             "delete_video_files",
@@ -1383,6 +1359,20 @@ mod tests {
             super::super::authz::check(world.store(), &world.bob, &granted[0]),
             Err(super::super::authz::Denied::NotFound)
         ));
+    }
+
+    // c5 item 5: the old sharing command is gone from the Web (the UI uses
+    // update_canvas_settings); there is no desktop command of that name.
+    #[test]
+    fn set_canvas_sharing_is_not_a_web_command() {
+        assert_eq!(Command::parse("set_canvas_sharing"), None);
+        assert!(!desktop_commands()
+            .iter()
+            .any(|name| name == "set_canvas_sharing"));
+        assert_eq!(
+            Command::parse("update_canvas_settings"),
+            Some(Command::UpdateCanvasSettings)
+        );
     }
 
     // 012c4: the orphan media commands are admin only (403 for everyone else,
