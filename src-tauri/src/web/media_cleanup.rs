@@ -22,10 +22,13 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 // Days a file must stay unreferenced before it is offered for cleanup
@@ -386,8 +389,26 @@ pub struct MediaOutcome {
     pub skipped: Vec<Skipped>,
 }
 
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct ScanStats {
+    pub nodes: usize,
+    pub held: std::time::Duration,
+}
+
+// Refresh requests from deletions (see schedule_refresh).
+#[derive(Default)]
+struct RefreshQueue {
+    running: bool,
+    pending: bool,
+    actors: BTreeSet<String>,
+}
+
 pub struct MediaRegistry {
     connection: Mutex<Connection>,
+    queue: Mutex<RefreshQueue>,
+    scans: AtomicUsize,
+    last_scan: Mutex<Option<ScanStats>>,
 }
 
 impl MediaRegistry {
@@ -399,6 +420,9 @@ impl MediaRegistry {
         connection.execute_batch(SCHEMA).map_err(error)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            queue: Mutex::default(),
+            scans: AtomicUsize::new(0),
+            last_scan: Mutex::default(),
         })
     }
 
@@ -416,6 +440,11 @@ impl MediaRegistry {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
+        // The write lock is held from here to the commit.
+        let locked = std::time::Instant::now();
+        let nodes: usize = transaction
+            .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get::<_, i64>(0))
+            .map_err(error)? as usize;
         let references = referenced(&transaction, roots)?;
         let stamp = time(now);
         for (path, category, size) in scan(roots) {
@@ -491,7 +520,87 @@ impl MediaRegistry {
             }
         }
         expire_trash(&transaction, roots, now)?;
-        transaction.commit().map_err(error)
+        transaction.commit().map_err(error)?;
+        let held = locked.elapsed();
+        self.scans.fetch_add(1, Ordering::SeqCst);
+        *self.last_scan.lock().unwrap() = Some(ScanStats { nodes, held });
+        if held > std::time::Duration::from_secs(1) {
+            eprintln!(
+                "素材登记刷新持有写锁 {} ms（{nodes} 个节点）",
+                held.as_millis()
+            );
+        }
+        Ok(())
+    }
+
+    // CANVAS-012c4 R1: deletions ask for a refresh; at most one runs and one
+    // more is queued, every request in between is merged into the queued one.
+    // `spawn` starts the worker (a blocking thread). released_by of a merged
+    // pass: its only operator, or nobody when several users asked.
+    pub fn schedule_refresh(
+        self: &Arc<Self>,
+        roots: MediaRoots,
+        actor: Option<&str>,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>),
+    ) {
+        {
+            let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            queue.pending = true;
+            if let Some(actor) = actor {
+                queue.actors.insert(actor.to_owned());
+            }
+            if queue.running {
+                return;
+            }
+            queue.running = true;
+        }
+        let registry = self.clone();
+        spawn(Box::new(move || registry.drain(&roots)));
+    }
+
+    // The worker: one pass per batch of requests until none is pending.
+    fn drain(&self, roots: &MediaRoots) {
+        // A panicking pass must not leave the queue marked as running forever.
+        struct Reset<'a>(&'a Mutex<RefreshQueue>);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.0.lock().unwrap_or_else(|e| e.into_inner()).running = false;
+                }
+            }
+        }
+        let _reset = Reset(&self.queue);
+        while let Some(actor) = self.next_pass() {
+            if let Err(error) = self.refresh(roots, Utc::now(), actor.as_deref()) {
+                eprintln!("素材登记刷新失败：{error}");
+            }
+        }
+    }
+
+    // Takes the pending batch (None: nothing pending, the worker stops).
+    fn next_pass(&self) -> Option<Option<String>> {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if !queue.pending {
+            queue.running = false;
+            return None;
+        }
+        queue.pending = false;
+        let actors = std::mem::take(&mut queue.actors);
+        Some(if actors.len() == 1 {
+            actors.into_iter().next()
+        } else {
+            None
+        })
+    }
+
+    // Full scans run so far and the last one's size and write-lock time
+    // (read by the tests and the R2 timing run).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn scan_stats(&self) -> (usize, Option<ScanStats>) {
+        (
+            self.scans.load(Ordering::SeqCst),
+            *self.last_scan.lock().unwrap(),
+        )
     }
 
     // Generation results returned to the browser: registered so they can be
@@ -1369,6 +1478,143 @@ mod tests {
                 media.days(GRACE_DAYS + 1)
             )
             .is_err());
+    }
+
+    // R1: 20 deletions in a row while a pass is running trigger one worker
+    // and at most two full scans; every file is still released, by alice.
+    #[test]
+    fn twenty_deletions_trigger_at_most_two_scans() {
+        let media = media();
+        let alice = media.world.alice.user_id.clone();
+        let mut nodes = Vec::new();
+        for n in 0..20 {
+            let reference = format!("sucanvas-input://sucanvas-imports/n{n}.png");
+            media.file(&reference);
+            nodes.push(media.node(json!({"assetPath": reference})));
+        }
+        let registry = Arc::new(MediaRegistry::open(&media.world.fixture.database()).unwrap());
+        registry.refresh(&media.roots, media.t0, None).unwrap();
+        let (before, _) = registry.scan_stats();
+        let workers = Mutex::new(Vec::new());
+        let connection = Connection::open(media.world.fixture.database()).unwrap();
+        {
+            // The first pass blocks on the registry until all 20 requests are in.
+            let busy = registry.connection.lock().unwrap();
+            for (n, node) in nodes.iter().enumerate() {
+                connection
+                    .execute("DELETE FROM nodes WHERE id = ?1", [node])
+                    .unwrap();
+                registry.schedule_refresh(media.roots.clone(), Some(&alice), |job| {
+                    workers.lock().unwrap().push(std::thread::spawn(job));
+                });
+                if n == 0 {
+                    // Let the worker take the first request before the others arrive.
+                    while registry.queue.lock().unwrap().pending {
+                        std::thread::yield_now();
+                    }
+                }
+            }
+            drop(busy);
+        }
+        let workers = workers.into_inner().unwrap();
+        let started = workers.len();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let (after, stats) = registry.scan_stats();
+        assert_eq!(started, 1, "one worker for 20 deletions");
+        assert!(
+            after - before <= 2,
+            "{} full scans for 20 deletions",
+            after - before
+        );
+        assert_eq!(stats.unwrap().nodes, 0);
+        assert!(!registry.queue.lock().unwrap().running);
+        // The worker passes run on the real clock.
+        let listing = registry
+            .list(&media.roots, Utc::now() + Duration::days(GRACE_DAYS + 1))
+            .unwrap();
+        assert_eq!(listing.candidates.len(), 20);
+        assert!(listing
+            .candidates
+            .iter()
+            .all(|item| item.released_by.as_deref() == Some("alice")));
+    }
+
+    // Merged requests name their operator only when there was exactly one;
+    // refreshes without an operator (periodic) do not count.
+    #[test]
+    fn merged_refreshes_name_a_single_operator_only() {
+        let media = media();
+        let registry = Arc::new(MediaRegistry::open(&media.world.fixture.database()).unwrap());
+        let mut started = 0;
+        let mut ask = |actor: Option<&str>| {
+            registry.schedule_refresh(media.roots.clone(), actor, |_job| started += 1)
+        };
+        ask(Some("alice"));
+        ask(None);
+        assert_eq!(registry.next_pass(), Some(Some("alice".to_owned())));
+        ask(Some("alice"));
+        ask(Some("bob"));
+        assert_eq!(registry.next_pass(), Some(None));
+        assert_eq!(registry.next_pass(), None);
+        assert!(!registry.queue.lock().unwrap().running);
+        ask(None);
+        assert_eq!(registry.next_pass(), Some(None));
+        assert_eq!(
+            started, 2,
+            "a new worker only after the previous one stopped"
+        );
+    }
+
+    // R2 measurement on a copy of a real database (not part of the suite):
+    // SUCANVAS_MEDIA_BENCH_DB=<copy> cargo test -- --ignored media_refresh_timing --nocapture
+    #[test]
+    #[ignore]
+    fn media_refresh_timing() {
+        let database = PathBuf::from(std::env::var("SUCANVAS_MEDIA_BENCH_DB").unwrap());
+        let root = database.parent().unwrap().join("bench-roots");
+        let roots = MediaRoots {
+            input: Some(root.join("input")),
+            output: Some(root.join("output")),
+            data: root.join("data"),
+        };
+        for directory in [
+            roots.input.clone().unwrap(),
+            roots.output.clone().unwrap(),
+            roots.data.clone(),
+        ] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        let registry = MediaRegistry::open(&database).unwrap();
+        for run in 1..=3 {
+            let start = std::time::Instant::now();
+            registry.refresh(&roots, Utc::now(), None).unwrap();
+            let total = start.elapsed();
+            let stats = registry.scan_stats().1.unwrap();
+            let edges: i64 = registry
+                .connection
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))
+                .unwrap();
+            let bytes: i64 = registry
+                .connection
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COALESCE(SUM(LENGTH(content_json)), 0) FROM nodes",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            println!(
+                "BENCH run={run} nodes={} edges={edges} content_bytes={bytes} total_ms={:.1} write_lock_ms={:.1}",
+                stats.nodes,
+                total.as_secs_f64() * 1000.0,
+                stats.held.as_secs_f64() * 1000.0
+            );
+        }
     }
 
     #[test]

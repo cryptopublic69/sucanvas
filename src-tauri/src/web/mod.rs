@@ -93,18 +93,15 @@ impl WebState {
     }
 
     // Recomputes media references in the background; `actor` is the user
-    // whose deletion may have released files. Failures only delay cleanup.
+    // whose deletion may have released files. Requests are merged (one pass
+    // running, one queued); failures only delay cleanup.
     fn refresh_media(&self, actor: Option<String>) {
         let state = self.clone().connection_snapshot();
-        tokio::task::spawn_blocking(move || {
-            if let Err(error) =
-                state
-                    .media
-                    .refresh(&state.media_roots(), chrono::Utc::now(), actor.as_deref())
-            {
-                eprintln!("素材登记刷新失败：{error}");
-            }
-        });
+        state
+            .media
+            .schedule_refresh(state.media_roots(), actor.as_deref(), |job| {
+                tokio::task::spawn_blocking(job);
+            });
     }
 }
 
