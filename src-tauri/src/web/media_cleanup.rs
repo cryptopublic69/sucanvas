@@ -61,6 +61,14 @@ const SYSTEM: Actor<'static> = Actor {
     username: "system",
 };
 
+// A pass that panicked (its transaction rolled back when the guard dropped)
+// must not take the registry down with it: a poisoned lock is recovered.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn error(error: impl ToString) -> String {
     error.to_string()
 }
@@ -436,7 +444,7 @@ impl MediaRegistry {
         now: DateTime<Utc>,
         actor: Option<&str>,
     ) -> Result<(), String> {
-        let mut connection = self.connection.lock().unwrap();
+        let mut connection = lock(&self.connection);
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
@@ -523,7 +531,7 @@ impl MediaRegistry {
         transaction.commit().map_err(error)?;
         let held = locked.elapsed();
         self.scans.fetch_add(1, Ordering::SeqCst);
-        *self.last_scan.lock().unwrap() = Some(ScanStats { nodes, held });
+        *lock(&self.last_scan) = Some(ScanStats { nodes, held });
         if held > std::time::Duration::from_secs(1) {
             eprintln!(
                 "素材登记刷新持有写锁 {} ms（{nodes} 个节点）",
@@ -597,10 +605,7 @@ impl MediaRegistry {
     // (read by the tests and the R2 timing run).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn scan_stats(&self) -> (usize, Option<ScanStats>) {
-        (
-            self.scans.load(Ordering::SeqCst),
-            *self.last_scan.lock().unwrap(),
-        )
+        (self.scans.load(Ordering::SeqCst), *lock(&self.last_scan))
     }
 
     // Generation results returned to the browser: registered so they can be
@@ -614,7 +619,7 @@ impl MediaRegistry {
     ) -> Result<(), String> {
         let mut texts = Vec::new();
         strings(result, &mut texts);
-        let connection = self.connection.lock().unwrap();
+        let connection = lock(&self.connection);
         for text in texts {
             if !text.starts_with("sucanvas-output://") {
                 continue;
@@ -659,7 +664,7 @@ impl MediaRegistry {
     }
 
     fn items(&self, condition: &str) -> Result<Vec<MediaItem>, String> {
-        let connection = self.connection.lock().unwrap();
+        let connection = lock(&self.connection);
         let mut statement = connection
             .prepare(&format!(
                 "SELECT media_files.reference, media_files.category, media_files.size, media_files.unreferenced_since,
@@ -717,7 +722,7 @@ impl MediaRegistry {
         references: &[String],
         now: DateTime<Utc>,
     ) -> Result<MediaOutcome, String> {
-        let mut connection = self.connection.lock().unwrap();
+        let mut connection = lock(&self.connection);
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
@@ -796,7 +801,7 @@ impl MediaRegistry {
         references: &[String],
         now: DateTime<Utc>,
     ) -> Result<MediaOutcome, String> {
-        let mut connection = self.connection.lock().unwrap();
+        let mut connection = lock(&self.connection);
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
@@ -863,7 +868,7 @@ impl MediaRegistry {
         roots: &MediaRoots,
         references: &[String],
     ) -> Result<MediaOutcome, String> {
-        let mut connection = self.connection.lock().unwrap();
+        let mut connection = lock(&self.connection);
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
@@ -1539,6 +1544,59 @@ mod tests {
             .candidates
             .iter()
             .all(|item| item.released_by.as_deref() == Some("alice")));
+    }
+
+    // c5 item 8: a pass that panics halfway (inside its IMMEDIATE transaction,
+    // holding the registry lock) poisons the lock. The next scheduled refresh
+    // still runs to the end, listing works, and the half-done write is gone.
+    #[test]
+    fn a_panicking_refresh_does_not_poison_the_registry() {
+        let media = media();
+        let reference = "sucanvas-input://sucanvas-imports/after-panic.png".to_owned();
+        media.file(&reference);
+        let registry = Arc::new(MediaRegistry::open(&media.world.fixture.database()).unwrap());
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut connection = registry.connection.lock().unwrap();
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO media_files (ref_key, reference, category, size, registered_at) VALUES ('half', 'half', 'upload', 0, '')",
+                    [],
+                )
+                .unwrap();
+            panic!("refresh failed halfway");
+        }));
+        assert!(crashed.is_err() && registry.connection.is_poisoned());
+        let mut worker = None;
+        registry.schedule_refresh(media.roots.clone(), None, |job| {
+            worker = Some(std::thread::spawn(job));
+        });
+        worker
+            .unwrap()
+            .join()
+            .expect("the refresh after a panic runs to the end");
+        assert!(!registry.queue.lock().unwrap().running);
+        let listing = registry
+            .list(&media.roots, Utc::now() + Duration::days(GRACE_DAYS + 1))
+            .unwrap();
+        assert_eq!(
+            listing
+                .candidates
+                .iter()
+                .map(|item| item.reference.as_str())
+                .collect::<Vec<_>>(),
+            vec![reference.as_str()]
+        );
+        let half: i64 = lock(&registry.connection)
+            .query_row(
+                "SELECT COUNT(*) FROM media_files WHERE ref_key = 'half'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(half, 0, "the panicking pass was rolled back");
     }
 
     // Merged requests name their operator only when there was exactly one;
