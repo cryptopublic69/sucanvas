@@ -6818,7 +6818,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         );
 
   const headerExpandControl = (isText || isNote) && (
-          <button
+          <button data-readonly-allow=""
             className="nodrag node-action"
             onClick={() => setExpanded(true)}
             title="放大编辑"
@@ -7120,7 +7120,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         )}
         {isText ? headerColorControl : headerExpandControl}
         {isNote && (
-          <button
+          <button data-readonly-allow=""
             type="button"
             className={`nodrag node-action ${nodeMarkdownPreview ? "is-active-markdown" : ""}`}
             onClick={() => setNodeMarkdownPreview((preview) => !preview)}
@@ -7131,7 +7131,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           </button>
         )}
         {!isContentIterationNode && (isText || isNote) && (
-          <button
+          <button data-readonly-allow=""
             type="button"
             className="nodrag node-action"
             onClick={() => copyMarkdown("node", textDraft)}
@@ -7202,7 +7202,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   >
                     {informationMarkdownPreview ? <Pencil size={13} /> : <Eye size={13} />}
                   </button>
-                  <button
+                  <button data-readonly-allow=""
                     type="button"
                     className="markdown-copy-button"
                     onClick={() => copyMarkdown("node-information", informationDraft)}
@@ -7436,7 +7436,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         <button
           type="button"
           className="nodrag folder-node-body"
-          data-read-only-safe=""
+          data-readonly-allow=""
           onClick={() => onOpenFolder(id)}
           title={`打开目录“${record.title}”`}
           aria-label={`打开目录“${record.title}”`}
@@ -7745,7 +7745,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               </div>
             )}
           {generatedVideoUrl && (
-            <button
+            <button data-readonly-allow=""
               type="button"
               className="nodrag node-action"
               onClick={() => void onRevealGeneratedVideo(id)}
@@ -7756,7 +7756,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </button>
           )}
           {generatedVideoUrl && (
-            <button
+            <button data-readonly-allow=""
               type="button"
               className="nodrag node-action generated-video-fullscreen-button"
               onClick={playGeneratedVideoFullscreen}
@@ -7768,7 +7768,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           )}
           {generatedVideoSnapshot && (
             <div ref={generatedInfoRef} className="nodrag generated-video-info-control">
-              <button
+              <button data-readonly-allow=""
                 type="button"
                 className={`node-action generated-video-info-button ${generatedInfoOpen ? "is-active" : ""}`}
                 onClick={() => {
@@ -8119,7 +8119,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             )}
             {generatedImageUrl && (
               <div ref={generatedInfoRef} className="nodrag generated-video-info-control">
-                <button
+                <button data-readonly-allow=""
                   type="button"
                   className={`node-action generated-video-info-button ${generatedInfoOpen ? "is-active" : ""}`}
                   onClick={() => {
@@ -9174,7 +9174,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       >
                         <LocateFixed size={13} aria-hidden="true" />
                       </button>
-                      <button
+                      <button data-readonly-allow=""
                         type="button"
                         className="nodrag video-input-expand"
                         aria-label={"放大编辑文本：" + (input.title || "未命名文本")}
@@ -9399,7 +9399,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                             <span className="video-input-index">{index + 1}</span>
                             {inputKind === "audio" ? (
                               <>
-                                <button
+                                <button data-readonly-allow=""
                                   type="button"
                                   className={`nodrag video-audio-play ${playingAudioId === input.id ? "is-playing" : ""}`}
                                   disabled={!inputAssetPath}
@@ -9993,7 +9993,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     </strong>
                     <span className="video-text-input-preview" title={imagePromptText(input)}>{imagePromptText(input) || "空文本"}</span>
                   </span>
-                  <button
+                  <button data-readonly-allow=""
                     type="button"
                     className="nodrag video-input-expand"
                     aria-label={`放大查看正向提示词：${input.title || "未命名文本"}`}
@@ -10279,7 +10279,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           {isImage && (
             <div className="generated-video-actions" aria-label="图片信息操作">
               <div ref={generatedInfoRef} className="nodrag generated-video-info-control">
-                <button
+                <button data-readonly-allow=""
                   type="button"
                   className={`node-action generated-video-info-button ${generatedInfoOpen ? "is-active" : ""}`}
                   onClick={() => setGeneratedInfoOpen((open) => !open)}
@@ -10542,7 +10542,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               )}
               {isNote && (
                 <>
-                  <button
+                  <button data-readonly-allow=""
                     type="button"
                     className={`markdown-mode-toggle ${expandedTextMarkdownPreview ? "is-active" : ""}`}
                     onClick={() => setExpandedTextMarkdownPreview((preview) => !preview)}
@@ -10551,7 +10551,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   >
                     {expandedTextMarkdownPreview ? <Pencil size={14} /> : <Eye size={14} />}
                   </button>
-                  <button
+                  <button data-readonly-allow=""
                     type="button"
                     className="markdown-copy-button"
                     onClick={() => copyMarkdown("expanded-note", textDraft)}
@@ -10578,7 +10578,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   <Save size={16} />
                 </button>
               )}
-              <button onClick={requestCloseExpandedEditor} title="关闭" aria-label="关闭放大编辑器">
+              <button data-readonly-allow="" onClick={requestCloseExpandedEditor} title="关闭" aria-label="关闭放大编辑器">
                 <X size={17} />
               </button>
             </header>
@@ -10588,7 +10588,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   <header>
                     <strong>{expandedTextMarkdownPreview ? "预览模式" : "编辑模式"}</strong>
                     <span>{textDraft.length.toLocaleString()} 字符</span>
-                    <button
+                    <button data-readonly-allow=""
                       type="button"
                       className={`markdown-mode-toggle ${expandedTextMarkdownPreview ? "is-active" : ""}`}
                       onClick={() => setExpandedTextMarkdownPreview((preview) => !preview)}
@@ -10597,7 +10597,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     >
                       {expandedTextMarkdownPreview ? <Pencil size={14} /> : <Eye size={14} />}
                     </button>
-                    <button
+                    <button data-readonly-allow=""
                       type="button"
                       className="markdown-copy-button"
                       onClick={() => copyMarkdown("expanded-text", textDraft)}
@@ -10638,7 +10638,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   <header>
                     <strong>备注</strong>
                     <span>{informationDraft.length.toLocaleString()} 字符</span>
-                    <button
+                    <button data-readonly-allow=""
                       type="button"
                       className={`markdown-mode-toggle ${expandedInformationMarkdownPreview ? "is-active" : ""}`}
                       onClick={() => setExpandedInformationMarkdownPreview((preview) => !preview)}
@@ -10647,7 +10647,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     >
                       {expandedInformationMarkdownPreview ? <Pencil size={14} /> : <Eye size={14} />}
                     </button>
-                    <button
+                    <button data-readonly-allow=""
                       type="button"
                       className="markdown-copy-button"
                       onClick={() => copyMarkdown("expanded-information", informationDraft)}
@@ -10748,7 +10748,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   <Save size={16} />
                 </button>
               )}
-              <button
+              <button data-readonly-allow=""
                 onClick={requestCloseConnectedTextEditor}
                 title="关闭"
                 aria-label="关闭提示词编辑器"
@@ -10761,7 +10761,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <header>
                   <strong>{connectedTextMarkdownPreview ? "预览模式" : "编辑模式"}</strong>
                   <span>{connectedTextEditor.text.length.toLocaleString()} 字符</span>
-                  <button
+                  <button data-readonly-allow=""
                     type="button"
                     className={`markdown-mode-toggle ${connectedTextMarkdownPreview ? "is-active" : ""}`}
                     onClick={() => setConnectedTextMarkdownPreview((preview) => !preview)}
@@ -10770,7 +10770,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   >
                     {connectedTextMarkdownPreview ? <Pencil size={14} /> : <Eye size={14} />}
                   </button>
-                  <button
+                  <button data-readonly-allow=""
                     type="button"
                     className="markdown-copy-button"
                     onClick={() => copyMarkdown("connected-text", connectedTextEditor.text)}
@@ -10811,7 +10811,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <header>
                   <strong>备注</strong>
                   <span>{connectedTextEditor.information.length.toLocaleString()} 字符</span>
-                  <button
+                  <button data-readonly-allow=""
                     type="button"
                     className={`markdown-mode-toggle ${connectedInformationMarkdownPreview ? "is-active" : ""}`}
                     onClick={() => setConnectedInformationMarkdownPreview((preview) => !preview)}
@@ -10820,7 +10820,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   >
                     {connectedInformationMarkdownPreview ? <Pencil size={14} /> : <Eye size={14} />}
                   </button>
-                  <button
+                  <button data-readonly-allow=""
                     type="button"
                     className="markdown-copy-button"
                     onClick={() => copyMarkdown("connected-information", connectedTextEditor.information)}

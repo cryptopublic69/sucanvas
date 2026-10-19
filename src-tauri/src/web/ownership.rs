@@ -370,6 +370,8 @@ impl Ownership {
     }
 
     // Private <-> shared, applied to the whole tree. Returns the root.
+    // Tests only: the Web goes through canvases::update_settings (audited).
+    #[cfg(test)]
     pub fn set_shared(&self, canvas_id: &str, shared: bool) -> Result<Option<CanvasOwner>, String> {
         let connection = self.connection.lock().unwrap();
         let Some(root_id) = root_of(&connection, canvas_id)? else {

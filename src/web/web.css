@@ -37,7 +37,7 @@
 /* CANVAS-012c2: read-only nodes (admin, other user's private canvas, no edit mode). */
 .react-flow.is-canvas-read-only :is(.node-resize-handle, .node-resize-line, .video-ratio-resizer, .video-generation-height-resizer) { display: none !important; }
 .canvas-node-detail-host.is-read-only :is(textarea, input, select) { caret-color: transparent; cursor: default; }
-.canvas-node-detail-host.is-read-only :is(button, [role="button"]):not([data-read-only-safe]) { cursor: not-allowed; opacity: .55; }
+.canvas-node-detail-host.is-read-only :is(button, [role="button"]):not([data-readonly-allow]) { cursor: not-allowed; opacity: .55; }
 .project-card-actions .project-settings-button { display: inline-flex; align-items: center; gap: 4px; }
 .project-delete-owner-warning { margin: 6px 0 0; padding: 8px 10px; color: #ffd9d9; background: rgba(232, 100, 118, .12); border: 1px solid rgba(232, 100, 118, .4); border-radius: 8px; font-weight: 600; }
 .canvas-settings-dialog > label { display: flex; flex-direction: column; gap: 6px; }

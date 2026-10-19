@@ -108,9 +108,10 @@ export function othersPrivateDeleteWarning(canvas: CanvasOwnership, user: Access
   if (!user || user.role !== "admin" || projectSection(canvas, user) !== "others") return null;
   return `这是 ${ownerLabel(canvas) || "其他用户"} 的私有画布，删除后不可恢复。`;
 }
-// Anyone may copy a shared project into their own canvases.
-export function canCopyProject(canvas: CanvasOwnership, user: AccessUser | null) {
-  return Boolean(user && canvas.isShared);
+// Whoever can see a project may copy it into their own private canvases
+// (012c2 rework; the server checks read access on the root).
+export function canCopyProject(_canvas: CanvasOwnership, user: AccessUser | null) {
+  return Boolean(user);
 }
 // An admin looking at someone else's private canvas reads it until edit mode is on.
 export function readOnlyCanvas(canvas: CanvasOwnership | null | undefined, user: AccessUser | null, editMode: boolean) {

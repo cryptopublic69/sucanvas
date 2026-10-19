@@ -93,7 +93,7 @@ fn finish_command(
             | Command::LoadWorkspace
             | Command::InspectWorkspace
             | Command::CreateProject
-            | Command::CopySharedProject
+            | Command::CopyProject
     ) {
         ownership.annotate(result)?;
     }

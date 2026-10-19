@@ -23,12 +23,19 @@ test("deleting another user's private canvas names its owner in the confirmation
   assert.equal(access.othersPrivateDeleteWarning(canvas("u-alice"), alice), null);
 });
 
-test("only shared canvases offer copying, to every signed-in user", () => {
+test("every canvas a signed-in user can see offers copying (012c2 rework)", () => {
   assert.equal(access.canCopyProject(canvas("u-bob", true), alice), true);
-  assert.equal(access.canCopyProject(canvas("u-bob", true), admin), true);
-  assert.equal(access.canCopyProject(canvas("u-alice"), alice), false);
-  assert.equal(access.canCopyProject(canvas("u-alice"), admin), false);
+  assert.equal(access.canCopyProject(canvas("u-alice"), alice), true);
+  assert.equal(access.canCopyProject(canvas("u-alice"), admin), true);
+  // Desktop / signed out: no copy entry.
   assert.equal(access.canCopyProject(canvas("u-bob", true), null), false);
+});
+
+test("canvas settings save through one update_canvas_settings call with only the changed fields", async () => {
+  const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(app, /invoke\("update_canvas_settings", \{\s+id: project\.canvas\.id,\s+\.\.\.\(ownerChanged \? \{ ownerUserId: settings\.ownerUserId \} : \{\}\),\s+\.\.\.\(sharingChanged \? \{ isShared: settings\.shared \} : \{\}\),/);
+  assert.doesNotMatch(app, /set_canvas_owner|"set_canvas_sharing"/);
+  assert.match(app, /invoke<WorkspaceSnapshot>\("copy_project"/);
 });
 
 test("the canvas settings owner list comes from the registered Web handler", async () => {
@@ -38,7 +45,7 @@ test("the canvas settings owner list comes from the registered Web handler", asy
   access.registerAssignableUsersHandler(null);
 });
 
-test("read-only nodes swallow clicks on buttons except navigation ones", () => {
+test("read-only nodes swallow clicks on every button except explicitly allowed ones", () => {
   // Minimal element stand-ins: closest() walks up to the first match.
   const element = (tag, attributes = {}, parent = null) => ({
     tag, attributes, parent,
@@ -52,7 +59,9 @@ test("read-only nodes swallow clicks on buttons except navigation ones", () => {
   });
   const save = element("button");
   const icon = element("svg", {}, save);
-  const folder = element("button", { "data-read-only-safe": "" });
+  const folder = element("button", { "data-readonly-allow": "" });
+  // The old marker name means nothing any more (fail-closed).
+  assert.equal(readOnly.readOnlyClickBlocked(element("button", { "data-read-only-safe": "" })), true);
   const fakeButton = element("div", { role: "button" });
   const text = element("textarea");
   assert.equal(readOnly.readOnlyClickBlocked(save), true);
@@ -64,16 +73,38 @@ test("read-only nodes swallow clicks on buttons except navigation ones", () => {
   assert.equal(readOnly.readOnlyClickBlocked(null), false);
 });
 
-test("the folder entry is marked safe and read-only hosts intercept edits", async () => {
+test("view-only buttons are on the explicit allowlist and read-only hosts intercept edits", async () => {
   const node = await readFile(new URL("../src/CanvasNode.tsx", import.meta.url), "utf8");
-  assert.match(node, /className="nodrag folder-node-body"\s+data-read-only-safe=""/);
+  assert.match(node, /className="nodrag folder-node-body"\s+data-readonly-allow=""/);
+  // Each allowed button is identified by what it does; nothing that writes is on the list.
+  // Each allowed button's markup up to its closing tag (onClick arrows contain ">").
+  const allowed = node.split('<button data-readonly-allow=""').slice(1).map((rest) => rest.slice(0, rest.indexOf("</button>")));
+  const expectations = [
+    ["fullscreen", /onClick=\{playGeneratedVideoFullscreen\}/, 1],
+    ["download", /onRevealGeneratedVideo/, 1],
+    ["audio play/pause", /toggleAudioPreview/, 1],
+    ["copy Markdown", /copyMarkdown\(/, 7],
+    ["info popovers", /title="查看(生成信息|图片生成信息|图片信息)"/, 3],
+    ["expand to view", /setExpanded\(true\)|openConnectedTextEditor\(input\)|放大查看正向提示词/, 3],
+    ["Markdown preview", /MarkdownPreview\(\(preview\) => !preview\)/, 6],
+    ["close expanded view", /requestClose(ExpandedEditor|ConnectedTextEditor)/, 2],
+  ];
+  for (const [label, pattern, count] of expectations) {
+    assert.equal(allowed.filter((attributes) => pattern.test(attributes)).length, count, label);
+  }
+  assert.equal(allowed.length, 24, "no unexpected button on the allowlist");
+  assert.equal(allowed.filter((attributes) => /save|delete|submit|execute|update|change|onChange/i.test(attributes)).length, 0);
   const presentation = await readFile(new URL("../src/canvas/CanvasNodePresentation.tsx", import.meta.url), "utf8");
   for (const handler of ["onDoubleClickCapture", "onClickCapture", "onChangeCapture", "onBeforeInputCapture", "onPasteCapture", "onDropCapture"]) {
     assert.match(presentation, new RegExp(`is-read-only[\\s\\S]*${handler}=`), handler);
   }
   const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   assert.match(app, /<CanvasReadOnlyContext\.Provider value=\{canvasReadOnly\}>/);
-  assert.equal((app.match(/if \(canvasReadOnlyRef\.current\) return;/g) ?? []).length, 2, "both context menus are closed while read-only");
+  assert.match(app, /const openCanvasContextMenu = useCallback\([^]*?event\.preventDefault\(\);[^]*?if \(canvasReadOnlyRef\.current\) return;/, "canvas menu closed while read-only");
+  assert.match(app, /const openNodeContextMenu = useCallback\([^]*?event\.stopPropagation\(\);\s+if \(canvasReadOnlyRef\.current\) return;/, "node menu closed while read-only");
+  // Passive saves (e.g. measured media size) never reach the server while read-only.
+  assert.match(app, /const persistPatch = useCallback\(\s+\(id: string, patch: NodePatch\) => \{[^]*?if \(canvasReadOnlyRef\.current\) return;\s+const previous/);
+  assert.match(app, /const persistPatchImmediately = useCallback\(\s+async \(id: string, patch: NodePatch\) => \{\s+if \(canvasReadOnlyRef\.current\) return;/);
 });
 
 test("regular users confirm removing generated media nodes (files are kept)", async () => {

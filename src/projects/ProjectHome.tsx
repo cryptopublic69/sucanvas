@@ -39,7 +39,7 @@ export type ProjectHomeAccess = {
   setNewProjectShared: (shared: boolean) => void;
   saveCanvasSettings: (project: WorkspaceSnapshot, settings: { ownerUserId: string; shared: boolean }) => Promise<boolean>;
   sharingBusyId: string | null;
-  copySharedProject: (project: WorkspaceSnapshot) => Promise<void>;
+  copyProject: (project: WorkspaceSnapshot) => Promise<void>;
   copyingProjectId: string | null;
 };
 
@@ -344,10 +344,10 @@ export function ProjectHome({
                   className="project-share-toggle project-copy-button"
                   disabled={access.copyingProjectId === project.canvas.id}
                   aria-label={`复制到我的画布：${project.canvas.name}`}
-                  title="复制一份到“我的画布”（私有）；图片和视频引用同一文件"
+                  title="复制一份到“我的画布”（私有）；图片和视频引用同一文件，未完成的生成在副本中取消"
                   onClick={(event) => {
                     event.stopPropagation();
-                    void access.copySharedProject(project);
+                    void access.copyProject(project);
                   }}
                 >
                   {access.copyingProjectId === project.canvas.id ? "复制中…" : "复制"}

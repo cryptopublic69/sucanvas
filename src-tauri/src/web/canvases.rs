@@ -1,5 +1,6 @@
-// Whole-canvas operations for the Web (CANVAS-012c2): admin delete, owner
-// change and copying a shared canvas into the caller's own canvases. Each runs
+// Whole-canvas operations for the Web (CANVAS-012c2): admin delete, canvas
+// settings (owner and sharing) and copying a readable canvas into the caller's
+// own canvases. Each runs
 // in one IMMEDIATE transaction on the ownership connection with foreign keys
 // on, so the change and its audit row land together or not at all.
 use super::ownership::{
@@ -106,45 +107,34 @@ pub fn admin_delete(
     })
 }
 
-// Admin: give a project (with its folders) to another enabled account.
-// Sharing is unchanged; giving it to its current owner changes nothing.
-pub fn set_owner(
+fn visibility(shared: bool) -> &'static str {
+    if shared {
+        "shared"
+    } else {
+        "private"
+    }
+}
+
+// Admin "画布设置" (012c2 rework): sharing and/or owner of a project (with its
+// folders) in one transaction, each change audited in that transaction.
+// Sharing is applied first, so a refused owner change (unknown or disabled
+// account) rolls it back too. Values equal to the current ones change nothing
+// and write no audit row.
+pub fn update_settings(
     store: &Ownership,
     actor: &Actor<'_>,
     canvas_id: &str,
-    user_id: &str,
+    owner_user_id: Option<&str>,
+    shared: Option<bool>,
 ) -> Result<CanvasOwner, String> {
+    if owner_user_id.is_none() && shared.is_none() {
+        return Err("没有要修改的画布设置".to_owned());
+    }
     let mut connection = store.connection();
     let transaction = begin(&mut connection)?;
     let root = project_root(&transaction, canvas_id)?;
     let info = root_info(&transaction, &root)?;
-    let target: Option<(String, bool)> = transaction
-        .query_row(
-            "SELECT username, disabled FROM users WHERE id = ?1",
-            [user_id],
-            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
-        )
-        .optional()
-        .map_err(error)?;
-    let Some((target_username, disabled)) = target else {
-        return Err("用户不存在".to_owned());
-    };
-    if disabled {
-        return Err("画布只能转给启用的用户".to_owned());
-    }
-    if info.owner_id.as_deref() != Some(user_id) {
-        transaction
-            .execute(
-                "UPDATE canvases SET owner_user_id = ?2 WHERE id = ?1",
-                params![root, user_id],
-            )
-            .map_err(error)?;
-        normalize_tree(&transaction, &root)?;
-        let command = format!(
-            "set_canvas_owner name={} from={} to={target_username}",
-            info.name,
-            info.owner_username.as_deref().unwrap_or(OWNERLESS)
-        );
+    let audit = |command: String| {
         insert_audit(
             &transaction,
             actor.id,
@@ -152,11 +142,81 @@ pub fn set_owner(
             &root,
             info.owner_id.as_deref(),
             &command,
-        )?;
+        )
+    };
+    if let Some(shared) = shared.filter(|shared| *shared != info.is_shared) {
+        transaction
+            .execute(
+                "UPDATE canvases SET is_shared = ?2 WHERE id = ?1",
+                params![root, shared as i64],
+            )
+            .map_err(error)?;
+        audit(format!(
+            "set_canvas_sharing name={} from={} to={}",
+            info.name,
+            visibility(info.is_shared),
+            visibility(shared)
+        ))?;
     }
+    if let Some(user_id) =
+        owner_user_id.filter(|user_id| info.owner_id.as_deref() != Some(*user_id))
+    {
+        let target: Option<(String, bool)> = transaction
+            .query_row(
+                "SELECT username, disabled FROM users WHERE id = ?1",
+                [user_id],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((target_username, disabled)) = target else {
+            return Err("用户不存在".to_owned());
+        };
+        if disabled {
+            return Err("画布只能转给启用的用户".to_owned());
+        }
+        transaction
+            .execute(
+                "UPDATE canvases SET owner_user_id = ?2 WHERE id = ?1",
+                params![root, user_id],
+            )
+            .map_err(error)?;
+        audit(format!(
+            "set_canvas_owner name={} from={} to={target_username}",
+            info.name,
+            info.owner_username.as_deref().unwrap_or(OWNERLESS)
+        ))?;
+    }
+    normalize_tree(&transaction, &root)?;
     let owner = owner_of(&transaction, &root)?.ok_or_else(|| "画布不存在".to_owned())?;
     transaction.commit().map_err(error)?;
     Ok(owner)
+}
+
+// Unfinished generations (running / queued / cancelling) cannot continue in a
+// copy: the copy's node is marked cancelled and loses its task references;
+// the node itself and any finished result stay.
+const UNFINISHED: &[&str] = &["running", "pending", "queued", "cancelling", "submitting"];
+fn cancel_unfinished(content: &mut Value) {
+    let Some(map) = content.as_object_mut() else {
+        return;
+    };
+    let unfinished = map
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| UNFINISHED.contains(&status));
+    if !unfinished {
+        return;
+    }
+    map.insert("status".to_owned(), Value::String("cancelled".to_owned()));
+    map.insert("executionProgress".to_owned(), Value::Null);
+    map.insert(
+        "validationMessage".to_owned(),
+        Value::String("复制画布时任务尚未完成，副本中已取消".to_owned()),
+    );
+    for key in ["placeholderClientId", "comfyPromptId"] {
+        map.remove(key);
+    }
 }
 
 // Ids inside node content and edge metadata (childCanvasId, promptNodeId, ...)
@@ -204,9 +264,13 @@ fn remapped_json(
     text: &str,
     ids: &HashMap<String, String>,
     prompt_sets: &mut HashMap<String, String>,
+    node_content: bool,
 ) -> Result<String, String> {
     let mut value: Value = serde_json::from_str(text).map_err(error)?;
     remap(&mut value, ids, prompt_sets);
+    if node_content {
+        cancel_unfinished(&mut value);
+    }
     serde_json::to_string(&value).map_err(error)
 }
 
@@ -236,9 +300,11 @@ struct EdgeRow {
     metadata: String,
 }
 
-// Copies a shared project (whole folder tree) into `owner_user_id`'s private
-// canvases. Returns the new root canvas id; the source is not modified.
-pub fn copy_shared(
+// Copies a project (whole folder tree) into `owner_user_id`'s private
+// canvases. Whoever may read the project may copy it (the caller checks
+// CanvasRead on the root, 012c2 rework). Returns the new root canvas id; the
+// source is not modified.
+pub fn copy_project(
     store: &Ownership,
     owner_user_id: &str,
     canvas_id: &str,
@@ -246,10 +312,6 @@ pub fn copy_shared(
     let mut connection = store.connection();
     let transaction = begin(&mut connection)?;
     let root = root_of(&transaction, canvas_id)?.ok_or_else(|| "画布不存在".to_owned())?;
-    let info = root_info(&transaction, &root)?;
-    if !info.is_shared {
-        return Err("只能复制共享画布".to_owned());
-    }
     // Parent canvases first, so folder links always find both ends.
     let tree: Vec<String> = {
         let mut statement = transaction
@@ -393,7 +455,7 @@ pub fn copy_shared(
                     mapped(&ids, &node.canvas_id)?,
                     node.kind,
                     node.title,
-                    remapped_json(&node.content, &ids, &mut prompt_sets)?,
+                    remapped_json(&node.content, &ids, &mut prompt_sets, true)?,
                     node.source,
                     x,
                     y,
@@ -416,7 +478,7 @@ pub fn copy_shared(
                     mapped(&ids, &edge.source)?,
                     mapped(&ids, &edge.target)?,
                     edge.kind,
-                    remapped_json(&edge.metadata, &ids, &mut prompt_sets)?,
+                    remapped_json(&edge.metadata, &ids, &mut prompt_sets, false)?,
                     now
                 ],
             )
@@ -537,48 +599,75 @@ mod tests {
     }
 
     #[test]
-    fn admins_move_projects_to_enabled_users_keeping_sharing() {
+    fn canvas_settings_change_owner_and_sharing_in_one_audited_transaction() {
         let world = world();
         let alices = world.project(&world.alice, false);
         let child = world.folder(&alices);
         let shared = world.project(&world.alice, true);
+        let settings = |id: &str, owner: Option<&str>, shared: Option<bool>| {
+            update_settings(world.store(), &admin(&world), id, owner, shared)
+        };
         world
             .auth
             .users()
             .set_disabled(&world.bob.user_id, true)
             .unwrap();
         assert_eq!(
-            set_owner(world.store(), &admin(&world), &alices, &world.bob.user_id).unwrap_err(),
+            settings(&alices, Some(&world.bob.user_id), None).unwrap_err(),
             "画布只能转给启用的用户"
         );
-        assert!(set_owner(world.store(), &admin(&world), &alices, "nobody").is_err());
-        assert!(set_owner(world.store(), &admin(&world), &child, &world.alice.user_id).is_err());
+        // Both at once, the owner part refused: the sharing part is rolled back too.
+        assert_eq!(
+            settings(&alices, Some(&world.bob.user_id), Some(true)).unwrap_err(),
+            "画布只能转给启用的用户"
+        );
+        assert!(settings(&alices, Some("nobody"), Some(true)).is_err());
+        assert_eq!(
+            world.columns(&alices),
+            (Some(world.alice.user_id.clone()), 0)
+        );
+        assert_eq!(
+            world.columns(&child),
+            (Some(world.alice.user_id.clone()), 0)
+        );
+        assert!(settings(&child, Some(&world.alice.user_id), None).is_err());
+        assert!(settings(&alices, None, None).is_err());
         assert!(audit(&world).is_empty());
         world
             .auth
             .users()
             .set_disabled(&world.bob.user_id, false)
             .unwrap();
-        let owner = set_owner(world.store(), &admin(&world), &alices, &world.bob.user_id).unwrap();
+        let owner = settings(&alices, Some(&world.bob.user_id), Some(true)).unwrap();
         assert_eq!(
             owner.owner_user_id.as_deref(),
             Some(world.bob.user_id.as_str())
         );
+        assert!(owner.is_shared);
         let bob = Some(world.bob.user_id.clone());
-        assert_eq!(world.columns(&alices), (bob.clone(), 0));
-        assert_eq!(world.columns(&child), (bob.clone(), 0));
-        set_owner(world.store(), &admin(&world), &shared, &world.bob.user_id).unwrap();
+        assert_eq!(world.columns(&alices), (bob.clone(), 1));
+        assert_eq!(world.columns(&child), (bob.clone(), 1));
+        // Owner only: sharing unchanged. Same values again: nothing written.
+        settings(&shared, Some(&world.bob.user_id), None).unwrap();
         assert_eq!(world.columns(&shared), (bob, 1));
-        // Same owner again: no change, no audit row.
-        set_owner(world.store(), &admin(&world), &shared, &world.bob.user_id).unwrap();
-        let rows = audit(&world);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].2, "set_canvas_owner name=project from=alice to=bob");
-        assert_eq!(rows[0].1.as_deref(), Some(world.alice.user_id.as_str()));
+        settings(&shared, Some(&world.bob.user_id), Some(true)).unwrap();
+        let rows: Vec<String> = audit(&world).into_iter().map(|row| row.2).collect();
+        assert_eq!(
+            rows,
+            [
+                "set_canvas_sharing name=project from=private to=shared",
+                "set_canvas_owner name=project from=alice to=bob",
+                "set_canvas_owner name=project from=alice to=bob",
+            ]
+        );
+        assert_eq!(
+            audit(&world)[0].1.as_deref(),
+            Some(world.alice.user_id.as_str())
+        );
     }
 
     #[test]
-    fn copying_a_shared_project_gives_the_caller_a_private_copy_with_new_ids() {
+    fn copying_a_readable_project_gives_the_caller_a_private_copy_with_new_ids() {
         let world = world();
         let bobs = world.project(&world.bob, true);
         let child = world.folder(&bobs);
@@ -591,14 +680,20 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-        let content = json!({"assetPath": "sucanvas-output://2026-10-19/clip.mp4", "promptNodeId": second, "promptSetId": "set-1"});
+        // `first` is still generating; `second` has a finished result.
+        let content = json!({"assetPath": "sucanvas-output://2026-10-19/clip.mp4", "promptNodeId": second, "promptSetId": "set-1",
+            "status": "running", "executionProgress": 0.4, "placeholderClientId": "client-1", "comfyPromptId": "prompt-1"});
+        let finished =
+            json!({"status": "succeeded", "comfyPromptId": "prompt-2", "videoUrl": "result.mp4"});
         let connection = db(&world);
-        connection
-            .execute(
-                "UPDATE nodes SET content_json = ?2 WHERE id = ?1",
-                params![first, content.to_string()],
-            )
-            .unwrap();
+        for (node, content) in [(&first, content), (&second, finished)] {
+            connection
+                .execute(
+                    "UPDATE nodes SET content_json = ?2 WHERE id = ?1",
+                    params![node, content.to_string()],
+                )
+                .unwrap();
+        }
         connection
             .execute(
                 "INSERT INTO prompt_scene_bindings (prompt_set_id, prompt_set_title, canvas_id, scene_key, scene_title, node_id, created_at, updated_at)
@@ -625,14 +720,21 @@ mod tests {
             &child,
         );
 
-        // Private canvases cannot be copied.
+        // Copying needs read access to the root: bob cannot read alice's private
+        // canvas (so the command never runs for him); alice copies her own.
         let alices = world.project(&world.alice, false);
-        assert_eq!(
-            copy_shared(world.store(), &world.bob.user_id, &alices).unwrap_err(),
-            "只能复制共享画布"
-        );
+        assert!(matches!(
+            check(
+                world.store(),
+                &world.bob,
+                &Permission::CanvasRead(alices.clone())
+            ),
+            Err(Denied::NotFound)
+        ));
+        let own = copy_project(world.store(), &world.alice.user_id, &alices).unwrap();
+        assert_eq!(world.columns(&own), (Some(world.alice.user_id.clone()), 0));
 
-        let copy = copy_shared(world.store(), &world.alice.user_id, &bobs).unwrap();
+        let copy = copy_project(world.store(), &world.alice.user_id, &bobs).unwrap();
         let alice = Some(world.alice.user_id.clone());
         assert_eq!(world.columns(&copy), (alice.clone(), 0));
         let name: String = connection
@@ -704,7 +806,33 @@ mod tests {
         );
         assert_eq!(copied_content["promptSetId"], binding_set.as_str());
         assert_ne!(binding_set, "set-1");
-        // The source is unchanged.
+        // The unfinished generation is cancelled in the copy, without task references.
+        assert_eq!(copied_content["status"], "cancelled");
+        assert_eq!(copied_content["executionProgress"], Value::Null);
+        assert!(copied_content.get("placeholderClientId").is_none());
+        assert!(copied_content.get("comfyPromptId").is_none());
+        // A finished result keeps its status and prompt id (preview versioning).
+        let finished: Value = serde_json::from_str(
+            &connection
+                .query_row(
+                    "SELECT content_json FROM nodes WHERE canvas_id = ?1 AND content_json LIKE '%result.mp4%'",
+                    [&copy],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(finished["status"], "succeeded");
+        assert_eq!(finished["comfyPromptId"], "prompt-2");
+        // The source is unchanged (its generation is still running).
+        let source: String = connection
+            .query_row(
+                "SELECT content_json FROM nodes WHERE id = ?1",
+                [&first],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(source.contains("\"running\"") && source.contains("client-1"));
         assert_eq!(world.columns(&bobs), (Some(world.bob.user_id.clone()), 1));
         assert_eq!(
             count(

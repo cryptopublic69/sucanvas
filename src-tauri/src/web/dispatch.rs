@@ -73,8 +73,8 @@ commands! {
     SetCanvasSharing => "set_canvas_sharing",
     // Web only (CANVAS-012c2).
     AdminDeleteProject => "admin_delete_project",
-    SetCanvasOwner => "set_canvas_owner",
-    CopySharedProject => "copy_shared_project",
+    UpdateCanvasSettings => "update_canvas_settings",
+    CopyProject => "copy_project",
     SetProjectPreviewImage => "set_project_preview_image",
     DeleteProject => "delete_project",
     CreateNode => "create_node",
@@ -305,7 +305,9 @@ pub fn permissions(
         // Any project, other users' private ones included, without edit mode;
         // always audited (architect, 012c2 item 1).
         | AdminDeleteProject
-        | SetCanvasOwner
+        // Owner change needs Admin, the sharing switch was already Admin:
+        // the stricter of the two is Admin (012c2 rework).
+        | UpdateCanvasSettings
         // Permanently deleting generated files stays admin-only until deletion
         // is checked against the canvases that reference each file.
         | DeleteVideoFiles
@@ -349,9 +351,9 @@ pub fn permissions(
             input::<UpdateProjectInput>(args)?.id,
         )],
         DeleteProject => vec![Permission::CanvasDelete(argument(args, "id")?)],
-        // Reading the source is enough; the copy is the caller's own, and the
-        // command itself refuses anything but shared projects.
-        CopySharedProject => vec![Permission::CanvasRead(argument(args, "id")?)],
+        // Whoever may read a project may copy it; the copy is the caller's own
+        // and private (012c2 rework). Read access is decided by the root.
+        CopyProject => vec![Permission::CanvasRead(argument(args, "id")?)],
         CreateEmptyFolder => vec![Permission::CanvasWrite(argument::<String>(
             &args["input"],
             "canvasId",
@@ -658,14 +660,29 @@ pub async fn dispatch(
             State(&state.core),
         )?)
         .map_err(|e| e.to_string()),
+        // Kept for compatibility (the Web UI uses update_canvas_settings);
+        // same audited path, applied to the project the canvas belongs to.
         Command::SetCanvasSharing => {
             let id: String = argument(args, "id")?;
             let shared: bool = argument(args, "shared")?;
-            let owner = state
+            let root = state
                 .auth
                 .ownership()
-                .set_shared(&id, shared)?
-                .ok_or("画布不存在")?;
+                .owner(&id)?
+                .ok_or("画布不存在")?
+                .root_id;
+            let username = actor_username(state, session)?;
+            let actor = Actor {
+                id: &session.user_id,
+                username: &username,
+            };
+            let owner = canvases::update_settings(
+                state.auth.ownership(),
+                &actor,
+                &root,
+                None,
+                Some(shared),
+            )?;
             Ok(serde_json::json!({"rootCanvasId": owner.root_id, "isShared": owner.is_shared}))
         }
         Command::SetProjectPreviewImage => serde_json::to_value(
@@ -707,17 +724,18 @@ pub async fn dispatch(
             }
             serde_json::to_value(deleted).map_err(|e| e.to_string())
         }
-        Command::SetCanvasOwner => {
+        Command::UpdateCanvasSettings => {
             let username = actor_username(state, session)?;
             let actor = Actor {
                 id: &session.user_id,
                 username: &username,
             };
-            let owner = canvases::set_owner(
+            let owner = canvases::update_settings(
                 state.auth.ownership(),
                 &actor,
                 &argument::<String>(args, "id")?,
-                &argument::<String>(args, "userId")?,
+                argument::<Option<String>>(args, "ownerUserId")?.as_deref(),
+                argument::<Option<bool>>(args, "isShared")?,
             )?;
             Ok(serde_json::json!({
                 "rootCanvasId": owner.root_id,
@@ -725,8 +743,8 @@ pub async fn dispatch(
                 "isShared": owner.is_shared,
             }))
         }
-        Command::CopySharedProject => {
-            let copy = canvases::copy_shared(
+        Command::CopyProject => {
+            let copy = canvases::copy_project(
                 state.auth.ownership(),
                 &session.user_id,
                 &argument::<String>(args, "id")?,
@@ -1068,7 +1086,7 @@ mod tests {
             "set_project_private",
             "set_canvas_sharing",
             "admin_delete_project",
-            "set_canvas_owner",
+            "update_canvas_settings",
             "delete_video_files",
             "delete_image_files",
         ] {
@@ -1116,7 +1134,7 @@ mod tests {
         rows.extend([
             ("load_workspace", json!({"canvasId": "canvas:a"}), "canvas-read"),
             ("inspect_workspace", json!({"canvasId": "canvas:a"}), "canvas-read"),
-            ("copy_shared_project", json!({"id": "canvas:a"}), "canvas-read"),
+            ("copy_project", json!({"id": "canvas:a"}), "canvas-read"),
             ("update_project", json!({"input": {"id": "canvas:a", "name": "n"}}), "canvas-write"),
             ("create_empty_folder", json!({"input": {"canvasId": "canvas:a", "x": 0.0, "y": 0.0}}), "canvas-write"),
             ("import_media", json!({"canvasId": "canvas:a"}), "canvas-write"),

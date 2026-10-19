@@ -1884,6 +1884,9 @@ function CanvasWorkspace() {
 
   const persistPatch = useCallback(
     (id: string, patch: NodePatch) => {
+      // Read-only canvas: changes made by viewing (e.g. measured media size)
+      // stay local; the server would refuse them (CANVAS-012c2 rework).
+      if (canvasReadOnlyRef.current) return;
       const previous = pendingPatches.current.get(id) ?? {};
       pendingPatches.current.set(id, { ...previous, ...patch });
       const activeTimer = saveTimers.current.get(id);
@@ -1921,6 +1924,7 @@ function CanvasWorkspace() {
 
   const persistPatchImmediately = useCallback(
     async (id: string, patch: NodePatch) => {
+      if (canvasReadOnlyRef.current) return;
       const activeTimer = saveTimers.current.get(id);
       if (activeTimer) window.clearTimeout(activeTimer);
       saveTimers.current.delete(id);
@@ -7864,18 +7868,21 @@ function CanvasWorkspace() {
     setSharingBusyId(project.canvas.id);
     let saved = false;
     try {
-      if (settings.ownerUserId && settings.ownerUserId !== project.canvas.ownerUserId) {
-        await invoke("set_canvas_owner", { id: project.canvas.id, userId: settings.ownerUserId });
-      }
-      if (settings.shared !== Boolean(project.canvas.isShared)) {
-        await invoke("set_canvas_sharing", { id: project.canvas.id, shared: settings.shared });
+      // One command, one server transaction: both changes land or neither does.
+      const ownerChanged = Boolean(settings.ownerUserId) && settings.ownerUserId !== project.canvas.ownerUserId;
+      const sharingChanged = settings.shared !== Boolean(project.canvas.isShared);
+      if (ownerChanged || sharingChanged) {
+        await invoke("update_canvas_settings", {
+          id: project.canvas.id,
+          ...(ownerChanged ? { ownerUserId: settings.ownerUserId } : {}),
+          ...(sharingChanged ? { isShared: settings.shared } : {}),
+        });
       }
       saved = true;
       setNotice(`已保存“${project.canvas.name}”的画布设置`);
     } catch (error) {
       reportError(error);
     }
-    // Re-read either way: a failed second step may follow a saved first one.
     try {
       setProjects(await invoke<WorkspaceSnapshot[]>("list_project_summaries"));
     } catch (error) {
@@ -7886,11 +7893,11 @@ function CanvasWorkspace() {
     return saved;
   }, [reportError]);
 
-  // Web: copy a shared project into the caller's own private canvases.
-  const copySharedProject = useCallback(async (project: WorkspaceSnapshot) => {
+  // Web: copy any project the user can read into their own private canvases.
+  const copyProject = useCallback(async (project: WorkspaceSnapshot) => {
     setCopyingProjectId(project.canvas.id);
     try {
-      const snapshot = await invoke<WorkspaceSnapshot>("copy_shared_project", { id: project.canvas.id });
+      const snapshot = await invoke<WorkspaceSnapshot>("copy_project", { id: project.canvas.id });
       setProjects((current) => [snapshot, ...current]);
       setNotice(`已复制到我的画布：“${snapshot.canvas.name}”`);
     } catch (error) {
@@ -11247,7 +11254,7 @@ function CanvasWorkspace() {
           setNewProjectShared,
           saveCanvasSettings,
           sharingBusyId,
-          copySharedProject,
+          copyProject,
           copyingProjectId,
         } : undefined}
         comfyQueueIndicator={comfyQueueIndicator}
