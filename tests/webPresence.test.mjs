@@ -29,6 +29,22 @@ test("the label names up to three users, then counts", () => {
   assert.equal(presence.presenceLabel([user("a"), user("b"), user("c"), user("d")]), "a、b、c 等 4 人也在这张画布");
 });
 
+test("toolbar avatars show up to three initials, then a +N count", () => {
+  assert.deepEqual(presence.presenceAvatars([]), { shown: [], extra: 0 });
+  const { shown, extra } = presence.presenceAvatars([user("u-alice", "爱丽丝"), user("bob"), user("carol"), user("dora"), user("eve")]);
+  assert.deepEqual(shown.map((avatar) => [avatar.initial, avatar.name]), [["爱", "爱丽丝"], ["B", "bob"], ["C", "carol"]]);
+  assert.equal(extra, 2);
+});
+
+test("read-only state and presence sit in the toolbar, not over the canvas", async () => {
+  const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(app, /canvas-top-notices|canvas-access-banner|className="canvas-presence"/);
+  assert.match(app, /className="api-panel">\s+\{\(canvasReadOnly \|\| editingOthersCanvas\) && activeCanvasRecord && \(\s+<CanvasAccessChip[^]*?<CanvasPresenceAvatars others=\{presentOthers\} \/>\s+\{comfyQueueIndicator\}/);
+  const chip = await readFile(new URL("../src/canvas/CanvasAccessIndicators.tsx", import.meta.url), "utf8");
+  assert.match(chip, /"开启编辑模式"/);
+  assert.match(chip, /"退出编辑模式"/);
+});
+
 test("an open project that was deleted or became unreadable is left; anything else refreshes", () => {
   const change = (reason, canvasId = "canvas:open") => ({ canvasId, reason });
   assert.equal(presence.accessChangeAction(change("deleted"), "canvas:open"), "leave");

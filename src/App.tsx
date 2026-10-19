@@ -79,7 +79,6 @@ import {
   Trash2,
   Upload,
   Unlink2,
-  Users,
   X
 } from "lucide-react";
 import {
@@ -288,13 +287,13 @@ import {
   requestEditMode,
   useAccess
 } from "./account/access";
+import { CanvasAccessChip, CanvasPresenceAvatars } from "./canvas/CanvasAccessIndicators";
 import { CanvasReadOnlyContext } from "./canvas/readOnly";
 import {
   ACCESS_EVENT,
   accessChangeAction,
   accessChangeNotice,
   othersPresent,
-  presenceLabel,
   useCanvasPresence,
   type AccessChange
 } from "./account/presence";
@@ -11400,31 +11399,6 @@ function CanvasWorkspace() {
         if (event.button === 1) setMiddlePanActive(true);
       }}
     >
-      {(((canvasReadOnly || editingOthersCanvas) && activeCanvasRecord) || presentOthers.length > 0) && (
-        <div className="canvas-top-notices">
-          {(canvasReadOnly || editingOthersCanvas) && activeCanvasRecord && (
-            <div className={`canvas-access-banner${editingOthersCanvas ? " is-editing" : ""}`} role="status">
-              <span>
-                {editingOthersCanvas
-                  ? `正在编辑 ${ownerLabel(activeCanvasRecord) || "其他用户"} 的画布（编辑模式 30 分钟后自动关闭，修改会记录审计）`
-                  : `${ownerLabel(activeCanvasRecord) || "其他用户"} 的私有画布 · 只读，节点不可编辑`}
-              </span>
-              <button
-                type="button"
-                onClick={() => void requestEditMode(!editingOthersCanvas).catch(reportError)}
-              >
-                {editingOthersCanvas ? "退出编辑模式" : "开启编辑模式"}
-              </button>
-            </div>
-          )}
-          {presentOthers.length > 0 && (
-            <div className="canvas-presence" role="status" title="同一节点被两人同时修改时，后保存的会覆盖先保存的">
-              <Users size={13} aria-hidden="true" />
-              <span>{presenceLabel(presentOthers)}</span>
-            </div>
-          )}
-        </div>
-      )}
       <CanvasReadOnlyContext.Provider value={canvasReadOnly}>
       <ReactFlow<CanvasFlowNode, Edge>
         key={activeProjectId}
@@ -11670,6 +11644,14 @@ function CanvasWorkspace() {
         )}
 
         <Panel position="top-right" className="api-panel">
+          {(canvasReadOnly || editingOthersCanvas) && activeCanvasRecord && (
+            <CanvasAccessChip
+              editing={editingOthersCanvas}
+              ownerName={ownerLabel(activeCanvasRecord) || "其他用户"}
+              onToggleEdit={() => void requestEditMode(!editingOthersCanvas).catch(reportError)}
+            />
+          )}
+          <CanvasPresenceAvatars others={presentOthers} />
           {comfyQueueIndicator}
           <span className="live-indicator"><Radio size={14} /> 本地 API</span>
           <label className="canvas-color-picker" title="选择当前项目的画布背景颜色">

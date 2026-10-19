@@ -36,6 +36,15 @@ export function presenceLabel(others: PresentUser[]) {
   return `${names.slice(0, 3).join("、")} 等 ${names.length} 人也在这张画布`;
 }
 
+// Toolbar avatars: the first `max` users by initial, the rest as a "+N" count.
+export function presenceAvatars(others: PresentUser[], max = 3) {
+  const shown = others.slice(0, max).map((user) => {
+    const name = user.displayName || user.username;
+    return { userId: user.userId, name, initial: Array.from(name.trim())[0]?.toUpperCase() ?? "?" };
+  });
+  return { shown, extra: Math.max(0, others.length - max) };
+}
+
 // An open project that was deleted or is no longer readable is left; every
 // other change only refreshes lists (and the open project's ownership info).
 export function accessChangeAction(change: AccessChange, openRootId: string | null): "leave" | "refresh" {
