@@ -371,12 +371,24 @@ pub async fn invoke(
         Err(denied) => return denied.into_response(),
     };
     if let Some(client_id) = submitted_client_id(kind, &input.args) {
-        if !state
+        match state
             .auth
             .ownership()
             .remember_task(&client_id, &session.user_id)
         {
-            return Denied::Forbidden("该生成任务 id 已被其他用户使用".to_owned()).into_response();
+            Ok(true) => {}
+            Ok(false) => {
+                return Denied::Forbidden("该生成任务 id 已被其他用户使用".to_owned())
+                    .into_response()
+            }
+            // Not submitted unless its owner is on record (the owner cancels it).
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("无法记录生成任务：{error}")})),
+                )
+                    .into_response()
+            }
         }
     }
     remove_unused_workflow_fallback(command, &mut input.args);

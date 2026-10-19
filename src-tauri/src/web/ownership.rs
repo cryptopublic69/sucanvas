@@ -10,7 +10,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     path::Path,
     sync::Mutex,
 };
@@ -292,12 +292,20 @@ pub(super) fn transfer_on_delete(
     Ok(roots)
 }
 
-// Generations remembered per ComfyUI client id (in memory, like sessions).
+// Who started which generation, per ComfyUI client id. Stored (c5 item 2) so
+// the starter can still cancel after a server restart; beyond the limit the
+// oldest entries are dropped one by one instead of forgetting everyone.
+// Web-only table: desktop databases never get it.
 const TASK_OWNER_LIMIT: usize = 20_000;
+const TASK_OWNERS: &str = "CREATE TABLE IF NOT EXISTS web_task_owners (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+)";
 
 pub struct Ownership {
     connection: Mutex<Connection>,
-    task_owners: Mutex<HashMap<String, String>>,
 }
 
 impl Ownership {
@@ -306,9 +314,11 @@ impl Ownership {
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| e.to_string())?;
+        connection
+            .execute_batch(TASK_OWNERS)
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             connection: Mutex::new(connection),
-            task_owners: Mutex::new(HashMap::new()),
         })
     }
 
@@ -320,19 +330,60 @@ impl Ownership {
 
     // Records who started a generation. A client id already claimed by
     // another user is refused (false), so nobody can take over someone else's task.
-    pub fn remember_task(&self, client_id: &str, user_id: &str) -> bool {
-        let mut owners = self.task_owners.lock().unwrap();
-        if let Some(owner) = owners.get(client_id) {
-            return owner == user_id;
-        }
-        if owners.len() >= TASK_OWNER_LIMIT {
-            owners.clear();
-        }
-        owners.insert(client_id.to_owned(), user_id.to_owned());
-        true
+    pub fn remember_task(&self, client_id: &str, user_id: &str) -> Result<bool, String> {
+        self.remember_task_within(client_id, user_id, TASK_OWNER_LIMIT)
     }
+    fn remember_task_within(
+        &self,
+        client_id: &str,
+        user_id: &str,
+        limit: usize,
+    ) -> Result<bool, String> {
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let owner: Option<String> = transaction
+            .query_row(
+                "SELECT user_id FROM web_task_owners WHERE client_id = ?1",
+                [client_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(owner) = owner {
+            return Ok(owner == user_id);
+        }
+        // Keep the newest limit - 1, then add this one.
+        transaction
+            .execute(
+                "DELETE FROM web_task_owners WHERE seq IN
+                 (SELECT seq FROM web_task_owners ORDER BY seq DESC LIMIT -1 OFFSET ?1)",
+                [limit.saturating_sub(1) as i64],
+            )
+            .map_err(|e| e.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO web_task_owners (client_id, user_id, created_at) VALUES (?1, ?2, ?3)",
+                params![client_id, user_id, chrono::Utc::now().to_rfc3339()],
+            )
+            .map_err(|e| e.to_string())?;
+        transaction.commit().map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+    // None also when the lookup fails: cancelling is then refused (fail-closed).
     pub fn task_owner(&self, client_id: &str) -> Option<String> {
-        self.task_owners.lock().unwrap().get(client_id).cloned()
+        self.connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT user_id FROM web_task_owners WHERE client_id = ?1",
+                [client_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
     }
 
     // Owner and sharing of the root above `canvas_id`; None when the canvas does not exist.
@@ -476,5 +527,63 @@ impl Ownership {
             "(canvases.owner_user_id = ?1 OR canvases.is_shared = 1)",
             vec![actor_user_id.to_owned()],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::users::tests::Fixture;
+    use super::*;
+
+    // c5 item 2: the starter of a generation is still known after a restart
+    // (a new Ownership on the same database), and nobody else can claim it.
+    #[test]
+    fn task_owners_survive_a_restart() {
+        let fixture = Fixture::new();
+        let before = Ownership::open(&fixture.database()).unwrap();
+        assert!(before.remember_task("client-1", "alice").unwrap());
+        drop(before);
+        let after = Ownership::open(&fixture.database()).unwrap();
+        assert_eq!(after.task_owner("client-1").as_deref(), Some("alice"));
+        assert!(!after.remember_task("client-1", "bob").unwrap());
+        assert!(after.remember_task("client-1", "alice").unwrap());
+        assert_eq!(after.task_owner("client-unknown"), None);
+    }
+
+    // At the limit only the oldest entry goes; the old code forgot everyone.
+    #[test]
+    fn a_full_task_table_drops_only_the_oldest() {
+        let fixture = Fixture::new();
+        let ownership = Ownership::open(&fixture.database()).unwrap();
+        for n in 1..=3 {
+            assert!(ownership
+                .remember_task_within(&format!("client-{n}"), "alice", 3)
+                .unwrap());
+        }
+        assert!(ownership
+            .remember_task_within("client-4", "bob", 3)
+            .unwrap());
+        assert_eq!(ownership.task_owner("client-1"), None);
+        for (client, owner) in [
+            ("client-2", "alice"),
+            ("client-3", "alice"),
+            ("client-4", "bob"),
+        ] {
+            assert_eq!(
+                ownership.task_owner(client).as_deref(),
+                Some(owner),
+                "{client}"
+            );
+        }
+        // A known id is answered without evicting anything.
+        assert!(ownership
+            .remember_task_within("client-2", "alice", 3)
+            .unwrap());
+        assert_eq!(ownership.task_owner("client-3").as_deref(), Some("alice"));
+        let rows: i64 = ownership
+            .connection()
+            .query_row("SELECT COUNT(*) FROM web_task_owners", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 3);
     }
 }

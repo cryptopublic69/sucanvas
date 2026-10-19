@@ -439,12 +439,17 @@ pub(crate) mod tests {
         let world = world();
         assert!(world
             .store()
-            .remember_task("client-1", &world.alice.user_id));
+            .remember_task("client-1", &world.alice.user_id)
+            .unwrap());
         assert!(world
             .store()
-            .remember_task("client-1", &world.alice.user_id));
+            .remember_task("client-1", &world.alice.user_id)
+            .unwrap());
         // Another user cannot claim the same client id and then cancel it.
-        assert!(!world.store().remember_task("client-1", &world.bob.user_id));
+        assert!(!world
+            .store()
+            .remember_task("client-1", &world.bob.user_id)
+            .unwrap());
         let cancel = |id: &str| Permission::TaskOwner(id.to_owned());
         assert!(world.check(&world.alice, cancel("client-1")).is_ok());
         assert!(matches!(
