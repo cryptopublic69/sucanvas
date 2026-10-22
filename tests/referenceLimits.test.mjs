@@ -95,3 +95,23 @@ test("connecting, the node check and submission all read the shared limits", asy
   // The V3 source workflow gained LoadAudio 9607; the auto-created module must bind it.
   assert.match(app, /audioNodeIds: \["268", "270", "9607"\]/);
 });
+
+test("limit refusals are recognised as such; other refusals are not", () => {
+  assert.equal(limits.isReferenceLimitNotice(limits.referenceConnectionError(audios(3), ["audio"], three)), true);
+  assert.equal(limits.isReferenceLimitNotice(limits.referenceConnectionError({ images: 9, audios: 0 }, ["image"], three)), true);
+  const nodes = [node("a1", "audio"), node("a2", "audio"), node("b1", "audio", true), node("b2", "audio", true)];
+  assert.equal(limits.isReferenceLimitNotice(limits.referenceBatchConnectionError("b1", "gen", nodes, into("a1", "a2"), three)), true);
+  assert.equal(limits.isReferenceLimitNotice("图生视频模式不能连接音频或视频参考"), false);
+  assert.equal(limits.isReferenceLimitNotice("这两个节点已经连接"), false);
+});
+
+test("a refused connection over the reference limit shows in the top notice, not only the status bar", async () => {
+  const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const connectEnd = app.slice(app.indexOf("onConnectEnd={"), app.indexOf("onNodeClick={"));
+  assert.match(connectEnd, /isReferenceLimitNotice\(error\)/);
+  assert.match(connectEnd, /showGlobalNotice/);
+  const connectStart = app.slice(app.indexOf("const connectNodes = useCallback("));
+  const connect = connectStart.slice(0, connectStart.indexOf("const createdEdges: Edge[] = [];"));
+  assert.match(connect, /if \(batchError\) \{\s*showGlobalNotice\(batchError\);/);
+  assert.match(connect, /isReferenceLimitNotice\(validationError\)/);
+});

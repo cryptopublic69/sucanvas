@@ -24,6 +24,7 @@ import { useVideoUpscale } from "./video/useVideoUpscale";
 import { VideoUpscaleDialog } from "./video/VideoUpscaleDialog";
 import type { VideoUpscaleSnapshot } from "./video/videoUpscale";
 import {
+  isReferenceLimitNotice,
   referenceBatchConnectionError,
   referenceConnectionError,
   referenceConnectionLimitApplies,
@@ -10015,7 +10016,7 @@ function CanvasWorkspace() {
         edgesSnapshot.current,
       );
       if (batchError) {
-        setNotice(batchError);
+        showGlobalNotice(batchError);
         return;
       }
       const validationEdges = [...edgesSnapshot.current];
@@ -10032,7 +10033,7 @@ function CanvasWorkspace() {
         );
         if (validationError) {
           const sourceTitle = source.data.record.title.trim() || "未命名素材";
-          setNotice(
+          (isReferenceLimitNotice(validationError) ? showGlobalNotice : setNotice)(
             batchSources.length > 1
               ? `批量连接失败：“${sourceTitle}”${validationError}`
               : validationError,
@@ -10162,7 +10163,7 @@ function CanvasWorkspace() {
         reportError(error);
       }
     },
-    [activeProjectId, changeNode, connectionValidationError, referenceBatchError, reportError, setEdges, setNodes],
+    [activeProjectId, changeNode, connectionValidationError, referenceBatchError, reportError, setEdges, setNodes, showGlobalNotice],
   );
 
   const deleteSelectedElements = useCallback(async (deleteSourceFiles = false) => {
@@ -11506,7 +11507,7 @@ function CanvasWorkspace() {
           // A refused multi-selection explains the batch, not the single dragged node.
           const error = referenceBatchError(source, target, contentNodes, edges)
             ?? connectionValidationError({ source, target, sourceHandle: null, targetHandle: null });
-          if (error) setNotice(error);
+          if (error) (isReferenceLimitNotice(error) ? showGlobalNotice : setNotice)(error);
         }}
         onNodeClick={(_, node) => {
           handleNodeRelationClick(node);

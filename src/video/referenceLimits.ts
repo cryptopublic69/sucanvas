@@ -60,6 +60,13 @@ export function referenceCounts(kinds: ReferenceMediaKind[]): ReferenceCounts {
   };
 }
 
+const LIMIT_NOTICE_PREFIX = "全能参考最多连接 ";
+
+/** Limit refusals go to the top notice as well as the status bar, so they are not missed while dragging. */
+export function isReferenceLimitNotice(message: string | null | undefined): boolean {
+  return Boolean(message?.startsWith(LIMIT_NOTICE_PREFIX));
+}
+
 /**
  * Connecting `adding` to a plain reference node that already has `connected`.
  * A batch either fits as a whole or is refused as a whole.
@@ -73,13 +80,13 @@ export function referenceConnectionError(
   const batch = adding.length > 1;
   if (added.audios && connected.audios + added.audios > limits.audios) {
     return batch
-      ? `全能参考最多连接 ${limits.audios} 个音频（已连 ${connected.audios} 个，这次选了 ${added.audios} 个），整批未连接`
-      : `全能参考最多连接 ${limits.audios} 个音频`;
+      ? `${LIMIT_NOTICE_PREFIX}${limits.audios} 个音频（已连 ${connected.audios} 个，这次选了 ${added.audios} 个），整批未连接`
+      : `${LIMIT_NOTICE_PREFIX}${limits.audios} 个音频`;
   }
   if (added.images && connected.images + added.images > limits.images) {
     return batch
-      ? `全能参考最多连接 ${limits.images} 张图片（已连 ${connected.images} 张，这次选了 ${added.images} 张），整批未连接`
-      : `全能参考最多连接 ${limits.images} 张图片`;
+      ? `${LIMIT_NOTICE_PREFIX}${limits.images} 张图片（已连 ${connected.images} 张，这次选了 ${added.images} 张），整批未连接`
+      : `${LIMIT_NOTICE_PREFIX}${limits.images} 张图片`;
   }
   return null;
 }
