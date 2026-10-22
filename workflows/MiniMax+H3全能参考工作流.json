@@ -315,6 +315,10 @@
       "ref_audios.ref_audio_1": [
         "416",
         0
+      ],
+      "ref_audios.ref_audio_2": [
+        "9510",
+        0
       ]
     },
     "class_type": "MiniMaxH3AudioConditioningT8",
@@ -675,6 +679,15 @@
     }
   },
   "416": {
+    "inputs": {
+      "audio": "66e54111-7237-4b2f-b8c2-ecac633883cd.MP3"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "加载音频"
+    }
+  },
+  "9510": {
     "inputs": {
       "audio": "66e54111-7237-4b2f-b8c2-ecac633883cd.MP3"
     },

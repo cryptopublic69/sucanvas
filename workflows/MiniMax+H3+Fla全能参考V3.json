@@ -222,6 +222,10 @@
       "ref_audios.ref_audio_1": [
         "270",
         0
+      ],
+      "ref_audios.ref_audio_2": [
+        "9607",
+        0
       ]
     },
     "class_type": "MiniMaxH3ReferenceToVideo",
@@ -609,6 +613,15 @@
     }
   },
   "270": {
+    "inputs": {
+      "audio": "66e54111-7237-4b2f-b8c2-ecac633883cd.MP3"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "加载音频"
+    }
+  },
+  "9607": {
     "inputs": {
       "audio": "66e54111-7237-4b2f-b8c2-ecac633883cd.MP3"
     },
