@@ -3820,7 +3820,7 @@ async fn submit_comfyui_workflow_inner(
     } else {
         (
             input.workflow_path.clone(),
-            workflow_modules::WorkflowAdapter::current_h3(WorkflowBindings::default()),
+            workflow_modules::WorkflowAdapter::without_module(),
         )
     };
     let adapter_variant = adapter.variant.clone();
@@ -5495,6 +5495,39 @@ mod tests {
                 .unwrap_err()
                 .contains("不能包含音频或视频参考")
         );
+    }
+
+    #[test]
+    fn reference_submission_takes_three_audios_and_rejects_a_fourth() {
+        let adapter =
+            crate::workflow_modules::WorkflowAdapter::current_h3(WorkflowBindings::default());
+        let contract = &adapter.input_contract;
+        assert!(validate_workflow_media_counts("reference-to-video", contract, 0, 3, 0).is_ok());
+        assert!(
+            validate_workflow_media_counts("reference-to-video", contract, 0, 4, 0)
+                .unwrap_err()
+                .contains("参考音频数量为 0–3 个")
+        );
+    }
+
+    #[test]
+    fn two_audio_packages_and_moduleless_submissions_reject_a_third_audio() {
+        let mut two_audio = WorkflowBindings::default();
+        two_audio.audio_node_ids.truncate(2);
+        for adapter in [
+            crate::workflow_modules::WorkflowAdapter::current_h3(two_audio),
+            crate::workflow_modules::WorkflowAdapter::without_module(),
+        ] {
+            let contract = &adapter.input_contract;
+            assert!(
+                validate_workflow_media_counts("reference-to-video", contract, 0, 2, 0).is_ok()
+            );
+            assert!(
+                validate_workflow_media_counts("reference-to-video", contract, 0, 3, 0)
+                    .unwrap_err()
+                    .contains("参考音频数量为 0–2 个")
+            );
+        }
     }
 
     fn resolution_test_workflow() -> serde_json::Value {

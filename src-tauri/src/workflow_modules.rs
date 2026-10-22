@@ -26,6 +26,9 @@ pub const KREA2_TEXT_TO_IMAGE_ADAPTER: &str = "krea2-text-to-image-v1";
 pub const VIDEO_PROCESSING_ADAPTER: &str = "video-processing-v1";
 pub const KREA2_IMAGE_EDIT_ADAPTER: &str = "krea2-image-edit-v1";
 const MAX_PACKAGE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+/// Reference workflows from before the third audio input had two LoadAudio nodes.
+/// Applies to packages without adapter.json and to submissions without a module.
+pub const LEGACY_REFERENCE_AUDIO_MAX: usize = 2;
 
 fn default_diffusion_model_node_id() -> String {
     "358".to_owned()
@@ -178,7 +181,7 @@ impl Default for WorkflowBindings {
             clean_save_node_id: "9001".to_owned(),
             secondary_video_input_node_id: "9002".to_owned(),
             conditioning_node_id: "363".to_owned(),
-            audio_node_ids: vec!["374".to_owned(), "416".to_owned()],
+            audio_node_ids: ["374", "416", "9510"].map(str::to_owned).to_vec(),
             image_node_ids: [
                 "362", "364", "365", "367", "368", "369", "370", "371", "372",
             ]
@@ -391,6 +394,14 @@ impl WorkflowBindings {
             _ => Self::default(),
         }
     }
+
+    /// Bindings for a package that predates adapter.json: its workflow only has
+    /// the first two default audio nodes.
+    pub fn legacy_for_variant(variant: &str) -> Self {
+        let mut bindings = Self::for_variant(variant);
+        bindings.audio_node_ids.truncate(LEGACY_REFERENCE_AUDIO_MAX);
+        bindings
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -412,7 +423,7 @@ impl Default for WorkflowInputContract {
             image_min: 0,
             image_max: 9,
             audio_min: 0,
-            audio_max: 2,
+            audio_max: 3,
             video_min: 0,
             video_max: 1,
         }
@@ -493,13 +504,20 @@ impl WorkflowAdapter {
         }
     }
     pub fn current_h3(bindings: WorkflowBindings) -> Self {
+        // Never promise more audios than the bindings have LoadAudio nodes for:
+        // two-audio bindings (legacy packages, hand-written drafts) stay at two.
+        let defaults = WorkflowInputContract::default();
+        let input_contract = WorkflowInputContract {
+            audio_max: defaults.audio_max.min(bindings.audio_node_ids.len()),
+            ..defaults
+        };
         Self {
             schema_version: WORKFLOW_PACKAGE_SCHEMA_VERSION,
             engine_api_version: WORKFLOW_ENGINE_API_VERSION.to_owned(),
             adapter_id: H3_MULTI_REFERENCE_ADAPTER.to_owned(),
             capability: "video-generation".to_owned(),
             variant: "reference-to-video".to_owned(),
-            input_contract: WorkflowInputContract::default(),
+            input_contract,
             bindings,
             video_processing: None,
         }
@@ -577,6 +595,15 @@ impl WorkflowAdapter {
             "last-frame-to-video" => Self::last_frame_to_video(bindings),
             _ => Self::current_h3(bindings),
         }
+    }
+
+    /// Adapter for a submission that names no module. The workflow file is
+    /// whatever path the user configured, so the limit stays at the legacy two
+    /// audios; the default bindings still clear out a third LoadAudio if present.
+    pub fn without_module() -> Self {
+        let mut adapter = Self::current_h3(WorkflowBindings::default());
+        adapter.input_contract.audio_max = LEGACY_REFERENCE_AUDIO_MAX;
+        adapter
     }
 }
 
@@ -1174,7 +1201,7 @@ fn read_or_migrate_package(
     let legacy_bindings = manifest
         .legacy_bindings
         .clone()
-        .unwrap_or_else(|| WorkflowBindings::for_variant(&manifest.variant));
+        .unwrap_or_else(|| WorkflowBindings::legacy_for_variant(&manifest.variant));
     let adapter = if adapter_file.is_file() {
         let bytes =
             fs::read(&adapter_file).map_err(|error| format!("读取方案适配器失败：{error}"))?;
@@ -2102,7 +2129,7 @@ fn import_package_bytes(
             source_manifest
                 .legacy_bindings
                 .clone()
-                .unwrap_or_else(|| WorkflowBindings::for_variant(&source_manifest.variant)),
+                .unwrap_or_else(|| WorkflowBindings::legacy_for_variant(&source_manifest.variant)),
         )
     };
     let ui_schema = if let Some(bytes) = ui_schema_bytes {
@@ -2140,11 +2167,12 @@ fn import_package_bytes(
 #[cfg(test)]
 mod tests {
     use super::{
-        export, import_bundle, list, restore_bundle, restore_from_trash, restore_latest_backup,
-        save, trash, validate_source, validate_workflow_bytes, SaveWorkflowModuleInput,
-        WorkflowAdapter, WorkflowBindings, WorkflowModuleDefaults, ADAPTER_FILE,
-        H3_FIRST_LAST_FRAME_ADAPTER, H3_IMAGE_TO_VIDEO_ADAPTER, H3_LAST_FRAME_TO_VIDEO_ADAPTER,
-        H3_MULTI_REFERENCE_ADAPTER, UI_SCHEMA_FILE, WORKFLOW_FILE, WORKFLOW_PACKAGE_ENGINE,
+        export, get, import_bundle, list, restore_bundle, restore_from_trash,
+        restore_latest_backup, save, trash, validate_source, validate_workflow_bytes,
+        SaveWorkflowModuleInput, WorkflowAdapter, WorkflowBindings, WorkflowModuleDefaults,
+        ADAPTER_FILE, H3_FIRST_LAST_FRAME_ADAPTER, H3_IMAGE_TO_VIDEO_ADAPTER,
+        H3_LAST_FRAME_TO_VIDEO_ADAPTER, H3_MULTI_REFERENCE_ADAPTER, UI_SCHEMA_FILE, WORKFLOW_FILE,
+        WORKFLOW_PACKAGE_ENGINE,
     };
     use serde_json::json;
     use std::{fs, path::PathBuf};
@@ -2185,7 +2213,7 @@ mod tests {
                 json!({ "inputs": { "image": "example.png" } }),
             );
         }
-        for id in ["374", "416"] {
+        for id in ["374", "416", "9510"] {
             object.insert(
                 id.to_owned(),
                 json!({ "inputs": { "audio": "example.wav" } }),
@@ -2459,5 +2487,104 @@ mod tests {
         assert_eq!(saved.adapter.input_contract.image_max, 1);
         assert_eq!(saved.bindings.image_node_ids, ["417"]);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn builtin_reference_adapter_accepts_three_audios() {
+        let adapter =
+            WorkflowAdapter::for_variant("reference-to-video", WorkflowBindings::default());
+        assert_eq!(adapter.input_contract.audio_max, 3);
+        assert_eq!(adapter.bindings.audio_node_ids, ["374", "416", "9510"]);
+    }
+
+    #[test]
+    fn fla_reference_sources_wire_a_third_load_audio() {
+        // These ids are the frontend's H3_FLA_REFERENCE_V3_BINDINGS.audioNodeIds.
+        for file in [
+            "MiniMax+H3+Fla全能参考V3.json",
+            "MiniMax+H3+Fla全能参考V4.json",
+        ] {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("workflows")
+                .join(file);
+            let workflow: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            for (index, node_id) in ["268", "270", "9607"].into_iter().enumerate() {
+                assert_eq!(
+                    workflow["136"]["inputs"][format!("ref_audios.ref_audio_{index}")],
+                    json!([node_id, 0]),
+                    "{file}"
+                );
+                assert_eq!(workflow[node_id]["class_type"], "LoadAudio", "{file}");
+            }
+        }
+    }
+
+    fn two_audio_workflow_source(root: &std::path::Path) -> PathBuf {
+        let mut workflow = test_workflow();
+        workflow.as_object_mut().unwrap().remove("9510");
+        fs::create_dir_all(root).unwrap();
+        let source = root.join("two-audio.json");
+        fs::write(&source, serde_json::to_vec_pretty(&workflow).unwrap()).unwrap();
+        source
+    }
+
+    #[test]
+    fn installed_two_audio_reference_package_stays_at_two() {
+        let root = test_root();
+        let mut input = save_input(&two_audio_workflow_source(&root));
+        input.bindings = Some(WorkflowBindings::legacy_for_variant("reference-to-video"));
+        let saved = save(&root, input).unwrap();
+        let module = get(&root, &saved.manifest.id).unwrap();
+        assert_eq!(module.adapter.input_contract.audio_max, 2);
+        assert_eq!(module.bindings.audio_node_ids, ["374", "416"]);
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(&module.adapter_path).unwrap()).unwrap();
+        assert_eq!(written["inputContract"]["audioMax"], 2);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn legacy_reference_package_without_adapter_keeps_two_audios() {
+        // Before adapter.json existed a package was a manifest (optionally with a
+        // `bindings` block) plus a workflow with two LoadAudio nodes.
+        for manifest_bindings in [false, true] {
+            let root = test_root();
+            let mut input = save_input(&two_audio_workflow_source(&root));
+            input.bindings = Some(WorkflowBindings::legacy_for_variant("reference-to-video"));
+            let id = save(&root, input).unwrap().manifest.id;
+            let directory = root.join(&id);
+            fs::remove_file(directory.join(ADAPTER_FILE)).unwrap();
+            if manifest_bindings {
+                let manifest_path = directory.join("manifest.json");
+                let mut manifest: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+                manifest["bindings"] = serde_json::to_value(WorkflowBindings::legacy_for_variant(
+                    "reference-to-video",
+                ))
+                .unwrap();
+                fs::write(
+                    &manifest_path,
+                    serde_json::to_vec_pretty(&manifest).unwrap(),
+                )
+                .unwrap();
+            }
+
+            let module = get(&root, &id).unwrap();
+            assert_eq!(
+                module.adapter.input_contract.audio_max, 2,
+                "manifest bindings: {manifest_bindings}"
+            );
+            assert_eq!(module.bindings.audio_node_ids, ["374", "416"]);
+            let validation =
+                validate_workflow_bytes(&fs::read(&module.workflow_path).unwrap(), &module.adapter);
+            assert!(validation.compatible, "{}", validation.issues.join("; "));
+            let written: serde_json::Value =
+                serde_json::from_slice(&fs::read(directory.join(ADAPTER_FILE)).unwrap()).unwrap();
+            assert_eq!(written["inputContract"]["audioMax"], 2);
+            fs::remove_dir_all(&root).unwrap();
+        }
     }
 }
