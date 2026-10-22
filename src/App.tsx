@@ -23,6 +23,15 @@ import { VideoRegenerationDialogs } from "./video/VideoRegenerationDialogs";
 import { useVideoUpscale } from "./video/useVideoUpscale";
 import { VideoUpscaleDialog } from "./video/VideoUpscaleDialog";
 import type { VideoUpscaleSnapshot } from "./video/videoUpscale";
+import {
+  referenceBatchConnectionError,
+  referenceConnectionError,
+  referenceConnectionLimitApplies,
+  referenceCounts,
+  referenceLimits,
+  referenceModuleFor,
+  referenceSubmitError,
+} from "./video/referenceLimits";
 import { SecondarySampleDialog } from "./video/SecondarySampleDialog";
 import { h3StyleLorasFromContent, styleLoraValidationError, usedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
 import { Channel, invoke } from "@tauri-apps/api/core";
@@ -338,7 +347,7 @@ const H3_FLA_REFERENCE_V3_BINDINGS: WorkflowBindings = {
   cleanSaveNodeId: "9001",
   secondaryVideoInputNodeId: "9002",
   conditioningNodeId: "136",
-  audioNodeIds: ["268", "270"],
+  audioNodeIds: ["268", "270", "9607"],
   imageNodeIds: ["139", "258", "263", "264", "266", "262", "261", "265", "267"],
   primaryAudioOutputNodeId: "218",
   primaryAudioOutputIndex: 0,
@@ -3547,7 +3556,12 @@ function CanvasWorkspace() {
     const promptDurationSeconds = promptOverride?.durationSeconds
       ?? promptDurationSecondsFromVersion(activePromptVersion);
     const referenceSelection = referenceCompilerMode
-      ? resolveStoryboardReferenceSelection(prompt, promptReferenceSelection, orderedMedia)
+      ? resolveStoryboardReferenceSelection(
+        prompt,
+        promptReferenceSelection,
+        orderedMedia,
+        referenceLimits(workflowModule),
+      )
       : null;
     // A compiler error must produce an empty submission list. Never fall back to
     // uploading every connected candidate, because that reintroduces pollution.
@@ -4178,6 +4192,10 @@ function CanvasWorkspace() {
       const videoMappingCount = snapshot.referenceMappings?.filter(
         (mapping) => mapping.kind === "video",
       ).length ?? 0;
+      const snapshotModuleId = snapshot.workflowModuleId;
+      const shotLimits = referenceLimits(workflowModules.find((module) => (
+        !module.deletedAt && module.id === snapshotModuleId
+      )));
       const referenceError = snapshot.referenceSelectionError
         || (!snapshot.referenceSelection ? "当前提示词缺少内部素材选择数据" : "")
         || (snapshot.imagePaths.length !== imageMappingCount
@@ -4189,8 +4207,11 @@ function CanvasWorkspace() {
         || (snapshot.videoPaths.length !== videoMappingCount
           ? "内部选择的视频与实际提交路径数量不一致"
           : "")
-        || (snapshot.imagePaths.length > 9 ? "当前分镜单次最多提交 9 张图片" : "")
-        || (snapshot.audioPaths.length > 2 ? "当前分镜单次最多提交 2 个音频" : "")
+        || (referenceSubmitError(
+          { images: snapshot.imagePaths.length, audios: snapshot.audioPaths.length },
+          shotLimits,
+          "storyboard",
+        ) ?? "")
         || (snapshot.videoPaths.length ? "当前 H3 工作流适配器尚未配置视频参考输入" : "")
         || (!snapshot.imagePaths.length && !snapshot.audioPaths.length
           ? "当前分镜没有可提交的图片或音频参考"
@@ -9825,14 +9846,65 @@ function CanvasWorkspace() {
           if (imageCount >= 1) return "尾帧生视频模式只能连接一张尾帧图片";
         }
       }
+      if (
+        referenceConnectionLimitApplies(target, mode)
+        && (sourceMediaKind === "image" || sourceMediaKind === "audio")
+      ) {
+        const connected = referenceCounts(
+          validationEdges
+            .filter((edge) => edge.target === target.id)
+            .map((edge) => contentNodes.find((node) => node.id === edge.source)?.data.record)
+            .filter((record): record is NodeRecord => Boolean(record))
+            .map((record) => videoInputMediaKind(record)),
+        );
+        const limitError = referenceConnectionError(
+          connected,
+          [sourceMediaKind],
+          referenceLimits(referenceModuleFor(target.content, workflowModules, workflowModuleDefaults)),
+        );
+        if (limitError) return limitError;
+      }
 
       return null;
     },
     [contentNodes, edges, workflowModuleDefaults, workflowModules],
   );
 
+  // Same batch as connectNodes picks, so hovering, dropping and connecting agree on
+  // refusing the whole multi-selection when it would overflow a reference node.
+  const referenceBatchError = useCallback(
+    (sourceId: string, targetId: string, nodes: CanvasFlowNode[], currentEdges: Edge[]): string | null => {
+      const target = nodes.find((node) => node.id === targetId)?.data.record;
+      if (!target || !referenceConnectionLimitApplies(target, videoGenerationModeFromContent(target.content))) {
+        return null;
+      }
+      return referenceBatchConnectionError(
+        sourceId,
+        targetId,
+        nodes.map((node) => ({
+          id: node.id,
+          selected: Boolean(node.selected),
+          kind: node.data.record.kind,
+          mediaKind: videoInputMediaKind(node.data.record),
+        })),
+        currentEdges,
+        referenceLimits(referenceModuleFor(target.content, workflowModules, workflowModuleDefaults)),
+      );
+    },
+    [workflowModuleDefaults, workflowModules],
+  );
+
   const isValidConnection = useCallback(
     (connection: Connection | Edge) => {
+      // A multi-selection that would overflow a reference node is refused as a whole,
+      // including while hovering over a source that is itself already connected.
+      if (
+        connection.source
+        && connection.target
+        && referenceBatchError(connection.source, connection.target, contentNodes, edges)
+      ) {
+        return false;
+      }
       const validationError = connectionValidationError(connection);
       if (!validationError) return true;
       if (validationError !== "这两个节点已经连接" || !connection.source || !connection.target) {
@@ -9850,7 +9922,7 @@ function CanvasWorkspace() {
         ))
       ));
     },
-    [connectionValidationError, contentNodes, edges],
+    [connectionValidationError, contentNodes, edges, referenceBatchError],
   );
 
   const connectNodes = useCallback(
@@ -9934,6 +10006,16 @@ function CanvasWorkspace() {
       );
       if (!sourcesToConnect.length) {
         setNotice("选中的输入素材已经全部连接");
+        return;
+      }
+      const batchError = referenceBatchError(
+        sourceNode.id,
+        connection.target,
+        nodesSnapshot.current,
+        edgesSnapshot.current,
+      );
+      if (batchError) {
+        setNotice(batchError);
         return;
       }
       const validationEdges = [...edgesSnapshot.current];
@@ -10080,7 +10162,7 @@ function CanvasWorkspace() {
         reportError(error);
       }
     },
-    [activeProjectId, changeNode, connectionValidationError, reportError, setEdges, setNodes],
+    [activeProjectId, changeNode, connectionValidationError, referenceBatchError, reportError, setEdges, setNodes],
   );
 
   const deleteSelectedElements = useCallback(async (deleteSourceFiles = false) => {
@@ -11419,12 +11501,11 @@ function CanvasWorkspace() {
         onConnectEnd={(_, state) => {
           if (state.isValid || !state.fromNode || !state.toNode) return;
           const fromSource = state.fromHandle?.type === "source";
-          const error = connectionValidationError({
-            source: fromSource ? state.fromNode.id : state.toNode.id,
-            target: fromSource ? state.toNode.id : state.fromNode.id,
-            sourceHandle: null,
-            targetHandle: null,
-          });
+          const source = fromSource ? state.fromNode.id : state.toNode.id;
+          const target = fromSource ? state.toNode.id : state.fromNode.id;
+          // A refused multi-selection explains the batch, not the single dragged node.
+          const error = referenceBatchError(source, target, contentNodes, edges)
+            ?? connectionValidationError({ source, target, sourceHandle: null, targetHandle: null });
           if (error) setNotice(error);
         }}
         onNodeClick={(_, node) => {

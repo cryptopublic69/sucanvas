@@ -2,6 +2,7 @@ import { Fragment } from "react";
 import { openWebComfySocket, type ComfySocket } from "./web/comfySocket";
 import { resolveComfyOutputPath } from "./web/outputFiles";
 import { videoUpscaleFromValue } from "./video/videoUpscale";
+import { referenceLimits, referenceModuleFor, referenceSubmitError, type ReferenceLimits } from "./video/referenceLimits";
 import { comfyOutputFromContent, videoUpscaleSourceUnavailableReason } from "./video/videoUpscaleSource";
 import {
   GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH,
@@ -1091,6 +1092,15 @@ interface WorkflowAdapter {
   capability: WorkflowCapability;
   variant: WorkflowVariant;
   bindings: WorkflowBindings;
+  inputContract?: {
+    promptRequired: boolean;
+    imageMin: number;
+    imageMax: number;
+    audioMin: number;
+    audioMax: number;
+    videoMin: number;
+    videoMax: number;
+  };
   videoProcessing?: {
     videoInput: { nodeId: string; inputName: string };
     outputNodeId: string;
@@ -4056,6 +4066,7 @@ function resolveStoryboardReferenceSelection(
   prompt: string,
   referenceSelection: StoryboardReferenceSelection | null,
   mediaInputs: NodeRecord[],
+  limits: ReferenceLimits,
 ): StoryboardReferenceResolution {
   const parsed = storyboardReferenceSelectionFromValue(referenceSelection);
   if (!parsed.selection) {
@@ -4119,11 +4130,9 @@ function resolveStoryboardReferenceSelection(
   const imageCount = parsed.selection.assets.filter((asset) => asset.kind === "image").length;
   const audioCount = parsed.selection.assets.filter((asset) => asset.kind === "audio").length;
   const videoCount = parsed.selection.assets.filter((asset) => asset.kind === "video").length;
-  if (imageCount > 9) {
-    return { selection: parsed.selection, selectedMedia: [], mappings: [], skippedCount: mediaInputs.length, error: `当前分镜选中了 ${imageCount} 张图片，单次最多 9 张` };
-  }
-  if (audioCount > 2) {
-    return { selection: parsed.selection, selectedMedia: [], mappings: [], skippedCount: mediaInputs.length, error: `当前分镜选中了 ${audioCount} 个音频，单次最多 2 个` };
+  const limitError = referenceSubmitError({ images: imageCount, audios: audioCount }, limits, "storyboard");
+  if (limitError) {
+    return { selection: parsed.selection, selectedMedia: [], mappings: [], skippedCount: mediaInputs.length, error: limitError };
   }
   if (videoCount > 1) {
     return { selection: parsed.selection, selectedMedia: [], mappings: [], skippedCount: mediaInputs.length, error: `当前分镜选中了 ${videoCount} 个视频，单次最多 1 个` };
@@ -4181,6 +4190,7 @@ function storyboardReferenceCandidateCatalog(
 function h3ReferenceAssetCatalog(
   generatorId: string,
   mediaInputs: NodeRecord[],
+  inputLimits: ReferenceLimits,
 ): string {
   const referenceCounts: Record<"image" | "audio" | "video", number> = {
     image: 0,
@@ -4192,7 +4202,7 @@ function h3ReferenceAssetCatalog(
     audio: "Audio",
     video: "Video",
   };
-  const limits = { images: 9, audios: 3, videos: 1 };
+  const limits = { images: inputLimits.images, audios: inputLimits.audios, videos: 1 };
   const assetCounts = { images: 0, audios: 0, videos: 0 };
 
   const assets = mediaInputs.map((record, index) => {
@@ -4232,6 +4242,7 @@ function validateVideoExecution(
   content: JsonObject,
   mediaInputs: NodeRecord[],
   textInputs: NodeRecord[],
+  limits: ReferenceLimits,
 ): { valid: boolean; message: string } {
   const images = mediaInputs.filter((input) => videoInputMediaKind(input) === "image");
   const audios = mediaInputs.filter((input) => videoInputMediaKind(input) === "audio");
@@ -4256,6 +4267,7 @@ function validateVideoExecution(
       fields.prompt,
       fields.referenceSelection,
       mediaInputs,
+      limits,
     );
     if (selection.error) return { valid: false, message: selection.error };
     const selectedImages = selection.mappings.filter((asset) => asset.kind === "image").length;
@@ -4331,11 +4343,13 @@ function validateVideoExecution(
   if (!activeTextInput || !textFromContent(activeTextInput.content).trim()) {
     return { valid: false, message: "当前选中的文字节点内容为空，请先填写" };
   }
-  if (images.length > 9) {
-    return { valid: false, message: "当前参考工作流最多支持9张图片" };
-  }
-  if (audios.length > 2) {
-    return { valid: false, message: "当前参考工作流最多支持2个音频" };
+  const limitError = referenceSubmitError(
+    { images: images.length, audios: audios.length },
+    limits,
+    "node",
+  );
+  if (limitError) {
+    return { valid: false, message: limitError };
   }
   if (videos.length) {
     return { valid: false, message: "当前参考工作流尚未配置视频参考输入" };
@@ -4584,6 +4598,7 @@ async function checkAndExecuteVideo(data: CanvasNodeData, options?: VideoExecuti
     record.content,
     mediaInputs,
     textInputs,
+    referenceLimits(referenceModuleFor(record.content, data.workflowModules, data.workflowModuleDefaults)),
   );
   onChange(id, {
     content: {
@@ -4619,6 +4634,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     h3DiffusionModelOptions,
     krea2LoraOptions,
     workflowModules,
+    workflowModuleDefaults,
     workflowModuleVisibleIds,
     liveComfyPreviewUrl,
     liveComfyPreviewMimeType,
@@ -4943,6 +4959,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       } as CSSProperties
     : undefined;
   const videoGenerationMode = videoGenerationModeFromContent(record.content);
+  const referenceInputLimits = referenceLimits(
+    referenceModuleFor(record.content, workflowModules, workflowModuleDefaults),
+  );
   const visibleWorkflowModuleIds = new Set(workflowModuleVisibleIds);
   const allAvailableWorkflowModules = workflowModules.filter(
     (module) => !module.deletedAt
@@ -5293,6 +5312,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         activeStoryboardFields.prompt,
         activeStoryboardFields.referenceSelection,
         mediaInputs,
+        referenceInputLimits,
       )
     : null;
   const storyboardCandidateCatalog = isStoryboardReferenceCompiler
@@ -5300,7 +5320,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     : "";
   const regularH3ReferenceCatalog = !isStoryboardReferenceCompiler
     && videoGenerationMode === "reference-to-video"
-    ? h3ReferenceAssetCatalog(id, mediaInputs)
+    ? h3ReferenceAssetCatalog(id, mediaInputs, referenceInputLimits)
     : "";
   const referenceCatalog = isStoryboardReferenceCompiler
     ? storyboardCandidateCatalog
@@ -6660,6 +6680,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       record.content,
       mediaInputs,
       textInputs,
+      referenceInputLimits,
     );
     const emptyTextIndex = textInputs.findIndex(
       (input) => !storyboardPromptFields(input).prompt.trim(),
@@ -6671,6 +6692,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             fields.prompt,
             fields.referenceSelection,
             mediaInputs,
+            referenceInputLimits,
           ).error);
         })
       : -1;
@@ -6679,6 +6701,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           storyboardPromptFields(textInputs[compilerInvalidIndex]).prompt,
           storyboardPromptFields(textInputs[compilerInvalidIndex]).referenceSelection,
           mediaInputs,
+          referenceInputLimits,
         ).error
       : "";
     const batchValidation = !result.valid
