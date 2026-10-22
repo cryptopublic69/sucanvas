@@ -30,6 +30,7 @@ import {
   type AccessUser,
   type AssignableUser
 } from "../account/access";
+import { coverThumbnailSrc } from "./coverSrc";
 
 // Web accounts: the home page groups canvases by owner; admins manage owner
 // and sharing in "画布设置"; shared canvases can be copied.
@@ -120,7 +121,9 @@ function nodePreviewColor(kind: string): string {
   return "#8b7cf6";
 }
 
-function ProjectThumbnail({ project }: { project: WorkspaceSnapshot }) {
+// `suspendCover`: another card is opening; covers drop their unfinished requests so
+// load_workspace does not queue behind them. `opening`: this card is the one.
+function ProjectThumbnail({ project, suspendCover, opening }: { project: WorkspaceSnapshot; suspendCover: boolean; opening: boolean }) {
   const preview = useMemo(() => {
     if (!project.nodes.length) return null;
     const minX = Math.min(...project.nodes.map((node) => node.x));
@@ -148,17 +151,21 @@ function ProjectThumbnail({ project }: { project: WorkspaceSnapshot }) {
         <img
           key={coverPath}
           className="project-cover-image"
-          src={convertFileSrc(coverPath)}
+          src={suspendCover ? undefined : coverThumbnailSrc(convertFileSrc(coverPath))}
           alt=""
           draggable={false}
+          loading="lazy"
+          decoding="async"
+          fetchPriority="low"
           onError={(event) => {
+            if (!event.currentTarget.getAttribute("src")) return;
             if (
               automaticCoverPath
               && automaticCoverPath !== coverPath
               && event.currentTarget.dataset.fallbackApplied !== "true"
             ) {
               event.currentTarget.dataset.fallbackApplied = "true";
-              event.currentTarget.src = convertFileSrc(automaticCoverPath);
+              event.currentTarget.src = coverThumbnailSrc(convertFileSrc(automaticCoverPath));
             } else {
               event.currentTarget.style.display = "none";
             }
@@ -204,6 +211,12 @@ function ProjectThumbnail({ project }: { project: WorkspaceSnapshot }) {
         </div>
       )}
       <span className="preview-node-count">{project.nodes.length} 个节点</span>
+      {opening && (
+        <div className="project-opening-overlay" role="status">
+          <span className="project-opening-spinner" aria-hidden="true" />
+          正在打开…
+        </div>
+      )}
     </div>
   );
 }
@@ -266,6 +279,13 @@ export function ProjectHome({
     [access, visibleProjects],
   );
   const [settingsProject, setSettingsProject] = useState<WorkspaceSnapshot | null>(null);
+  // Feedback right on the clicked card; on success this page goes away, on failure
+  // (reported by openProject) the card is clickable again.
+  const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
+  const open = (projectId: string) => {
+    setOpeningProjectId(projectId);
+    void openProject(projectId).finally(() => setOpeningProjectId((current) => (current === projectId ? null : current)));
+  };
   const deleteWarning = access && projectToDelete ? othersPrivateDeleteWarning(projectToDelete.canvas, access.user) : null;
   const gridStyle = { gridTemplateColumns: `repeat(${projectColumns}, minmax(0, 1fr))` };
   const newProjectCard = (
@@ -296,21 +316,23 @@ export function ProjectHome({
     const section = access ? projectSection(project.canvas, access.user) : null;
     const admin = access?.user.role === "admin";
     const deletable = !access || canDeleteProject(project.canvas, access.user);
+    const opening = openingProjectId === project.canvas.id;
     return (
       <article
-        className="project-card"
+        className={`project-card${opening ? " is-opening" : ""}`}
         key={project.canvas.id}
         role="button"
         tabIndex={0}
-        onClick={() => void openProject(project.canvas.id)}
+        aria-busy={opening || undefined}
+        onClick={() => open(project.canvas.id)}
         onKeyDown={(event) => {
           if (event.target !== event.currentTarget) return;
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault();
-          void openProject(project.canvas.id);
+          open(project.canvas.id);
         }}
       >
-        <ProjectThumbnail project={project} />
+        <ProjectThumbnail project={project} suspendCover={openingProjectId !== null} opening={opening} />
         <div className="project-card-info">
           <div>
             <strong>

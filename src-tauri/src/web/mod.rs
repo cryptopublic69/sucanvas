@@ -17,6 +17,7 @@ mod rpc;
 mod settings;
 mod storage;
 mod tasks;
+mod thumbnails;
 mod users;
 mod ws_handover;
 
@@ -329,6 +330,7 @@ pub async fn run() -> Result<(), String> {
             post(files::upload).layer(DefaultBodyLimit::max(state.config.max_upload_bytes)),
         )
         .route("/api/resource", get(files::resource))
+        .route("/api/thumbnail", get(thumbnails::thumbnail))
         .route("/api/video-poster", get(posters::image))
         .route("/api/events", get(events))
         .route("/api/settings", get(read_settings).put(write_settings))

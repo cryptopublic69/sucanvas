@@ -169,19 +169,16 @@ pub struct Resource {
     download: bool,
     filename: Option<String>,
 }
-pub async fn resource(
-    State(state): State<WebState>,
-    Query(input): Query<Resource>,
-    request: Request<Body>,
-) -> Response {
-    let state = state.connection_snapshot();
-    let path = if input.resource.starts_with("sucanvas-export://") {
-        rpc::export_path(&state, &input.resource)
+/// The file /api/resource serves for `resource`, or the status it answers with
+/// (also used by /api/thumbnail, so both reach exactly the same files).
+pub(super) fn resolve(state: &WebState, resource: &str) -> Result<std::path::PathBuf, StatusCode> {
+    let path = if resource.starts_with("sucanvas-export://") {
+        rpc::export_path(state, resource)
     } else {
-        super::storage::resource_path(&state, &input.resource)
+        super::storage::resource_path(state, resource)
     };
     let Ok(path) = path else {
-        return StatusCode::BAD_REQUEST.into_response();
+        return Err(StatusCode::BAD_REQUEST);
     };
     let mut roots = vec![
         state.core.assets_dir.clone(),
@@ -197,8 +194,37 @@ pub async fn resource(
         ));
     }
     if rpc::ensure_contained(&path, &roots).is_err() || !path.is_file() {
-        return StatusCode::NOT_FOUND.into_response();
+        return Err(StatusCode::NOT_FOUND);
     }
+    Ok(path)
+}
+
+pub(super) async fn serve(path: &std::path::Path, request: Request<Body>) -> Response {
+    let mut response = ServeFile::new(path)
+        .oneshot(request)
+        .await
+        .unwrap()
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        "private, max-age=3600".parse().unwrap(),
+    );
+    response
+        .headers_mut()
+        .insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
+    response
+}
+
+pub async fn resource(
+    State(state): State<WebState>,
+    Query(input): Query<Resource>,
+    request: Request<Body>,
+) -> Response {
+    let state = state.connection_snapshot();
+    let path = match resolve(&state, &input.resource) {
+        Ok(path) => path,
+        Err(status) => return status.into_response(),
+    };
     let download = input.download
         || !matches!(
             path.extension()
@@ -225,18 +251,7 @@ pub async fn resource(
                 | "aac"
                 | "ogg"
         );
-    let mut response = ServeFile::new(&path)
-        .oneshot(request)
-        .await
-        .unwrap()
-        .into_response();
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        "private, max-age=3600".parse().unwrap(),
-    );
-    response
-        .headers_mut()
-        .insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
+    let mut response = serve(&path, request).await;
     if download {
         let filename = input
             .filename
