@@ -8,6 +8,7 @@ import { choiceKey, type ChoiceStore } from "./workflow/choiceCache";
 import { convertLegacyImageNodeContent } from "./workflow/legacyImageNode";
 import { WorkflowControls } from "./workflow/WorkflowControls";
 import {
+  displayPorts,
   portLabel,
   resultUpscaleOffered,
   switchedControlValues,
@@ -9891,7 +9892,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             ) : <span className="video-seed-hint">每次生成自动更换</span>}
           </div>
           )}
-          {imageOperation?.inputs?.map((port) => {
+          {imageOperation && displayPorts(imageOperation).map((port) => {
             if (port.type === "text" && port === imageTextPort) {
               const label = portLabel(port);
               return (

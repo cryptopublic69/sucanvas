@@ -29,9 +29,13 @@ export type ControlDescription = {
   unit?: string;
   help?: string;
   emptyLabel?: string;
+  /** How much the arrows change a number (interface only; `step` is what is valid). */
+  increment?: number;
+  /** The module setting (manifest defaults key) that is this control's preset. */
+  setting?: string;
 };
 
-export type PortDescription = { id: string; type: PortType; label?: string; min?: number; max?: number };
+export type PortDescription = { id: string; type: PortType; label?: string; min?: number; max?: number; order?: number };
 export type GroupDescription = { id: string; label?: string; swap?: boolean };
 
 export type OperationDescription = {
@@ -252,6 +256,29 @@ export function upscaleModuleFor(
   if (offers(generatingModuleId)) return generatingModuleId;
   if (offers(defaultModuleId)) return defaultModuleId;
   return moduleIds.find(offers) ?? "";
+}
+
+/** Input ports in the order the node shows them (the package's `order`, else declaration order). */
+export function displayPorts(operation: OperationDescription): PortDescription[] {
+  return (operation.inputs ?? [])
+    .map((port, index) => ({ port, rank: port.order ?? index, index }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map(({ port }) => port);
+}
+
+/** The control of a module's run operation that takes a given module setting (settings page). */
+export function settingControl(description: PackageDescription | undefined, setting: string): ControlDescription | undefined {
+  return description?.operations.generate?.controls?.find((control) => control.setting === setting);
+}
+
+/** Whether `value` names a file (`dir\file`) inside one of the control's ComfyUI directories. */
+export function choiceInDirectories(control: ControlDescription | undefined, value: string): boolean {
+  const dirs = control?.options?.comfyui?.dirs ?? [];
+  const normalized = value.trim().replace(/\//g, "\\");
+  const separator = normalized.indexOf("\\");
+  if (separator <= 0 || !normalized.slice(separator + 1).trim()) return false;
+  const directory = normalized.slice(0, separator).toLowerCase();
+  return dirs.some((dir) => dir.toLowerCase() === directory);
 }
 
 /** File name of a `dir\file` choice, for display. */

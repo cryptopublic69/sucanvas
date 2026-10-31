@@ -304,6 +304,8 @@ pub fn run() {
             crate::workflow_v2::submit::get_workflow_package,
             crate::workflow_v2::submit::get_comfyui_control_choices,
             crate::workflow_v2::submit::submit_comfyui_workflow_operation,
+            crate::workflow_v2::submit::update_workflow_module_defaults,
+            crate::workflow_v2::submit::check_workflow_package,
             commands::cancel_comfyui_workflow,
             commands::get_comfyui_queue_summary,
             commands::get_comfyui_h3_loras,

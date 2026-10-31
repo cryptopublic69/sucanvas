@@ -7,12 +7,13 @@ import { WebRequestTimeoutError } from "./web/requestTimeout";
 import { recoverableWebGenerationFailure } from "./web/generationRequest";
 import { imageRegenerationPrompt, type WebImagePromptRequest } from "./web/imageGenerationPrompt";
 import { deduplicateRegenerationPromptOptions } from "./video/regenerationPromptOptions";
-import { imageModelDirectoryLabel, isImageModelNameForModule } from "./image/imageWorkflowAdapter";
 import { choiceKey, createChoiceStore } from "./workflow/choiceCache";
-import { convertLegacyImageNodeContent, needsLegacyImageConversion } from "./workflow/legacyImageNode";
+import { convertLegacyImageNodeContent, needsLegacyImageConversion, NODE_SHELL_VERSION } from "./workflow/legacyImageNode";
 import {
   buildOperationRequest,
+  choiceInDirectories,
   controlValue,
+  settingControl,
   operationRequestError,
   UPSCALE_OPERATION,
   upscaleModuleFor,
@@ -438,6 +439,8 @@ function videoInputMediaKind(record: NodeRecord): "image" | "audio" | "video" | 
   return null;
 }
 
+const NO_CHOICES: string[] = [];
+
 // Admin on another user's private canvas without edit mode (Web).
 const READ_ONLY_NOTICE = "这是其他用户的私有画布，开启编辑模式后才能修改";
 
@@ -581,8 +584,6 @@ function CanvasWorkspace() {
   const [h3DiffusionModelOptions, setH3DiffusionModelOptions] = useState<string[]>([DEFAULT_H3_DIFFUSION_MODEL_NAME]);
   const [h3DiffusionModelCatalogLoaded, setH3DiffusionModelCatalogLoaded] = useState(false);
   const [h3DiffusionModelName, setH3DiffusionModelName] = useState(DEFAULT_H3_DIFFUSION_MODEL_NAME);
-  const [krea2DiffusionModelOptions, setKrea2DiffusionModelOptions] = useState<string[]>([]);
-  const [krea2DiffusionModelCatalogLoaded, setKrea2DiffusionModelCatalogLoaded] = useState(false);
   const [selectedImageWorkflowModuleId, setSelectedImageWorkflowModuleId] = useState("");
   const [krea2DiffusionModelName, setKrea2DiffusionModelName] = useState("");
   const [h3ModelParameters, setH3ModelParameters] = useState(h3ModelParametersFromStorage);
@@ -1512,37 +1513,41 @@ function CanvasWorkspace() {
     setH3DiffusionModelName(selectedWorkflowModule.defaults.diffusionModelName);
   }, [selectedWorkflowModule]);
 
+  // CANVAS-024d: the image model setting is the package control that declares
+  // `setting: "diffusionModelName"`; its directories and file list come from the package.
+  const imageModelSettingControl = (module: WorkflowModuleRecord | null) => (
+    settingControl(module ? workflowPackages[module.id] : undefined, "diffusionModelName")
+  );
+  const isImageModelNameForModule = useCallback((value: string, module: WorkflowModuleRecord | null) => (
+    choiceInDirectories(settingControl(module ? workflowPackages[module.id] : undefined, "diffusionModelName"), value)
+  ), [workflowPackages]);
+  const imageModelDirectoryLabel = useCallback((module: WorkflowModuleRecord | null) => (
+    settingControl(module ? workflowPackages[module.id] : undefined, "diffusionModelName")?.options?.comfyui?.dirs.join(" / ") ?? ""
+  ), [workflowPackages]);
+  const selectedImageModelControl = imageModelSettingControl(selectedImageWorkflowModule);
+  const selectedImageModelChoices = selectedImageModelControl
+    ? workflowChoices.get(choiceKey(selectedImageModelControl))
+    : null;
+  const krea2DiffusionModelCatalogLoaded = selectedImageModelChoices?.status !== "loading";
+  const krea2DiffusionModelOptions = selectedImageModelChoices?.status === "ready" ? selectedImageModelChoices.values : NO_CHOICES;
+
   useEffect(() => {
     if (
       !settingsOpen
       || activeSettingsSection !== "image-model"
       || !selectedImageWorkflowModule
+      || !krea2DiffusionModelCatalogLoaded
     ) return;
-    let disposed = false;
-    setKrea2DiffusionModelCatalogLoaded(false);
-    void invoke<string[]>("get_comfyui_krea2_diffusion_models", {
-      serverUrl: comfyUiServerUrl,
-      workflowModuleId: selectedImageWorkflowModule.id,
-    }).then((models) => {
-      if (disposed) return;
-      setKrea2DiffusionModelOptions(models);
-      setKrea2DiffusionModelCatalogLoaded(true);
-      const configured = selectedImageWorkflowModule.defaults.diffusionModelName;
-      setKrea2DiffusionModelName((current) => (
-        models.some((model) => sameH3DiffusionModelName(model, current))
-          ? current
-          : models.find((model) => sameH3DiffusionModelName(model, configured))
-          ?? models[0]
-          ?? ""
-      ));
-    }).catch(() => {
-      if (!disposed) {
-        setKrea2DiffusionModelOptions([]);
-        setKrea2DiffusionModelCatalogLoaded(true);
-      }
-    });
-    return () => { disposed = true; };
-  }, [activeSettingsSection, comfyUiServerUrl, selectedImageWorkflowModule, settingsOpen]);
+    const models = krea2DiffusionModelOptions;
+    const configured = selectedImageWorkflowModule.defaults.diffusionModelName;
+    setKrea2DiffusionModelName((current) => (
+      models.some((model) => sameH3DiffusionModelName(model, current))
+        ? current
+        : models.find((model) => sameH3DiffusionModelName(model, configured))
+        ?? models[0]
+        ?? ""
+    ));
+  }, [activeSettingsSection, krea2DiffusionModelCatalogLoaded, krea2DiffusionModelOptions, selectedImageWorkflowModule, settingsOpen]);
 
   const workflowModuleUsageCount = useCallback((moduleId: string) => {
     const records = new Map<string, NodeRecord>();
@@ -3378,22 +3383,12 @@ function CanvasWorkspace() {
     }
     setWorkflowModulesBusy(true);
     try {
-      await invoke<WorkflowModuleRecord>("save_workflow_module", {
-        input: {
-          id: module.id,
-          name: module.name,
-          capability: module.capability,
-          variant: module.variant,
-          revision: module.revision,
-          adapterKind: module.adapterKind,
-          sourceWorkflowPath: module.workflowPath,
-          bindings: module.bindings,
-          adapter: module.adapter,
-          uiSchema: module.uiSchema,
-          defaults: {
-            ...module.defaults,
-            diffusionModelName: krea2DiffusionModelName,
-          },
+      // Only the module setting changes; the package files stay (a v2 package included).
+      await invoke<WorkflowModuleRecord>("update_workflow_module_defaults", {
+        workflowModuleId: module.id,
+        defaults: {
+          ...module.defaults,
+          diffusionModelName: krea2DiffusionModelName,
         },
       });
       await refreshWorkflowModules(true);
@@ -3403,7 +3398,7 @@ function CanvasWorkspace() {
     } finally {
       setWorkflowModulesBusy(false);
     }
-  }, [krea2DiffusionModelCatalogLoaded, krea2DiffusionModelName, krea2DiffusionModelOptions, refreshWorkflowModules, reportError, selectedImageWorkflowModule, showGlobalNotice, workflowModuleDefaults, workflowModules]);
+  }, [imageModelDirectoryLabel, isImageModelNameForModule, krea2DiffusionModelCatalogLoaded, krea2DiffusionModelName, krea2DiffusionModelOptions, refreshWorkflowModules, reportError, selectedImageWorkflowModule, showGlobalNotice, workflowModuleDefaults, workflowModules]);
 
   const saveVideoGenerationDefaults = useCallback(() => {
     if (!Number.isInteger(videoGenerationDefaultsDraft.generationDuration)
@@ -8593,7 +8588,7 @@ function CanvasWorkspace() {
     const height = imageGenerationAutoHeight(0, Boolean(operation?.inputs?.some((port) => port.type === "image")), 0);
     const placement = reserveNodePlacement(activeProjectId, position, width, height);
     try {
-      const result = await invoke<CreateNodeResult>("create_node", { input: { canvasId: activeProjectId, kind: "image-generation", title: "图片生成", content: { status: "idle", nodeShell: WORKFLOW_NODE_SHELL, operation: "generate", workflowModuleId: module?.id ?? "", workflowModuleRevision: module?.revision ?? "", activeTextInputId: "", controlValues: {}, seedMode: "random", seed: "" }, source: "manual", x: placement.position.x, y: placement.position.y, width, height } });
+      const result = await invoke<CreateNodeResult>("create_node", { input: { canvasId: activeProjectId, kind: "image-generation", title: "图片生成", content: { status: "idle", nodeShell: WORKFLOW_NODE_SHELL, nodeShellVersion: NODE_SHELL_VERSION, operation: "generate", workflowModuleId: module?.id ?? "", workflowModuleRevision: module?.revision ?? "", activeTextInputId: "", controlValues: {}, seedMode: "random", seed: "" }, source: "manual", x: placement.position.x, y: placement.position.y, width, height } });
       finishNodePlacementReservation(placement.reservationId, [result.node]);
       setNodes((current) => [...current, makeFlowNode(result.node)]);
       setNotice("图片生成节点已创建");

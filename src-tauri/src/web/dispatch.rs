@@ -129,6 +129,8 @@ commands! {
     GetWorkflowPackage => "get_workflow_package",
     GetComfyuiControlChoices => "get_comfyui_control_choices",
     SubmitComfyuiWorkflowOperation => "submit_comfyui_workflow_operation",
+    UpdateWorkflowModuleDefaults => "update_workflow_module_defaults",
+    CheckWorkflowPackage => "check_workflow_package",
 }
 
 impl Command {
@@ -312,6 +314,8 @@ pub fn permissions(
         | ExportWorkflowModule
         | ImportWorkflowModuleBundle
         | RestoreWorkflowModuleBundle
+        | UpdateWorkflowModuleDefaults
+        | CheckWorkflowPackage
         | SetProjectPrivate
         // Any project, other users' private ones included, without edit mode;
         // always audited (architect, 012c2 item 1).
@@ -1156,6 +1160,23 @@ pub async fn dispatch(
             .await?,
         )
         .map_err(|e| e.to_string()),
+        Command::UpdateWorkflowModuleDefaults => {
+            serde_json::to_value(workflow_submit::update_workflow_module_defaults(
+                argument(args, "workflowModuleId")?,
+                argument(args, "defaults")?,
+                State(&state.core),
+            )?)
+            .map_err(|e| e.to_string())
+        }
+        Command::CheckWorkflowPackage => serde_json::to_value(
+            workflow_submit::check_workflow_package(
+                argument(args, "serverUrl")?,
+                argument(args, "workflowModuleId")?,
+                State(&state.core),
+            )
+            .await?,
+        )
+        .map_err(|e| e.to_string()),
         Command::SubmitComfyuiWorkflowOperation => serde_json::to_value(
             workflow_submit::submit_comfyui_workflow_operation(input(args)?, State(&state.core))
                 .await?,
@@ -1232,6 +1253,8 @@ mod tests {
             "export_workflow_module",
             "import_workflow_module_bundle",
             "restore_workflow_module_bundle",
+            "update_workflow_module_defaults",
+            "check_workflow_package",
             "set_project_private",
             "admin_delete_project",
             "update_canvas_settings",

@@ -95,7 +95,7 @@ function NumberField({ control, value, onChange, labelSuffix = "" }: FieldProps)
       value={number}
       min={control.min}
       max={control.max}
-      step={control.step ?? (control.number === "float" ? "any" : 1)}
+      step={control.increment ?? control.step ?? (control.number === "float" ? "any" : 1)}
       onPointerDown={stop}
       onChange={(event) => {
         const text = event.currentTarget.value;

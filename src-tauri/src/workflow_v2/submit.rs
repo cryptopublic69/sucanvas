@@ -3,14 +3,14 @@
 //! module goes through the same code; nothing here names a workflow or a node (checked by a
 //! test).
 
-use super::{engine, runtime, PortType};
+use super::{engine, runtime, validate, PortType};
 use crate::commands::{
     collect_image_files, collect_video_files, comfy_execution_elapsed_seconds, comfy_view_url,
     resolve_generation_seed, upload_comfy_input, upload_comfy_output_as_input,
 };
 use crate::models::{ComfyOutputFile, ComfySubmitResult};
 use crate::platform::State;
-use crate::workflow_modules::{self, WorkflowModuleRecord};
+use crate::workflow_modules::{self, WorkflowModuleDefaults, WorkflowModuleRecord};
 use crate::ApplicationState;
 use chrono::Local;
 use reqwest::{Client, Url};
@@ -96,6 +96,72 @@ pub async fn get_workflow_package(
     described["moduleId"] = json!(record.manifest.id);
     described["revision"] = json!(record.manifest.revision);
     Ok(described)
+}
+
+/// The module settings (manifest `defaults`) only; the package files are not rewritten,
+/// which keeps a v2 package intact (CANVAS-024d).
+#[cfg_attr(feature = "desktop", tauri::command(async))]
+pub fn update_workflow_module_defaults(
+    workflow_module_id: String,
+    defaults: WorkflowModuleDefaults,
+    state: State<'_, ApplicationState>,
+) -> Result<WorkflowModuleRecord, String> {
+    workflow_modules::update_defaults(&state.workflow_modules_dir, &workflow_module_id, defaults)
+}
+
+/// The import check against ComfyUI: node types installed, every declared directory list
+/// has files, defaults and presets exist. When ComfyUI cannot be reached the report says
+/// it was not checked.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn check_workflow_package(
+    server_url: String,
+    workflow_module_id: String,
+    state: State<'_, ApplicationState>,
+) -> Result<validate::ValidationReport, String> {
+    let record = workflow_modules::get(&state.workflow_modules_dir, &workflow_module_id)?;
+    let loaded = load_module(&record)?;
+    let server_url = comfy_server(&server_url)?;
+    let info = async {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(60))
+            .build()
+            .ok()?
+            .get(format!("{server_url}/object_info"))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()
+    }
+    .await;
+    let mut report = validate::validate_package(&loaded.package, &loaded.workflow, info.as_ref());
+    // Presets come from the module settings; they must exist in ComfyUI too.
+    if let Some(info) = info.as_ref() {
+        for operation in loaded.package.operations.values() {
+            for control in &operation.controls {
+                let (Some(preset), Some(files)) = (
+                    control.preset.as_ref().and_then(Value::as_str),
+                    control.options.as_ref().and_then(|o| o.comfyui.as_ref()),
+                ) else {
+                    continue;
+                };
+                let known = validate::comfy_choices(info, &files.class_type, &files.input)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .any(|name| name.replace('/', "\\") == preset.replace('/', "\\"));
+                let message = format!("ComfyUI 中找不到 {} 的设置值 {preset}", control.id);
+                if !known && !report.errors.contains(&message) {
+                    report.errors.push(message);
+                }
+            }
+        }
+    }
+    Ok(report)
 }
 
 fn in_directories(name: &str, dirs: &[String]) -> bool {

@@ -27,6 +27,18 @@ pub const MOSS_TEXT_TO_IMAGE_ADAPTER: &str = "moss-text-to-image-v1";
 pub const VIDEO_PROCESSING_ADAPTER: &str = "video-processing-v1";
 pub const KREA2_IMAGE_EDIT_ADAPTER: &str = "krea2-image-edit-v1";
 const MAX_PACKAGE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+/// CANVAS-024d: a module whose adapter.json is a workflow package v2 (engineApiVersion 2).
+/// The record shows this generic placeholder adapter; the package itself is read by
+/// workflow_v2 (runtime), and v2 packages are never checked against the v1 adapter contract.
+pub const PACKAGE_V2_ADAPTER: &str = "workflow-package-v2";
+const PACKAGE_V2_ENGINE_API_VERSION: &str = "2";
+
+fn is_package_v2(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("engineApiVersion")?.as_u64())
+        == Some(u64::from(crate::workflow_v2::ENGINE_API_VERSION))
+}
 /// Reference workflows from before the third audio input had two LoadAudio nodes.
 /// Applies to packages without adapter.json and to submissions without a module.
 pub const LEGACY_REFERENCE_AUDIO_MAX: usize = 2;
@@ -485,6 +497,20 @@ pub struct WorkflowAdapter {
 }
 
 impl WorkflowAdapter {
+    /// The placeholder a v2 module's record carries (no v1 bindings apply to it).
+    pub fn package_v2(capability: &str, variant: &str) -> Self {
+        Self {
+            schema_version: WORKFLOW_PACKAGE_SCHEMA_VERSION,
+            engine_api_version: PACKAGE_V2_ENGINE_API_VERSION.to_owned(),
+            adapter_id: PACKAGE_V2_ADAPTER.to_owned(),
+            capability: capability.to_owned(),
+            variant: variant.to_owned(),
+            input_contract: WorkflowInputContract::default(),
+            bindings: WorkflowBindings::default(),
+            video_processing: None,
+        }
+    }
+
     pub fn image_generation(bindings: WorkflowBindings) -> Self {
         Self {
             schema_version: WORKFLOW_PACKAGE_SCHEMA_VERSION,
@@ -1233,6 +1259,13 @@ fn read_or_migrate_package(
 ) -> Result<WorkflowModuleRecord, String> {
     let adapter_file = adapter_path(root, &manifest.id);
     let ui_schema_file = ui_schema_path(root, &manifest.id);
+    if adapter_file.is_file() {
+        let bytes =
+            fs::read(&adapter_file).map_err(|error| format!("读取方案适配器失败：{error}"))?;
+        if is_package_v2(&bytes) {
+            return package_v2_record(root, manifest);
+        }
+    }
     let legacy_bindings = manifest
         .legacy_bindings
         .clone()
@@ -1288,6 +1321,138 @@ fn read_or_migrate_package(
         backup_count: backup_count(root, &manifest.id),
         manifest,
     })
+}
+
+/// A v2 module as the store lists it. Its manifest is not migrated to v1 values.
+fn package_v2_record(
+    root: &Path,
+    manifest: WorkflowModuleManifest,
+) -> Result<WorkflowModuleRecord, String> {
+    let ui_schema_file = ui_schema_path(root, &manifest.id);
+    if !ui_schema_file.is_file() {
+        write_json_file(
+            &ui_schema_file,
+            &WorkflowUiSchema::default(),
+            "方案界面定义",
+        )?;
+    }
+    let adapter = WorkflowAdapter::package_v2(&manifest.capability, &manifest.variant);
+    Ok(WorkflowModuleRecord {
+        workflow_path: workflow_path(root, &manifest.id)
+            .to_string_lossy()
+            .into_owned(),
+        adapter_path: adapter_path(root, &manifest.id)
+            .to_string_lossy()
+            .into_owned(),
+        ui_schema_path: ui_schema_file.to_string_lossy().into_owned(),
+        bindings: adapter.bindings.clone(),
+        adapter,
+        ui_schema: WorkflowUiSchema::default(),
+        backup_count: backup_count(root, &manifest.id),
+        manifest,
+    })
+}
+
+/// Stores a v2 package exactly as written, after the generic static checks (every node and
+/// input its steps name exists, versions, controls). A target id restores over that module
+/// and keeps its id; the previous package becomes a restore point.
+fn save_package_v2(
+    root: &Path,
+    source: WorkflowModuleManifest,
+    workflow_bytes: &[u8],
+    adapter_bytes: &[u8],
+    target_id: Option<String>,
+) -> Result<WorkflowModuleRecord, String> {
+    fs::create_dir_all(root).map_err(|error| format!("创建工作流方案仓库失败：{error}"))?;
+    let name = validate_label(&source.name, "方案名称")?;
+    let (capability, variant) = normalize_classification(&source.capability, &source.variant)?;
+    let revision = if source.revision.trim().is_empty() {
+        "当前".to_owned()
+    } else {
+        validate_label(&source.revision, "修订名称")?
+    };
+    let adapter: Value = serde_json::from_slice(adapter_bytes)
+        .map_err(|error| format!("解析方案包失败：{error}"))?;
+    let workflow: Value = serde_json::from_slice(workflow_bytes)
+        .map_err(|error| format!("解析方案工作流失败：{error}"))?;
+    let manifest_value =
+        serde_json::to_value(&source).map_err(|error| format!("方案描述无效：{error}"))?;
+    let loaded = crate::workflow_v2::runtime::load_from_files(
+        &manifest_value,
+        &adapter,
+        &Value::Null,
+        workflow,
+    )?;
+    if loaded.package.capability != capability || loaded.package.variant != variant {
+        return Err(format!(
+            "方案包的类型（{} / {}）与方案描述（{capability} / {variant}）不一致",
+            loaded.package.capability, loaded.package.variant
+        ));
+    }
+    let timestamp = now();
+    let (id, created_at, upgraded_from) = if let Some(id) = target_id.as_deref() {
+        let previous = read_manifest(root, id)?;
+        if previous.capability != capability {
+            return Err("从备份恢复不能改变方案的功能类型".to_owned());
+        }
+        backup_current(root, id)?;
+        (id.to_owned(), previous.created_at, previous.upgraded_from)
+    } else {
+        (
+            format!("workflow-module-{}", Uuid::new_v4()),
+            timestamp.clone(),
+            None,
+        )
+    };
+    let manifest = WorkflowModuleManifest {
+        id: id.clone(),
+        name,
+        capability,
+        variant,
+        revision,
+        package_schema_version: WORKFLOW_PACKAGE_SCHEMA_VERSION,
+        engine_api_version: PACKAGE_V2_ENGINE_API_VERSION.to_owned(),
+        adapter_kind: PACKAGE_V2_ADAPTER.to_owned(),
+        adapter_entry: ADAPTER_FILE.to_owned(),
+        ui_schema_entry: UI_SCHEMA_FILE.to_owned(),
+        source_workflow_name: WORKFLOW_FILE.to_owned(),
+        created_at,
+        updated_at: timestamp,
+        deleted_at: None,
+        upgraded_from,
+        legacy_bindings: None,
+        defaults: source.defaults,
+    };
+    let directory = module_dir(root, &id);
+    fs::create_dir_all(&directory).map_err(|error| format!("创建工作流方案目录失败：{error}"))?;
+    fs::write(directory.join(WORKFLOW_FILE), workflow_bytes)
+        .map_err(|error| format!("保存方案工作流失败：{error}"))?;
+    fs::write(directory.join(ADAPTER_FILE), adapter_bytes)
+        .map_err(|error| format!("保存方案包失败：{error}"))?;
+    write_json_file(
+        &directory.join(UI_SCHEMA_FILE),
+        &WorkflowUiSchema::default(),
+        "方案界面定义",
+    )?;
+    write_manifest(root, &manifest)?;
+    read_or_migrate_package(root, manifest)
+}
+
+/// The module's settings (manifest `defaults`) only; its package files stay as they are.
+pub fn update_defaults(
+    root: &Path,
+    id: &str,
+    defaults: WorkflowModuleDefaults,
+) -> Result<WorkflowModuleRecord, String> {
+    let mut manifest = read_manifest(root, id)?;
+    if manifest.deleted_at.is_some() {
+        return Err(format!("工作流方案 {id} 已在回收站中"));
+    }
+    backup_current(root, id)?;
+    manifest.defaults = defaults;
+    manifest.updated_at = now();
+    write_manifest(root, &manifest)?;
+    read_or_migrate_package(root, manifest)
 }
 
 fn backup_current(root: &Path, id: &str) -> Result<(), String> {
@@ -1853,6 +2018,15 @@ pub fn save(root: &Path, input: SaveWorkflowModuleInput) -> Result<WorkflowModul
     {
         return Err(format!("当前程序尚不支持方案引擎 {requested_engine}"));
     }
+    // A save carrying a v2 module's placeholder adapter would overwrite its package with an
+    // empty v1 adapter. Restoring a v1 bundle over a v2 module (rollback) stays possible.
+    if input
+        .adapter
+        .as_ref()
+        .is_some_and(|adapter| adapter.adapter_id == PACKAGE_V2_ADAPTER)
+    {
+        return Err("第 2 版方案包只能用「从备份恢复」更新；设置页的模型请用设置页保存".to_owned());
+    }
     let bindings = input
         .bindings
         .unwrap_or_else(|| WorkflowBindings::for_variant(&variant));
@@ -2177,6 +2351,9 @@ fn import_package_bytes(
 ) -> Result<WorkflowModuleRecord, String> {
     let source_manifest: WorkflowModuleManifest = serde_json::from_slice(manifest_bytes)
         .map_err(|error| format!("解析方案备份描述失败：{error}"))?;
+    if let Some(bytes) = adapter_bytes.filter(|bytes| is_package_v2(bytes)) {
+        return save_package_v2(root, source_manifest, workflow_bytes, bytes, target_id);
+    }
     let adapter = if let Some(bytes) = adapter_bytes {
         serde_json::from_slice::<WorkflowAdapter>(bytes)
             .map_err(|error| format!("解析方案备份适配器失败：{error}"))?
