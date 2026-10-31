@@ -68,7 +68,8 @@ fn build(
     media: BTreeMap<String, Vec<String>>,
 ) -> Result<engine::Built, String> {
     let values: Map<String, Value> = serde_json::from_value(values).unwrap();
-    let request = runtime::engine_request(&loaded.package, operation, &values, media, 7, "2026-11-01")?;
+    let request =
+        runtime::engine_request(&loaded.package, operation, &values, media, 7, "2026-11-01")?;
     engine::build(&loaded.package, operation, &loaded.workflow, &request)
 }
 
@@ -87,7 +88,16 @@ fn width_and_height_step_by_64_in_the_interface_without_a_validation_step() {
             assert_eq!(size.increment, Some(64.0), "{short} {id}");
             assert_eq!(size.step, None, "{short} {id}: 1000 px must stay valid");
         }
-        assert!(build(&loaded, "generate", json!({ "width": 1000 }), prompt("fox")).is_ok());
+        // Inputs the package requires (the image edit needs an image).
+        let mut media = prompt("fox");
+        if loaded.package.operations["generate"]
+            .inputs
+            .iter()
+            .any(|p| p.id == "images")
+        {
+            media.insert("images".to_owned(), vec!["a.png".to_owned()]);
+        }
+        assert!(build(&loaded, "generate", json!({ "width": 1000 }), media).is_ok());
     }
 }
 
@@ -97,7 +107,8 @@ fn the_image_edit_node_shows_its_images_before_the_prompt() {
     let inputs = &edit.package.operations["generate"].inputs;
     let order = |id: &str| {
         let port = inputs.iter().find(|port| port.id == id).unwrap();
-        port.order.unwrap_or(inputs.iter().position(|p| p.id == id).unwrap() as i32)
+        port.order
+            .unwrap_or(inputs.iter().position(|p| p.id == id).unwrap() as i32)
     };
     assert!(order("images") < order("prompt"));
     // Checking still reports the prompt first when it is blank (engine order is unchanged).
@@ -150,11 +161,19 @@ fn release_packages_name_the_krea2_directory_for_their_defaults() {
             .is_some_and(|preset| preset.starts_with("Krea2\\")));
         let text = fs::read_to_string(release_dir(short).join("workflow.json")).unwrap()
             + &fs::read_to_string(release_dir(short).join("manifest.json")).unwrap();
-        assert!(!text.contains("Kera2\\\\"), "{short}: Kera2 left in workflow/manifest");
+        assert!(
+            !text.contains("Kera2\\\\"),
+            "{short}: Kera2 left in workflow/manifest"
+        );
     }
 }
 
-fn differences(path: &str, expected: &Value, actual: &Value, out: &mut Vec<(String, Value, Value)>) {
+fn differences(
+    path: &str,
+    expected: &Value,
+    actual: &Value,
+    out: &mut Vec<(String, Value, Value)>,
+) {
     if expected == actual {
         return;
     }
@@ -211,7 +230,8 @@ fn release_packages_submit_what_the_converted_v1_packages_submit_except_the_rena
         let operation = request["operation"].as_str().unwrap();
         let seed: u64 = request["seed"].as_str().unwrap().parse().unwrap_or(0);
         let run = |loaded: &runtime::LoadedPackage| {
-            let values: Map<String, Value> = serde_json::from_value(request["values"].clone()).unwrap();
+            let values: Map<String, Value> =
+                serde_json::from_value(request["values"].clone()).unwrap();
             let engine_request = runtime::engine_request(
                 &loaded.package,
                 operation,
@@ -221,9 +241,14 @@ fn release_packages_submit_what_the_converted_v1_packages_submit_except_the_rena
                 "2026-11-01",
             )
             .unwrap();
-            engine::build(&loaded.package, operation, &loaded.workflow, &engine_request)
-                .unwrap()
-                .workflow
+            engine::build(
+                &loaded.package,
+                operation,
+                &loaded.workflow,
+                &engine_request,
+            )
+            .unwrap()
+            .workflow
         };
         let old = run(&v1_loaded(short));
         let new = run(&release_loaded(short));
@@ -232,7 +257,10 @@ fn release_packages_submit_what_the_converted_v1_packages_submit_except_the_rena
         for (path, before, after) in diff {
             assert_eq!(
                 after,
-                json!(before.as_str().unwrap_or_default().replacen("Kera2\\", "Krea2\\", 1)),
+                json!(before
+                    .as_str()
+                    .unwrap_or_default()
+                    .replacen("Kera2\\", "Krea2\\", 1)),
                 "{name} {path}: only the Kera2 -> Krea2 default may differ"
             );
             found.push(format!("{name} {path}"));
@@ -261,36 +289,75 @@ fn moss_offers_six_lora_slots_weighted_0_to_2_that_act_on_the_model_only() {
     let files = name.options.as_ref().unwrap().comfyui.as_ref().unwrap();
     assert_eq!(files.class_type, "LoraLoaderModelOnly");
     for slot in ["9701", "9702", "9703", "9704", "9705", "9706"] {
-        assert_eq!(moss.workflow[slot]["class_type"], json!("LoraLoaderModelOnly"), "{slot}");
+        assert_eq!(
+            moss.workflow[slot]["class_type"],
+            json!("LoraLoaderModelOnly"),
+            "{slot}"
+        );
     }
     // No LoRA: identical to the package without slots (checked byte for byte above too).
-    let none = build(&moss, "generate", json!({}), prompt("fox")).unwrap().workflow;
+    let none = build(&moss, "generate", json!({}), prompt("fox"))
+        .unwrap()
+        .workflow;
     assert_eq!(none["38"]["inputs"]["model"], json!(["28", 0]));
     assert!(none.get("9701").is_none());
     // One LoRA.
-    let one = build(&moss, "generate", json!({ "loras": [{ "name": "moss\\a.safetensors", "weight": 0.8 }] }), prompt("fox"))
-        .unwrap()
-        .workflow;
-    assert_eq!(one["9701"]["inputs"], json!({ "model": ["28", 0], "lora_name": "moss\\a.safetensors", "strength_model": 0.8 }));
+    let one = build(
+        &moss,
+        "generate",
+        json!({ "loras": [{ "name": "moss\\a.safetensors", "weight": 0.8 }] }),
+        prompt("fox"),
+    )
+    .unwrap()
+    .workflow;
+    assert_eq!(
+        one["9701"]["inputs"],
+        json!({ "model": ["28", 0], "lora_name": "moss\\a.safetensors", "strength_model": 0.8 })
+    );
     assert_eq!(one["38"]["inputs"]["model"], json!(["9701", 0]));
     assert!(one.get("9702").is_none());
     // Three with the middle one switched off: it is skipped, the others chain.
-    let three = build(&moss, "generate", json!({ "loras": [
+    let three = build(
+        &moss,
+        "generate",
+        json!({ "loras": [
         { "name": "moss\\a.safetensors", "weight": 1.0 },
         { "name": "moss\\b.safetensors", "weight": 0.5, "on": false },
         { "name": "moss\\c.safetensors", "weight": 1.5 }
-    ] }), prompt("fox"))
+    ] }),
+        prompt("fox"),
+    )
     .unwrap()
     .workflow;
     assert_eq!(three["9701"]["inputs"]["model"], json!(["28", 0]));
-    assert_eq!(three["9703"]["inputs"], json!({ "model": ["9701", 0], "lora_name": "moss\\c.safetensors", "strength_model": 1.5 }));
+    assert_eq!(
+        three["9703"]["inputs"],
+        json!({ "model": ["9701", 0], "lora_name": "moss\\c.safetensors", "strength_model": 1.5 })
+    );
     assert_eq!(three["38"]["inputs"]["model"], json!(["9703", 0]));
-    assert!(three.get("9702").is_none(), "the switched-off slot is not submitted");
+    assert!(
+        three.get("9702").is_none(),
+        "the switched-off slot is not submitted"
+    );
     // Out of range or too many are refused.
-    assert!(build(&moss, "generate", json!({ "loras": [{ "name": "moss\\a.safetensors", "weight": 2.5 }] }), prompt("fox")).is_err());
-    let seven = (0..7).map(|_| json!({ "name": "moss\\a.safetensors" })).collect::<Vec<_>>();
+    assert!(build(
+        &moss,
+        "generate",
+        json!({ "loras": [{ "name": "moss\\a.safetensors", "weight": 2.5 }] }),
+        prompt("fox")
+    )
+    .is_err());
+    let seven = (0..7)
+        .map(|_| json!({ "name": "moss\\a.safetensors" }))
+        .collect::<Vec<_>>();
     assert!(build(&moss, "generate", json!({ "loras": seven }), prompt("fox")).is_err());
-    assert!(build(&moss, "generate", json!({ "loras": [{ "name": "elsewhere\\a.safetensors" }] }), prompt("fox")).is_err());
+    assert!(build(
+        &moss,
+        "generate",
+        json!({ "loras": [{ "name": "elsewhere\\a.safetensors" }] }),
+        prompt("fox")
+    )
+    .is_err());
 }
 
 #[test]
@@ -309,7 +376,10 @@ fn import_check_reports_the_krea2_default_missing_while_the_directory_is_still_k
     );
     // A directory list is fine when at least one of its directories has files.
     assert!(
-        !report.errors.iter().any(|e| e.contains("目录里没有可用文件（modelName）")),
+        !report
+            .errors
+            .iter()
+            .any(|e| e.contains("目录里没有可用文件（modelName）")),
         "{:?}",
         report.errors
     );
@@ -325,24 +395,34 @@ fn module_root() -> PathBuf {
 fn restoring_a_v2_bundle_over_a_v1_module_keeps_its_id_and_its_package() {
     let root = module_root();
     fs::create_dir_all(&root).unwrap();
-    let v1 = workflow_modules::import_bundle(&root, &testdata().join("v1").join("5dd20ec7")).unwrap();
+    let v1 =
+        workflow_modules::import_bundle(&root, &testdata().join("v1").join("5dd20ec7")).unwrap();
     let id = v1.manifest.id.clone();
     let restored = workflow_modules::restore_bundle(&root, &id, &release_dir("5dd20ec7")).unwrap();
     assert_eq!(restored.manifest.id, id);
-    assert_eq!(restored.adapter.adapter_id, workflow_modules::PACKAGE_V2_ADAPTER);
+    assert_eq!(
+        restored.adapter.adapter_id,
+        workflow_modules::PACKAGE_V2_ADAPTER
+    );
     assert_eq!(
         read_json(PathBuf::from(&restored.adapter_path)),
         read_json(release_dir("5dd20ec7").join("adapter.json")),
         "the v2 package is stored as written"
     );
-    assert_eq!(restored.backup_count, 1, "the v1 package is kept as a restore point");
+    assert_eq!(
+        restored.backup_count, 1,
+        "the v1 package is kept as a restore point"
+    );
     let listed = workflow_modules::list(&root, false).unwrap();
     assert_eq!(listed.len(), 1);
     // The settings page changes only the module settings; the v2 package stays.
     let mut defaults = restored.manifest.defaults.clone();
     defaults.diffusion_model_name = "Moss\\other.safetensors".to_owned();
     let updated = workflow_modules::update_defaults(&root, &id, defaults).unwrap();
-    assert_eq!(updated.manifest.defaults.diffusion_model_name, "Moss\\other.safetensors");
+    assert_eq!(
+        updated.manifest.defaults.diffusion_model_name,
+        "Moss\\other.safetensors"
+    );
     assert_eq!(
         read_json(PathBuf::from(&updated.adapter_path)),
         read_json(release_dir("5dd20ec7").join("adapter.json"))
@@ -360,7 +440,11 @@ fn a_v2_bundle_whose_steps_name_a_missing_node_is_refused() {
     }
     let mut adapter = read_json(release_dir("5dd20ec7").join("adapter.json"));
     adapter["operations"]["generate"]["steps"][0]["node"] = json!("99999");
-    fs::write(bundle.join("adapter.json"), serde_json::to_vec(&adapter).unwrap()).unwrap();
+    fs::write(
+        bundle.join("adapter.json"),
+        serde_json::to_vec(&adapter).unwrap(),
+    )
+    .unwrap();
     let error = workflow_modules::import_bundle(&root, &bundle).unwrap_err();
     assert!(error.contains("节点 99999 不存在"), "{error}");
     fs::remove_dir_all(&root).ok();
