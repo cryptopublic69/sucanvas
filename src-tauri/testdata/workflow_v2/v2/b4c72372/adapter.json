@@ -1,0 +1,81 @@
+{
+  "engineApiVersion": 2,
+  "capability": "video-upscale",
+  "variant": "video-upscale",
+  "operations": {
+    "generate": {
+      "label": "处理",
+      "inputs": [
+        {
+          "id": "source",
+          "type": "video",
+          "min": 1,
+          "max": 1
+        }
+      ],
+      "outputs": [
+        {
+          "id": "video",
+          "type": "video",
+          "min": 0,
+          "max": 1
+        }
+      ],
+      "controls": [
+        {
+          "id": "softness",
+          "type": "number",
+          "label": "Softness",
+          "default": 3.0,
+          "min": 1.0,
+          "max": 3.0,
+          "step": 1.0,
+          "number": "intIfWhole"
+        },
+        {
+          "id": "upscaleFactor",
+          "type": "number",
+          "label": "放大倍率",
+          "default": 1.0,
+          "min": 1.0,
+          "max": 4.0,
+          "step": 1.0,
+          "number": "intIfWhole"
+        }
+      ],
+      "steps": [
+        {
+          "op": "set",
+          "node": "3",
+          "input": "file",
+          "value": {
+            "media": {
+              "port": "source",
+              "index": 0
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "2",
+          "input": "softness",
+          "value": {
+            "intIfWhole": {
+              "control": "softness"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "2",
+          "input": "upscale_factor",
+          "value": {
+            "intIfWhole": {
+              "control": "upscaleFactor"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

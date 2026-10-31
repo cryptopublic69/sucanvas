@@ -1,0 +1,416 @@
+{
+  "engineApiVersion": 2,
+  "capability": "image-generation",
+  "variant": "image-edit",
+  "operations": {
+    "generate": {
+      "label": "生成",
+      "inputs": [
+        {
+          "id": "images",
+          "type": "image",
+          "min": 1,
+          "max": 2
+        }
+      ],
+      "outputs": [
+        {
+          "id": "image",
+          "type": "image",
+          "min": 0,
+          "max": 1
+        }
+      ],
+      "controls": [
+        {
+          "id": "prompt",
+          "type": "textarea",
+          "label": "提示词",
+          "default": ""
+        },
+        {
+          "id": "negativePrompt",
+          "type": "textarea",
+          "label": "负向提示词",
+          "default": ""
+        },
+        {
+          "id": "width",
+          "type": "number",
+          "label": "宽",
+          "default": 1280,
+          "min": 64.0,
+          "max": 4096.0,
+          "number": "int"
+        },
+        {
+          "id": "height",
+          "type": "number",
+          "label": "高",
+          "default": 720,
+          "min": 64.0,
+          "max": 4096.0,
+          "number": "int"
+        },
+        {
+          "id": "steps",
+          "type": "number",
+          "label": "步数",
+          "default": 8,
+          "min": 1.0,
+          "max": 1000.0,
+          "number": "int"
+        },
+        {
+          "id": "seed",
+          "type": "seed",
+          "label": "种子"
+        },
+        {
+          "id": "modelName",
+          "type": "select",
+          "label": "模型",
+          "default": "Kera2\\pornmasterKrea2_v2TurboBF16.safetensors",
+          "options": {
+            "comfyui": {
+              "classType": "UNETLoader",
+              "input": "unet_name",
+              "dirs": [
+                "Krea2",
+                "Kera2"
+              ]
+            }
+          },
+          "emptyMeansDefault": true
+        }
+      ],
+      "steps": [
+        {
+          "op": "set",
+          "node": "500",
+          "input": "filename_prefix",
+          "value": {
+            "date": {
+              "const": "%date:yyyy-MM-dd%/ComfyUI_krea2_image_edit"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "43",
+          "input": "unet_name",
+          "value": {
+            "path": {
+              "control": "modelName"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "18",
+          "input": "unet_name",
+          "value": {
+            "path": {
+              "control": "modelName"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "42",
+          "input": "lora_name",
+          "value": {
+            "const": "Krea2\\krea2_identity_edit_v1_2.safetensors"
+          }
+        },
+        {
+          "op": "set",
+          "node": "17",
+          "input": "lora_name",
+          "value": {
+            "const": "Krea2\\krea2_identity_edit_v1_2.safetensors"
+          }
+        },
+        {
+          "op": "set",
+          "node": "45",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 0
+            }
+          },
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 2
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "500",
+          "input": "images",
+          "value": {
+            "link": [
+              "29",
+              0
+            ]
+          },
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 2
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "28",
+          "input": "width",
+          "value": {
+            "int": {
+              "control": "width"
+            }
+          },
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 2
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "28",
+          "input": "height",
+          "value": {
+            "int": {
+              "control": "height"
+            }
+          },
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 2
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "21",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 0
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 2
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 1
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 2
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "4",
+          "input": "width",
+          "value": {
+            "int": {
+              "control": "width"
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 2
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "4",
+          "input": "height",
+          "value": {
+            "int": {
+              "control": "height"
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 2
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "500",
+          "input": "images",
+          "value": {
+            "link": [
+              "6",
+              0
+            ]
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 2
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "37",
+          "input": "value",
+          "value": {
+            "trim": {
+              "control": "prompt"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "20",
+          "input": "value",
+          "value": {
+            "trim": {
+              "control": "prompt"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "34",
+          "input": "prompt",
+          "value": {
+            "trim": {
+              "control": "negativePrompt"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "3",
+          "input": "prompt",
+          "value": {
+            "trim": {
+              "control": "negativePrompt"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "30",
+          "input": "seed",
+          "value": {
+            "seed": true
+          },
+          "create": true
+        },
+        {
+          "op": "set",
+          "node": "30",
+          "input": "steps",
+          "value": {
+            "int": {
+              "control": "steps"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "30",
+          "input": "cfg",
+          "value": {
+            "if": {
+              "cond": {
+                "empty": {
+                  "trim": {
+                    "control": "negativePrompt"
+                  }
+                }
+              },
+              "then": {
+                "const": 1.0
+              },
+              "else": {
+                "const": 1.5
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "7",
+          "input": "seed",
+          "value": {
+            "seed": true
+          },
+          "create": true
+        },
+        {
+          "op": "set",
+          "node": "7",
+          "input": "steps",
+          "value": {
+            "int": {
+              "control": "steps"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "7",
+          "input": "cfg",
+          "value": {
+            "if": {
+              "cond": {
+                "empty": {
+                  "trim": {
+                    "control": "negativePrompt"
+                  }
+                }
+              },
+              "then": {
+                "const": 1.0
+              },
+              "else": {
+                "const": 1.5
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

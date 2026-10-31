@@ -1,0 +1,1312 @@
+{
+  "engineApiVersion": 2,
+  "capability": "video-generation",
+  "variant": "image-to-video",
+  "nodeTypes": {
+    "127": "UNETLoader",
+    "147": "LoraLoaderModelOnly",
+    "9200": "LoraLoaderModelOnly",
+    "9201": "LoraLoaderModelOnly",
+    "9300": "VHS_LoadVideo",
+    "9383": "ImageResizeKJv2",
+    "9386": "VAEEncode",
+    "9387": "SamplerCustomAdvanced",
+    "9388": "VAEEncodeAudio",
+    "9390": "PT_H3ConcatAVLatent",
+    "9391": "BasicScheduler",
+    "9393": "BasicGuider",
+    "9395": "VAEDecode",
+    "9398": "ResolutionSelector",
+    "9403": "LayerColor: BrightnessContrastV2",
+    "9500": "LoraLoaderModelOnly",
+    "9501": "LoraLoaderModelOnly",
+    "9502": "LoraLoaderModelOnly",
+    "9503": "LoraLoaderModelOnly",
+    "9504": "LoraLoaderModelOnly",
+    "9505": "LoraLoaderModelOnly",
+    "9506": "LoraLoaderModelOnly",
+    "9507": "LoraLoaderModelOnly",
+    "9508": "LoraLoaderModelOnly",
+    "9509": "LoraLoaderModelOnly",
+    "9600": "LoraLoaderModelOnly",
+    "9601": "LoraLoaderModelOnly",
+    "9602": "LoraLoaderModelOnly",
+    "9603": "LoraLoaderModelOnly",
+    "9604": "LoraLoaderModelOnly",
+    "9605": "LoraLoaderModelOnly"
+  },
+  "operations": {
+    "generate": {
+      "label": "生成",
+      "inputs": [
+        {
+          "id": "images",
+          "type": "image",
+          "min": 1,
+          "max": 1
+        },
+        {
+          "id": "secondarySource",
+          "type": "video",
+          "label": "二采源视频",
+          "min": 0,
+          "max": 1
+        }
+      ],
+      "outputs": [
+        {
+          "id": "video",
+          "type": "video",
+          "min": 0,
+          "max": 1
+        }
+      ],
+      "controls": [
+        {
+          "id": "prompt",
+          "type": "textarea",
+          "label": "提示词",
+          "default": ""
+        },
+        {
+          "id": "durationSeconds",
+          "type": "number",
+          "label": "时长",
+          "default": 5.0,
+          "min": 2.0,
+          "max": 15.0,
+          "number": "float"
+        },
+        {
+          "id": "aspectRatio",
+          "type": "select",
+          "label": "画面比例",
+          "default": "16:9",
+          "options": {
+            "values": [
+              {
+                "value": "16:9"
+              },
+              {
+                "value": "9:16"
+              },
+              {
+                "value": "4:3"
+              },
+              {
+                "value": "3:4"
+              },
+              {
+                "value": "2:3"
+              },
+              {
+                "value": "3:2"
+              },
+              {
+                "value": "1:1"
+              }
+            ]
+          }
+        },
+        {
+          "id": "primaryResolutionMegapixels",
+          "type": "number",
+          "label": "1采分辨率",
+          "default": 0.4,
+          "min": 0.2,
+          "max": 2.0,
+          "number": "float"
+        },
+        {
+          "id": "secondaryResolutionMegapixels",
+          "type": "number",
+          "label": "2采分辨率",
+          "default": 0.5,
+          "min": 0.2,
+          "max": 2.0,
+          "number": "float"
+        },
+        {
+          "id": "primaryVideoSteps",
+          "type": "number",
+          "label": "1采 Video Steps",
+          "default": 6,
+          "min": 1.0,
+          "number": "int"
+        },
+        {
+          "id": "primaryAudioSteps",
+          "type": "number",
+          "label": "1采 Audio Steps",
+          "default": 8,
+          "min": 1.0,
+          "number": "int"
+        },
+        {
+          "id": "secondarySchedulerSteps",
+          "type": "number",
+          "label": "2采 Steps",
+          "default": 4,
+          "min": 1.0,
+          "number": "int"
+        },
+        {
+          "id": "primaryUpscaleFactor",
+          "type": "number",
+          "label": "1采放大倍率",
+          "default": 1.0,
+          "min": 1.0,
+          "max": 4.0,
+          "number": "float"
+        },
+        {
+          "id": "primaryBrightness",
+          "type": "number",
+          "label": "1采亮度",
+          "default": 1.0,
+          "min": 0.0,
+          "max": 3.0,
+          "number": "float"
+        },
+        {
+          "id": "primaryContrast",
+          "type": "number",
+          "label": "1采对比度",
+          "default": 0.9,
+          "min": 0.0,
+          "max": 3.0,
+          "number": "float"
+        },
+        {
+          "id": "primarySaturation",
+          "type": "number",
+          "label": "1采饱和度",
+          "default": 0.9,
+          "min": 0.0,
+          "max": 3.0,
+          "number": "float"
+        },
+        {
+          "id": "secondaryBrightness",
+          "type": "number",
+          "label": "2采亮度",
+          "default": 1.0,
+          "min": 0.0,
+          "max": 3.0,
+          "number": "float"
+        },
+        {
+          "id": "secondaryContrast",
+          "type": "number",
+          "label": "2采对比度",
+          "default": 0.9,
+          "min": 0.0,
+          "max": 3.0,
+          "number": "float"
+        },
+        {
+          "id": "secondarySaturation",
+          "type": "number",
+          "label": "2采饱和度",
+          "default": 1.0,
+          "min": 0.0,
+          "max": 3.0,
+          "number": "float"
+        },
+        {
+          "id": "secondarySamplingEnabled",
+          "type": "toggle",
+          "label": "2采",
+          "default": false
+        },
+        {
+          "id": "diffusionModelName",
+          "type": "select",
+          "label": "基础模型",
+          "default": "",
+          "options": {
+            "comfyui": {
+              "classType": "UNETLoader",
+              "input": "unet_name",
+              "dirs": [
+                "MinimaxH3"
+              ]
+            }
+          }
+        },
+        {
+          "id": "loraName",
+          "type": "select",
+          "label": "LoRA",
+          "default": "",
+          "options": {
+            "comfyui": {
+              "classType": "LoraLoaderModelOnly",
+              "input": "lora_name",
+              "dirs": [
+                "MinimaxH3"
+              ]
+            }
+          },
+          "allowEmpty": true
+        },
+        {
+          "id": "loraStrength",
+          "type": "number",
+          "label": "LoRA 权重",
+          "default": 1.0,
+          "min": 0.0,
+          "max": 10.0,
+          "number": "float"
+        },
+        {
+          "id": "loraBypassed",
+          "type": "toggle",
+          "label": "LoRA Bypass",
+          "default": false
+        },
+        {
+          "id": "secondaryLoraName",
+          "type": "select",
+          "label": "2采 LoRA",
+          "default": "",
+          "options": {
+            "comfyui": {
+              "classType": "LoraLoaderModelOnly",
+              "input": "lora_name",
+              "dirs": [
+                "MinimaxH3"
+              ]
+            }
+          },
+          "allowEmpty": true
+        },
+        {
+          "id": "secondaryLoraStrength",
+          "type": "number",
+          "label": "2采 LoRA 权重",
+          "default": 1.0,
+          "min": 0.0,
+          "max": 10.0,
+          "number": "float"
+        },
+        {
+          "id": "secondaryLoraBypassed",
+          "type": "toggle",
+          "label": "2采 LoRA Bypass",
+          "default": false
+        },
+        {
+          "id": "styleLoras",
+          "type": "repeat",
+          "label": "风格 LoRA",
+          "max": 6.0,
+          "fields": [
+            {
+              "id": "name",
+              "type": "select",
+              "label": "LoRA",
+              "default": "",
+              "options": {
+                "comfyui": {
+                  "classType": "LoraLoaderModelOnly",
+                  "input": "lora_name",
+                  "dirs": [
+                    "MinimaxH3"
+                  ]
+                }
+              },
+              "allowEmpty": true
+            },
+            {
+              "id": "strength",
+              "type": "number",
+              "label": "权重",
+              "default": 1.0,
+              "min": 0.0,
+              "max": 10.0,
+              "number": "float"
+            },
+            {
+              "id": "on",
+              "type": "toggle",
+              "label": "启用",
+              "default": true
+            },
+            {
+              "id": "toSecondary",
+              "type": "toggle",
+              "label": "应用到二段",
+              "default": false
+            },
+            {
+              "id": "toSecondPass",
+              "type": "toggle",
+              "label": "应用到2采",
+              "default": false
+            }
+          ]
+        },
+        {
+          "id": "seed",
+          "type": "seed",
+          "label": "种子"
+        }
+      ],
+      "steps": [
+        {
+          "op": "set",
+          "node": "127",
+          "input": "unet_name",
+          "value": {
+            "trim": {
+              "control": "diffusionModelName"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "138",
+          "input": "value",
+          "value": {
+            "control": "prompt"
+          }
+        },
+        {
+          "op": "set",
+          "node": "129",
+          "input": "noise_seed",
+          "value": {
+            "seed": true
+          }
+        },
+        {
+          "op": "set",
+          "node": "132",
+          "input": "value",
+          "value": {
+            "float": {
+              "control": "durationSeconds"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "115",
+          "input": "aspect_ratio",
+          "value": {
+            "map": {
+              "value": {
+                "trim": {
+                  "control": "aspectRatio"
+                }
+              },
+              "table": {
+                "16:9": "16:9 (Widescreen)",
+                "1:1": "1:1 (Square)",
+                "2:3": "2:3 (Portrait Photo)",
+                "3:2": "3:2 (Photo)",
+                "3:4": "3:4 (Portrait Standard)",
+                "4:3": "4:3 (Standard)",
+                "9:16": "9:16 (Portrait Widescreen)"
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "115",
+          "input": "megapixels",
+          "value": {
+            "float": {
+              "control": "primaryResolutionMegapixels"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "115",
+          "input": "aspect_ratio",
+          "value": {
+            "map": {
+              "value": {
+                "trim": {
+                  "control": "aspectRatio"
+                }
+              },
+              "table": {
+                "16:9": "16:9 (Widescreen)",
+                "1:1": "1:1 (Square)",
+                "2:3": "2:3 (Portrait Photo)",
+                "3:2": "3:2 (Photo)",
+                "3:4": "3:4 (Portrait Standard)",
+                "4:3": "4:3 (Standard)",
+                "9:16": "9:16 (Portrait Widescreen)"
+              }
+            }
+          },
+          "when": {
+            "any": [
+              {
+                "truthy": {
+                  "control": "secondarySamplingEnabled"
+                }
+              },
+              {
+                "mediaAtLeast": {
+                  "port": "secondarySource",
+                  "count": 1
+                }
+              }
+            ]
+          }
+        },
+        {
+          "op": "set",
+          "node": "115",
+          "input": "megapixels",
+          "value": {
+            "float": {
+              "control": "secondaryResolutionMegapixels"
+            }
+          },
+          "when": {
+            "any": [
+              {
+                "truthy": {
+                  "control": "secondarySamplingEnabled"
+                }
+              },
+              {
+                "mediaAtLeast": {
+                  "port": "secondarySource",
+                  "count": 1
+                }
+              }
+            ]
+          }
+        },
+        {
+          "op": "set",
+          "node": "124",
+          "input": "steps",
+          "value": {
+            "int": {
+              "control": "primaryVideoSteps"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "280",
+          "input": "value",
+          "value": {
+            "float": {
+              "control": "primaryUpscaleFactor"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "259",
+          "input": "brightness",
+          "value": {
+            "float": {
+              "control": "primaryBrightness"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "259",
+          "input": "contrast",
+          "value": {
+            "float": {
+              "control": "primaryContrast"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "259",
+          "input": "saturation",
+          "value": {
+            "float": {
+              "control": "primarySaturation"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "259",
+          "input": "brightness",
+          "value": {
+            "float": {
+              "control": "secondaryBrightness"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "259",
+          "input": "contrast",
+          "value": {
+            "float": {
+              "control": "secondaryContrast"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "259",
+          "input": "saturation",
+          "value": {
+            "float": {
+              "control": "secondarySaturation"
+            }
+          }
+        },
+        {
+          "op": "capture",
+          "id": "primaryUpstream",
+          "value": {
+            "input": {
+              "node": "147",
+              "input": "model"
+            }
+          }
+        },
+        {
+          "op": "capture",
+          "id": "secondaryUpstream",
+          "value": {
+            "input": {
+              "node": "147",
+              "input": "model"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "147",
+          "input": "lora_name",
+          "value": {
+            "trim": {
+              "control": "loraName"
+            }
+          },
+          "when": {
+            "not": {
+              "any": [
+                {
+                  "empty": {
+                    "trim": {
+                      "control": "loraName"
+                    }
+                  }
+                },
+                {
+                  "truthy": {
+                    "control": "loraBypassed"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "147",
+          "input": "strength_model",
+          "value": {
+            "float": {
+              "control": "loraStrength"
+            }
+          },
+          "when": {
+            "not": {
+              "any": [
+                {
+                  "empty": {
+                    "trim": {
+                      "control": "loraName"
+                    }
+                  }
+                },
+                {
+                  "truthy": {
+                    "control": "loraBypassed"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "147",
+          "input": "lora_name",
+          "value": {
+            "trim": {
+              "control": "secondaryLoraName"
+            }
+          },
+          "when": {
+            "not": {
+              "any": [
+                {
+                  "empty": {
+                    "trim": {
+                      "control": "secondaryLoraName"
+                    }
+                  }
+                },
+                {
+                  "truthy": {
+                    "control": "secondaryLoraBypassed"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "147",
+          "input": "strength_model",
+          "value": {
+            "float": {
+              "control": "secondaryLoraStrength"
+            }
+          },
+          "when": {
+            "not": {
+              "any": [
+                {
+                  "empty": {
+                    "trim": {
+                      "control": "secondaryLoraName"
+                    }
+                  }
+                },
+                {
+                  "truthy": {
+                    "control": "secondaryLoraBypassed"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "142",
+          "input": "model",
+          "value": {
+            "if": {
+              "cond": {
+                "all": [
+                  {
+                    "any": [
+                      {
+                        "empty": {
+                          "trim": {
+                            "control": "loraName"
+                          }
+                        }
+                      },
+                      {
+                        "truthy": {
+                          "control": "loraBypassed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "any": [
+                      {
+                        "empty": {
+                          "trim": {
+                            "control": "secondaryLoraName"
+                          }
+                        }
+                      },
+                      {
+                        "truthy": {
+                          "control": "secondaryLoraBypassed"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              "then": {
+                "var": "primaryUpstream"
+              },
+              "else": {
+                "link": [
+                  "147",
+                  0
+                ]
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "124",
+          "input": "model",
+          "value": {
+            "link": [
+              "141",
+              0
+            ]
+          }
+        },
+        {
+          "op": "chain",
+          "id": "primaryStage",
+          "repeat": "styleLoras",
+          "slots": [
+            "9200",
+            "9500",
+            "9502",
+            "9504",
+            "9506",
+            "9508"
+          ],
+          "linkInput": "model",
+          "itemWhen": {
+            "truthy": {
+              "item": "on"
+            }
+          },
+          "fields": {
+            "lora_name": {
+              "trim": {
+                "item": "name"
+              }
+            },
+            "strength_model": {
+              "float": {
+                "item": "strength"
+              }
+            }
+          },
+          "from": {
+            "link": [
+              "141",
+              0
+            ]
+          }
+        },
+        {
+          "op": "chain",
+          "id": "secondaryStage",
+          "repeat": "styleLoras",
+          "slots": [
+            "9201",
+            "9501",
+            "9503",
+            "9505",
+            "9507",
+            "9509"
+          ],
+          "linkInput": "model",
+          "itemWhen": {
+            "all": [
+              {
+                "truthy": {
+                  "item": "on"
+                }
+              },
+              {
+                "truthy": {
+                  "item": "toSecondary"
+                }
+              }
+            ]
+          },
+          "fields": {
+            "lora_name": {
+              "trim": {
+                "item": "name"
+              }
+            },
+            "strength_model": {
+              "float": {
+                "item": "strength"
+              }
+            }
+          },
+          "from": {
+            "link": [
+              "141",
+              0
+            ]
+          }
+        },
+        {
+          "op": "set",
+          "node": "126",
+          "input": "model",
+          "value": {
+            "var": "primaryStage"
+          }
+        },
+        {
+          "op": "set",
+          "node": "279",
+          "input": "model",
+          "value": {
+            "var": "secondaryStage"
+          }
+        },
+        {
+          "op": "chain",
+          "id": "independent",
+          "repeat": "styleLoras",
+          "slots": [
+            "9600",
+            "9601",
+            "9602",
+            "9603",
+            "9604",
+            "9605"
+          ],
+          "linkInput": "model",
+          "itemWhen": {
+            "all": [
+              {
+                "truthy": {
+                  "item": "on"
+                }
+              },
+              {
+                "truthy": {
+                  "item": "toSecondPass"
+                }
+              }
+            ]
+          },
+          "fields": {
+            "lora_name": {
+              "trim": {
+                "item": "name"
+              }
+            },
+            "strength_model": {
+              "float": {
+                "item": "strength"
+              }
+            }
+          },
+          "from": {
+            "link": [
+              "141",
+              0
+            ]
+          },
+          "to": [
+            {
+              "node": "9391",
+              "input": "model"
+            },
+            {
+              "node": "9393",
+              "input": "model"
+            }
+          ]
+        },
+        {
+          "op": "removeNode",
+          "node": "275"
+        },
+        {
+          "op": "removeNode",
+          "node": "275"
+        },
+        {
+          "op": "removeNode",
+          "node": "9404"
+        },
+        {
+          "op": "addNode",
+          "node": "9000",
+          "classType": "CreateVideo",
+          "inputs": {
+            "audio": {
+              "if": {
+                "cond": {
+                  "any": [
+                    {
+                      "truthy": {
+                        "control": "secondarySamplingEnabled"
+                      }
+                    },
+                    {
+                      "mediaAtLeast": {
+                        "port": "secondarySource",
+                        "count": 1
+                      }
+                    }
+                  ]
+                },
+                "then": {
+                  "link": [
+                    "218",
+                    0
+                  ]
+                },
+                "else": {
+                  "link": [
+                    "218",
+                    0
+                  ]
+                }
+              }
+            },
+            "bit_depth": {
+              "const": 8
+            },
+            "fps": {
+              "const": 24.0
+            },
+            "images": {
+              "if": {
+                "cond": {
+                  "any": [
+                    {
+                      "truthy": {
+                        "control": "secondarySamplingEnabled"
+                      }
+                    },
+                    {
+                      "mediaAtLeast": {
+                        "port": "secondarySource",
+                        "count": 1
+                      }
+                    }
+                  ]
+                },
+                "then": {
+                  "link": [
+                    "259",
+                    0
+                  ]
+                },
+                "else": {
+                  "link": [
+                    "259",
+                    0
+                  ]
+                }
+              }
+            }
+          },
+          "meta": {
+            "title": "Create Final Video"
+          }
+        },
+        {
+          "op": "addNode",
+          "node": "9001",
+          "classType": "SaveVideo",
+          "inputs": {
+            "codec": {
+              "const": "auto"
+            },
+            "filename_prefix": {
+              "date": {
+                "if": {
+                  "cond": {
+                    "any": [
+                      {
+                        "truthy": {
+                          "control": "secondarySamplingEnabled"
+                        }
+                      },
+                      {
+                        "mediaAtLeast": {
+                          "port": "secondarySource",
+                          "count": 1
+                        }
+                      }
+                    ]
+                  },
+                  "then": {
+                    "const": "%date:yyyy-MM-dd%/Minimax_H3"
+                  },
+                  "else": {
+                    "const": "%date:yyyy-MM-dd%/Minimax_H3"
+                  }
+                }
+              }
+            },
+            "format": {
+              "const": "mp4"
+            },
+            "video": {
+              "link": [
+                "9000",
+                0
+              ]
+            }
+          },
+          "meta": {
+            "title": "Save Final Video"
+          }
+        },
+        {
+          "op": "set",
+          "node": "139",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 0
+            }
+          }
+        },
+        {
+          "op": "capture",
+          "id": "secondarySourceModel",
+          "value": {
+            "input": {
+              "node": "9393",
+              "input": "model"
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9300",
+          "input": "video",
+          "value": {
+            "media": {
+              "port": "secondarySource",
+              "index": 0
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9398",
+          "input": "aspect_ratio",
+          "value": {
+            "map": {
+              "value": {
+                "trim": {
+                  "control": "aspectRatio"
+                }
+              },
+              "table": {
+                "16:9": "16:9 (Widescreen)",
+                "1:1": "1:1 (Square)",
+                "2:3": "2:3 (Portrait Photo)",
+                "3:2": "3:2 (Photo)",
+                "3:4": "3:4 (Portrait Standard)",
+                "4:3": "4:3 (Standard)",
+                "9:16": "9:16 (Portrait Widescreen)"
+              }
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9398",
+          "input": "megapixels",
+          "value": {
+            "float": {
+              "control": "secondaryResolutionMegapixels"
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9383",
+          "input": "image",
+          "value": {
+            "link": [
+              "9300",
+              0
+            ]
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9388",
+          "input": "audio",
+          "value": {
+            "link": [
+              "9300",
+              2
+            ]
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9391",
+          "input": "steps",
+          "value": {
+            "int": {
+              "control": "secondarySchedulerSteps"
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9391",
+          "input": "model",
+          "value": {
+            "var": "secondarySourceModel"
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9393",
+          "input": "model",
+          "value": {
+            "var": "secondarySourceModel"
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9403",
+          "input": "brightness",
+          "value": {
+            "float": {
+              "control": "secondaryBrightness"
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9403",
+          "input": "contrast",
+          "value": {
+            "float": {
+              "control": "secondaryContrast"
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9403",
+          "input": "saturation",
+          "value": {
+            "float": {
+              "control": "secondarySaturation"
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9000",
+          "input": "images",
+          "value": {
+            "link": [
+              "9403",
+              0
+            ]
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9000",
+          "input": "audio",
+          "value": {
+            "link": [
+              "9300",
+              2
+            ]
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "secondarySource",
+              "count": 1
+            }
+          }
+        }
+      ]
+    }
+  }
+}

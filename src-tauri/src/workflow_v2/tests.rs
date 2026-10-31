@@ -27,7 +27,10 @@ fn v1_files(short: &str) -> (Value, Value, Value, Value) {
 }
 
 fn v2_package(short: &str) -> PackageV2 {
-    serde_json::from_value(read_json(testdata().join("v2").join(short).join("adapter.json"))).unwrap()
+    serde_json::from_value(read_json(
+        testdata().join("v2").join(short).join("adapter.json"),
+    ))
+    .unwrap()
 }
 
 fn shorts() -> Vec<String> {
@@ -93,7 +96,35 @@ fn every_golden_submission_is_reproduced_field_by_field() {
             Err(error) => failures.push(format!("{name}: engine error: {error}")),
         }
     }
-    assert!(failures.is_empty(), "{} of 55 differ:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} of 55 differ:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Regenerates testdata/workflow_v2/v2 from the v1 copies (run with --ignored).
+#[test]
+#[ignore]
+fn write_v2_packages() {
+    for short in shorts() {
+        let (manifest, adapter, ui_schema, workflow) = v1_files(&short);
+        let converted =
+            legacy_v1_convert::convert_package(&manifest, &adapter, &ui_schema, &workflow).unwrap();
+        let dir = testdata().join("v2").join(&short);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("adapter.json"),
+            serde_json::to_string_pretty(&converted).unwrap() + "\n",
+        )
+        .unwrap();
+        fs::copy(
+            testdata().join("v1").join(&short).join("workflow.json"),
+            dir.join("workflow.json"),
+        )
+        .unwrap();
+    }
 }
 
 #[test]
@@ -195,13 +226,25 @@ fn switched_off_slots_are_skipped_and_downstream_reconnects_to_the_upstream() {
         ),
     )
     .unwrap();
-    assert_eq!(built["a"]["inputs"], json!({ "model": ["base", 0], "lora_name": "one.safetensors", "strength_model": 0.5 }));
-    assert_eq!(built["c"]["inputs"], json!({ "model": ["a", 0], "lora_name": "three.safetensors", "strength_model": 2.0 }));
+    assert_eq!(
+        built["a"]["inputs"],
+        json!({ "model": ["base", 0], "lora_name": "one.safetensors", "strength_model": 0.5 })
+    );
+    assert_eq!(
+        built["c"]["inputs"],
+        json!({ "model": ["a", 0], "lora_name": "three.safetensors", "strength_model": 2.0 })
+    );
     assert_eq!(built["use"]["inputs"]["model"], json!(["c", 0]));
     // The skipped slot is left exactly as it was in the workflow.
     assert_eq!(built["b"], chain_workflow()["b"]);
 
-    let none = engine::build_workflow(&chain_package(), "generate", &chain_workflow(), &request(json!({ "loras": [] }), json!({}))).unwrap();
+    let none = engine::build_workflow(
+        &chain_package(),
+        "generate",
+        &chain_workflow(),
+        &request(json!({ "loras": [] }), json!({})),
+    )
+    .unwrap();
     assert_eq!(none["use"]["inputs"]["model"], json!(["base", 0]));
 }
 
@@ -237,12 +280,21 @@ fn one_node_with_several_slots_is_filled_by_input_pattern() {
         &package,
         "generate",
         &workflow,
-        &request(json!({ "loras": [{ "name": "a" }, { "name": "" }, { "name": "c", "weight": 0.25 }] }), json!({})),
+        &request(
+            json!({ "loras": [{ "name": "a" }, { "name": "" }, { "name": "c", "weight": 0.25 }] }),
+            json!({}),
+        ),
     )
     .unwrap();
-    assert_eq!(built["multi"]["inputs"]["slot_1"], json!({ "on": true, "lora": "a", "strength": 1.0 }));
+    assert_eq!(
+        built["multi"]["inputs"]["slot_1"],
+        json!({ "on": true, "lora": "a", "strength": 1.0 })
+    );
     assert!(built["multi"]["inputs"].get("slot_2").is_none());
-    assert_eq!(built["multi"]["inputs"]["slot_3"], json!({ "on": true, "lora": "c", "strength": 0.25 }));
+    assert_eq!(
+        built["multi"]["inputs"]["slot_3"],
+        json!({ "on": true, "lora": "c", "strength": 0.25 })
+    );
 }
 
 #[test]
@@ -269,14 +321,29 @@ fn outputs_and_derived_values_follow_declared_conditions() {
         "save": { "class_type": "Save", "inputs": { "images": ["small", 0], "filename_prefix": "" } },
         "orphan": { "class_type": "Note", "inputs": {} }
     });
-    let plain = engine::build_workflow(&package, "generate", &workflow, &request(json!({ "negative": "  " }), json!({}))).unwrap();
+    let plain = engine::build_workflow(
+        &package,
+        "generate",
+        &workflow,
+        &request(json!({ "negative": "  " }), json!({})),
+    )
+    .unwrap();
     assert_eq!(plain["s"]["inputs"]["cfg"], json!(1.0));
     assert_eq!(plain["save"]["inputs"]["images"], json!(["small", 0]));
     assert_eq!(plain["s"]["inputs"]["width"], json!(1008));
     assert_eq!(plain["s"]["inputs"]["seed"], json!(7));
-    assert_eq!(plain["save"]["inputs"]["filename_prefix"], json!("2026-11-01/out"));
+    assert_eq!(
+        plain["save"]["inputs"]["filename_prefix"],
+        json!("2026-11-01/out")
+    );
     assert!(plain.get("orphan").is_none() && plain.get("big").is_none());
-    let upscaled = engine::build_workflow(&package, "generate", &workflow, &request(json!({ "negative": "ugly", "upscale": true }), json!({}))).unwrap();
+    let upscaled = engine::build_workflow(
+        &package,
+        "generate",
+        &workflow,
+        &request(json!({ "negative": "ugly", "upscale": true }), json!({})),
+    )
+    .unwrap();
     assert_eq!(upscaled["s"]["inputs"]["cfg"], json!(1.5));
     assert_eq!(upscaled["save"]["inputs"]["images"], json!(["big", 0]));
     assert!(upscaled.get("big").is_some());
@@ -293,7 +360,9 @@ fn validation_package(node: &str, input: &str, version: u32) -> PackageV2 {
                   { "op": "set", "node": "load", "input": "name", "value": { "control": "model" } }]
     }));
     package.engine_api_version = version;
-    package.node_types.insert("load".to_owned(), "Loader".to_owned());
+    package
+        .node_types
+        .insert("load".to_owned(), "Loader".to_owned());
     package
 }
 
@@ -306,45 +375,107 @@ fn validation_workflow() -> Value {
 
 #[test]
 fn validation_rejects_a_missing_node() {
-    let report = validate::validate_package(&validation_package("99", "text", ENGINE_API_VERSION), &validation_workflow(), None);
-    assert!(report.errors.iter().any(|e| e.contains("节点 99 不存在")), "{:?}", report.errors);
+    let report = validate::validate_package(
+        &validation_package("99", "text", ENGINE_API_VERSION),
+        &validation_workflow(),
+        None,
+    );
+    assert!(
+        report.errors.iter().any(|e| e.contains("节点 99 不存在")),
+        "{:?}",
+        report.errors
+    );
 }
 
 #[test]
 fn validation_rejects_a_missing_input() {
-    let report = validate::validate_package(&validation_package("text", "prompt_text", ENGINE_API_VERSION), &validation_workflow(), None);
-    assert!(report.errors.iter().any(|e| e.contains("节点 text 没有输入 prompt_text")), "{:?}", report.errors);
+    let report = validate::validate_package(
+        &validation_package("text", "prompt_text", ENGINE_API_VERSION),
+        &validation_workflow(),
+        None,
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("节点 text 没有输入 prompt_text")),
+        "{:?}",
+        report.errors
+    );
 }
 
 #[test]
 fn validation_rejects_a_wrong_node_type() {
     let mut workflow = validation_workflow();
     workflow["load"]["class_type"] = json!("OtherLoader");
-    let report = validate::validate_package(&validation_package("text", "text", ENGINE_API_VERSION), &workflow, None);
-    assert!(report.errors.iter().any(|e| e.contains("节点 load 的类型应为 Loader，实际为 OtherLoader")), "{:?}", report.errors);
+    let report = validate::validate_package(
+        &validation_package("text", "text", ENGINE_API_VERSION),
+        &workflow,
+        None,
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("节点 load 的类型应为 Loader，实际为 OtherLoader")),
+        "{:?}",
+        report.errors
+    );
 }
 
 #[test]
 fn validation_rejects_an_unsupported_engine_version() {
-    let report = validate::validate_package(&validation_package("text", "text", 3), &validation_workflow(), None);
-    assert_eq!(report.errors, vec![format!("方案包需要引擎接口版本 3，本程序支持版本 {ENGINE_API_VERSION}")]);
+    let report = validate::validate_package(
+        &validation_package("text", "text", 3),
+        &validation_workflow(),
+        None,
+    );
+    assert_eq!(
+        report.errors,
+        vec![format!(
+            "方案包需要引擎接口版本 3，本程序支持版本 {ENGINE_API_VERSION}"
+        )]
+    );
 }
 
 #[test]
 fn validation_against_comfyui_reports_missing_classes_and_models_or_says_it_was_not_checked() {
     let package = validation_package("text", "text", ENGINE_API_VERSION);
     let unchecked = validate::validate_package(&package, &validation_workflow(), None);
-    assert!(!unchecked.comfyui_checked && unchecked.notes.iter().any(|n| n.contains("未检查")), "{:?}", unchecked.notes);
-    let object_info = json!({ "Loader": { "input": { "required": { "name": [["dir\\other.safetensors"]] } } } });
+    assert!(
+        !unchecked.comfyui_checked && unchecked.notes.iter().any(|n| n.contains("未检查")),
+        "{:?}",
+        unchecked.notes
+    );
+    let object_info =
+        json!({ "Loader": { "input": { "required": { "name": [["dir\\other.safetensors"]] } } } });
     let checked = validate::validate_package(&package, &validation_workflow(), Some(&object_info));
     assert!(checked.comfyui_checked);
-    assert!(checked.errors.iter().any(|e| e.contains("ComfyUI 缺少节点类型 TextEncode")), "{:?}", checked.errors);
-    assert!(checked.errors.iter().any(|e| e.contains("dir\\base.safetensors")), "{:?}", checked.errors);
+    assert!(
+        checked
+            .errors
+            .iter()
+            .any(|e| e.contains("ComfyUI 缺少节点类型 TextEncode")),
+        "{:?}",
+        checked.errors
+    );
+    assert!(
+        checked
+            .errors
+            .iter()
+            .any(|e| e.contains("dir\\base.safetensors")),
+        "{:?}",
+        checked.errors
+    );
     let complete = json!({
         "Loader": { "input": { "required": { "name": [["dir\\base.safetensors"]] } } },
         "TextEncode": { "input": { "required": { "text": ["STRING"] } } }
     });
-    assert!(validate::validate_package(&package, &validation_workflow(), Some(&complete)).errors.is_empty());
+    assert!(
+        validate::validate_package(&package, &validation_workflow(), Some(&complete))
+            .errors
+            .is_empty()
+    );
 }
 
 // ---- the plug-in rule, checked in code: generic files never name a module or a node ----

@@ -1,0 +1,191 @@
+{
+  "engineApiVersion": 2,
+  "capability": "image-generation",
+  "variant": "image-generation",
+  "operations": {
+    "generate": {
+      "label": "生成",
+      "outputs": [
+        {
+          "id": "image",
+          "type": "image",
+          "min": 0,
+          "max": 1
+        }
+      ],
+      "controls": [
+        {
+          "id": "prompt",
+          "type": "textarea",
+          "label": "提示词",
+          "default": ""
+        },
+        {
+          "id": "negativePrompt",
+          "type": "textarea",
+          "label": "负向提示词",
+          "default": ""
+        },
+        {
+          "id": "width",
+          "type": "number",
+          "label": "宽",
+          "default": 1280,
+          "min": 64.0,
+          "max": 4096.0,
+          "number": "int"
+        },
+        {
+          "id": "height",
+          "type": "number",
+          "label": "高",
+          "default": 720,
+          "min": 64.0,
+          "max": 4096.0,
+          "number": "int"
+        },
+        {
+          "id": "steps",
+          "type": "number",
+          "label": "步数",
+          "default": 25,
+          "min": 1.0,
+          "max": 1000.0,
+          "number": "int"
+        },
+        {
+          "id": "seed",
+          "type": "seed",
+          "label": "种子"
+        },
+        {
+          "id": "modelName",
+          "type": "select",
+          "label": "模型",
+          "default": "",
+          "options": {
+            "comfyui": {
+              "classType": "UNETLoader",
+              "input": "unet_name",
+              "dirs": [
+                "Moss"
+              ]
+            }
+          },
+          "allowEmpty": true
+        }
+      ],
+      "steps": [
+        {
+          "op": "set",
+          "node": "28",
+          "input": "unet_name",
+          "value": {
+            "path": {
+              "control": "modelName"
+            }
+          },
+          "when": {
+            "not": {
+              "empty": {
+                "trim": {
+                  "control": "modelName"
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "57",
+          "input": "value",
+          "value": {
+            "trim": {
+              "control": "prompt"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "36",
+          "input": "text",
+          "value": {
+            "trim": {
+              "control": "negativePrompt"
+            }
+          },
+          "when": {
+            "not": {
+              "empty": {
+                "trim": {
+                  "control": "negativePrompt"
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "31",
+          "input": "seed",
+          "value": {
+            "seed": true
+          }
+        },
+        {
+          "op": "set",
+          "node": "31",
+          "input": "steps",
+          "value": {
+            "int": {
+              "control": "steps"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "35",
+          "input": "width",
+          "value": {
+            "roundTo": {
+              "value": {
+                "int": {
+                  "control": "width"
+                }
+              },
+              "multiple": 16,
+              "min": 16
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "35",
+          "input": "height",
+          "value": {
+            "roundTo": {
+              "value": {
+                "int": {
+                  "control": "height"
+                }
+              },
+              "multiple": 16,
+              "min": 16
+            }
+          }
+        },
+        {
+          "op": "keepReachable",
+          "from": [
+            "64"
+          ]
+        }
+      ],
+      "results": [
+        {
+          "node": "64"
+        }
+      ]
+    }
+  }
+}
