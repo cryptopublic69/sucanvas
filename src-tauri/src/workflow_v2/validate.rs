@@ -112,6 +112,9 @@ pub fn validate_package(
         Some(info) => {
             report.comfyui_checked = true;
             check_comfyui(package, nodes, &added_classes, info, &mut report.errors);
+            // Operations sharing a control (e.g. the same default model) report it once.
+            let mut seen = HashSet::new();
+            report.errors.retain(|error| seen.insert(error.clone()));
         }
     }
     report
