@@ -1,9 +1,11 @@
 // CANVAS-024b: tests for the workflow package v2 engine, its import validation and the
 // transitional v1 -> v2 converter. The golden file was produced by the unmodified c588f8d
 // server against a recording ComfyUI stand-in (see testdata/workflow_v2/goldens.json).
-use super::{engine, legacy_v1_convert, validate, EngineRequest, PackageV2, ENGINE_API_VERSION};
-use serde_json::{json, Value};
-use std::{fs, path::PathBuf};
+use super::{
+    engine, legacy_v1_convert, runtime, validate, EngineRequest, PackageV2, ENGINE_API_VERSION,
+};
+use serde_json::{json, Map, Value};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 fn testdata() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -478,33 +480,355 @@ fn validation_against_comfyui_reports_missing_classes_and_models_or_says_it_was_
     );
 }
 
+// ---- CANVAS-024c: the generic node's request -> runtime -> engine, byte for byte ----
+
+fn load_v1(short: &str) -> runtime::LoadedPackage {
+    let (manifest, adapter, ui_schema, workflow) = v1_files(short);
+    runtime::load_from_files(&manifest, &adapter, &ui_schema, workflow)
+        .unwrap_or_else(|e| panic!("{short}: {e}"))
+}
+
+/// The prompt exactly as the old server submitted it: goldens.json keeps one case per line
+/// with the raw prompt text spliced in last (see the 024b driver).
+fn raw_golden_prompt(goldens: &str, case: &str) -> String {
+    let head = format!("{{\"case\":\"{case}\",");
+    let line = goldens
+        .lines()
+        .find(|line| line.starts_with(&head))
+        .unwrap_or_else(|| panic!("golden {case} missing"));
+    let line = line.trim_end().trim_end_matches(',');
+    let date = line.find(",\"date\":\"").unwrap();
+    let start = date + line[date..].find("\"prompt\":").unwrap() + "\"prompt\":".len();
+    line[start..line.len() - 1].to_owned()
+}
+
+/// What the server hands the engine for each input item: text as is, uploaded files under the
+/// name ComfyUI returns (the recording stand-in answers with the file name).
+fn uploaded_names(inputs: &Value) -> BTreeMap<String, Vec<String>> {
+    let mut media = BTreeMap::new();
+    for (port, items) in inputs.as_object().into_iter().flatten() {
+        let names = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    text.to_owned()
+                } else if let Some(path) = item.get("path").and_then(Value::as_str) {
+                    path.rsplit(['/', '\\']).next().unwrap().to_owned()
+                } else {
+                    item["output"]["filename"].as_str().unwrap().to_owned()
+                }
+            })
+            .collect();
+        media.insert(port.clone(), names);
+    }
+    media
+}
+
+fn object(value: &Value) -> Map<String, Value> {
+    value.as_object().cloned().unwrap_or_default()
+}
+
+#[test]
+fn generic_requests_reproduce_every_image_golden_byte_for_byte() {
+    let goldens = fs::read_to_string(testdata().join("goldens.json")).unwrap();
+    let fixture = read_json(testdata().join("generic-requests.json"));
+    let cases = fixture["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 12, "every image golden case has a generic request");
+    let mut failures = Vec::new();
+    for case in cases {
+        let name = case["case"].as_str().unwrap();
+        let short = case["module"].as_str().unwrap();
+        let request = &case["request"];
+        let operation = request["operation"].as_str().unwrap();
+        let loaded = load_v1(short);
+        let seed = request["seed"].as_str().unwrap().parse().unwrap_or(0);
+        let built = runtime::engine_request(
+            &loaded.package,
+            operation,
+            &object(&request["values"]),
+            uploaded_names(&request["inputs"]),
+            seed,
+            "2026-11-01",
+        )
+        .and_then(|engine_request| {
+            engine::build(&loaded.package, operation, &loaded.workflow, &engine_request)
+        });
+        match built {
+            Ok(built) => {
+                let bytes = serde_json::to_string(&built.workflow).unwrap();
+                if bytes != raw_golden_prompt(&goldens, name) {
+                    failures.push(format!("{name}: bytes differ"));
+                }
+            }
+            Err(error) => failures.push(format!("{name}: {error}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn image_packages_take_the_prompt_from_a_text_port() {
+    for short in ["0bf9145b", "52cba27b", "5dd20ec7"] {
+        let loaded = load_v1(short);
+        let generate = &loaded.package.operations["generate"];
+        let port = generate
+            .inputs
+            .iter()
+            .find(|port| port.id == "prompt")
+            .unwrap_or_else(|| panic!("{short}: no prompt port"));
+        assert_eq!(serde_json::to_value(port.port_type).unwrap(), json!("text"));
+        assert_eq!((port.min, port.max), (1, 1), "{short}");
+        assert!(
+            !generate.controls.iter().any(|control| control.id == "prompt"),
+            "{short}: prompt must not also be a control"
+        );
+        let blank = runtime::engine_request(
+            &loaded.package,
+            "generate",
+            &Map::new(),
+            BTreeMap::from([("prompt".to_owned(), vec!["   ".to_owned()])]),
+            1,
+            "2026-11-01",
+        )
+        .and_then(|request| engine::build(&loaded.package, "generate", &loaded.workflow, &request))
+        .err()
+        .unwrap_or_default();
+        assert!(blank.contains("不能为空"), "{short}: {blank}");
+    }
+}
+
+fn control<'a>(loaded: &'a runtime::LoadedPackage, operation: &str, id: &str) -> &'a super::Control {
+    loaded.package.operations[operation]
+        .controls
+        .iter()
+        .find(|control| control.id == id)
+        .unwrap()
+}
+
+#[test]
+fn the_settings_model_is_the_preset_used_when_the_node_leaves_the_control_unset() {
+    // The module settings page's model (v1 manifest defaults) is the control's preset: used
+    // when the node has no value. The package default is untouched (an explicit empty value
+    // with emptyMeansDefault still means the package default, as the old server did).
+    let edit = load_v1("52cba27b");
+    let model = control(&edit, "generate", "modelName");
+    assert_eq!(model.preset, Some(json!("Kera2\\Krea2_turbo.safetensors")));
+    assert_eq!(
+        model.default,
+        Some(json!("Kera2\\pornmasterKrea2_v2TurboBF16.safetensors"))
+    );
+    let loaded = load_v1("0bf9145b");
+    for operation in ["generate", "upscaleImage"] {
+        assert_eq!(
+            control(&loaded, operation, "modelName").preset,
+            Some(json!("Kera2\\pornmasterKrea2_v2TurboBF16.safetensors")),
+            "{operation}"
+        );
+    }
+    let mut workflow = loaded.workflow.clone();
+    workflow["98"]["inputs"]["unet_name"] = json!("Krea2\\workflow-own.safetensors");
+    let request = runtime::engine_request(
+        &loaded.package,
+        "generate",
+        &Map::new(),
+        BTreeMap::from([("prompt".to_owned(), vec!["fox".to_owned()])]),
+        1,
+        "2026-11-01",
+    )
+    .unwrap();
+    let built = engine::build(&loaded.package, "generate", &workflow, &request).unwrap();
+    assert_eq!(
+        built.workflow["98"]["inputs"]["unet_name"],
+        json!("Kera2\\pornmasterKrea2_v2TurboBF16.safetensors")
+    );
+    // A settings model outside the control's directories is ignored, as the old frontend did.
+    let (mut manifest, adapter, ui_schema, workflow) = v1_files("0bf9145b");
+    manifest["defaults"]["diffusionModelName"] = json!("Elsewhere\\x.safetensors");
+    let loaded = runtime::load_from_files(&manifest, &adapter, &ui_schema, workflow).unwrap();
+    assert_eq!(control(&loaded, "generate", "modelName").preset, None);
+}
+
+#[test]
+fn the_record_reports_the_model_the_workflow_actually_used() {
+    let loaded = load_v1("0bf9145b");
+    let run = |model: &str| {
+        let values = Map::from_iter([("modelName".to_owned(), json!(model))]);
+        let request = runtime::engine_request(
+            &loaded.package,
+            "generate",
+            &values,
+            BTreeMap::from([("prompt".to_owned(), vec!["fox".to_owned()])]),
+            1,
+            "2026-11-01",
+        )
+        .unwrap();
+        engine::build(&loaded.package, "generate", &loaded.workflow, &request)
+            .unwrap()
+            .record["modelName"]
+            .clone()
+    };
+    // Empty = the workflow's own model; a choice is written and reported with `\`.
+    assert_eq!(
+        run(""),
+        loaded.workflow["98"]["inputs"]["unet_name"].clone()
+    );
+    assert_eq!(run("Krea2/base.safetensors"), json!("Krea2\\base.safetensors"));
+}
+
+#[test]
+fn the_description_is_what_the_node_needs_and_nothing_it_does_not() {
+    let loaded = load_v1("0bf9145b");
+    let described = runtime::describe(&loaded.package);
+    let generate = &described["operations"]["generate"];
+    assert!(generate.get("steps").is_none() && generate.get("record").is_none());
+    assert!(described.get("nodeTypes").is_none());
+    let controls = generate["controls"].as_array().unwrap();
+    let group_of = |id: &str| {
+        controls.iter().find(|c| c["id"] == id).unwrap()["group"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    // Width and height share a row the user can swap, as on the old node.
+    assert!(!group_of("width").is_empty());
+    assert_eq!(group_of("width"), group_of("height"));
+    let groups = generate["groups"].as_array().unwrap();
+    let size = groups.iter().find(|g| g["id"] == group_of("width")).unwrap();
+    assert_eq!(size["swap"], json!(true));
+    // Toolbar upscale is offered for Krea2 results but not for Moss results (CANVAS-022).
+    assert!(described.get("resultUpscale").is_none());
+    assert_eq!(
+        runtime::describe(&load_v1("5dd20ec7").package)["resultUpscale"],
+        json!(false)
+    );
+}
+
+#[test]
+fn numbers_must_sit_on_their_declared_step() {
+    let package = synthetic(json!({
+        "controls": [{ "id": "scale", "type": "number", "min": 1, "max": 4, "step": 0.5, "default": 2 }],
+        "steps": [{ "op": "set", "node": "n", "input": "scale", "value": { "control": "scale" } }]
+    }));
+    let workflow = json!({ "n": { "class_type": "N", "inputs": { "scale": 1 } } });
+    let run = |value: Value| {
+        engine::build_workflow(
+            &package,
+            "generate",
+            &workflow,
+            &request(json!({ "scale": value }), json!({})),
+        )
+    };
+    assert!(run(json!(2.5)).is_ok());
+    let error = run(json!(2.25)).unwrap_err();
+    assert!(error.contains("步长") && error.contains("0.5"), "{error}");
+}
+
+#[test]
+fn results_and_unknown_controls_are_checked() {
+    let loaded = load_v1("5dd20ec7");
+    let values = Map::from_iter([("upscaleEnabled".to_owned(), json!(true))]);
+    let error = runtime::engine_request(
+        &loaded.package,
+        "generate",
+        &values,
+        BTreeMap::from([("prompt".to_owned(), vec!["fox".to_owned()])]),
+        1,
+        "2026-11-01",
+    )
+    .unwrap_err();
+    assert!(error.contains("upscaleEnabled"), "{error}");
+    let request = runtime::engine_request(
+        &loaded.package,
+        "generate",
+        &Map::new(),
+        BTreeMap::from([("prompt".to_owned(), vec!["fox".to_owned()])]),
+        1,
+        "2026-11-01",
+    )
+    .unwrap();
+    assert_eq!(
+        runtime::result_nodes(&loaded.package, "generate", &request).unwrap(),
+        Some(vec!["64".to_owned()])
+    );
+    let krea2 = load_v1("0bf9145b");
+    assert_eq!(
+        runtime::result_nodes(&krea2.package, "generate", &request).unwrap(),
+        None
+    );
+}
+
 // ---- the plug-in rule, checked in code: generic files never name a module or a node ----
+
+/// Generic frontend files of the workflow node (CANVAS-024c). The one exemption is the old
+/// image node converter, which is deleted in stage five together with legacy_v1_convert.rs.
+fn generic_frontend_sources() -> Vec<(String, String)> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("src")
+        .join("workflow");
+    let mut files = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "ts" || extension == "tsx")
+        })
+        .filter(|path| !path.ends_with("legacyImageNode.ts"))
+        .map(|path| {
+            (
+                format!("src/workflow/{}", path.file_name().unwrap().to_string_lossy()),
+                fs::read_to_string(&path).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+fn quoted_digits(file: &str, source: &str, quote: char) {
+    let mut index = 0;
+    while let Some(start) = source[index..].find(quote).map(|p| p + index) {
+        let end = match source[start + 1..].find(quote) {
+            Some(p) => start + 1 + p,
+            None => break,
+        };
+        let inner = &source[start + 1..end];
+        assert!(
+            inner.is_empty() || !inner.bytes().all(|b| b.is_ascii_digit()),
+            "{file}: quoted number {quote}{inner}{quote} looks like a node id"
+        );
+        index = end + 1;
+    }
+}
 
 #[test]
 fn generic_engine_files_name_no_module_and_no_node_id() {
     let forbidden = ["krea", "kera", "moss", "h3", "minimax", "video-processing"];
-    for (file, source) in [
-        ("mod.rs", include_str!("mod.rs")),
-        ("engine.rs", include_str!("engine.rs")),
-        ("validate.rs", include_str!("validate.rs")),
-    ] {
+    let mut sources = vec![
+        ("mod.rs".to_owned(), include_str!("mod.rs").to_owned()),
+        ("engine.rs".to_owned(), include_str!("engine.rs").to_owned()),
+        ("validate.rs".to_owned(), include_str!("validate.rs").to_owned()),
+        ("runtime.rs".to_owned(), include_str!("runtime.rs").to_owned()),
+        ("submit.rs".to_owned(), include_str!("submit.rs").to_owned()),
+    ];
+    let frontend = generic_frontend_sources();
+    assert!(
+        frontend.len() >= 3,
+        "the generic node files must exist: {:?}",
+        frontend.iter().map(|(file, _)| file).collect::<Vec<_>>()
+    );
+    sources.extend(frontend);
+    for (file, source) in &sources {
         let lower = source.to_lowercase();
         for word in forbidden {
             assert!(!lower.contains(word), "{file} mentions {word}");
         }
         // A quoted string made only of digits would be a hard-coded node id.
-        let mut index = 0;
-        while let Some(start) = source[index..].find('"').map(|p| p + index) {
-            let end = match source[start + 1..].find('"') {
-                Some(p) => start + 1 + p,
-                None => break,
-            };
-            let inner = &source[start + 1..end];
-            assert!(
-                inner.is_empty() || !inner.bytes().all(|b| b.is_ascii_digit()),
-                "{file}: quoted number \"{inner}\" looks like a node id"
-            );
-            index = end + 1;
+        quoted_digits(file, source, '"');
+        if file.ends_with(".ts") || file.ends_with(".tsx") {
+            quoted_digits(file, source, '\'');
         }
     }
 }

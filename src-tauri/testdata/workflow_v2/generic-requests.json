@@ -1,0 +1,486 @@
+{
+  "about": "CANVAS-024c: per image golden case, the node data (node) and the generic request the frontend must build from it (request). Path/output media upload under their file names (mock ComfyUI).",
+  "cases": [
+    {
+      "case": "krea2-plain",
+      "module": "0bf9145b",
+      "operation": "generate",
+      "node": {
+        "values": {
+          "negativePrompt": "",
+          "width": 1280,
+          "height": 720,
+          "steps": 8,
+          "loraName": "",
+          "modelName": "",
+          "upscaleEnabled": false,
+          "upscaleMegapixels": 8
+        },
+        "prompt": " a red fox in snow ",
+        "imagePaths": []
+      },
+      "request": {
+        "operation": "generate",
+        "values": {
+          "negativePrompt": "",
+          "width": 1280,
+          "height": 720,
+          "steps": 8,
+          "loraName": "",
+          "modelName": "",
+          "upscaleEnabled": false,
+          "upscaleMegapixels": 8
+        },
+        "inputs": {
+          "prompt": [
+            {
+              "text": "a red fox in snow"
+            }
+          ]
+        },
+        "seedMode": "fixed",
+        "seed": "123456789012345"
+      }
+    },
+    {
+      "case": "krea2-neg-lora-upscale-model",
+      "module": "0bf9145b",
+      "operation": "generate",
+      "node": {
+        "values": {
+          "negativePrompt": " ugly ",
+          "width": 1000,
+          "height": 600,
+          "steps": 12,
+          "loraName": "Krea2\\PornMaster_Krea2_Realism_slider_V1.safetensors",
+          "modelName": "Krea2/base.safetensors",
+          "upscaleEnabled": true,
+          "upscaleMegapixels": 4
+        },
+        "prompt": " a red fox in snow ",
+        "imagePaths": []
+      },
+      "request": {
+        "operation": "generate",
+        "values": {
+          "negativePrompt": " ugly ",
+          "width": 1000,
+          "height": 600,
+          "steps": 12,
+          "loraName": "Krea2\\PornMaster_Krea2_Realism_slider_V1.safetensors",
+          "modelName": "Krea2/base.safetensors",
+          "upscaleEnabled": true,
+          "upscaleMegapixels": 4
+        },
+        "inputs": {
+          "prompt": [
+            {
+              "text": "a red fox in snow"
+            }
+          ]
+        },
+        "seedMode": "fixed",
+        "seed": "123456789012345"
+      }
+    },
+    {
+      "case": "krea2-lora-only",
+      "module": "0bf9145b",
+      "operation": "generate",
+      "node": {
+        "values": {
+          "negativePrompt": "",
+          "width": 1280,
+          "height": 720,
+          "steps": 8,
+          "loraName": "Krea2\\other.safetensors",
+          "modelName": "Kera2\\pornmasterKrea2_v2TurboBF16.safetensors",
+          "upscaleEnabled": false,
+          "upscaleMegapixels": 8
+        },
+        "prompt": " a red fox in snow ",
+        "imagePaths": []
+      },
+      "request": {
+        "operation": "generate",
+        "values": {
+          "negativePrompt": "",
+          "width": 1280,
+          "height": 720,
+          "steps": 8,
+          "loraName": "Krea2\\other.safetensors",
+          "modelName": "Kera2\\pornmasterKrea2_v2TurboBF16.safetensors",
+          "upscaleEnabled": false,
+          "upscaleMegapixels": 8
+        },
+        "inputs": {
+          "prompt": [
+            {
+              "text": "a red fox in snow"
+            }
+          ]
+        },
+        "seedMode": "fixed",
+        "seed": "123456789012345"
+      }
+    },
+    {
+      "case": "krea2-upscale-only",
+      "module": "0bf9145b",
+      "operation": "generate",
+      "node": {
+        "values": {
+          "negativePrompt": "",
+          "width": 720,
+          "height": 1280,
+          "steps": 20,
+          "loraName": "",
+          "modelName": "",
+          "upscaleEnabled": true,
+          "upscaleMegapixels": 16
+        },
+        "prompt": " a red fox in snow ",
+        "imagePaths": []
+      },
+      "request": {
+        "operation": "generate",
+        "values": {
+          "negativePrompt": "",
+          "width": 720,
+          "height": 1280,
+          "steps": 20,
+          "loraName": "",
+          "modelName": "",
+          "upscaleEnabled": true,
+          "upscaleMegapixels": 16
+        },
+        "inputs": {
+          "prompt": [
+            {
+              "text": "a red fox in snow"
+            }
+          ]
+        },
+        "seedMode": "fixed",
+        "seed": "123456789012345"
+      }
+    },
+    {
+      "case": "krea2-toolbar-upscale",
+      "module": "0bf9145b",
+      "operation": "upscaleImage",
+      "node": {
+        "values": {
+          "megapixels": 4,
+          "modelName": ""
+        }
+      },
+      "request": {
+        "operation": "upscaleImage",
+        "values": {
+          "megapixels": 4,
+          "modelName": ""
+        },
+        "inputs": {
+          "source": [
+            {
+              "output": {
+                "filename": "gen1.png",
+                "subfolder": "",
+                "fileType": "output",
+                "url": "http://127.0.0.1:18995/view?filename=gen1.png"
+              }
+            }
+          ]
+        },
+        "seedMode": "random",
+        "seed": ""
+      }
+    },
+    {
+      "case": "krea2-toolbar-upscale-model",
+      "module": "0bf9145b",
+      "operation": "upscaleImage",
+      "node": {
+        "values": {
+          "megapixels": 12,
+          "modelName": "Krea2/base.safetensors"
+        }
+      },
+      "request": {
+        "operation": "upscaleImage",
+        "values": {
+          "megapixels": 12,
+          "modelName": "Krea2/base.safetensors"
+        },
+        "inputs": {
+          "source": [
+            {
+              "output": {
+                "filename": "gen2.png",
+                "subfolder": "",
+                "fileType": "output",
+                "url": "http://127.0.0.1:18995/view?filename=gen2.png"
+              }
+            }
+          ]
+        },
+        "seedMode": "random",
+        "seed": ""
+      }
+    },
+    {
+      "case": "edit-single",
+      "module": "52cba27b",
+      "operation": "generate",
+      "node": {
+        "values": {
+          "negativePrompt": "",
+          "width": 1024,
+          "height": 1024,
+          "steps": 8,
+          "loraName": "",
+          "modelName": "",
+          "upscaleEnabled": false,
+          "upscaleMegapixels": 8
+        },
+        "prompt": " a red fox in snow ",
+        "imagePaths": [
+          "img1.png"
+        ]
+      },
+      "request": {
+        "operation": "generate",
+        "values": {
+          "negativePrompt": "",
+          "width": 1024,
+          "height": 1024,
+          "steps": 8,
+          "modelName": ""
+        },
+        "inputs": {
+          "prompt": [
+            {
+              "text": "a red fox in snow"
+            }
+          ],
+          "images": [
+            {
+              "path": "img1.png"
+            }
+          ]
+        },
+        "seedMode": "fixed",
+        "seed": "123456789012345"
+      }
+    },
+    {
+      "case": "edit-dual-neg-model",
+      "module": "52cba27b",
+      "operation": "generate",
+      "node": {
+        "values": {
+          "negativePrompt": " blurry ",
+          "width": 1280,
+          "height": 720,
+          "steps": 10,
+          "loraName": "",
+          "modelName": "Krea2\\edit.safetensors",
+          "upscaleEnabled": false,
+          "upscaleMegapixels": 8
+        },
+        "prompt": " a red fox in snow ",
+        "imagePaths": [
+          "img1.png",
+          "img2.png"
+        ]
+      },
+      "request": {
+        "operation": "generate",
+        "values": {
+          "negativePrompt": " blurry ",
+          "width": 1280,
+          "height": 720,
+          "steps": 10,
+          "modelName": "Krea2\\edit.safetensors"
+        },
+        "inputs": {
+          "prompt": [
+            {
+              "text": "a red fox in snow"
+            }
+          ],
+          "images": [
+            {
+              "path": "img1.png"
+            },
+            {
+              "path": "img2.png"
+            }
+          ]
+        },
+        "seedMode": "fixed",
+        "seed": "123456789012345"
+      }
+    },
+    {
+      "case": "edit-single-slash-model",
+      "module": "52cba27b",
+      "operation": "generate",
+      "node": {
+        "values": {
+          "negativePrompt": "",
+          "width": 800,
+          "height": 1200,
+          "steps": 8,
+          "loraName": "",
+          "modelName": "Kera2/x.safetensors",
+          "upscaleEnabled": false,
+          "upscaleMegapixels": 8
+        },
+        "prompt": " a red fox in snow ",
+        "imagePaths": [
+          "img2.png"
+        ]
+      },
+      "request": {
+        "operation": "generate",
+        "values": {
+          "negativePrompt": "",
+          "width": 800,
+          "height": 1200,
+          "steps": 8,
+          "modelName": "Kera2/x.safetensors"
+        },
+        "inputs": {
+          "prompt": [
+            {
+              "text": "a red fox in snow"
+            }
+          ],
+          "images": [
+            {
+              "path": "img2.png"
+            }
+          ]
+        },
+        "seedMode": "fixed",
+        "seed": "123456789012345"
+      }
+    },
+    {
+      "case": "moss-default",
+      "module": "5dd20ec7",
+      "operation": "generate",
+      "node": {
+        "values": {
+          "negativePrompt": "",
+          "width": 1024,
+          "height": 1024,
+          "steps": 25,
+          "loraName": "",
+          "modelName": "",
+          "upscaleEnabled": false,
+          "upscaleMegapixels": 8
+        },
+        "prompt": " a red fox in snow ",
+        "imagePaths": []
+      },
+      "request": {
+        "operation": "generate",
+        "values": {
+          "negativePrompt": "",
+          "width": 1024,
+          "height": 1024,
+          "steps": 25,
+          "modelName": ""
+        },
+        "inputs": {
+          "prompt": [
+            {
+              "text": "a red fox in snow"
+            }
+          ]
+        },
+        "seedMode": "fixed",
+        "seed": "123456789012345"
+      }
+    },
+    {
+      "case": "moss-neg-model-odd",
+      "module": "5dd20ec7",
+      "operation": "generate",
+      "node": {
+        "values": {
+          "negativePrompt": " blurry ",
+          "width": 1000,
+          "height": 750,
+          "steps": 30,
+          "loraName": "",
+          "modelName": "Moss/moss-image-sft-dit-int8-convrot.safetensors",
+          "upscaleEnabled": false,
+          "upscaleMegapixels": 8
+        },
+        "prompt": " a red fox in snow ",
+        "imagePaths": []
+      },
+      "request": {
+        "operation": "generate",
+        "values": {
+          "negativePrompt": " blurry ",
+          "width": 1000,
+          "height": 750,
+          "steps": 30,
+          "modelName": "Moss/moss-image-sft-dit-int8-convrot.safetensors"
+        },
+        "inputs": {
+          "prompt": [
+            {
+              "text": "a red fox in snow"
+            }
+          ]
+        },
+        "seedMode": "fixed",
+        "seed": "123456789012345"
+      }
+    },
+    {
+      "case": "moss-blank-neg",
+      "module": "5dd20ec7",
+      "operation": "generate",
+      "node": {
+        "values": {
+          "negativePrompt": "   ",
+          "width": 768,
+          "height": 1344,
+          "steps": 25,
+          "loraName": "",
+          "modelName": "",
+          "upscaleEnabled": false,
+          "upscaleMegapixels": 8
+        },
+        "prompt": " a red fox in snow ",
+        "imagePaths": []
+      },
+      "request": {
+        "operation": "generate",
+        "values": {
+          "negativePrompt": "   ",
+          "width": 768,
+          "height": 1344,
+          "steps": 25,
+          "modelName": ""
+        },
+        "inputs": {
+          "prompt": [
+            {
+              "text": "a red fox in snow"
+            }
+          ]
+        },
+        "seedMode": "fixed",
+        "seed": "123456789012345"
+      }
+    }
+  ]
+}
