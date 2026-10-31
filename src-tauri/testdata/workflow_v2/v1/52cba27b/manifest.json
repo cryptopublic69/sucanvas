@@ -1,0 +1,30 @@
+{
+  "id": "workflow-module-52cba27b-07ed-4fda-b95e-c5e90c8f3fa1",
+  "name": "Krea2 图像编辑（单图或双图）",
+  "capability": "image-generation",
+  "variant": "image-edit",
+  "revision": "v1",
+  "packageSchemaVersion": 1,
+  "engineApiVersion": "1.0",
+  "adapterKind": "workflow-package-v1",
+  "adapterEntry": "adapter.json",
+  "uiSchemaEntry": "ui-schema.json",
+  "sourceWorkflowName": "workflow.json",
+  "createdAt": "2026-08-16T22:07:21.663191200+00:00",
+  "updatedAt": "2026-08-17T00:27:57.990782900+00:00",
+  "deletedAt": null,
+  "defaults": {
+    "primaryVideoSteps": 6,
+    "primaryAudioSteps": 8,
+    "secondarySchedulerSteps": 4,
+    "primaryBrightness": 1.0,
+    "primaryContrast": 0.9,
+    "primarySaturation": 0.9,
+    "secondaryBrightness": 1.0,
+    "secondaryContrast": 0.9,
+    "secondarySaturation": 1.0,
+    "diffusionModelName": "Kera2\\Krea2_turbo.safetensors",
+    "loraName": "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors",
+    "loraStrength": 1.0
+  }
+}

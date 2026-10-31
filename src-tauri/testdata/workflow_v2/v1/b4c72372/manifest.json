@@ -1,0 +1,31 @@
+{
+  "id": "workflow-module-b4c72372-1607-45c7-b1b9-d0502275b9f7",
+  "name": "Topaz Starlight",
+  "capability": "video-upscale",
+  "variant": "video-upscale",
+  "revision": "2.6",
+  "packageSchemaVersion": 1,
+  "engineApiVersion": "1.0",
+  "adapterKind": "workflow-package-v1",
+  "adapterEntry": "adapter.json",
+  "uiSchemaEntry": "ui-schema.json",
+  "sourceWorkflowName": "workflow-6ea5a4d573f546e19138f4dd61a4bb4f.json",
+  "createdAt": "2026-10-07T12:14:51.211454200+00:00",
+  "updatedAt": "2026-10-07T12:14:51.211454200+00:00",
+  "deletedAt": null,
+  "defaults": {
+    "primaryVideoSteps": 6,
+    "primaryAudioSteps": 8,
+    "secondarySchedulerSteps": 4,
+    "primaryUpscaleFactor": 1.0,
+    "primaryBrightness": 1.0,
+    "primaryContrast": 0.9,
+    "primarySaturation": 0.9,
+    "secondaryBrightness": 1.0,
+    "secondaryContrast": 0.9,
+    "secondarySaturation": 1.0,
+    "diffusionModelName": "MinimaxH3\\minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "loraName": "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors",
+    "loraStrength": 1.0
+  }
+}

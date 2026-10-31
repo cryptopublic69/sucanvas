@@ -14,6 +14,9 @@ mod portable;
 mod video_posters;
 mod video_upscale;
 mod workflow_modules;
+// CANVAS-024b stage one: the v2 engine is not wired into a submission path yet (stage two).
+#[cfg_attr(not(test), allow(dead_code))]
+mod workflow_v2;
 #[cfg(feature = "desktop")]
 pub use desktop::run;
 #[cfg(feature = "server")]

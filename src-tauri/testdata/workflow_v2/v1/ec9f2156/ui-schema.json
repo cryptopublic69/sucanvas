@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "groups": [
+    {
+      "id": "sampling",
+      "title": "Sigma 二段采样",
+      "fields": [
+        {
+          "key": "primaryVideoSteps",
+          "label": "采样 Steps",
+          "type": "number",
+          "min": 1.0,
+          "max": 100.0,
+          "step": 1.0,
+          "default": 4.0
+        },
+        {
+          "key": "primaryUpscaleFactor",
+          "label": "二采 latent 放大倍率",
+          "type": "number",
+          "min": 1.0,
+          "max": 4.0,
+          "step": 0.1,
+          "default": 1.2
+        }
+      ],
+      "note": "倍率同时驱动 latent 放大与二采 I2V 条件尺寸。"
+    },
+    {
+      "id": "color",
+      "title": "输出画面调整",
+      "fields": [
+        {
+          "key": "primaryBrightness",
+          "label": "亮度",
+          "type": "number",
+          "min": 0.0,
+          "max": 3.0,
+          "step": 0.01,
+          "default": 1.0
+        },
+        {
+          "key": "primaryContrast",
+          "label": "对比度",
+          "type": "number",
+          "min": 0.0,
+          "max": 3.0,
+          "step": 0.01,
+          "default": 0.8
+        },
+        {
+          "key": "primarySaturation",
+          "label": "饱和度",
+          "type": "number",
+          "min": 0.0,
+          "max": 3.0,
+          "step": 0.01,
+          "default": 1.0
+        }
+      ],
+      "note": "应用于二采解码后的最终画面。"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "id": "workflow-module-eb7a5470-7551-45af-8b87-a36bade247bb",
+  "name": "MiniMax H3 Fla全能参考",
+  "capability": "video-generation",
+  "variant": "reference-to-video",
+  "revision": "V3-TRT",
+  "packageSchemaVersion": 1,
+  "engineApiVersion": "1.0",
+  "adapterKind": "workflow-package-v1",
+  "adapterEntry": "adapter.json",
+  "uiSchemaEntry": "ui-schema.json",
+  "sourceWorkflowName": "MiniMax+H3+Fla全能参考V4.json",
+  "createdAt": "2026-09-26T02:43:26.914345+00:00",
+  "updatedAt": "2026-09-26T03:22:51.760004+00:00",
+  "deletedAt": null,
+  "defaults": {
+    "primaryVideoSteps": 8,
+    "primaryAudioSteps": 8,
+    "secondarySchedulerSteps": 4,
+    "primaryUpscaleFactor": 1.0,
+    "primaryBrightness": 1.0,
+    "primaryContrast": 0.8,
+    "primarySaturation": 1.0,
+    "secondaryBrightness": 1.0,
+    "secondaryContrast": 0.9,
+    "secondarySaturation": 1.0,
+    "diffusionModelName": "MinimaxH3\\minimax_h3_fl2va_int8_convrot.safetensors",
+    "loraName": "MinimaxH3\\minimax_h3_turbo_v4_step600_comfyui_T8-convert.safetensors",
+    "loraStrength": 1.0
+  },
+  "upgradedFrom": "workflow-module-24f40f6d-1d15-4a6e-8f01-afa8cacc0010"
+}
