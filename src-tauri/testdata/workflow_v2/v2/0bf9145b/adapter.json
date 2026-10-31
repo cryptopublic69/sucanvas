@@ -8,6 +8,15 @@
   "operations": {
     "generate": {
       "label": "生成",
+      "inputs": [
+        {
+          "id": "prompt",
+          "type": "text",
+          "label": "提示词",
+          "min": 1,
+          "max": 1
+        }
+      ],
       "outputs": [
         {
           "id": "image",
@@ -17,50 +26,6 @@
         }
       ],
       "controls": [
-        {
-          "id": "prompt",
-          "type": "textarea",
-          "label": "提示词",
-          "default": ""
-        },
-        {
-          "id": "negativePrompt",
-          "type": "textarea",
-          "label": "负向提示词",
-          "default": ""
-        },
-        {
-          "id": "width",
-          "type": "number",
-          "label": "宽",
-          "default": 1280,
-          "min": 64.0,
-          "max": 4096.0,
-          "number": "int"
-        },
-        {
-          "id": "height",
-          "type": "number",
-          "label": "高",
-          "default": 720,
-          "min": 64.0,
-          "max": 4096.0,
-          "number": "int"
-        },
-        {
-          "id": "steps",
-          "type": "number",
-          "label": "步数",
-          "default": 8,
-          "min": 1.0,
-          "max": 1000.0,
-          "number": "int"
-        },
-        {
-          "id": "seed",
-          "type": "seed",
-          "label": "种子"
-        },
         {
           "id": "loraName",
           "type": "select",
@@ -75,7 +40,8 @@
               ]
             }
           },
-          "allowEmpty": true
+          "allowEmpty": true,
+          "emptyLabel": "不使用 LoRA"
         },
         {
           "id": "modelName",
@@ -95,10 +61,56 @@
           "allowEmpty": true
         },
         {
+          "id": "negativePrompt",
+          "type": "textarea",
+          "label": "负向提示词",
+          "default": "",
+          "help": "可选：直接输入不希望出现的内容"
+        },
+        {
+          "id": "width",
+          "type": "number",
+          "label": "宽度",
+          "default": 1280,
+          "min": 64.0,
+          "max": 4096.0,
+          "number": "int",
+          "group": "size",
+          "unit": "px"
+        },
+        {
+          "id": "height",
+          "type": "number",
+          "label": "高度",
+          "default": 720,
+          "min": 64.0,
+          "max": 4096.0,
+          "number": "int",
+          "group": "size",
+          "unit": "px"
+        },
+        {
+          "id": "steps",
+          "type": "number",
+          "label": "生图步数",
+          "default": 8,
+          "min": 1.0,
+          "max": 1000.0,
+          "number": "int",
+          "group": "sampling",
+          "help": "基础文生图 K 采样器的采样步数"
+        },
+        {
+          "id": "seed",
+          "type": "seed",
+          "label": "种子"
+        },
+        {
           "id": "upscaleEnabled",
           "type": "toggle",
           "label": "输出放大",
-          "default": false
+          "default": false,
+          "group": "sampling"
         },
         {
           "id": "upscaleMegapixels",
@@ -107,7 +119,19 @@
           "default": 8.0,
           "min": 0.1,
           "max": 64.0,
-          "number": "float"
+          "number": "float",
+          "group": "sampling",
+          "unit": "MP",
+          "help": "放大后的目标像素数（MP）"
+        }
+      ],
+      "groups": [
+        {
+          "id": "size",
+          "swap": true
+        },
+        {
+          "id": "sampling"
         }
       ],
       "steps": [
@@ -165,7 +189,10 @@
           "input": "text",
           "value": {
             "trim": {
-              "control": "prompt"
+              "media": {
+                "port": "prompt",
+                "index": 0
+              }
             }
           }
         },
@@ -308,7 +335,15 @@
             }
           }
         }
-      ]
+      ],
+      "record": {
+        "modelName": {
+          "input": {
+            "node": "98",
+            "input": "unet_name"
+          }
+        }
+      }
     },
     "upscaleImage": {
       "label": "放大图片",
@@ -316,6 +351,7 @@
         {
           "id": "source",
           "type": "image",
+          "label": "源图片",
           "min": 1,
           "max": 1
         }
@@ -421,7 +457,15 @@
             ]
           }
         }
-      ]
+      ],
+      "record": {
+        "modelName": {
+          "input": {
+            "node": "98",
+            "input": "unet_name"
+          }
+        }
+      }
     }
   }
 }

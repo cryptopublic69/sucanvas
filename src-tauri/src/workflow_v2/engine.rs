@@ -2,8 +2,8 @@
 //! Knows no workflow, adapter or node; everything comes from the package's steps.
 
 use super::{
-    Cond, Control, ControlType, EngineRequest, Expr, NumberFormat, Operation, PackageV2, Step,
-    ENGINE_API_VERSION,
+    Cond, Control, ControlType, EngineRequest, Expr, NumberFormat, Operation, PackageV2, PortType,
+    Step, ENGINE_API_VERSION,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -17,12 +17,29 @@ struct Context<'a> {
     item: Option<Value>,
 }
 
+/// The finished workflow and the values the operation records about it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Built {
+    pub workflow: Value,
+    pub record: Map<String, Value>,
+}
+
+#[cfg(test)]
 pub fn build_workflow(
     package: &PackageV2,
     operation: &str,
     workflow: &Value,
     request: &EngineRequest,
 ) -> Result<Value, String> {
+    build(package, operation, workflow, request).map(|built| built.workflow)
+}
+
+pub fn build(
+    package: &PackageV2,
+    operation: &str,
+    workflow: &Value,
+    request: &EngineRequest,
+) -> Result<Built, String> {
     if package.engine_api_version != ENGINE_API_VERSION {
         return Err(format!(
             "方案包需要引擎接口版本 {}，本程序支持版本 {ENGINE_API_VERSION}",
@@ -47,22 +64,73 @@ pub fn build_workflow(
     for step in &operation.steps {
         apply_step(&mut workflow, step, &mut context)?;
     }
-    Ok(workflow)
+    let mut record = Map::new();
+    for (key, expr) in &operation.record {
+        record.insert(key.clone(), evaluate(expr, &context, &workflow)?);
+    }
+    Ok(Built { workflow, record })
+}
+
+/// Whether `value` passes the control's checks (used to accept a module setting as preset).
+pub fn accepts(control: &Control, value: &Value) -> bool {
+    check_control(control, value.clone()).is_ok()
+}
+
+/// The result nodes an operation reads for this request, or None for "every output node".
+pub fn result_nodes(
+    package: &PackageV2,
+    operation: &str,
+    request: &EngineRequest,
+) -> Result<Option<Vec<String>>, String> {
+    let operation = package
+        .operations
+        .get(operation)
+        .ok_or_else(|| format!("方案包没有操作 {operation}"))?;
+    if operation.results.is_empty() {
+        return Ok(None);
+    }
+    let context = Context {
+        values: resolve_controls(&operation.controls, &request.values)?,
+        request,
+        vars: BTreeMap::new(),
+        item: None,
+    };
+    let mut nodes = Vec::new();
+    for rule in &operation.results {
+        if when(&rule.when, &context)? {
+            nodes.push(rule.node.clone());
+        }
+    }
+    Ok(Some(nodes))
+}
+
+fn port_label(port: &super::Port) -> &str {
+    if port.label.is_empty() {
+        &port.id
+    } else {
+        &port.label
+    }
 }
 
 fn check_media(operation: &Operation, request: &EngineRequest) -> Result<(), String> {
     for port in &operation.inputs {
-        let count = request.media.get(&port.id).map_or(0, Vec::len);
-        if count < port.min || count > port.max {
+        let items = request.media.get(&port.id).map_or(&[][..], Vec::as_slice);
+        // A text input counts only when it says something.
+        let count = if port.port_type == PortType::Text {
+            items.iter().filter(|text| !text.trim().is_empty()).count()
+        } else {
+            items.len()
+        };
+        if port.port_type == PortType::Text && count < port.min && items.len() <= port.max {
+            return Err(format!("{}不能为空", port_label(port)));
+        }
+        if count < port.min || items.len() > port.max {
             return Err(format!(
-                "输入 {} 需要 {}–{} 个素材，实际 {count} 个",
-                if port.label.is_empty() {
-                    &port.id
-                } else {
-                    &port.label
-                },
+                "输入 {} 需要 {}–{} 个素材，实际 {} 个",
+                port_label(port),
                 port.min,
-                port.max
+                port.max,
+                items.len()
             ));
         }
     }
@@ -103,8 +171,13 @@ fn resolve_controls(
     for control in controls {
         let raw = given.get(&control.id).cloned().unwrap_or(Value::Null);
         let blank = is_empty_value(&raw) || raw.as_str().is_some_and(|text| text.trim().is_empty());
-        let use_default = raw.is_null() || (control.empty_means_default && blank);
-        let value = if use_default {
+        let value = if raw.is_null() {
+            control
+                .preset
+                .clone()
+                .or_else(|| control.default.clone())
+                .unwrap_or(Value::Null)
+        } else if control.empty_means_default && blank {
             control.default.clone().unwrap_or(Value::Null)
         } else {
             raw
@@ -158,6 +231,18 @@ fn check_control(control: &Control, value: Value) -> Result<Value, String> {
             }
             if control.number == Some(NumberFormat::Int) && number.fract() != 0.0 {
                 return Err(format!("{} 必须是整数", label(control)));
+            }
+            // A declared step is part of the valid values (counted from the minimum).
+            if let Some(step) = control.step.filter(|step| *step > 0.0) {
+                let offset = (number - control.min.unwrap_or(0.0)) / step;
+                if (offset - offset.round()).abs() > 1e-6 {
+                    return Err(format!(
+                        "{} 的数值必须在 {}–{} 之间，步长为 {step}",
+                        label(control),
+                        control.min.map_or("-".to_owned(), |v| v.to_string()),
+                        control.max.map_or("-".to_owned(), |v| v.to_string())
+                    ));
+                }
             }
             Ok(value)
         }

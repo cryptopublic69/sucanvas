@@ -81,6 +81,26 @@ pub fn validate_package(
             if let Some(cond) = &control.visible_when {
                 checker.cond(cond, None, &mut errors);
             }
+            if !control.group.is_empty()
+                && !operation
+                    .groups
+                    .iter()
+                    .any(|group| group.id == control.group)
+            {
+                errors.insert(format!(
+                    "操作 {name} 的控件 {} 属于不存在的分组 {}",
+                    control.id, control.group
+                ));
+            }
+        }
+        for expr in operation.record.values() {
+            checker.expr(expr, None, &mut errors);
+        }
+        if let Some(node) = &operation.live_preview_node {
+            checker.node(node, &mut errors);
+        }
+        for rule in &operation.results {
+            checker.node(&rule.node, &mut errors);
         }
     }
     report.errors = errors.into_iter().collect();
@@ -288,7 +308,11 @@ impl Checker<'_> {
     }
 }
 
-fn comfy_choices<'a>(info: &'a Value, class_type: &str, input: &str) -> Option<&'a Vec<Value>> {
+pub(crate) fn comfy_choices<'a>(
+    info: &'a Value,
+    class_type: &str,
+    input: &str,
+) -> Option<&'a Vec<Value>> {
     let inputs = info.get(class_type)?.get("input")?;
     ["required", "optional"]
         .iter()

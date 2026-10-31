@@ -6,7 +6,9 @@
 //! whose generic steps reproduce the old submission field by field (proven by the golden
 //! test), and turns a v1 request into the v2 engine request. The engine itself stays generic.
 
-use super::{EngineRequest, PackageV2, ENGINE_API_VERSION};
+#[cfg(test)]
+use super::{EngineRequest, PortType};
+use super::{PackageV2, ENGINE_API_VERSION};
 use crate::workflow_modules::{
     WorkflowAdapter, WorkflowBindings, WorkflowUiSchema, H3_FIRST_LAST_FRAME_ADAPTER,
     H3_IMAGE_TO_VIDEO_ADAPTER, H3_LAST_FRAME_TO_VIDEO_ADAPTER, H3_MULTI_REFERENCE_ADAPTER,
@@ -164,14 +166,45 @@ pub fn convert_package(
     };
     let mut operations = operations;
     mark_created_inputs(&mut operations, workflow);
+    // CANVAS-022: images made by Moss do not offer the toolbar upscale (a Krea2 branch).
+    let result_upscale = adapter.adapter_id != MOSS_TEXT_TO_IMAGE_ADAPTER;
     serde_json::from_value(json!({
         "engineApiVersion": ENGINE_API_VERSION,
         "capability": adapter.capability,
         "variant": adapter.variant,
         "nodeTypes": node_types,
         "operations": operations,
+        "resultUpscale": result_upscale,
     }))
     .map_err(|error| format!("转换结果不是有效的第 2 版方案包：{error}"))
+}
+
+/// CANVAS-024c: the module settings a v1 package kept in manifest.json `defaults`, as
+/// (operation, control, value) presets. The image modules' settings page chose the base
+/// model the old frontend submitted when the node did not say otherwise.
+pub fn module_presets(manifest: &Value, package: &PackageV2) -> Vec<(String, String, Value)> {
+    let mut presets = Vec::new();
+    if package.capability != "image-generation" {
+        return presets;
+    }
+    let model = manifest
+        .pointer("/defaults/diffusionModelName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if model.is_empty() {
+        return presets;
+    }
+    for (name, operation) in &package.operations {
+        if operation
+            .controls
+            .iter()
+            .any(|control| control.id == "modelName")
+        {
+            presets.push((name.clone(), "modelName".to_owned(), json!(model)));
+        }
+    }
+    presets
 }
 
 /// The old code inserted values even where the workflow node had no such input yet; mark
@@ -264,22 +297,40 @@ fn krea2_model_dirs(bindings: &WorkflowBindings) -> Vec<String> {
     dirs
 }
 
+/// CANVAS-024c: the image node's look as the old fixed UI drew it. The positive prompt is the
+/// text connected to the node (a text port), everything else a control.
 fn image_controls(steps_default: u32) -> Vec<Value> {
-    vec![
-        text("prompt", "提示词", ""),
-        text("negativePrompt", "负向提示词", ""),
-        number("width", "宽", "int", 64.0, Some(4096.0), json!(1280)),
-        number("height", "高", "int", 64.0, Some(4096.0), json!(720)),
-        number(
-            "steps",
-            "步数",
-            "int",
-            1.0,
-            Some(1000.0),
-            json!(steps_default),
-        ),
-        seed_control(),
-    ]
+    let mut negative = text("negativePrompt", "负向提示词", "");
+    negative["help"] = json!("可选：直接输入不希望出现的内容");
+    let mut width = number("width", "宽度", "int", 64.0, Some(4096.0), json!(1280));
+    let mut height = number("height", "高度", "int", 64.0, Some(4096.0), json!(720));
+    for size in [&mut width, &mut height] {
+        size["group"] = json!("size");
+        size["unit"] = json!("px");
+    }
+    let mut steps = number(
+        "steps",
+        "生图步数",
+        "int",
+        1.0,
+        Some(1000.0),
+        json!(steps_default),
+    );
+    steps["group"] = json!("sampling");
+    steps["help"] = json!("基础文生图 K 采样器的采样步数");
+    vec![negative, width, height, steps, seed_control()]
+}
+
+fn image_groups() -> Value {
+    json!([{ "id": "size", "swap": true }, { "id": "sampling" }])
+}
+
+fn prompt_port() -> Value {
+    json!({ "id": "prompt", "type": "text", "label": "提示词", "min": 1, "max": 1 })
+}
+
+fn model_record(node: &str) -> Value {
+    json!({ "modelName": { "input": { "node": node, "input": "unet_name" } } })
 }
 
 fn cfg_by_negative() -> Value {
@@ -291,32 +342,42 @@ fn cfg_by_negative() -> Value {
 }
 
 fn krea2_generate(b: &WorkflowBindings) -> Value {
-    let mut controls = image_controls(8);
-    controls.push(files(
+    let mut lora = files(
         "loraName",
         "LoRA",
         "LoraLoaderModelOnly",
         "lora_name",
         vec![b.lora_directory.clone()],
         "",
-    ));
-    controls.push(files(
-        "modelName",
-        "模型",
-        &b.diffusion_model_class_type,
-        "unet_name",
-        krea2_model_dirs(b),
-        "",
-    ));
-    controls.push(toggle("upscaleEnabled", "输出放大", false));
-    controls.push(number(
+    );
+    lora["emptyLabel"] = json!("不使用 LoRA");
+    let mut controls = vec![
+        lora,
+        files(
+            "modelName",
+            "模型",
+            &b.diffusion_model_class_type,
+            "unet_name",
+            krea2_model_dirs(b),
+            "",
+        ),
+    ];
+    controls.extend(image_controls(8));
+    let mut upscale = toggle("upscaleEnabled", "输出放大", false);
+    upscale["group"] = json!("sampling");
+    controls.push(upscale);
+    let mut megapixels = number(
         "upscaleMegapixels",
         "放大像素数",
         "float",
         0.1,
         Some(64.0),
         json!(8.0),
-    ));
+    );
+    megapixels["group"] = json!("sampling");
+    megapixels["unit"] = json!("MP");
+    megapixels["help"] = json!("放大后的目标像素数（MP）");
+    controls.push(megapixels);
     let has_model = not(empty(trim(c("modelName"))));
     let steps = vec![
         set_when(
@@ -331,7 +392,7 @@ fn krea2_generate(b: &WorkflowBindings) -> Value {
             json!({ "object": { "on": konst(json!(true)), "lora": trim(c("loraName")), "strength": konst(json!(1.0)) } }),
             not(empty(trim(c("loraName")))),
         ),
-        set(&b.prompt_node_id, "text", trim(c("prompt"))),
+        set(&b.prompt_node_id, "text", trim(media("prompt", 0))),
         set(&b.conditioning_node_id, "text", trim(c("negativePrompt"))),
         set(&b.seed_node_id, "cfg", cfg_by_negative()),
         set(&b.primary_sampler_node_id, "cfg", cfg_by_negative()),
@@ -355,7 +416,9 @@ fn krea2_generate(b: &WorkflowBindings) -> Value {
             iff(truthy(c("upscaleEnabled")), link("163", 0), link("30", 0)),
         ),
     ];
-    json!({ "label": "生成", "outputs": [{ "id": "image", "type": "image" }], "controls": controls, "steps": steps })
+    json!({ "label": "生成", "inputs": [prompt_port()], "outputs": [{ "id": "image", "type": "image" }],
+            "controls": controls, "groups": image_groups(), "steps": steps,
+            "record": model_record(&b.diffusion_model_node_id) })
 }
 
 fn krea2_upscale(b: &WorkflowBindings) -> Value {
@@ -398,12 +461,12 @@ fn krea2_upscale(b: &WorkflowBindings) -> Value {
             link(&b.secondary_resize_node_id, 0),
         ),
     ];
-    json!({ "label": "放大图片", "inputs": [{ "id": "source", "type": "image", "min": 1, "max": 1 }],
-            "outputs": [{ "id": "image", "type": "image" }], "controls": controls, "steps": steps })
+    json!({ "label": "放大图片", "inputs": [{ "id": "source", "type": "image", "label": "源图片", "min": 1, "max": 1 }],
+            "outputs": [{ "id": "image", "type": "image" }], "controls": controls, "steps": steps,
+            "record": model_record(&b.diffusion_model_node_id) })
 }
 
 fn krea2_edit(b: &WorkflowBindings) -> Value {
-    let mut controls = image_controls(8);
     let mut model = files(
         "modelName",
         "模型",
@@ -414,7 +477,8 @@ fn krea2_edit(b: &WorkflowBindings) -> Value {
     );
     model["allowEmpty"] = json!(false);
     model["emptyMeansDefault"] = json!(true);
-    controls.push(model);
+    let mut controls = vec![model];
+    controls.extend(image_controls(8));
     let single = not(at_least("images", 2));
     let dual = at_least("images", 2);
     let first_dual_input = b.image_node_ids.first().cloned().unwrap_or_default();
@@ -478,8 +542,12 @@ fn krea2_edit(b: &WorkflowBindings) -> Value {
             dual.clone(),
         ),
         set_when(&b.primary_output_node_id, "images", link("6", 0), dual),
-        set(&b.prompt_node_id, "value", trim(c("prompt"))),
-        set(&b.secondary_prompt_node_id, "value", trim(c("prompt"))),
+        set(&b.prompt_node_id, "value", trim(media("prompt", 0))),
+        set(
+            &b.secondary_prompt_node_id,
+            "value",
+            trim(media("prompt", 0)),
+        ),
         set(&b.conditioning_node_id, "prompt", trim(c("negativePrompt"))),
         set(
             &b.secondary_conditioning_node_id,
@@ -492,20 +560,22 @@ fn krea2_edit(b: &WorkflowBindings) -> Value {
         steps.push(set(node, "steps", int(c("steps"))));
         steps.push(set(node, "cfg", cfg_by_negative()));
     }
-    json!({ "label": "生成", "inputs": [{ "id": "images", "type": "image", "min": 1, "max": 2 }],
-            "outputs": [{ "id": "image", "type": "image" }], "controls": controls, "steps": steps })
+    json!({ "label": "生成",
+            "inputs": [prompt_port(), { "id": "images", "type": "image", "label": "编辑图片", "min": 1, "max": 2 }],
+            "outputs": [{ "id": "image", "type": "image" }], "controls": controls, "groups": image_groups(),
+            "steps": steps, "record": model_record("43") })
 }
 
 fn moss_generate(b: &WorkflowBindings) -> Value {
-    let mut controls = image_controls(25);
-    controls.push(files(
+    let mut controls = vec![files(
         "modelName",
         "模型",
         &b.diffusion_model_class_type,
         "unet_name",
         vec![b.diffusion_model_directory.clone()],
         "",
-    ));
+    )];
+    controls.extend(image_controls(25));
     let round = |control: &str| json!({ "roundTo": { "value": int(c(control)), "multiple": 16, "min": 16 } });
     let steps = vec![
         set_when(
@@ -514,7 +584,7 @@ fn moss_generate(b: &WorkflowBindings) -> Value {
             path(c("modelName")),
             not(empty(trim(c("modelName")))),
         ),
-        set(&b.prompt_node_id, "value", trim(c("prompt"))),
+        set(&b.prompt_node_id, "value", trim(media("prompt", 0))),
         set_when(
             &b.conditioning_node_id,
             "text",
@@ -527,8 +597,10 @@ fn moss_generate(b: &WorkflowBindings) -> Value {
         set(&b.primary_resolution_node_id, "height", round("height")),
         json!({ "op": "keepReachable", "from": [b.primary_output_node_id] }),
     ];
-    json!({ "label": "生成", "outputs": [{ "id": "image", "type": "image" }], "controls": controls, "steps": steps,
-            "results": [{ "node": b.primary_output_node_id }] })
+    json!({ "label": "生成", "inputs": [prompt_port()], "outputs": [{ "id": "image", "type": "image" }],
+            "controls": controls, "groups": image_groups(), "steps": steps,
+            "results": [{ "node": b.primary_output_node_id }],
+            "record": model_record(&b.diffusion_model_node_id) })
 }
 
 fn video_processing(
@@ -1295,7 +1367,10 @@ fn h3_secondary_source(
 }
 
 // ---------- request conversion ----------
+// Test-only since CANVAS-024c: the generic node sends v2 requests itself; the golden test
+// still drives the recorded v1 requests through here.
 
+#[cfg(test)]
 fn names(media: &Value, key: &str) -> Vec<String> {
     media
         .get(key)
@@ -1312,6 +1387,7 @@ fn names(media: &Value, key: &str) -> Vec<String> {
 
 /// A v1 request (as the old submission commands received it) plus the names its media
 /// were uploaded under -> the v2 engine request.
+#[cfg(test)]
 pub fn convert_request(
     package: &PackageV2,
     operation: &str,
@@ -1347,6 +1423,12 @@ pub fn convert_request(
         let list = names(uploaded, &port.id);
         if !list.is_empty() {
             media.insert(port.id.clone(), list);
+        }
+        // A text port carries the old request's field of the same name (the prompt).
+        if port.port_type == PortType::Text {
+            if let Some(text) = legacy.get(&port.id).and_then(Value::as_str) {
+                media.insert(port.id.clone(), vec![text.to_owned()]);
+            }
         }
     }
     if let Some(parameters) = legacy.get("parameters").and_then(Value::as_object) {
@@ -1406,6 +1488,7 @@ pub fn convert_request(
 }
 
 /// The v1 style LoRA list, or the single legacy style LoRA when the list is absent.
+#[cfg(test)]
 fn style_items(legacy: &Value) -> Vec<Value> {
     if let Some(list) = legacy.get("styleLoras").and_then(Value::as_array) {
         return list

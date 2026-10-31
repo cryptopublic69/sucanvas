@@ -28,6 +28,14 @@ fn one() -> usize {
     1
 }
 
+fn yes() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageV2 {
@@ -39,6 +47,10 @@ pub struct PackageV2 {
     pub node_types: BTreeMap<String, String>,
     /// Named operations; "generate" is what the node's run button does.
     pub operations: BTreeMap<String, Operation>,
+    /// Whether images this package produces offer the image toolbar's upscale (which runs
+    /// an `upscaleImage` operation of some package). Default true.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub result_upscale: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -52,11 +64,32 @@ pub struct Operation {
     pub outputs: Vec<Port>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<Control>,
+    /// Rows of controls on the node (controls name their group).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<ControlGroup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
     /// Nodes whose outputs are the results; empty = every output node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub results: Vec<ResultRule>,
+    /// Values read from the finished workflow and returned with the result
+    /// (`modelName` is recorded on the generated media).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub record: BTreeMap<String, Expr>,
+    /// Node whose sampler previews are shown while the operation runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_preview_node: Option<String>,
+}
+
+/// A row of controls on the node. `swap` adds a button exchanging the row's two values.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlGroup {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub swap: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +154,10 @@ pub struct Control {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
+    /// The module's own setting for this control (settings page); used instead of `default`
+    /// when the request leaves the control unset. Not part of a package file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<Value>,
     /// Number range; for a repeat group `max` is the largest number of items.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<f64>,
@@ -143,6 +180,18 @@ pub struct Control {
     /// Fields of one item of a repeat group.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<Control>,
+    /// The group (row) this control is drawn in.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group: String,
+    /// Unit shown after a number (px, MP).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unit: String,
+    /// Tooltip.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub help: String,
+    /// What a select shows for the empty value (otherwise "默认" / "工作流自带").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub empty_label: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

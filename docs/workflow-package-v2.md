@@ -20,7 +20,8 @@ CANVAS-024b 定稿。依据：su 定的「工作流即插即用」原则（CANVA
 ```
 - `engineApiVersion`：程序不支持的版本直接拒收，提示"方案包需要引擎接口版本 X，本程序支持版本 2"。
 - `nodeTypes`：包依赖的节点类型，导入时核对 workflow.json。
-- `operations`：命名的操作。`generate` 是节点运行按钮触发的操作；其它操作（例如图片工具栏的放大）由界面按名字调用。
+- `operations`：命名的操作。`generate` 是节点运行按钮触发的操作；其它操作（例如图片工具栏的放大）由界面按名字调用：图片工具栏的放大调用 `upscaleImage`。
+- `resultUpscale`（CANVAS-024c）：这个包生成的图片是否提供工具栏放大，默认 `true`；写 `false` 时不显示放大按钮。
 
 ## 3. 操作
 ```json
@@ -34,7 +35,12 @@ CANVAS-024b 定稿。依据：su 定的「工作流即插即用」原则（CANVA
 }
 ```
 - `inputs` / `outputs`：连线口，类型只能是 `text`、`image`、`video`、`audio`。`min` / `max` 是该口能接的素材数，引擎提交时会核对。
-- `results`：从哪些节点取结果，每项可以带 `when` 条件；不写表示取所有输出节点。
+  - `text` 口（CANVAS-024c）：值是连到节点上、当前选中的文本节点的文字，用 `{"media": {"port": "…", "index": 0}}` 取。只算非空白的文字；`min` 不满足时报"〈label〉不能为空"。
+  - 节点外壳把连线按类型分给口：每种类型的第一个口接收这种类型的全部连线（图片按节点上的顺序）。
+- `results`：从哪些节点取结果，每项可以带 `when` 条件；不写表示取所有输出节点。输出口有 `video` 时按视频文件收集，否则按图片收集。
+- `groups`（CANVAS-024c）：节点上的控件行 `[{ "id", "label"?, "swap"? }]`。控件用 `group` 指明所在行；`swap: true` 且该行正好两个控件时，中间显示"互换"按钮。
+- `record`（CANVAS-024c）：`{ 名字: 取值 }`，在工作流写完之后求值并随结果返回。`modelName` 记在生成的图片上（例如 `{"input": {"node": "…", "input": "unet_name"}}` = 实际用的模型）。
+- `livePreviewNode`（CANVAS-024c）：运行时显示这个节点的采样预览；不写则不显示。
 
 ## 4. 控件
 ```json
@@ -46,7 +52,9 @@ CANVAS-024b 定稿。依据：su 定的「工作流即插即用」原则（CANVA
 |---|---|
 | `type` | `text` `textarea` `number` `slider` `select` `toggle` `seed` `repeat` |
 | `default` | 默认值。请求没有给值时使用 |
-| `min` / `max` / `step` | 数值范围；对 `repeat` 来说，`max` 是最多几项 |
+| `preset` | 不写在包里：方案的设置页（第 1 版是 manifest 的 `defaults`）给这个控件定的值。请求没有给值时优先于 `default`；不符合控件校验的设置值不采用 |
+| `min` / `max` / `step` | 数值范围；对 `repeat` 来说，`max` 是最多几项。`step` 同时是校验：数值必须是 `min`（没有则 0）加整数个 `step`，否则报"…步长为 …"（CANVAS-024c） |
+| `group` / `unit` / `help` / `emptyLabel` | 所在行、数值后的单位、提示文字、下拉"空值"一项的文字（不写时显示"默认（…）"或"工作流自带"） |
 | `number` | `int` / `float` / `intIfWhole`，用于校验整数 |
 | `options.values` | 静态选项 `[{ "value": …, "label": … }]` |
 | `options.comfyui` | 从 ComfyUI 列文件：`classType.input` 的候选值，只保留 `dirs` 里列出的目录（可以写多个）。提交时也会检查所选值是否在这些目录里 |
@@ -109,3 +117,6 @@ CANVAS-024b 定稿。依据：su 定的「工作流即插即用」原则（CANVA
 
 ## 9. 第 1 版过渡
 `legacy_v1_convert.rs` 在导入第 1 版包时把它转成本格式，同时把旧请求转成引擎请求。凡是需要认识具体方案的知识（adapterId、旧绑定的默认值、旧代码按图结构做的判断）都只放在这个文件里。阶段五删除。
+- CANVAS-024c 起，服务端在读取方案时转换（不写回磁盘）：`workflow_v2/runtime.rs` 加载、套用设置页的值（`preset`）、做静态校验；`workflow_v2/submit.rs` 提供三条命令 `get_workflow_package`（节点描述，不含 steps/record/results）、`get_comfyui_control_choices`（某个 class.input 在指定目录下的文件）、`submit_comfyui_workflow_operation`（请求 = 方案 id + 操作名 + 控件值 + 每个口接的素材 `{text}` / `{path}` / `{output}` + 种子）。
+- 旧请求的转换只剩黄金测试在用（`#[cfg(test)]`）。
+- 前端旧生图节点的转换在 `src/workflow/legacyImageNode.ts`，与本转换器同时删除。
