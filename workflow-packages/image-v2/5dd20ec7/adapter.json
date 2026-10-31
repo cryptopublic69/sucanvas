@@ -85,7 +85,7 @@
           "id": "negativePrompt",
           "type": "textarea",
           "label": "负向提示词",
-          "default": "",
+          "default": "worst quality, bad anatomy, watermark, jpeg artifact",
           "help": "可选：直接输入不希望出现的内容"
         },
         {

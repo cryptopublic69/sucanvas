@@ -3,7 +3,7 @@
   "name": "Moss全能王 文生图",
   "capability": "image-generation",
   "variant": "image-generation",
-  "revision": "v2",
+  "revision": "v3",
   "packageSchemaVersion": 1,
   "engineApiVersion": "2",
   "adapterKind": "workflow-package-v2",

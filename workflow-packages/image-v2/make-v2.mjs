@@ -33,6 +33,9 @@ const renameDeep = (value) => {
 };
 const control = (operation, id) => operation.controls.find((c) => c.id === id);
 
+// Each package's revision goes up when its release changes (v1 = the production package before 024d).
+const REVISIONS = { "0bf9145b": "v2", "52cba27b": "v2", "5dd20ec7": "v3" };
+
 const packages = {
   // Krea2 text-to-image: the default model is named on the control (so the import check can
   // see it), the workflow's own loader and the module setting use Krea2. LoRA node 159 is
@@ -51,7 +54,11 @@ const packages = {
   },
   // Moss: six model-only LoRA slots placed after the model loader (28 -> 38). A slot whose
   // item is switched off or has no file is skipped; unused slots are dropped by keepReachable.
+  // CANVAS-026 (v3): the negative prompt defaults to the workflow's own text in node 36.
   "5dd20ec7": ({ adapter, workflow, manifest }) => {
+    const negative = workflow["36"].inputs.text;
+    if (typeof negative !== "string" || !negative.trim()) throw new Error("Moss: node 36 has no text");
+    control(adapter.operations.generate, "negativePrompt").default = negative;
     const slots = ["9701", "9702", "9703", "9704", "9705", "9706"];
     if (JSON.stringify(workflow["38"].inputs.model) !== JSON.stringify(["28", 0])) throw new Error("Moss: 38.model is not 28");
     slots.forEach((id, index) => {
@@ -94,7 +101,7 @@ for (const [short, edit] of Object.entries(packages)) {
   const adapter = read(path.join(CONVERTED, short, "adapter.json"));
   const result = edit({ adapter, workflow, manifest });
   // Version 2 of the same module: same id and name, new revision and package kind.
-  Object.assign(result.manifest, { revision: "v2", adapterKind: "workflow-package-v2", engineApiVersion: "2" });
+  Object.assign(result.manifest, { revision: REVISIONS[short], adapterKind: "workflow-package-v2", engineApiVersion: "2" });
   const out = path.join(HERE, short);
   fs.mkdirSync(out, { recursive: true });
   write(path.join(out, "manifest.json"), result.manifest);
