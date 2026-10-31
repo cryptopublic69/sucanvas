@@ -12,7 +12,7 @@ const compile = (source) => ts.transpileModule(source, {
 const { imageRegenerationPrompt } = await import(`data:text/javascript;base64,${Buffer.from(compile(promptSource)).toString("base64")}`);
 // CANVAS-022: the image submission also uses the real Krea2/Moss module rules.
 const adapterSource = await readFile(new URL("../src/image/imageWorkflowAdapter.ts", import.meta.url), "utf8");
-const { defaultImageSteps, effectiveImageOptions, isImageModelNameForModule } = await import(`data:text/javascript;base64,${Buffer.from(compile(adapterSource)).toString("base64")}`);
+const { defaultImageSteps, effectiveImageModelName, effectiveImageOptions, effectiveMossLoras, isImageModelNameForModule, mossLoraValidationError, mossLorasFromContent } = await import(`data:text/javascript;base64,${Buffer.from(compile(adapterSource)).toString("base64")}`);
 
 // Exercise the real callbacks without rendering or automating the UI.
 function callback(source, name, env, mode = "web") {
@@ -76,6 +76,7 @@ function imageExecutionEnvironment() {
     workflowModuleDefaults: {}, workflowModules: [{ id: "image", capability: "image-generation", defaults: {} }],
     isKrea2DiffusionModelName: () => false, orderedNodeRecordsFromContent: (_, __, inputs) => inputs,
     defaultImageSteps, effectiveImageOptions, isImageModelNameForModule,
+    effectiveImageModelName, effectiveMossLoras, mossLoraValidationError, mossLorasFromContent,
     videoInputMediaKind: () => null,
     activeTextInputFromContent: (content, inputs) => inputs.find((input) => input.id === content.activeTextInputId) ?? null,
     isContentIterationContent: () => false, activePromptVersionFromContent: () => null,

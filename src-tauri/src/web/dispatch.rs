@@ -115,6 +115,7 @@ commands! {
     GetComfyuiKrea2DiffusionModels => "get_comfyui_krea2_diffusion_models",
     GetComfyuiH3Loras => "get_comfyui_h3_loras",
     GetComfyuiKrea2Loras => "get_comfyui_krea2_loras",
+    GetComfyuiMossLoras => "get_comfyui_moss_loras",
     GetComfyuiH3DiffusionModels => "get_comfyui_h3_diffusion_models",
     SubmitComfyuiImageWorkflow => "submit_comfyui_image_workflow",
     SubmitComfyuiImageUpscale => "submit_comfyui_image_upscale",
@@ -341,6 +342,7 @@ pub fn permissions(
         | GetComfyuiKrea2DiffusionModels
         | GetComfyuiH3Loras
         | GetComfyuiKrea2Loras
+        | GetComfyuiMossLoras
         | GetComfyuiH3DiffusionModels
         | SubmitComfyuiImageWorkflow
         | SubmitComfyuiImageUpscale
@@ -1063,6 +1065,10 @@ pub async fn dispatch(
         .map_err(|e| e.to_string()),
         Command::GetComfyuiKrea2Loras => serde_json::to_value(
             commands::get_comfyui_krea2_loras(argument(args, "serverUrl")?).await?,
+        )
+        .map_err(|e| e.to_string()),
+        Command::GetComfyuiMossLoras => serde_json::to_value(
+            commands::get_comfyui_moss_loras(argument(args, "serverUrl")?).await?,
         )
         .map_err(|e| e.to_string()),
         Command::GetComfyuiH3DiffusionModels => serde_json::to_value(

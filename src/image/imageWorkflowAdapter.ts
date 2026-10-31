@@ -102,6 +102,74 @@ export function imageUpscaleModule<T extends ImageModuleLike>(modules: T[], defa
     ?? modules.find(isKrea2TextToImageModule);
 }
 
+// CANVAS-023: Moss takes up to 6 model-only LoRAs and a per-node base model. Both live
+// in their own content keys (mossLoras / mossModelName), so switching to Krea2 neither
+// shows nor submits them and switching back finds them again. The slot shape is the
+// shared StyleLoraEditor's (H3StyleLora); Moss never uses the two "apply to" flags.
+
+export const MAX_MOSS_LORAS = 6;
+
+export type MossLoraSlot = {
+  name: string;
+  strength: number;
+  bypassed: boolean;
+  applyToSecondary: boolean;
+  applyToSecondPass: boolean;
+};
+
+export function imageModuleSupportsMultiLora(module: ImageModuleLike | null | undefined): boolean {
+  return isMossImageModule(module);
+}
+
+export function mossLorasFromContent(content: ImageContent): MossLoraSlot[] {
+  if (!Array.isArray(content.mossLoras)) return [];
+  return content.mossLoras.map((value) => {
+    const slot = value && typeof value === "object" ? value as Record<string, unknown> : {};
+    const name = typeof slot.name === "string" ? slot.name : "";
+    return {
+      name,
+      strength: typeof slot.strength === "number" && Number.isFinite(slot.strength) ? slot.strength : 1,
+      bypassed: typeof slot.bypassed === "boolean" ? slot.bypassed : !name,
+      applyToSecondary: false,
+      applyToSecondPass: false,
+    };
+  });
+}
+
+/** The `loras` list of a Moss submission (every slot; the server skips switched-off or
+ * unnamed ones). Null for every other module: their submissions carry no list at all. */
+export function effectiveMossLoras(
+  content: ImageContent,
+  module: ImageModuleLike | null | undefined,
+): Array<{ name: string; strength: number; bypassed: boolean }> | null {
+  if (!isMossImageModule(module)) return null;
+  return mossLorasFromContent(content).map(({ name, strength, bypassed }) => ({ name: name.trim(), strength, bypassed }));
+}
+
+/** Same limits the server applies (H3 weight rule: 0 to 10). */
+export function mossLoraValidationError(slots: MossLoraSlot[]): string | null {
+  if (slots.length > MAX_MOSS_LORAS) return `最多支持${MAX_MOSS_LORAS}个 Moss LoRA`;
+  for (const [index, slot] of slots.entries()) {
+    if (!Number.isFinite(slot.strength) || slot.strength < 0 || slot.strength > 10) return `Moss LoRA ${index + 1} 权重必须在0到10之间`;
+    if (!slot.bypassed && !slot.name.trim()) return `请选择 Moss LoRA ${index + 1} 或关闭该槽位`;
+  }
+  return null;
+}
+
+/** Base model of a submission: a Moss node's own pick when it is a Moss model, else the
+ * module default from the settings page (Krea2 keeps using only the default). */
+export function effectiveImageModelName(
+  content: ImageContent,
+  module: (ImageModuleLike & { defaults?: { diffusionModelName?: string } }) | null | undefined,
+): string {
+  if (!module) return "";
+  if (isMossImageModule(module) && typeof content.mossModelName === "string" && isImageModelNameForModule(content.mossModelName, module)) {
+    return content.mossModelName.trim();
+  }
+  const fallback = module.defaults?.diffusionModelName;
+  return typeof fallback === "string" && isImageModelNameForModule(fallback, module) ? fallback : "";
+}
+
 /** Images produced by a Moss module do not offer the Krea2 toolbar upscale. */
 export function generatedImageUpscaleSupported(content: ImageContent, modules: ImageModuleLike[]): boolean {
   const moduleId = typeof content.generationWorkflowModuleId === "string" ? content.generationWorkflowModuleId : "";

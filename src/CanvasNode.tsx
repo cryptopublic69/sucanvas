@@ -4,7 +4,7 @@ import { resolveComfyOutputPath } from "./web/outputFiles";
 import { videoUpscaleFromValue } from "./video/videoUpscale";
 import { referenceLimits, referenceModuleFor, referenceSubmitError, type ReferenceLimits } from "./video/referenceLimits";
 import { comfyOutputFromContent, videoUpscaleSourceUnavailableReason } from "./video/videoUpscaleSource";
-import { generatedImageUpscaleSupported, imageModuleSupportsLora, imageModuleSupportsUpscale, imageModuleSwitchContent } from "./image/imageWorkflowAdapter";
+import { generatedImageUpscaleSupported, imageModuleSupportsLora, imageModuleSupportsMultiLora, imageModuleSupportsUpscale, imageModuleSwitchContent, mossLorasFromContent } from "./image/imageWorkflowAdapter";
 import {
   GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH,
   GENERATED_VIDEO_PREVIEW_WIDTH,
@@ -1661,6 +1661,8 @@ interface CanvasNodeData extends Record<string, unknown> {
   h3LoraOptions: string[];
   h3DiffusionModelOptions: string[];
   krea2LoraOptions: string[];
+  mossLoraOptions: string[];
+  mossModelOptions: string[];
   workflowModules: WorkflowModuleRecord[];
   workflowModuleDefaults: WorkflowModuleDefaultMap;
   workflowModuleVisibleIds: string[];
@@ -2513,16 +2515,21 @@ function imageGenerationAutoHeight(
   textInputCount = 0,
   imageEditMode = false,
   _imageInputCount = 0,
+  mossLoraCount: number | null = null,
 ): number {
   // Image edit adds a fixed two-slot image group plus its own resolution row.
   // Count both rows explicitly so the execution controls never overlap when
   // this variant is selected.
   const imageEditControlsHeight = imageEditMode ? 116 : 0;
+  // Moss (CANVAS-023): its model picker takes the hidden Krea2 LoRA row; the LoRA
+  // editor adds its heading plus one row per slot (the video node's 72px rows).
+  const mossControlsHeight = mossLoraCount === null ? 0 : 40 + Math.max(0, mossLoraCount) * 72;
   const contentHeight = IMAGE_GENERATION_NODE_BASE_HEIGHT
     + IMAGE_GENERATION_SEED_CONTROL_HEIGHT
     + Math.max(0, Math.min(VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS, textInputCount) - 1)
       * IMAGE_GENERATION_TEXT_ROW_HEIGHT
-    + imageEditControlsHeight;
+    + imageEditControlsHeight
+    + mossControlsHeight;
   return Math.ceil(contentHeight / CANVAS_GRID_SIZE) * CANVAS_GRID_SIZE;
 }
 
@@ -4634,6 +4641,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     h3LoraOptions,
     h3DiffusionModelOptions,
     krea2LoraOptions,
+    mossLoraOptions,
+    mossModelOptions,
     workflowModules,
     workflowModuleDefaults,
     workflowModuleVisibleIds,
@@ -5155,6 +5164,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const availableImageLoraName = krea2LoraOptions.find(
     (lora) => sameH3LoraName(lora, imageLoraName),
   );
+  // CANVAS-023: Moss LoRA slots and the node's own Moss base model (empty = settings default).
+  const mossLoraSlots = mossLorasFromContent(record.content);
+  const mossModelName = typeof record.content.mossModelName === "string" ? record.content.mossModelName : "";
+  const availableMossModelName = mossModelOptions.find((model) => sameH3DiffusionModelName(model, mossModelName));
   const seedMode = seedModeFromContent(record.content);
   const fixedSeed = fixedSeedFromContent(record.content);
   const validationStatus = record.content.status === "ready"
@@ -9956,6 +9969,39 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               ))}
             </select>
           </label>
+          )}
+          {imageModuleSupportsMultiLora(selectedImageWorkflowModule) && (
+          <>
+          <label className="video-workflow-module-select image-generation-model-select">
+            <span>模型</span>
+            <select
+              className="image-generation-select image-generation-moss-model-select"
+              value={availableMossModelName ?? mossModelName}
+              onChange={(event) => onChange(id, {
+                content: {
+                  ...record.content,
+                  mossModelName: event.currentTarget.value,
+                  status: "idle",
+                  validationMessage: "",
+                },
+              })}
+            >
+              <option value="">默认（{h3DiffusionModelDisplayName(selectedImageWorkflowModule?.defaults.diffusionModelName ?? "") || "方案设置"}）</option>
+              {mossModelName && !availableMossModelName && (
+                <option value={mossModelName} disabled>{h3DiffusionModelDisplayName(mossModelName)}（未找到）</option>
+              )}
+              {mossModelOptions.map((model) => (
+                <option key={model} value={model}>{h3DiffusionModelDisplayName(model)}</option>
+              ))}
+            </select>
+          </label>
+          <StyleLoraEditor slots={mossLoraSlots} options={mossLoraOptions} hasSecondStage={false} showSecondPass={false}
+            label="Moss LoRA" menuLabel="Moss LoRA" emptyTitle="Moss LoRA 未设置"
+            onChange={(slots) => onChange(id, {
+              content: { ...record.content, mossLoras: slots, status: "idle", validationMessage: "" },
+            })}
+          />
+          </>
           )}
           <section className="video-input-group is-text image-prompt-input-group">
             <div className={`video-input-group-heading ${textInputs.length ? "has-text-clear" : ""}`}>

@@ -305,6 +305,7 @@ pub fn run() {
             commands::get_comfyui_queue_summary,
             commands::get_comfyui_h3_loras,
             commands::get_comfyui_krea2_loras,
+            commands::get_comfyui_moss_loras,
             commands::get_comfyui_krea2_diffusion_models,
             commands::get_comfyui_h3_diffusion_models,
             commands::get_comfyui_client_task_statuses,

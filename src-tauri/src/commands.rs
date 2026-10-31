@@ -30,7 +30,7 @@ use crate::{
         ComfySubmitResult, CreateEdgeInput, CreateEmptyFolderInput, CreateEmptyFolderResult,
         CreateNodeInput, CreateNodeResult, CreateProjectInput, DeleteFolderResult,
         DeleteNodesInput, DeletedBatch, EdgeRecord, FolderActionInput, GroupNodesIntoFolderInput,
-        GroupNodesIntoFolderResult, GroupRelatedNodesIntoFolderInput, H3StyleLora,
+        GroupNodesIntoFolderResult, GroupRelatedNodesIntoFolderInput, H3StyleLora, ImageLoraSlot,
         MergeFoldersInput, MergeFoldersResult, NodeRecord, ReplaceNodeAndDeleteInput,
         ReplaceNodeAndDeleteResult, ResizeImageResult, RestoreNodeReplacementInput,
         RestoreNodeReplacementResult, RuntimeInfo, SetAppLockInput, SetProjectPreviewImageInput,
@@ -1559,6 +1559,47 @@ pub async fn get_comfyui_h3_loras(server_url: String) -> Result<Vec<String>, Str
         LORA_CLASS_TYPE,
         LORA_DIRECTORY,
     ))
+}
+
+/// Moss LoRAs live in ComfyUI's `loras\moss` (lower case; the base models are in
+/// `diffusion_models\Moss`). The directory compares case-insensitively and the
+/// names keep ComfyUI's own spelling.
+const MOSS_LORA_DIRECTORY: &str = "moss";
+const MOSS_MAX_LORAS: usize = 6;
+/// Inserted Moss LoRA loaders take the ids 9701, 9702, ... (absent from the package).
+const MOSS_FIRST_LORA_NODE_ID: usize = 9701;
+
+fn moss_loras_from_object_info(value: &Value) -> Vec<String> {
+    loras_from_object_info(value, "LoraLoaderModelOnly", MOSS_LORA_DIRECTORY)
+}
+
+async fn fetch_moss_loras(server_url: &str) -> Result<Vec<String>, String> {
+    let parsed_server =
+        Url::parse(server_url.trim()).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if parsed_server.scheme() != "http" && parsed_server.scheme() != "https" {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let server_url = server_url.trim().trim_end_matches('/');
+    let value = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?
+        .get(format!("{server_url}/object_info/LoraLoaderModelOnly"))
+        .send()
+        .await
+        .map_err(|error| format!("读取 Moss LoRA 列表失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("读取 Moss LoRA 列表失败：{error}"))?
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("解析 Moss LoRA 列表失败：{error}"))?;
+    Ok(moss_loras_from_object_info(&value))
+}
+
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn get_comfyui_moss_loras(server_url: String) -> Result<Vec<String>, String> {
+    fetch_moss_loras(&server_url).await
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
@@ -3269,17 +3310,95 @@ fn prune_to_output_node(workflow: &mut Value, output_node_id: &str) -> Result<()
     Ok(())
 }
 
-/// Moss全能王 text-to-image (CANVAS-022). CFG stays at the workflow's value; an
-/// empty negative prompt keeps the workflow's own negative text. LoRA and output
-/// upscale do not exist in this workflow and are refused rather than ignored.
+/// Chains the active Moss LoRA slots as `LoraLoaderModelOnly` nodes right after the
+/// base model loader: every node that took the loader's model output takes the end
+/// of the chain instead. LoRA only acts on the model (CLIP is untouched). Without an
+/// active slot the workflow is left exactly as it was.
+fn configure_moss_loras(
+    workflow: &mut Value,
+    model_node_id: &str,
+    slots: &[ImageLoraSlot],
+    available_loras: &[String],
+) -> Result<(), String> {
+    if slots.len() > MOSS_MAX_LORAS {
+        return Err(format!("Moss 方案最多支持 {MOSS_MAX_LORAS} 个 LoRA"));
+    }
+    let mut chosen = Vec::new();
+    for (index, slot) in slots.iter().enumerate() {
+        let number = index + 1;
+        if !slot.strength.is_finite() || !(0.0..=10.0).contains(&slot.strength) {
+            return Err(format!("Moss LoRA {number} 权重必须在0到10之间"));
+        }
+        let name = slot.name.trim();
+        if slot.bypassed || name.is_empty() {
+            continue;
+        }
+        let normalized = name.replace('/', "\\");
+        if !is_model_name_in_directory(&normalized, MOSS_LORA_DIRECTORY) {
+            return Err(format!(
+                "Moss LoRA {number} 只能选择 loras\\{MOSS_LORA_DIRECTORY} 目录中的 LoRA"
+            ));
+        }
+        let existing = available_loras
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .replace('/', "\\")
+                    .eq_ignore_ascii_case(&normalized)
+            })
+            .ok_or_else(|| format!("Moss LoRA {number} 在 ComfyUI 中不存在：{name}"))?;
+        chosen.push((existing.clone(), slot.strength));
+    }
+    if chosen.is_empty() {
+        return Ok(());
+    }
+    let object = workflow
+        .as_object_mut()
+        .ok_or_else(|| "图片工作流必须是对象".to_owned())?;
+    let model_output = json!([model_node_id, 0]);
+    let consumers = object
+        .iter()
+        .filter(|(_, node)| node.pointer("/inputs/model") == Some(&model_output))
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    if consumers.is_empty() {
+        return Err(format!(
+            "图片工作流中没有节点使用模型节点 {model_node_id} 的输出，无法接入 LoRA"
+        ));
+    }
+    let mut upstream = model_output;
+    for (offset, (name, strength)) in chosen.into_iter().enumerate() {
+        let node_id = (MOSS_FIRST_LORA_NODE_ID + offset).to_string();
+        if object.contains_key(&node_id) {
+            return Err(format!("图片工作流已有节点 {node_id}，无法插入 Moss LoRA"));
+        }
+        object.insert(
+            node_id.clone(),
+            json!({ "class_type": "LoraLoaderModelOnly", "inputs": {
+                "lora_name": name, "strength_model": strength, "model": upstream } }),
+        );
+        upstream = json!([node_id, 0]);
+    }
+    for id in consumers {
+        object[&id]["inputs"]["model"] = upstream.clone();
+    }
+    Ok(())
+}
+
+/// Moss全能王 text-to-image (CANVAS-022, LoRA list CANVAS-023). CFG stays at the
+/// workflow's value; an empty negative prompt keeps the workflow's own negative
+/// text. LoRA comes only from the `loras` list, checked against `available_loras`
+/// (ComfyUI's `loras\moss` files); the Krea2 single-LoRA field and output upscale
+/// are refused rather than ignored.
 fn prepare_moss_image_workflow(
     mut workflow: Value,
     bindings: &WorkflowBindings,
     input: &ComfyImageSubmitInput,
     generation_seed: u64,
+    available_loras: &[String],
 ) -> Result<(Value, Option<String>), String> {
     if !input.lora_name.trim().is_empty() {
-        return Err("Moss 方案不支持 LoRA，请清空 LoRA 后再生成".to_owned());
+        return Err("Moss 方案不使用 Krea2 的单个 LoRA，请在 Moss LoRA 列表中选择".to_owned());
     }
     if input.upscale_enabled {
         return Err("Moss 方案不支持输出放大，请关闭放大后再生成".to_owned());
@@ -3342,6 +3461,12 @@ fn prepare_moss_image_workflow(
         "height",
         json!(round_to_multiple_of_16(input.height)),
     )?;
+    configure_moss_loras(
+        &mut workflow,
+        &b.diffusion_model_node_id,
+        &input.loras,
+        available_loras,
+    )?;
     prune_to_output_node(&mut workflow, &b.primary_output_node_id)?;
     Ok((workflow, model_name))
 }
@@ -3397,8 +3522,18 @@ async fn submit_moss_image_workflow(
         }
     }
     let bindings = &bindings;
+    // ComfyUI is asked for its Moss LoRA files only when a slot is in use.
+    let available_loras = if input
+        .loras
+        .iter()
+        .any(|slot| !slot.bypassed && !slot.name.trim().is_empty())
+    {
+        fetch_moss_loras(server_url).await?
+    } else {
+        Vec::new()
+    };
     let (workflow, model_name) =
-        prepare_moss_image_workflow(workflow, bindings, input, generation_seed)?;
+        prepare_moss_image_workflow(workflow, bindings, input, generation_seed, &available_loras)?;
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(900))
@@ -5034,8 +5169,9 @@ mod tests {
         WorkflowInputContract, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
     use super::{
-        ensure_image_upscale_module, image_diffusion_models_for_adapter, moss_output_files,
-        prepare_krea2_image_workflow, prepare_moss_image_workflow,
+        ensure_image_upscale_module, image_diffusion_models_for_adapter,
+        moss_loras_from_object_info, moss_output_files, prepare_krea2_image_workflow,
+        prepare_moss_image_workflow,
     };
     use crate::models::ComfyImageSubmitInput;
     use crate::workflow_modules::WorkflowAdapter;
@@ -6815,8 +6951,7 @@ mod tests {
             "modelName": "Moss/moss-image-sft-dit-int8-convrot.safetensors",
         }));
         let (workflow, model_name) =
-            prepare_moss_image_workflow(moss_source_workflow(), &bindings, &input, 7, &[])
-                .unwrap();
+            prepare_moss_image_workflow(moss_source_workflow(), &bindings, &input, 7, &[]).unwrap();
         assert_eq!(
             workflow.pointer("/57/inputs/value"),
             Some(&json!("a red fox"))
@@ -6864,8 +6999,7 @@ mod tests {
         let bindings = WorkflowBindings::moss_image_generation();
         let input = image_input(json!({ "width": 1024, "height": 1024, "steps": 25 }));
         let (workflow, model_name) =
-            prepare_moss_image_workflow(moss_source_workflow(), &bindings, &input, 9, &[])
-                .unwrap();
+            prepare_moss_image_workflow(moss_source_workflow(), &bindings, &input, 9, &[]).unwrap();
         assert_eq!(
             workflow.pointer("/36/inputs/text"),
             Some(&json!(
@@ -7069,7 +7203,10 @@ mod tests {
         let mut out = serde_json::Map::new();
         let moss_bindings = WorkflowBindings::moss_image_generation();
         let moss_inputs = [
-            ("default", json!({ "width": 1024, "height": 1024, "steps": 25 })),
+            (
+                "default",
+                json!({ "width": 1024, "height": 1024, "steps": 25 }),
+            ),
             (
                 "chosen",
                 json!({ "negativePrompt": " blurry ", "steps": 30, "width": 1000, "height": 750,
@@ -7221,7 +7358,10 @@ mod tests {
         let goldens = canvas023_goldens();
         let now = canvas023_regression_outputs();
         let golden_keys = goldens.as_object().unwrap().keys().collect::<Vec<_>>();
-        assert_eq!(now.as_object().unwrap().keys().collect::<Vec<_>>(), golden_keys);
+        assert_eq!(
+            now.as_object().unwrap().keys().collect::<Vec<_>>(),
+            golden_keys
+        );
         assert_eq!(golden_keys.len(), 4 + 2 + 5);
         for key in golden_keys {
             assert_eq!(now[key], goldens[key], "{key} differs from bb7a74c");
@@ -7273,7 +7413,10 @@ mod tests {
             json!({ "class_type": "LoraLoaderModelOnly", "inputs": {
                 "lora_name": MOSS_LORA_A, "strength_model": 0.7, "model": ["28", 0] } })
         );
-        assert_eq!(workflow.pointer("/38/inputs/model"), Some(&json!(["9701", 0])));
+        assert_eq!(
+            workflow.pointer("/38/inputs/model"),
+            Some(&json!(["9701", 0]))
+        );
         let mut expected = golden;
         expected["9701"] = workflow["9701"].clone();
         expected["38"]["inputs"]["model"] = json!(["9701", 0]);
@@ -7298,14 +7441,28 @@ mod tests {
         for (id, name, strength, upstream) in chain {
             assert_eq!(workflow[id]["class_type"], json!("LoraLoaderModelOnly"));
             assert_eq!(workflow[id]["inputs"]["lora_name"], json!(name), "{id}");
-            assert_eq!(workflow[id]["inputs"]["strength_model"], json!(strength), "{id}");
-            assert_eq!(workflow[id]["inputs"]["model"], json!([upstream, 0]), "{id}");
+            assert_eq!(
+                workflow[id]["inputs"]["strength_model"],
+                json!(strength),
+                "{id}"
+            );
+            assert_eq!(
+                workflow[id]["inputs"]["model"],
+                json!([upstream, 0]),
+                "{id}"
+            );
         }
         assert!(workflow.get("9704").is_none());
-        assert_eq!(workflow.pointer("/38/inputs/model"), Some(&json!(["9703", 0])));
+        assert_eq!(
+            workflow.pointer("/38/inputs/model"),
+            Some(&json!(["9703", 0]))
+        );
         // LoRA only touches the model: CLIP and the sampler wiring are unchanged.
         assert_eq!(workflow.pointer("/29/inputs/clip"), Some(&json!(["30", 0])));
-        assert_eq!(workflow.pointer("/31/inputs/model"), Some(&json!(["38", 0])));
+        assert_eq!(
+            workflow.pointer("/31/inputs/model"),
+            Some(&json!(["38", 0]))
+        );
     }
 
     #[test]
@@ -7320,7 +7477,10 @@ mod tests {
             (json!([slot(MOSS_LORA_A, 10.5)]), "权重"),
             (json!([slot(MOSS_LORA_A, -0.1)]), "权重"),
             // A switched-off slot still has to carry a valid weight.
-            (json!([{ "name": MOSS_LORA_A, "strength": 11.0, "bypassed": true }]), "权重"),
+            (
+                json!([{ "name": MOSS_LORA_A, "strength": 11.0, "bypassed": true }]),
+                "权重",
+            ),
         ] {
             let error = moss_with_loras(loras.clone()).unwrap_err();
             assert!(error.contains(expected), "{loras}: {error}");
@@ -7355,8 +7515,10 @@ mod tests {
         let (workflow, model_name) = prepare_moss_image_workflow(
             moss_source_workflow(),
             &WorkflowBindings::moss_image_generation(),
-            &image_input(json!({ "modelName": "Moss\\moss-image-sft-dit-int8-convrot.safetensors",
-                "loras": [{ "name": MOSS_LORA_B, "strength": 0.8 }] })),
+            &image_input(
+                json!({ "modelName": "Moss\\moss-image-sft-dit-int8-convrot.safetensors",
+                "loras": [{ "name": MOSS_LORA_B, "strength": 0.8 }] }),
+            ),
             7,
             &moss_available_loras(),
         )
@@ -7369,8 +7531,15 @@ mod tests {
             model_name.as_deref(),
             Some("Moss\\moss-image-sft-dit-int8-convrot.safetensors")
         );
-        assert_eq!(workflow.pointer("/9701/inputs/model"), Some(&json!(["28", 0])));
-        for model in ["Krea2\\base.safetensors", "moss.safetensors", "Mossy\\x.safetensors"] {
+        assert_eq!(
+            workflow.pointer("/9701/inputs/model"),
+            Some(&json!(["28", 0]))
+        );
+        for model in [
+            "Krea2\\base.safetensors",
+            "moss.safetensors",
+            "Mossy\\x.safetensors",
+        ] {
             let error = prepare_moss_image_workflow(
                 moss_source_workflow(),
                 &WorkflowBindings::moss_image_generation(),
