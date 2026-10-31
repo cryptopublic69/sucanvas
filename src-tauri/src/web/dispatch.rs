@@ -1233,6 +1233,7 @@ mod tests {
             "get_comfyui_krea2_diffusion_models",
             "get_comfyui_h3_loras",
             "get_comfyui_krea2_loras",
+            "get_comfyui_moss_loras",
             "get_comfyui_h3_diffusion_models",
             "submit_comfyui_image_workflow",
             "submit_comfyui_image_upscale",
