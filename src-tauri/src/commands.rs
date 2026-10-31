@@ -4723,6 +4723,12 @@ mod tests {
         validate_workflow_media_counts, verify_app_lock_hash, MediaFormat, WorkflowBindings,
         WorkflowInputContract, AUDIO_MAX_BYTES, IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
     };
+    use super::{
+        ensure_image_upscale_module, image_diffusion_models_for_adapter, moss_output_files,
+        prepare_krea2_image_workflow, prepare_moss_image_workflow,
+    };
+    use crate::models::ComfyImageSubmitInput;
+    use crate::workflow_modules::WorkflowAdapter;
     use crate::{db::Database, models::CreateNodeInput};
     use serde_json::json;
     use std::{fs, path::Path};
@@ -6448,5 +6454,274 @@ mod tests {
         assert!(video_path.exists());
 
         fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    // CANVAS-022: Moss text-to-image submissions and the unchanged Krea2 path.
+    fn image_input(extra: serde_json::Value) -> ComfyImageSubmitInput {
+        let mut input = json!({
+            "serverUrl": "http://127.0.0.1:8188",
+            "workflowModuleId": "module",
+            "clientId": "client",
+            "prompt": " a red fox ",
+            "seedMode": "fixed",
+            "seed": "42",
+            "width": 1280,
+            "height": 720,
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            input[key] = value.clone();
+        }
+        serde_json::from_value(input).unwrap()
+    }
+
+    fn moss_source_workflow() -> serde_json::Value {
+        // The 14 nodes of shared/tasks/canvas-022/Moss全能王.json, with the long texts shortened.
+        json!({
+            "19": { "class_type": "ResolutionSelector", "inputs": { "aspect_ratio": "9:16 (Portrait Widescreen)", "megapixels": 1.5, "multiple": 16 } },
+            "28": { "class_type": "UNETLoader", "inputs": { "unet_name": "Moss\\pornmasterMoss_v1.safetensors", "weight_dtype": "default" } },
+            "29": { "class_type": "CLIPTextEncode", "inputs": { "text": ["57", 0], "clip": ["30", 0] } },
+            "30": { "class_type": "CLIPLoader", "inputs": { "clip_name": "qwen3.5_9b_w4a8_gptq.safetensors", "type": "moss_image", "device": "default" } },
+            "31": { "class_type": "KSampler", "inputs": { "seed": 92925844317081u64, "steps": 25, "cfg": 3, "sampler_name": "er_sde", "scheduler": "simple", "denoise": 1, "model": ["38", 0], "positive": ["29", 0], "negative": ["36", 0], "latent_image": ["35", 0] } },
+            "32": { "class_type": "VAELoader", "inputs": { "vae_name": "flux2-vae.safetensors" } },
+            "35": { "class_type": "EmptyFlux2LatentImage", "inputs": { "width": ["19", 0], "height": ["19", 1], "batch_size": 1 } },
+            "36": { "class_type": "CLIPTextEncode", "inputs": { "text": "worst quality, bad anatomy, watermark, jpeg artifact", "clip": ["30", 0] } },
+            "37": { "class_type": "VAEDecode", "inputs": { "samples": ["31", 0], "vae": ["32", 0] } },
+            "38": { "class_type": "SkipLayerGuidanceDiTSimple", "inputs": { "double_layers": "", "single_layers": "22", "start_percent": 0, "end_percent": 0.5, "model": ["28", 0] } },
+            "47": { "class_type": "Image Comparer (rgthree)", "inputs": { "image_a": ["37", 0], "image_b": ["37", 0] } },
+            "57": { "class_type": "PrimitiveStringMultiline", "inputs": { "value": "default prompt" } },
+            "63": { "class_type": "PrimitiveStringMultiline", "inputs": { "value": "a very long expansion skill text" } },
+            "64": { "class_type": "Image Save", "inputs": { "output_path": "[time(%Y-%m-%d)]", "filename_prefix": "moss_", "images": ["37", 0] } }
+        })
+    }
+
+    #[test]
+    fn moss_submission_rewrites_only_its_own_nodes_and_prunes_the_rest() {
+        let bindings = WorkflowBindings::moss_image_generation();
+        let input = image_input(json!({
+            "negativePrompt": " blurry ",
+            "steps": 30,
+            "width": 1000,
+            "height": 750,
+            "modelName": "Moss/moss-image-sft-dit-int8-convrot.safetensors",
+        }));
+        let (workflow, model_name) =
+            prepare_moss_image_workflow(moss_source_workflow(), &bindings, &input, 7).unwrap();
+        assert_eq!(workflow.pointer("/57/inputs/value"), Some(&json!("a red fox")));
+        assert_eq!(workflow.pointer("/36/inputs/text"), Some(&json!("blurry")));
+        assert_eq!(workflow.pointer("/31/inputs/seed"), Some(&json!(7)));
+        assert_eq!(workflow.pointer("/31/inputs/steps"), Some(&json!(30)));
+        // The workflow's own CFG stays; the Krea2 1.0/1.5 rule does not apply.
+        assert_eq!(workflow.pointer("/31/inputs/cfg"), Some(&json!(3)));
+        // 1000 x 750 rounds to the nearest multiple of 16 for the Flux2 latent.
+        assert_eq!(workflow.pointer("/35/inputs/width"), Some(&json!(1008)));
+        assert_eq!(workflow.pointer("/35/inputs/height"), Some(&json!(752)));
+        assert_eq!(
+            workflow.pointer("/28/inputs/unet_name"),
+            Some(&json!("Moss\\moss-image-sft-dit-int8-convrot.safetensors"))
+        );
+        assert_eq!(
+            model_name.as_deref(),
+            Some("Moss\\moss-image-sft-dit-int8-convrot.safetensors")
+        );
+        let mut ids = workflow
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        ids.sort();
+        // 47 (comparer output), 63 (orphan text) and 19 (resolution selector) are gone.
+        assert_eq!(
+            ids,
+            ["28", "29", "30", "31", "32", "35", "36", "37", "38", "57", "64"]
+        );
+        let source = moss_source_workflow();
+        for id in ["29", "30", "32", "37", "38", "64"] {
+            assert_eq!(workflow.get(id), source.get(id), "node {id} must be unchanged");
+        }
+    }
+
+    #[test]
+    fn moss_submission_keeps_workflow_defaults_when_nothing_is_chosen() {
+        let bindings = WorkflowBindings::moss_image_generation();
+        let input = image_input(json!({ "width": 1024, "height": 1024, "steps": 25 }));
+        let (workflow, model_name) =
+            prepare_moss_image_workflow(moss_source_workflow(), &bindings, &input, 9).unwrap();
+        assert_eq!(
+            workflow.pointer("/36/inputs/text"),
+            Some(&json!("worst quality, bad anatomy, watermark, jpeg artifact"))
+        );
+        assert_eq!(
+            workflow.pointer("/28/inputs/unet_name"),
+            Some(&json!("Moss\\pornmasterMoss_v1.safetensors"))
+        );
+        assert_eq!(
+            model_name.as_deref(),
+            Some("Moss\\pornmasterMoss_v1.safetensors")
+        );
+        assert_eq!(workflow.pointer("/35/inputs/width"), Some(&json!(1024)));
+        assert_eq!(workflow.pointer("/35/inputs/height"), Some(&json!(1024)));
+    }
+
+    #[test]
+    fn moss_submission_rejects_lora_upscale_and_foreign_models() {
+        let bindings = WorkflowBindings::moss_image_generation();
+        for (extra, expected) in [
+            (json!({ "loraName": "Krea2\\a.safetensors" }), "LoRA"),
+            (json!({ "upscaleEnabled": true }), "放大"),
+            (json!({ "modelName": "Krea2\\model.safetensors" }), "Moss"),
+        ] {
+            let error = prepare_moss_image_workflow(
+                moss_source_workflow(),
+                &bindings,
+                &image_input(extra.clone()),
+                1,
+            )
+            .unwrap_err();
+            assert!(error.contains(expected), "{extra}: {error}");
+        }
+    }
+
+    #[test]
+    fn moss_results_come_only_from_the_declared_output_node() {
+        let entry = json!({
+            "outputs": {
+                "47": { "images": [
+                    { "filename": "rgthree.compare._temp_a.png", "subfolder": "", "type": "temp" },
+                    { "filename": "rgthree.compare._temp_b.png", "subfolder": "", "type": "temp" }
+                ] },
+                "64": { "images": [
+                    { "filename": "moss_0001.png", "subfolder": "2026-10-31", "type": "output" }
+                ] }
+            }
+        });
+        assert_eq!(
+            moss_output_files(&entry, "64"),
+            vec![(
+                "moss_0001.png".to_owned(),
+                "2026-10-31".to_owned(),
+                "output".to_owned()
+            )]
+        );
+        assert!(moss_output_files(&entry, "99").is_empty());
+    }
+
+    fn repo_workflow(name: &str) -> serde_json::Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows")
+            .join(name);
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn krea2_submission_is_unchanged_field_by_field() {
+        // Bindings as persisted by the production module: LoRA fields empty, filled from defaults.
+        let mut bindings = WorkflowBindings::image_generation();
+        bindings.primary_lora_node_id.clear();
+        bindings.lora_class_type.clear();
+        let source = repo_workflow("Krea2文生图_可选放大.json");
+        let input = image_input(json!({
+            "negativePrompt": " ugly ",
+            "steps": 12,
+            "width": 1000,
+            "height": 600,
+            "loraName": "Krea2\\style.safetensors",
+            "modelName": "Krea2/base.safetensors",
+            "upscaleEnabled": true,
+            "upscaleMegapixels": 4.0,
+        }));
+        let (workflow, model_name) =
+            prepare_krea2_image_workflow(source.clone(), &bindings, &input, 5).unwrap();
+        let mut expected = source.clone();
+        for (pointer, value) in [
+            ("/98/inputs/unet_name", json!("Krea2\\base.safetensors")),
+            (
+                "/159/inputs/lora_1",
+                json!({ "on": true, "lora": "Krea2\\style.safetensors", "strength": 1.0 }),
+            ),
+            ("/90/inputs/text", json!("a red fox")),
+            ("/153/inputs/text", json!("ugly")),
+            ("/63/inputs/cfg", json!(1.5)),
+            ("/160/inputs/cfg", json!(1.5)),
+            ("/63/inputs/noise_seed", json!(5)),
+            ("/63/inputs/steps", json!(12)),
+            ("/29/inputs/width", json!(1000)),
+            ("/29/inputs/height", json!(600)),
+            ("/63/inputs/latent_image", json!(["29", 0])),
+            ("/161/inputs/megapixels", json!(4.0)),
+            ("/157/inputs/images", json!(["163", 0])),
+        ] {
+            *expected.pointer_mut(pointer).unwrap() = value;
+        }
+        assert_eq!(workflow, expected);
+        assert_eq!(model_name.as_deref(), Some("Krea2\\base.safetensors"));
+
+        let plain = image_input(json!({ "steps": 8 }));
+        let (workflow, model_name) =
+            prepare_krea2_image_workflow(source.clone(), &bindings, &plain, 6).unwrap();
+        let mut expected = source.clone();
+        for (pointer, value) in [
+            ("/90/inputs/text", json!("a red fox")),
+            ("/153/inputs/text", json!("")),
+            ("/63/inputs/cfg", json!(1.0)),
+            ("/160/inputs/cfg", json!(1.0)),
+            ("/63/inputs/noise_seed", json!(6)),
+            ("/63/inputs/steps", json!(8)),
+            ("/29/inputs/width", json!(1280)),
+            ("/29/inputs/height", json!(720)),
+            ("/63/inputs/latent_image", json!(["29", 0])),
+            ("/161/inputs/megapixels", json!(8.0)),
+            ("/157/inputs/images", json!(["30", 0])),
+        ] {
+            *expected.pointer_mut(pointer).unwrap() = value;
+        }
+        assert_eq!(workflow, expected);
+        assert_eq!(
+            model_name.as_deref(),
+            Some("Kera2\\pornmasterKrea2_v2TurboBF16.safetensors")
+        );
+
+        let error = prepare_krea2_image_workflow(
+            source,
+            &bindings,
+            &image_input(json!({ "modelName": "Moss\\pornmasterMoss_v1.safetensors" })),
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(error, "图片生成只能选择 Krea2 目录中的基础模型");
+    }
+
+    #[test]
+    fn image_model_lists_follow_the_module_adapter() {
+        let info = json!({ "UNETLoader": { "input": { "required": { "unet_name": [[
+            "Krea2\\a.safetensors", "Kera2\\b.safetensors", "Moss\\pornmasterMoss_v1.safetensors",
+            "Moss\\moss-image-sft-dit-int8-convrot.safetensors", "MinimaxH3\\h3.safetensors"
+        ]] } } } });
+        let krea2 = WorkflowAdapter::image_generation(WorkflowBindings::image_generation());
+        let moss = WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
+        assert_eq!(
+            image_diffusion_models_for_adapter(&info, &krea2),
+            ["Kera2\\b.safetensors", "Krea2\\a.safetensors"]
+        );
+        assert_eq!(
+            image_diffusion_models_for_adapter(&info, &moss),
+            [
+                "Moss\\moss-image-sft-dit-int8-convrot.safetensors",
+                "Moss\\pornmasterMoss_v1.safetensors"
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_krea2_text_to_image_module_can_upscale_images() {
+        let krea2 = WorkflowAdapter::image_generation(WorkflowBindings::image_generation());
+        let moss = WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
+        assert!(ensure_image_upscale_module(&krea2).is_ok());
+        assert_eq!(
+            ensure_image_upscale_module(&moss).unwrap_err(),
+            "图片放大仅支持 Krea2 文生图方案"
+        );
     }
 }

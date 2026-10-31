@@ -2174,6 +2174,10 @@ mod tests {
         H3_LAST_FRAME_TO_VIDEO_ADAPTER, H3_MULTI_REFERENCE_ADAPTER, UI_SCHEMA_FILE, WORKFLOW_FILE,
         WORKFLOW_PACKAGE_ENGINE,
     };
+    use super::{
+        validate_adapter_contract, KREA2_IMAGE_EDIT_ADAPTER, KREA2_TEXT_TO_IMAGE_ADAPTER,
+        MOSS_TEXT_TO_IMAGE_ADAPTER,
+    };
     use serde_json::json;
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
@@ -2586,5 +2590,134 @@ mod tests {
             assert_eq!(written["inputContract"]["audioMax"], 2);
             fs::remove_dir_all(&root).unwrap();
         }
+    }
+
+    // CANVAS-022: image generation accepts the Krea2 and the Moss text-to-image adapters.
+    fn repo_workflows() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("workflows")
+    }
+
+    const MOSS_WORKFLOW_FILE: &str = "Moss全能王_文生图.json";
+    const MOSS_PACKAGE_FILE: &str = "Moss全能王_文生图.zip";
+
+    #[test]
+    fn image_generation_accepts_krea2_and_moss_adapters_only() {
+        let krea2 = WorkflowAdapter::image_generation(WorkflowBindings::image_generation());
+        let moss = WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
+        assert_eq!(krea2.adapter_id, KREA2_TEXT_TO_IMAGE_ADAPTER);
+        assert_eq!(moss.adapter_id, MOSS_TEXT_TO_IMAGE_ADAPTER);
+        assert_eq!(moss.capability, "image-generation");
+        assert_eq!(moss.variant, "image-generation");
+        assert_eq!(moss.input_contract.image_max, 0);
+        for adapter in [&krea2, &moss] {
+            validate_adapter_contract(adapter, "image-generation", "image-generation").unwrap();
+        }
+        let mut other = moss.clone();
+        other.adapter_id = KREA2_IMAGE_EDIT_ADAPTER.to_owned();
+        assert!(validate_adapter_contract(&other, "image-generation", "image-generation").is_err());
+        other.adapter_id = "someone-else-v1".to_owned();
+        assert!(validate_adapter_contract(&other, "image-generation", "image-generation").is_err());
+    }
+
+    #[test]
+    fn each_image_adapter_checks_its_own_required_nodes() {
+        let moss = WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
+        let krea2 = WorkflowAdapter::image_generation(WorkflowBindings::image_generation());
+        let moss_bytes = fs::read(repo_workflows().join(MOSS_WORKFLOW_FILE)).unwrap();
+        let krea2_bytes = fs::read(repo_workflows().join("Krea2文生图_可选放大.json")).unwrap();
+        let ok = validate_workflow_bytes(&moss_bytes, &moss);
+        assert!(ok.compatible, "{}", ok.issues.join("; "));
+        let ok = validate_workflow_bytes(&krea2_bytes, &krea2);
+        assert!(ok.compatible, "{}", ok.issues.join("; "));
+        let wrong = validate_workflow_bytes(&krea2_bytes, &moss);
+        assert!(!wrong.compatible);
+        assert!(wrong.issues.iter().any(|issue| issue.contains("57")), "{:?}", wrong.issues);
+        let wrong = validate_workflow_bytes(&moss_bytes, &krea2);
+        assert!(!wrong.compatible);
+    }
+
+    #[test]
+    fn checked_in_moss_workflow_is_cleaned() {
+        let workflow: serde_json::Value =
+            serde_json::from_slice(&fs::read(repo_workflows().join(MOSS_WORKFLOW_FILE)).unwrap())
+                .unwrap();
+        let mut ids = workflow
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(
+            ids,
+            ["28", "29", "30", "31", "32", "35", "36", "37", "38", "57", "64"]
+        );
+        assert!(workflow.pointer("/35/inputs/width").unwrap().is_u64());
+        assert!(workflow.pointer("/35/inputs/height").unwrap().is_u64());
+        assert_eq!(workflow.pointer("/31/inputs/cfg"), Some(&json!(3)));
+        assert_eq!(
+            workflow.pointer("/28/inputs/unet_name"),
+            Some(&json!("Moss\\pornmasterMoss_v1.safetensors"))
+        );
+    }
+
+    #[test]
+    fn checked_in_moss_package_imports_as_a_moss_image_module() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let imported = import_bundle(&root, &repo_workflows().join(MOSS_PACKAGE_FILE)).unwrap();
+        assert_eq!(imported.manifest.capability, "image-generation");
+        assert_eq!(imported.manifest.variant, "image-generation");
+        assert_eq!(imported.adapter.adapter_id, MOSS_TEXT_TO_IMAGE_ADAPTER);
+        assert_eq!(
+            imported.manifest.defaults.diffusion_model_name,
+            "Moss\\pornmasterMoss_v1.safetensors"
+        );
+        assert_eq!(
+            fs::read(&imported.workflow_path).unwrap(),
+            fs::read(repo_workflows().join(MOSS_WORKFLOW_FILE)).unwrap()
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Regenerates workflows/Moss全能王_文生图.zip from the cleaned workflow:
+    /// `cargo test --locked write_moss_workflow_package -- --ignored`.
+    #[test]
+    #[ignore]
+    fn write_moss_workflow_package() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let saved = save(
+            &root,
+            SaveWorkflowModuleInput {
+                id: None,
+                name: "Moss全能王 文生图".to_owned(),
+                capability: "image-generation".to_owned(),
+                variant: "image-generation".to_owned(),
+                revision: "v1".to_owned(),
+                adapter_kind: WORKFLOW_PACKAGE_ENGINE.to_owned(),
+                source_workflow_path: repo_workflows()
+                    .join(MOSS_WORKFLOW_FILE)
+                    .to_string_lossy()
+                    .into_owned(),
+                bindings: None,
+                adapter: Some(WorkflowAdapter::moss_image_generation(
+                    WorkflowBindings::moss_image_generation(),
+                )),
+                ui_schema: None,
+                defaults: Some(WorkflowModuleDefaults {
+                    diffusion_model_name: "Moss\\pornmasterMoss_v1.safetensors".to_owned(),
+                    lora_name: String::new(),
+                    ..WorkflowModuleDefaults::default()
+                }),
+            },
+        )
+        .unwrap();
+        let exported = export(&root, &root.join("exports"), &saved.manifest.id).unwrap();
+        fs::copy(exported, repo_workflows().join(MOSS_PACKAGE_FILE)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 }
