@@ -23,6 +23,7 @@ pub const H3_FIRST_LAST_FRAME_ADAPTER: &str = "minimax-h3-first-last-frame-v1";
 pub const H3_IMAGE_TO_VIDEO_ADAPTER: &str = "minimax-h3-image-to-video-v1";
 pub const H3_LAST_FRAME_TO_VIDEO_ADAPTER: &str = "minimax-h3-last-frame-to-video-v1";
 pub const KREA2_TEXT_TO_IMAGE_ADAPTER: &str = "krea2-text-to-image-v1";
+pub const MOSS_TEXT_TO_IMAGE_ADAPTER: &str = "moss-text-to-image-v1";
 pub const VIDEO_PROCESSING_ADAPTER: &str = "video-processing-v1";
 pub const KREA2_IMAGE_EDIT_ADAPTER: &str = "krea2-image-edit-v1";
 const MAX_PACKAGE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
@@ -262,6 +263,28 @@ impl WorkflowBindings {
         }
     }
 
+    /// Moss全能王 text-to-image: prompt 57.value, negative 36.text, KSampler 31
+    /// (seed/steps, CFG left to the workflow), latent 35 width/height, model 28
+    /// in the Moss directory and the single output 64. No LoRA, no upscale.
+    pub fn moss_image_generation() -> Self {
+        Self {
+            prompt_node_id: "57".to_owned(),
+            seed_node_id: "31".to_owned(),
+            primary_resolution_node_id: "35".to_owned(),
+            primary_lora_node_id: String::new(),
+            primary_sampler_node_id: "31".to_owned(),
+            primary_output_node_id: "64".to_owned(),
+            conditioning_node_id: "36".to_owned(),
+            secondary_resize_node_id: String::new(),
+            secondary_audio_encode_node_id: String::new(),
+            diffusion_model_node_id: "28".to_owned(),
+            diffusion_model_directory: "Moss".to_owned(),
+            lora_class_type: String::new(),
+            lora_directory: String::new(),
+            ..Self::image_generation()
+        }
+    }
+
     pub fn image_edit() -> Self {
         Self {
             prompt_node_id: "37".to_owned(),
@@ -480,6 +503,16 @@ impl WorkflowAdapter {
             },
             bindings,
             video_processing: None,
+        }
+    }
+
+    /// Moss modules arrive as packages (workflows/Moss全能王_文生图.zip); this is
+    /// how that package and the tests build the adapter.
+    #[cfg(test)]
+    pub fn moss_image_generation(bindings: WorkflowBindings) -> Self {
+        Self {
+            adapter_id: MOSS_TEXT_TO_IMAGE_ADAPTER.to_owned(),
+            ..Self::image_generation(bindings)
         }
     }
 
@@ -977,8 +1010,10 @@ fn validate_adapter_contract(
         return Ok(());
     }
     if capability == "image-generation" && variant == "image-generation" {
-        if adapter.adapter_id != KREA2_TEXT_TO_IMAGE_ADAPTER {
-            return Err("图片生成方案必须使用 Krea2 文生图适配器".to_owned());
+        if adapter.adapter_id != KREA2_TEXT_TO_IMAGE_ADAPTER
+            && adapter.adapter_id != MOSS_TEXT_TO_IMAGE_ADAPTER
+        {
+            return Err("图片生成方案必须使用 Krea2 或 Moss 文生图适配器".to_owned());
         }
         return Ok(());
     }
@@ -1476,6 +1511,28 @@ pub fn validate_workflow_bytes(
             {
                 issues.push(format!("视频超分参数 {key} 必须绑定数值输入"));
             }
+        }
+        return WorkflowModuleValidation {
+            compatible: issues.is_empty(),
+            issues,
+        };
+    }
+    if adapter.capability == "image-generation"
+        && adapter.variant == "image-generation"
+        && adapter.adapter_id == MOSS_TEXT_TO_IMAGE_ADAPTER
+    {
+        for (node_id, input_name) in [
+            (&bindings.prompt_node_id, "value"),
+            (&bindings.conditioning_node_id, "text"),
+            (&bindings.seed_node_id, "seed"),
+            (&bindings.seed_node_id, "steps"),
+            (&bindings.seed_node_id, "cfg"),
+            (&bindings.primary_resolution_node_id, "width"),
+            (&bindings.primary_resolution_node_id, "height"),
+            (&bindings.diffusion_model_node_id, "unet_name"),
+            (&bindings.primary_output_node_id, "images"),
+        ] {
+            require_input(&workflow, node_id, input_name, &mut issues);
         }
         return WorkflowModuleValidation {
             compatible: issues.is_empty(),
@@ -2606,7 +2663,8 @@ mod tests {
     #[test]
     fn image_generation_accepts_krea2_and_moss_adapters_only() {
         let krea2 = WorkflowAdapter::image_generation(WorkflowBindings::image_generation());
-        let moss = WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
+        let moss =
+            WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
         assert_eq!(krea2.adapter_id, KREA2_TEXT_TO_IMAGE_ADAPTER);
         assert_eq!(moss.adapter_id, MOSS_TEXT_TO_IMAGE_ADAPTER);
         assert_eq!(moss.capability, "image-generation");
@@ -2624,7 +2682,8 @@ mod tests {
 
     #[test]
     fn each_image_adapter_checks_its_own_required_nodes() {
-        let moss = WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
+        let moss =
+            WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
         let krea2 = WorkflowAdapter::image_generation(WorkflowBindings::image_generation());
         let moss_bytes = fs::read(repo_workflows().join(MOSS_WORKFLOW_FILE)).unwrap();
         let krea2_bytes = fs::read(repo_workflows().join("Krea2文生图_可选放大.json")).unwrap();
@@ -2634,7 +2693,11 @@ mod tests {
         assert!(ok.compatible, "{}", ok.issues.join("; "));
         let wrong = validate_workflow_bytes(&krea2_bytes, &moss);
         assert!(!wrong.compatible);
-        assert!(wrong.issues.iter().any(|issue| issue.contains("57")), "{:?}", wrong.issues);
+        assert!(
+            wrong.issues.iter().any(|issue| issue.contains("57")),
+            "{:?}",
+            wrong.issues
+        );
         let wrong = validate_workflow_bytes(&moss_bytes, &krea2);
         assert!(!wrong.compatible);
     }
@@ -2676,9 +2739,13 @@ mod tests {
             imported.manifest.defaults.diffusion_model_name,
             "Moss\\pornmasterMoss_v1.safetensors"
         );
+        // Parsed, so a CRLF or LF checkout of the source compares the same.
+        let parse = |path: PathBuf| -> serde_json::Value {
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+        };
         assert_eq!(
-            fs::read(&imported.workflow_path).unwrap(),
-            fs::read(repo_workflows().join(MOSS_WORKFLOW_FILE)).unwrap()
+            parse(PathBuf::from(&imported.workflow_path)),
+            parse(repo_workflows().join(MOSS_WORKFLOW_FILE))
         );
         fs::remove_dir_all(&root).unwrap();
     }

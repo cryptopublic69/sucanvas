@@ -4,6 +4,7 @@ import { resolveComfyOutputPath } from "./web/outputFiles";
 import { videoUpscaleFromValue } from "./video/videoUpscale";
 import { referenceLimits, referenceModuleFor, referenceSubmitError, type ReferenceLimits } from "./video/referenceLimits";
 import { comfyOutputFromContent, videoUpscaleSourceUnavailableReason } from "./video/videoUpscaleSource";
+import { generatedImageUpscaleSupported, imageModuleSupportsLora, imageModuleSupportsUpscale, imageModuleSwitchContent } from "./image/imageWorkflowAdapter";
 import {
   GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH,
   GENERATED_VIDEO_PREVIEW_WIDTH,
@@ -8042,7 +8043,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           </div>
           <span className="generated-video-footer-spacer" />
           <div className="generated-video-actions" aria-label="图片预览操作">
-            {generatedImageUrl && (
+            {generatedImageUrl && generatedImageUpscaleSupported(record.content, workflowModules) && (
               <button
                 type="button"
                 className={`nodrag node-action generated-video-secondary-action ${executionRunning ? "is-cancel" : ""}`}
@@ -9714,16 +9715,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               const module = availableImageWorkflowModules.find((candidate) => candidate.id === event.currentTarget.value);
               if (!module) return;
               onChange(id, {
-                content: {
-                  ...record.content,
-                  workflowModuleId: module.id,
-                  workflowModuleRevision: module.revision,
-                  imageEditLayout: module.variant === "image-edit",
-                  imageLoraName: module.variant === "image-edit" ? "" : imageLoraName,
-                  upscaleEnabled: module.variant === "image-edit" ? false : record.content.upscaleEnabled,
-                  status: "idle",
-                  validationMessage: "",
-                },
+                content: imageModuleSwitchContent(record.content, module, selectedImageWorkflowModule),
               });
               }}
             >
@@ -9943,7 +9935,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               </ol>
             </section>
           )}
-          {!isKrea2ImageEdit && (
+          {imageModuleSupportsLora(selectedImageWorkflowModule) && (
           <label className="video-workflow-module-select image-generation-lora-select">
             <span>LoRA</span>
             <select
@@ -10121,7 +10113,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 })}
               />
             </label>
-            {!isKrea2ImageEdit && (
+            {imageModuleSupportsUpscale(selectedImageWorkflowModule) && (
             <div className="image-generation-upscale">
               <span>输出放大</span>
               <label className="image-generation-upscale-megapixels" title="放大后的目标像素数（MP）">

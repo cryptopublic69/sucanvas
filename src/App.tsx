@@ -7,6 +7,7 @@ import { WebRequestTimeoutError } from "./web/requestTimeout";
 import { recoverableWebGenerationFailure } from "./web/generationRequest";
 import { imageRegenerationPrompt, type WebImagePromptRequest } from "./web/imageGenerationPrompt";
 import { deduplicateRegenerationPromptOptions } from "./video/regenerationPromptOptions";
+import { defaultImageSteps, effectiveImageOptions, imageModelDirectoryLabel, imageUpscaleModule, isImageModelNameForModule } from "./image/imageWorkflowAdapter";
 import { generationQueuePositions } from "./generationQueuePositions";
 import { VideoPosterViewportCache } from "./VideoPosterViewportCache";
 import { summarizeProject } from "./projects/projectSummaries";
@@ -3310,8 +3311,8 @@ function CanvasWorkspace() {
       showGlobalNotice("没有可保存模型参数的图片生成方案");
       return;
     }
-    if (!isKrea2DiffusionModelName(krea2DiffusionModelName)) {
-      showGlobalNotice("请先选择 Krea2 基础模型");
+    if (!isImageModelNameForModule(krea2DiffusionModelName, module)) {
+      showGlobalNotice(`请先选择 ${imageModelDirectoryLabel(module)} 基础模型`);
       return;
     }
     if (
@@ -3320,7 +3321,7 @@ function CanvasWorkspace() {
         sameH3DiffusionModelName(model, krea2DiffusionModelName)
       ))
     ) {
-      showGlobalNotice("所选 Krea2 基础模型已不在 ComfyUI 模型目录中，请重新选择");
+      showGlobalNotice(`所选 ${imageModelDirectoryLabel(module)} 基础模型已不在 ComfyUI 模型目录中，请重新选择`);
       return;
     }
     setWorkflowModulesBusy(true);
@@ -8535,7 +8536,7 @@ function CanvasWorkspace() {
     const height = imageGenerationAutoHeight(0, module?.variant === "image-edit", 0);
     const placement = reserveNodePlacement(activeProjectId, position, width, height);
     try {
-      const result = await invoke<CreateNodeResult>("create_node", { input: { canvasId: activeProjectId, kind: "image-generation", title: "图片生成", content: { status: "idle", workflowModuleId: module?.id ?? "", workflowModuleRevision: module?.revision ?? "", activeTextInputId: "", imageLoraName: "", imageEditLayout: module?.variant === "image-edit", width: 1280, height: 720, steps: 8, upscaleEnabled: false, upscaleMegapixels: 8, seedMode: "random", seed: "" }, source: "manual", x: placement.position.x, y: placement.position.y, width, height } });
+      const result = await invoke<CreateNodeResult>("create_node", { input: { canvasId: activeProjectId, kind: "image-generation", title: "图片生成", content: { status: "idle", workflowModuleId: module?.id ?? "", workflowModuleRevision: module?.revision ?? "", activeTextInputId: "", imageLoraName: "", imageEditLayout: module?.variant === "image-edit", width: 1280, height: 720, steps: defaultImageSteps(module), upscaleEnabled: false, upscaleMegapixels: 8, seedMode: "random", seed: "" }, source: "manual", x: placement.position.x, y: placement.position.y, width, height } });
       finishNodePlacementReservation(placement.reservationId, [result.node]);
       setNodes((current) => [...current, makeFlowNode(result.node)]);
       setNotice("图片生成节点已创建");
@@ -8564,7 +8565,7 @@ function CanvasWorkspace() {
     ));
     const isImageEdit = selectedImageModule?.variant === "image-edit";
     const imageModelName = selectedImageModule
-      && isKrea2DiffusionModelName(selectedImageModule.defaults.diffusionModelName)
+      && isImageModelNameForModule(selectedImageModule.defaults.diffusionModelName, selectedImageModule)
       ? selectedImageModule.defaults.diffusionModelName
       : "";
     const recordsById = new Map(
@@ -8618,9 +8619,9 @@ function CanvasWorkspace() {
       ? webPromptRequest.negativePrompt : typeof target.content.negativePrompt === "string"
       ? target.content.negativePrompt.trim()
       : "";
-    const imageLoraName = typeof target.content.imageLoraName === "string"
-      ? target.content.imageLoraName.trim()
-      : "";
+    // LoRA and upscale only for modules that have them (Moss and image edit do not); stale values
+    // left on the node from another module are neither submitted nor recorded in the snapshot.
+    const { loraName: imageLoraName, upscaleEnabled } = effectiveImageOptions(target.content, selectedImageModule);
     if (!prompt.trim() || !moduleId || (isImageEdit && (imageInputs.length < 1 || imageInputs.length > 2)) || (isImageEdit && imagePaths.some((path) => !path))) {
       const message = !moduleId
         ? "请先选择图片生成方案"
@@ -8638,8 +8639,7 @@ function CanvasWorkspace() {
 
     const width = Number(target.content.width) || 1280;
     const height = Number(target.content.height) || 720;
-    const steps = Number(target.content.steps) || 8;
-    const upscaleEnabled = target.content.upscaleEnabled === true;
+    const steps = Number(target.content.steps) || defaultImageSteps(selectedImageModule);
     const effectiveUpscaleEnabled = !isImageEdit && upscaleEnabled;
     const upscaleMegapixels = Number(target.content.upscaleMegapixels) || 8;
     const clientId = crypto.randomUUID();
@@ -8910,22 +8910,12 @@ function CanvasWorkspace() {
     const sourceGenerator = sourceGeneratorId
       ? nodesSnapshot.current.find((node) => node.id === sourceGeneratorId)?.data.record
       : undefined;
-    const defaultImageModuleId = workflowModuleDefaults["image-generation"] ?? "";
-    const imageUpscaleModule = workflowModules.find((module) => (
-      !module.deletedAt
-      && module.id === defaultImageModuleId
-      && module.capability === "image-generation"
-      && module.variant === "image-generation"
-    ))
-      ?? workflowModules.find((module) => (
-        !module.deletedAt
-        && module.capability === "image-generation"
-        && module.variant === "image-generation"
-      ));
-    const moduleId = imageUpscaleModule?.id ?? "";
-    const imageModelName = imageUpscaleModule
-      && isKrea2DiffusionModelName(imageUpscaleModule.defaults.diffusionModelName)
-      ? imageUpscaleModule.defaults.diffusionModelName
+    // The upscale branch belongs to the Krea2 text-to-image workflow; a Moss default is skipped.
+    const upscaleModule = imageUpscaleModule(workflowModules, workflowModuleDefaults["image-generation"] ?? "");
+    const moduleId = upscaleModule?.id ?? "";
+    const imageModelName = upscaleModule
+      && isKrea2DiffusionModelName(upscaleModule.defaults.diffusionModelName)
+      ? upscaleModule.defaults.diffusionModelName
       : "";
     if (!moduleId) {
       setNotice("无法放大：请先配置 Krea2 文生图生成方案");
@@ -11029,7 +11019,7 @@ function CanvasWorkspace() {
                   if (module) {
                     setSelectedImageWorkflowModuleId(module.id);
                     setKrea2DiffusionModelName(
-                      isKrea2DiffusionModelName(module.defaults.diffusionModelName)
+                      isImageModelNameForModule(module.defaults.diffusionModelName, module)
                         ? module.defaults.diffusionModelName
                         : "",
                     );
@@ -11158,7 +11148,8 @@ function CanvasWorkspace() {
                   workflowModules={workflowModules}
                   setSelectedImageWorkflowModuleId={setSelectedImageWorkflowModuleId}
                   setKrea2DiffusionModelName={setKrea2DiffusionModelName}
-                  isKrea2DiffusionModelName={isKrea2DiffusionModelName}
+                  isImageModelNameForModule={isImageModelNameForModule}
+                  imageModelDirectoryLabel={imageModelDirectoryLabel}
                   krea2DiffusionModelName={krea2DiffusionModelName}
                   krea2DiffusionModelCatalogLoaded={krea2DiffusionModelCatalogLoaded}
                   krea2DiffusionModelOptions={krea2DiffusionModelOptions}

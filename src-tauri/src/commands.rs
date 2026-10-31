@@ -39,8 +39,9 @@ use crate::{
         WorkspaceSnapshot,
     },
     workflow_modules::{
-        self, SaveWorkflowModuleInput, WorkflowBindings, WorkflowInputContract,
-        WorkflowModuleRecord, WorkflowModuleValidation,
+        self, SaveWorkflowModuleInput, WorkflowAdapter, WorkflowBindings, WorkflowInputContract,
+        WorkflowModuleRecord, WorkflowModuleValidation, KREA2_TEXT_TO_IMAGE_ADAPTER,
+        MOSS_TEXT_TO_IMAGE_ADAPTER,
     },
     ApplicationState, CanvasSelectionState, RunningComfyTask,
 };
@@ -1455,6 +1456,20 @@ pub async fn get_comfyui_krea2_diffusion_models(
         .json::<Value>()
         .await
         .map_err(|error| format!("解析 Krea2 大模型列表失败：{error}"))?;
+    Ok(image_diffusion_models_for_adapter(&value, &module.adapter))
+}
+
+/// Base models offered for an image module: Moss lists its own directory; every
+/// other image module keeps the Krea2 (or Kera2) directory rule.
+fn image_diffusion_models_for_adapter(value: &Value, adapter: &WorkflowAdapter) -> Vec<String> {
+    let class_type = &adapter.bindings.diffusion_model_class_type;
+    if adapter.adapter_id == MOSS_TEXT_TO_IMAGE_ADAPTER {
+        return diffusion_models_from_object_info(
+            value,
+            class_type,
+            &adapter.bindings.diffusion_model_directory,
+        );
+    }
     let pointer = format!("/{class_type}/input/required/unet_name/0");
     let mut models = value
         .pointer(&pointer)
@@ -1467,7 +1482,7 @@ pub async fn get_comfyui_krea2_diffusion_models(
         .collect::<Vec<_>>();
     models.sort_by_key(|name| name.to_ascii_lowercase());
     models.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-    Ok(models)
+    models
 }
 
 fn loras_from_object_info(value: &Value, class_type: &str, directory: &str) -> Vec<String> {
@@ -3214,47 +3229,300 @@ async fn submit_krea2_image_edit_workflow(
     Err(format!("等待 ComfyUI 图像编辑任务超时：{prompt_id}"))
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub async fn submit_comfyui_image_workflow(
-    input: ComfyImageSubmitInput,
-    state: State<'_, ApplicationState>,
+/// Nearest multiple of 16 (the Flux2 latent step), at least 16.
+fn round_to_multiple_of_16(value: u32) -> u32 {
+    (value.saturating_add(8) / 16 * 16).max(16)
+}
+
+/// Keeps only the nodes the declared output depends on. This drops other output
+/// nodes (Moss: the Image Comparer 47), orphans (the expansion text 63) and nodes
+/// a literal input has replaced (the resolution selector 19).
+fn prune_to_output_node(workflow: &mut Value, output_node_id: &str) -> Result<(), String> {
+    let object = workflow
+        .as_object_mut()
+        .ok_or_else(|| "图片工作流必须是对象".to_owned())?;
+    if !object.contains_key(output_node_id) {
+        return Err(format!("图片工作流缺少输出节点 {output_node_id}"));
+    }
+    let mut keep = HashSet::new();
+    let mut pending = vec![output_node_id.to_owned()];
+    while let Some(id) = pending.pop() {
+        if !keep.insert(id.clone()) {
+            continue;
+        }
+        let Some(inputs) = object
+            .get(&id)
+            .and_then(|node| node.get("inputs"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        for value in inputs.values() {
+            if let Some([Value::String(source), index]) = value.as_array().map(Vec::as_slice) {
+                if index.is_u64() && object.contains_key(source) {
+                    pending.push(source.clone());
+                }
+            }
+        }
+    }
+    object.retain(|id, _| keep.contains(id));
+    Ok(())
+}
+
+/// Moss全能王 text-to-image (CANVAS-022). CFG stays at the workflow's value; an
+/// empty negative prompt keeps the workflow's own negative text. LoRA and output
+/// upscale do not exist in this workflow and are refused rather than ignored.
+fn prepare_moss_image_workflow(
+    mut workflow: Value,
+    bindings: &WorkflowBindings,
+    input: &ComfyImageSubmitInput,
+    generation_seed: u64,
+) -> Result<(Value, Option<String>), String> {
+    if !input.lora_name.trim().is_empty() {
+        return Err("Moss 方案不支持 LoRA，请清空 LoRA 后再生成".to_owned());
+    }
+    if input.upscale_enabled {
+        return Err("Moss 方案不支持输出放大，请关闭放大后再生成".to_owned());
+    }
+    let b = bindings;
+    let model_name = if input.model_name.trim().is_empty() {
+        workflow
+            .get(&b.diffusion_model_node_id)
+            .and_then(|node| node.get("inputs"))
+            .and_then(|inputs| inputs.get("unet_name"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    } else {
+        let selected = input.model_name.trim().replace('/', "\\");
+        if !is_model_name_in_directory(&selected, &b.diffusion_model_directory) {
+            return Err(format!(
+                "Moss 方案只能选择 {} 目录中的基础模型",
+                b.diffusion_model_directory
+            ));
+        }
+        set_workflow_input(
+            &mut workflow,
+            &b.diffusion_model_node_id,
+            "unet_name",
+            Value::String(selected.clone()),
+        )?;
+        Some(selected)
+    };
+    set_workflow_input(
+        &mut workflow,
+        &b.prompt_node_id,
+        "value",
+        Value::String(input.prompt.trim().to_owned()),
+    )?;
+    let negative_prompt = input.negative_prompt.trim();
+    if !negative_prompt.is_empty() {
+        set_workflow_input(
+            &mut workflow,
+            &b.conditioning_node_id,
+            "text",
+            Value::String(negative_prompt.to_owned()),
+        )?;
+    }
+    set_workflow_input(
+        &mut workflow,
+        &b.seed_node_id,
+        "seed",
+        json!(generation_seed),
+    )?;
+    set_workflow_input(&mut workflow, &b.seed_node_id, "steps", json!(input.steps))?;
+    set_workflow_input(
+        &mut workflow,
+        &b.primary_resolution_node_id,
+        "width",
+        json!(round_to_multiple_of_16(input.width)),
+    )?;
+    set_workflow_input(
+        &mut workflow,
+        &b.primary_resolution_node_id,
+        "height",
+        json!(round_to_multiple_of_16(input.height)),
+    )?;
+    prune_to_output_node(&mut workflow, &b.primary_output_node_id)?;
+    Ok((workflow, model_name))
+}
+
+/// Image files of one output node only (Moss collects from its declared output).
+fn moss_output_files(entry: &Value, output_node_id: &str) -> Vec<(String, String, String)> {
+    let mut files = Vec::new();
+    if let Some(output) = entry
+        .get("outputs")
+        .and_then(|outputs| outputs.get(output_node_id))
+    {
+        collect_image_files(output, &mut files);
+    }
+    files
+}
+
+async fn submit_moss_image_workflow(
+    input: &ComfyImageSubmitInput,
+    module: &WorkflowModuleRecord,
+    server_url: &str,
+    workflow: Value,
+    generation_seed: u64,
 ) -> Result<ComfySubmitResult, String> {
-    if input.prompt.trim().is_empty() {
-        return Err("提示词不能为空".to_owned());
+    // A hand-edited adapter.json may leave a binding empty; use the Moss default for it.
+    let mut bindings = module.adapter.bindings.clone();
+    let defaults = WorkflowBindings::moss_image_generation();
+    for (value, default) in [
+        (&mut bindings.prompt_node_id, &defaults.prompt_node_id),
+        (
+            &mut bindings.conditioning_node_id,
+            &defaults.conditioning_node_id,
+        ),
+        (&mut bindings.seed_node_id, &defaults.seed_node_id),
+        (
+            &mut bindings.primary_resolution_node_id,
+            &defaults.primary_resolution_node_id,
+        ),
+        (
+            &mut bindings.primary_output_node_id,
+            &defaults.primary_output_node_id,
+        ),
+        (
+            &mut bindings.diffusion_model_node_id,
+            &defaults.diffusion_model_node_id,
+        ),
+        (
+            &mut bindings.diffusion_model_directory,
+            &defaults.diffusion_model_directory,
+        ),
+    ] {
+        if value.trim().is_empty() {
+            value.clone_from(default);
+        }
     }
-    if !(64..=4096).contains(&input.width) || !(64..=4096).contains(&input.height) {
-        return Err("图片宽高必须在 64–4096 像素之间".to_owned());
-    }
-    if !(1..=1000).contains(&input.steps) {
-        return Err("生图步数必须在 1–1000 之间".to_owned());
-    }
-    if !input.upscale_megapixels.is_finite() || !(0.1..=64.0).contains(&input.upscale_megapixels) {
-        return Err("输出放大像素数必须在 0.1–64 MP 之间".to_owned());
-    }
-    let server_url = input.server_url.trim().trim_end_matches('/').to_owned();
-    let parsed_server =
-        Url::parse(&server_url).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
-    if !matches!(parsed_server.scheme(), "http" | "https") {
-        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
-    }
-    let module = workflow_modules::get(&state.workflow_modules_dir, &input.workflow_module_id)?;
-    if module.adapter.capability != "image-generation" {
-        return Err("所选方案不是图片生成方案".to_owned());
-    }
-    let generation_seed = resolve_generation_seed(&input.seed_mode, &input.seed)?;
-    if module.adapter.variant == "image-edit" {
-        return submit_krea2_image_edit_workflow(&input, &module, &server_url, generation_seed)
-            .await;
-    }
-    let bytes = tokio::fs::read(&module.workflow_path)
+    let bindings = &bindings;
+    let (workflow, model_name) =
+        prepare_moss_image_workflow(workflow, bindings, input, generation_seed)?;
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(900))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?;
+    let response = client
+        .post(format!("{server_url}/prompt"))
+        .json(&json!({"prompt": workflow, "client_id": input.client_id}))
+        .send()
         .await
-        .map_err(|error| format!("读取图片工作流失败：{error}"))?;
-    let mut workflow: Value =
-        serde_json::from_slice(&bytes).map_err(|error| format!("解析图片工作流失败：{error}"))?;
+        .map_err(|error| format!("提交 ComfyUI 图片工作流失败：{error}"))?;
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析 ComfyUI 响应失败（HTTP {status}）：{error}"))?;
+    if !status.is_success() {
+        return Err(format!("ComfyUI 拒绝图片工作流（HTTP {status}）：{body}"));
+    }
+    let prompt_id = body
+        .get("prompt_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("ComfyUI 响应缺少 prompt_id：{body}"))?
+        .to_owned();
+    for _ in 0..5400 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let response = client
+            .get(format!("{server_url}/history/{prompt_id}"))
+            .send()
+            .await
+            .map_err(|error| format!("查询 ComfyUI 图片任务失败：{error}"))?;
+        if !response.status().is_success() {
+            continue;
+        }
+        let history: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("解析 ComfyUI 图片任务失败：{error}"))?;
+        let Some(entry) = history.get(&prompt_id) else {
+            continue;
+        };
+        match entry
+            .pointer("/status/status_str")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+        {
+            "error" => {
+                return Err(format!(
+                    "ComfyUI 图片生成失败：{}",
+                    entry
+                        .pointer("/status/messages")
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                ))
+            }
+            "success" => {
+                let mut seen = HashSet::new();
+                let outputs = moss_output_files(entry, &bindings.primary_output_node_id)
+                    .into_iter()
+                    .filter_map(|(filename, subfolder, file_type)| {
+                        let identity = format!("{file_type}/{subfolder}/{filename}");
+                        if !seen.insert(identity) {
+                            return None;
+                        }
+                        comfy_view_url(
+                            server_url,
+                            &filename,
+                            &subfolder,
+                            &file_type,
+                            Some(&prompt_id),
+                        )
+                        .ok()
+                        .map(|url| ComfyOutputFile {
+                            filename,
+                            subfolder,
+                            file_type,
+                            url,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if outputs.is_empty() {
+                    return Err(format!(
+                        "ComfyUI 已完成，但输出节点 {} 没有图片",
+                        bindings.primary_output_node_id
+                    ));
+                }
+                return Ok(ComfySubmitResult {
+                    prompt_id,
+                    seed: generation_seed.to_string(),
+                    outputs,
+                    model_name,
+                    execution_elapsed_seconds: comfy_execution_elapsed_seconds(entry),
+                    cleanup_warning: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    Err(format!("等待 ComfyUI 图片任务超时：{prompt_id}"))
+}
+
+/// Toolbar image upscale runs the Krea2 text-to-image module's upscale branch.
+fn ensure_image_upscale_module(adapter: &WorkflowAdapter) -> Result<(), String> {
+    if adapter.capability != "image-generation" || adapter.variant != "image-generation" {
+        return Err("图片放大必须使用 Krea2 文生图方案".to_owned());
+    }
+    if adapter.adapter_id != KREA2_TEXT_TO_IMAGE_ADAPTER {
+        return Err("图片放大仅支持 Krea2 文生图方案".to_owned());
+    }
+    Ok(())
+}
+
+/// Krea2 text-to-image: writes the submission into the module workflow (CANVAS-022 moved this
+/// out of submit_comfyui_image_workflow unchanged so it can be tested field by field).
+fn prepare_krea2_image_workflow(
+    mut workflow: Value,
+    module_bindings: &WorkflowBindings,
+    input: &ComfyImageSubmitInput,
+    generation_seed: u64,
+) -> Result<(Value, Option<String>), String> {
     // Existing installations may have persisted the image adapter before its
     // LoRA binding was introduced. Supply the Krea2 binding without changing
     // any user-managed workflow module files.
-    let mut bindings = module.adapter.bindings.clone();
+    let mut bindings = module_bindings.clone();
     let default_image_bindings = WorkflowBindings::image_generation();
     if bindings.primary_lora_node_id.trim().is_empty() {
         bindings.primary_lora_node_id = default_image_bindings.primary_lora_node_id.clone();
@@ -3385,6 +3653,52 @@ pub async fn submit_comfyui_image_workflow(
             json!(["30", 0])
         },
     )?;
+    Ok((workflow, model_name))
+}
+
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn submit_comfyui_image_workflow(
+    input: ComfyImageSubmitInput,
+    state: State<'_, ApplicationState>,
+) -> Result<ComfySubmitResult, String> {
+    if input.prompt.trim().is_empty() {
+        return Err("提示词不能为空".to_owned());
+    }
+    if !(64..=4096).contains(&input.width) || !(64..=4096).contains(&input.height) {
+        return Err("图片宽高必须在 64–4096 像素之间".to_owned());
+    }
+    if !(1..=1000).contains(&input.steps) {
+        return Err("生图步数必须在 1–1000 之间".to_owned());
+    }
+    if !input.upscale_megapixels.is_finite() || !(0.1..=64.0).contains(&input.upscale_megapixels) {
+        return Err("输出放大像素数必须在 0.1–64 MP 之间".to_owned());
+    }
+    let server_url = input.server_url.trim().trim_end_matches('/').to_owned();
+    let parsed_server =
+        Url::parse(&server_url).map_err(|error| format!("ComfyUI 地址无效：{error}"))?;
+    if !matches!(parsed_server.scheme(), "http" | "https") {
+        return Err("ComfyUI 地址只允许 http 或 https".to_owned());
+    }
+    let module = workflow_modules::get(&state.workflow_modules_dir, &input.workflow_module_id)?;
+    if module.adapter.capability != "image-generation" {
+        return Err("所选方案不是图片生成方案".to_owned());
+    }
+    let generation_seed = resolve_generation_seed(&input.seed_mode, &input.seed)?;
+    if module.adapter.variant == "image-edit" {
+        return submit_krea2_image_edit_workflow(&input, &module, &server_url, generation_seed)
+            .await;
+    }
+    let bytes = tokio::fs::read(&module.workflow_path)
+        .await
+        .map_err(|error| format!("读取图片工作流失败：{error}"))?;
+    let workflow: Value =
+        serde_json::from_slice(&bytes).map_err(|error| format!("解析图片工作流失败：{error}"))?;
+    if module.adapter.adapter_id == MOSS_TEXT_TO_IMAGE_ADAPTER {
+        return submit_moss_image_workflow(&input, &module, &server_url, workflow, generation_seed)
+            .await;
+    }
+    let (workflow, model_name) =
+        prepare_krea2_image_workflow(workflow, &module.adapter.bindings, &input, generation_seed)?;
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(900))
@@ -3510,11 +3824,7 @@ pub async fn submit_comfyui_image_upscale(
         return Err("图片放大源不是受支持的图片文件".to_owned());
     }
     let module = workflow_modules::get(&state.workflow_modules_dir, &input.workflow_module_id)?;
-    if module.adapter.capability != "image-generation"
-        || module.adapter.variant != "image-generation"
-    {
-        return Err("图片放大必须使用 Krea2 文生图方案".to_owned());
-    }
+    ensure_image_upscale_module(&module.adapter)?;
     let bytes = tokio::fs::read(&module.workflow_path)
         .await
         .map_err(|error| format!("读取图片工作流失败：{error}"))?;
@@ -6506,7 +6816,10 @@ mod tests {
         }));
         let (workflow, model_name) =
             prepare_moss_image_workflow(moss_source_workflow(), &bindings, &input, 7).unwrap();
-        assert_eq!(workflow.pointer("/57/inputs/value"), Some(&json!("a red fox")));
+        assert_eq!(
+            workflow.pointer("/57/inputs/value"),
+            Some(&json!("a red fox"))
+        );
         assert_eq!(workflow.pointer("/36/inputs/text"), Some(&json!("blurry")));
         assert_eq!(workflow.pointer("/31/inputs/seed"), Some(&json!(7)));
         assert_eq!(workflow.pointer("/31/inputs/steps"), Some(&json!(30)));
@@ -6537,7 +6850,11 @@ mod tests {
         );
         let source = moss_source_workflow();
         for id in ["29", "30", "32", "37", "38", "64"] {
-            assert_eq!(workflow.get(id), source.get(id), "node {id} must be unchanged");
+            assert_eq!(
+                workflow.get(id),
+                source.get(id),
+                "node {id} must be unchanged"
+            );
         }
     }
 
@@ -6549,7 +6866,9 @@ mod tests {
             prepare_moss_image_workflow(moss_source_workflow(), &bindings, &input, 9).unwrap();
         assert_eq!(
             workflow.pointer("/36/inputs/text"),
-            Some(&json!("worst quality, bad anatomy, watermark, jpeg artifact"))
+            Some(&json!(
+                "worst quality, bad anatomy, watermark, jpeg artifact"
+            ))
         );
         assert_eq!(
             workflow.pointer("/28/inputs/unet_name"),
@@ -6700,7 +7019,8 @@ mod tests {
             "Moss\\moss-image-sft-dit-int8-convrot.safetensors", "MinimaxH3\\h3.safetensors"
         ]] } } } });
         let krea2 = WorkflowAdapter::image_generation(WorkflowBindings::image_generation());
-        let moss = WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
+        let moss =
+            WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
         assert_eq!(
             image_diffusion_models_for_adapter(&info, &krea2),
             ["Kera2\\b.safetensors", "Krea2\\a.safetensors"]
@@ -6717,7 +7037,8 @@ mod tests {
     #[test]
     fn only_the_krea2_text_to_image_module_can_upscale_images() {
         let krea2 = WorkflowAdapter::image_generation(WorkflowBindings::image_generation());
-        let moss = WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
+        let moss =
+            WorkflowAdapter::moss_image_generation(WorkflowBindings::moss_image_generation());
         assert!(ensure_image_upscale_module(&krea2).is_ok());
         assert_eq!(
             ensure_image_upscale_module(&moss).unwrap_err(),
