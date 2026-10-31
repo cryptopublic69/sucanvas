@@ -20,6 +20,9 @@ type FieldProps = {
   choices: ChoiceState;
   onChange: (value: unknown) => void;
   labelSuffix?: string;
+  /** Inside a repeat item: no visible label (the group heading names it), the label stays as the
+   * accessible name and the tooltip. */
+  compact?: boolean;
 };
 
 const stop = (event: { stopPropagation(): void }) => event.stopPropagation();
@@ -36,7 +39,7 @@ function emptyChoiceLabel(control: ControlDescription): string {
   return typeof fallback === "string" && fallback.trim() ? `默认（${choiceDisplayName(fallback)}）` : "工作流自带";
 }
 
-function SelectField({ control, value, choices, onChange, labelSuffix = "" }: FieldProps) {
+function SelectField({ control, value, choices, onChange, labelSuffix = "", compact = false }: FieldProps) {
   const label = `${controlLabel(control)}${labelSuffix}`;
   const current = typeof value === "string" ? value : "";
   const staticValues = control.options?.values;
@@ -67,8 +70,11 @@ function SelectField({ control, value, choices, onChange, labelSuffix = "" }: Fi
   }
   const selected = staticValues && !fromComfy ? String(displayed(control, value) ?? "") : current;
   return (
-    <label className="video-workflow-module-select workflow-control is-select" title={control.help || undefined}>
-      <span>{label}</span>
+    <label
+      className={compact ? "workflow-control is-select is-compact" : "video-workflow-module-select workflow-control is-select"}
+      title={control.help || (compact ? label : undefined)}
+    >
+      {!compact && <span>{label}</span>}
       <select
         className="image-generation-select"
         aria-label={label}
@@ -83,7 +89,7 @@ function SelectField({ control, value, choices, onChange, labelSuffix = "" }: Fi
   );
 }
 
-function NumberField({ control, value, onChange, labelSuffix = "" }: FieldProps) {
+function NumberField({ control, value, onChange, labelSuffix = "", compact = false }: FieldProps) {
   const label = `${controlLabel(control)}${labelSuffix}`;
   const shown = displayed(control, value);
   const number = typeof shown === "number" ? shown : "";
@@ -104,8 +110,11 @@ function NumberField({ control, value, onChange, labelSuffix = "" }: FieldProps)
     />
   );
   return (
-    <label className="video-resolution-inline workflow-control is-number" title={control.help || undefined}>
-      <span>{label}</span>
+    <label
+      className={compact ? "workflow-control is-number is-compact" : "video-resolution-inline workflow-control is-number"}
+      title={control.help || (compact ? label : undefined)}
+    >
+      {!compact && <span>{label}</span>}
       {control.type === "slider" && input("range")}
       {input("number")}
       {control.unit && <output>{control.unit}</output>}
@@ -113,12 +122,12 @@ function NumberField({ control, value, onChange, labelSuffix = "" }: FieldProps)
   );
 }
 
-function ToggleField({ control, value, onChange, labelSuffix = "" }: FieldProps) {
+function ToggleField({ control, value, onChange, labelSuffix = "", compact = false }: FieldProps) {
   const label = `${controlLabel(control)}${labelSuffix}`;
   const on = displayed(control, value) === true;
   return (
-    <div className="workflow-control is-toggle" title={control.help || undefined}>
-      <span>{label}</span>
+    <div className={compact ? "workflow-control is-toggle is-compact" : "workflow-control is-toggle"} title={control.help || (compact ? label : undefined)}>
+      {!compact && <span>{label}</span>}
       <button
         type="button"
         className="video-lora-bypass-switch"
@@ -134,9 +143,19 @@ function ToggleField({ control, value, onChange, labelSuffix = "" }: FieldProps)
   );
 }
 
-function TextField({ control, value, onChange, labelSuffix = "" }: FieldProps) {
+function TextField({ control, value, onChange, labelSuffix = "", compact = false }: FieldProps) {
   const label = `${controlLabel(control)}${labelSuffix}`;
   const text = typeof displayed(control, value) === "string" ? String(displayed(control, value)) : "";
+  const kind = control.type === "textarea" ? "is-textarea" : "is-text";
+  if (compact) {
+    const props = { "aria-label": label, value: text, placeholder: control.help || label, spellCheck: false,
+      onPointerDown: stop, onChange: (event: { currentTarget: { value: string } }) => onChange(event.currentTarget.value) };
+    return (
+      <label className={`workflow-control ${kind} is-compact`} title={label}>
+        {control.type === "textarea" ? <textarea {...props} /> : <input type="text" {...props} />}
+      </label>
+    );
+  }
   return control.type === "textarea" ? (
     <label className="image-generation-negative-field workflow-control is-textarea">
       <span>{label}</span>
@@ -166,6 +185,12 @@ export function WorkflowControlField(props: FieldProps) {
 
 type ChoicesFor = (control: ControlDescription) => ChoiceState;
 
+/** Fields that take an item's main width (a choice or a text); the rest are small tools lined
+ * up after it by type: numbers and sliders, then switches, then the item's delete button. */
+const MAIN_FIELD_TYPES = new Set(["select", "text", "textarea"]);
+const TOOL_ORDER: Record<string, number> = { slider: 0, number: 0, toggle: 1 };
+const toolRank = (field: ControlDescription) => TOOL_ORDER[field.type] ?? 2;
+
 function RepeatField({ control, value, choicesFor, onChange }: {
   control: ControlDescription;
   value: unknown;
@@ -176,7 +201,31 @@ function RepeatField({ control, value, choicesFor, onChange }: {
   const items = Array.isArray(value) ? value.filter((item): item is ControlValues => Boolean(item) && typeof item === "object") : [];
   const max = control.max ?? Infinity;
   const fields = control.fields ?? [];
+  const mainFields = fields.filter((field) => MAIN_FIELD_TYPES.has(field.type));
+  // A stable sort: fields of one type keep the package's order.
+  const toolFields = fields.filter((field) => !MAIN_FIELD_TYPES.has(field.type)).sort((a, b) => toolRank(a) - toolRank(b));
   const write = (next: ControlValues[]) => onChange(next.length ? next : undefined);
+  // One item, one line: index | main fields | tools + delete. Labels live in the heading only.
+  const itemField = (item: ControlValues, index: number) => (field: ControlDescription) => (
+    <WorkflowControlField
+      key={field.id}
+      control={field}
+      value={item[field.id]}
+      choices={choicesFor(field)}
+      labelSuffix={` ${index + 1}`}
+      compact
+      onChange={(fieldValue) => {
+        const next = items.map((candidate, position) => {
+          if (position !== index) return candidate;
+          const changed = { ...candidate };
+          if (fieldValue === undefined) delete changed[field.id];
+          else changed[field.id] = fieldValue;
+          return changed;
+        });
+        write(next);
+      }}
+    />
+  );
   return (
     <section className="workflow-repeat" aria-label={label}>
       <div className="workflow-repeat-heading">
@@ -197,34 +246,20 @@ function RepeatField({ control, value, choicesFor, onChange }: {
       {items.map((item, index) => (
         <div className="workflow-repeat-item" key={index}>
           <span className="workflow-repeat-index">{index + 1}</span>
-          {fields.map((field) => (
-            <WorkflowControlField
-              key={field.id}
-              control={field}
-              value={item[field.id]}
-              choices={choicesFor(field)}
-              labelSuffix={` ${index + 1}`}
-              onChange={(fieldValue) => {
-                const next = items.map((candidate, position) => {
-                  if (position !== index) return candidate;
-                  const changed = { ...candidate };
-                  if (fieldValue === undefined) delete changed[field.id];
-                  else changed[field.id] = fieldValue;
-                  return changed;
-                });
-                write(next);
-              }}
-            />
-          ))}
-          <button
-            type="button"
-            className="nodrag video-input-remove"
-            aria-label={`删除${label} ${index + 1}`}
-            onPointerDown={stop}
-            onClick={() => write(items.filter((_, position) => position !== index))}
-          >
-            <Trash2 size={13} aria-hidden="true" />
-          </button>
+          {mainFields.length > 0 && <div className="workflow-repeat-main">{mainFields.map(itemField(item, index))}</div>}
+          <div className="workflow-repeat-tools">
+            {toolFields.map(itemField(item, index))}
+            <button
+              type="button"
+              className="nodrag video-input-remove"
+              aria-label={`删除${label} ${index + 1}`}
+              title={`删除${label} ${index + 1}`}
+              onPointerDown={stop}
+              onClick={() => write(items.filter((_, position) => position !== index))}
+            >
+              <Trash2 size={13} aria-hidden="true" />
+            </button>
+          </div>
         </div>
       ))}
     </section>

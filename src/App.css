@@ -2524,14 +2524,36 @@ button { color: inherit; }
 .workflow-control.is-select { order: 0; z-index: auto; }
 .workflow-control.is-select select:disabled { color: #8f88bd; cursor: progress; }
 .workflow-control.is-text input { width: 100%; min-width: 0; height: 33px; box-sizing: border-box; padding: 0 8px; color: #d8d3ff; background: #1c1a2c; border: 1px solid #4e477e; border-radius: 7px; outline: none; font: inherit; }
-.workflow-repeat { display: grid; gap: 6px; padding: 6px; background: #10131a; border: 1px solid #2d323e; border-radius: 9px; }
-.workflow-repeat-heading { display: flex; align-items: center; gap: 6px; color: #aaa0f2; font-size: calc(11.5px + var(--ui-font-adjust)); }
-.workflow-repeat-heading > span { margin-left: auto; color: #8f88bd; }
+/* CANVAS-025: a repeat group is one box like the "模型" row (same padding, border, radius, colours,
+   33px controls). Heading, count and add once; each item is one line laid out by field type:
+   index | main fields (choice/text, the main width) | tools (slider+number, switch) + delete.
+   When the group is too narrow the tools move as one block to a second line; nothing wraps alone. */
+.workflow-repeat { container-type: inline-size; display: grid; min-width: 0; gap: 6px; padding: 5px 7px 5px 9px; color: #8d95a5; background: #10131a; border: 1px solid #2d323e; border-radius: 9px; font-size: calc(12.5px + var(--ui-font-adjust)); }
+.workflow-repeat-heading { display: flex; min-height: 33px; align-items: center; gap: 6px; }
+.workflow-repeat-heading > strong { font-weight: inherit; white-space: nowrap; }
+.workflow-repeat-heading > span { margin-left: auto; color: #8f88bd; font-variant-numeric: tabular-nums; }
 .workflow-repeat-add { display: grid; width: 26px; height: 26px; place-items: center; padding: 0; color: #aaa0f2; background: #1c1a2c; border: 1px solid #4e477e; border-radius: 7px; cursor: pointer; }
 .workflow-repeat-add:disabled { opacity: .45; cursor: not-allowed; }
-.workflow-repeat-item { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.workflow-repeat-item > .workflow-control { min-width: 0; flex: 1 1 140px; }
-.workflow-repeat-index { width: 18px; color: #8f88bd; text-align: center; }
+.workflow-repeat-item { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; grid-template-areas: "index main tools"; align-items: center; gap: 6px; min-height: 33px; }
+.workflow-repeat-index { grid-area: index; color: #8f88bd; text-align: center; font-variant-numeric: tabular-nums; }
+.workflow-repeat-main { grid-area: main; display: flex; min-width: 0; gap: 6px; }
+.workflow-repeat-main > .workflow-control { flex: 1 1 0; min-width: 0; }
+.workflow-repeat-tools { grid-area: tools; display: flex; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: 4px; min-width: 0; }
+.workflow-repeat .workflow-control.is-compact { display: flex; min-height: 0; align-items: center; gap: 4px; padding: 0; background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+.workflow-repeat .workflow-control.is-number.is-compact { flex: 0 1 auto; }
+.workflow-repeat .workflow-control.is-number.is-compact > .workflow-control-slider { width: 64px; min-width: 40px; flex: 1 1 64px; margin: 0; }
+.workflow-repeat .workflow-control.is-number.is-compact > .image-generation-number { width: 46px; flex: 0 0 46px; padding: 0 2px; text-align: center; }
+.workflow-repeat .workflow-control.is-toggle.is-compact { flex: 0 0 auto; padding: 0 2px; }
+.workflow-repeat .workflow-control.is-text.is-compact input { width: 100%; min-width: 0; height: 33px; box-sizing: border-box; padding: 0 8px; color: #d8d3ff; background: #1c1a2c; border: 1px solid #4e477e; border-radius: 7px; outline: none; font: inherit; }
+.workflow-repeat-tools > .video-input-remove { flex: 0 0 24px; }
+@container (max-width: 300px) {
+  .workflow-repeat-item { grid-template-columns: 16px minmax(0, 1fr); grid-template-areas: "index main" ". tools"; }
+  .workflow-repeat-tools { justify-content: stretch; }
+  .workflow-repeat .workflow-control.is-number.is-compact { flex: 1 1 auto; }
+}
 .workflow-package-pending { width: 100%; }
 :root[data-theme="light"] .workflow-control.is-toggle,
 :root[data-theme="light"] .workflow-repeat { color: #554aa7; background: #f7f8fb; border-color: #d9dce5; }
+/* Light theme: the group matches the light "模型" row; fields inside it stay unboxed. */
+:root[data-theme="light"] .workflow-repeat { color: #667082; background: #f7f8fa; border-color: #d9dde5; }
+:root[data-theme="light"] .workflow-repeat .workflow-control.is-compact { background: transparent; border: 0; }
