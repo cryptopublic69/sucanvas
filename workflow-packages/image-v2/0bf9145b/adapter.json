@@ -1,0 +1,475 @@
+{
+  "engineApiVersion": 2,
+  "capability": "image-generation",
+  "variant": "image-generation",
+  "nodeTypes": {
+    "159": "Power Lora Loader (rgthree)"
+  },
+  "operations": {
+    "generate": {
+      "label": "生成",
+      "inputs": [
+        {
+          "id": "prompt",
+          "type": "text",
+          "label": "提示词",
+          "min": 1,
+          "max": 1
+        }
+      ],
+      "outputs": [
+        {
+          "id": "image",
+          "type": "image",
+          "min": 0,
+          "max": 1
+        }
+      ],
+      "controls": [
+        {
+          "id": "loraName",
+          "type": "select",
+          "label": "LoRA",
+          "default": "",
+          "options": {
+            "comfyui": {
+              "classType": "LoraLoaderModelOnly",
+              "input": "lora_name",
+              "dirs": [
+                "Krea2"
+              ]
+            }
+          },
+          "allowEmpty": true,
+          "emptyLabel": "不使用 LoRA"
+        },
+        {
+          "id": "modelName",
+          "type": "select",
+          "label": "模型",
+          "default": "Krea2\\pornmasterKrea2_v2TurboBF16.safetensors",
+          "options": {
+            "comfyui": {
+              "classType": "UNETLoader",
+              "input": "unet_name",
+              "dirs": [
+                "Krea2",
+                "Kera2"
+              ]
+            }
+          },
+          "allowEmpty": true,
+          "setting": "diffusionModelName"
+        },
+        {
+          "id": "negativePrompt",
+          "type": "textarea",
+          "label": "负向提示词",
+          "default": "",
+          "help": "可选：直接输入不希望出现的内容"
+        },
+        {
+          "id": "width",
+          "type": "number",
+          "label": "宽度",
+          "default": 1280,
+          "min": 64.0,
+          "max": 4096.0,
+          "number": "int",
+          "group": "size",
+          "unit": "px",
+          "increment": 64.0
+        },
+        {
+          "id": "height",
+          "type": "number",
+          "label": "高度",
+          "default": 720,
+          "min": 64.0,
+          "max": 4096.0,
+          "number": "int",
+          "group": "size",
+          "unit": "px",
+          "increment": 64.0
+        },
+        {
+          "id": "steps",
+          "type": "number",
+          "label": "生图步数",
+          "default": 8,
+          "min": 1.0,
+          "max": 1000.0,
+          "number": "int",
+          "group": "sampling",
+          "help": "基础文生图 K 采样器的采样步数"
+        },
+        {
+          "id": "seed",
+          "type": "seed",
+          "label": "种子"
+        },
+        {
+          "id": "upscaleEnabled",
+          "type": "toggle",
+          "label": "输出放大",
+          "default": false,
+          "group": "sampling"
+        },
+        {
+          "id": "upscaleMegapixels",
+          "type": "number",
+          "label": "放大像素数",
+          "default": 8.0,
+          "min": 0.1,
+          "max": 64.0,
+          "number": "float",
+          "group": "sampling",
+          "unit": "MP",
+          "help": "放大后的目标像素数（MP）"
+        }
+      ],
+      "groups": [
+        {
+          "id": "size",
+          "swap": true
+        },
+        {
+          "id": "sampling"
+        }
+      ],
+      "steps": [
+        {
+          "op": "set",
+          "node": "98",
+          "input": "unet_name",
+          "value": {
+            "path": {
+              "control": "modelName"
+            }
+          },
+          "when": {
+            "not": {
+              "empty": {
+                "trim": {
+                  "control": "modelName"
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "159",
+          "input": "lora_1",
+          "value": {
+            "object": {
+              "lora": {
+                "trim": {
+                  "control": "loraName"
+                }
+              },
+              "on": {
+                "const": true
+              },
+              "strength": {
+                "const": 1.0
+              }
+            }
+          },
+          "when": {
+            "not": {
+              "empty": {
+                "trim": {
+                  "control": "loraName"
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "90",
+          "input": "text",
+          "value": {
+            "trim": {
+              "media": {
+                "port": "prompt",
+                "index": 0
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "153",
+          "input": "text",
+          "value": {
+            "trim": {
+              "control": "negativePrompt"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "63",
+          "input": "cfg",
+          "value": {
+            "if": {
+              "cond": {
+                "empty": {
+                  "trim": {
+                    "control": "negativePrompt"
+                  }
+                }
+              },
+              "then": {
+                "const": 1.0
+              },
+              "else": {
+                "const": 1.5
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "160",
+          "input": "cfg",
+          "value": {
+            "if": {
+              "cond": {
+                "empty": {
+                  "trim": {
+                    "control": "negativePrompt"
+                  }
+                }
+              },
+              "then": {
+                "const": 1.0
+              },
+              "else": {
+                "const": 1.5
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "63",
+          "input": "noise_seed",
+          "value": {
+            "seed": true
+          }
+        },
+        {
+          "op": "set",
+          "node": "63",
+          "input": "steps",
+          "value": {
+            "int": {
+              "control": "steps"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "29",
+          "input": "width",
+          "value": {
+            "int": {
+              "control": "width"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "29",
+          "input": "height",
+          "value": {
+            "int": {
+              "control": "height"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "63",
+          "input": "latent_image",
+          "value": {
+            "link": [
+              "29",
+              0
+            ]
+          }
+        },
+        {
+          "op": "set",
+          "node": "161",
+          "input": "megapixels",
+          "value": {
+            "float": {
+              "control": "upscaleMegapixels"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "157",
+          "input": "images",
+          "value": {
+            "if": {
+              "cond": {
+                "truthy": {
+                  "control": "upscaleEnabled"
+                }
+              },
+              "then": {
+                "link": [
+                  "163",
+                  0
+                ]
+              },
+              "else": {
+                "link": [
+                  "30",
+                  0
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "record": {
+        "modelName": {
+          "input": {
+            "node": "98",
+            "input": "unet_name"
+          }
+        }
+      }
+    },
+    "upscaleImage": {
+      "label": "放大图片",
+      "inputs": [
+        {
+          "id": "source",
+          "type": "image",
+          "label": "源图片",
+          "min": 1,
+          "max": 1
+        }
+      ],
+      "outputs": [
+        {
+          "id": "image",
+          "type": "image",
+          "min": 0,
+          "max": 1
+        }
+      ],
+      "controls": [
+        {
+          "id": "megapixels",
+          "type": "number",
+          "label": "放大像素数",
+          "default": 8.0,
+          "min": 0.1,
+          "max": 64.0,
+          "number": "float"
+        },
+        {
+          "id": "modelName",
+          "type": "select",
+          "label": "模型",
+          "default": "Krea2\\pornmasterKrea2_v2TurboBF16.safetensors",
+          "options": {
+            "comfyui": {
+              "classType": "UNETLoader",
+              "input": "unet_name",
+              "dirs": [
+                "Krea2",
+                "Kera2"
+              ]
+            }
+          },
+          "allowEmpty": true,
+          "setting": "diffusionModelName"
+        }
+      ],
+      "steps": [
+        {
+          "op": "set",
+          "node": "98",
+          "input": "unet_name",
+          "value": {
+            "path": {
+              "control": "modelName"
+            }
+          },
+          "when": {
+            "not": {
+              "empty": {
+                "trim": {
+                  "control": "modelName"
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "addNode",
+          "node": "infinite_canvas_image_upscale_source",
+          "classType": "LoadImage",
+          "inputs": {
+            "image": {
+              "media": {
+                "port": "source",
+                "index": 0
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "161",
+          "input": "image",
+          "value": {
+            "link": [
+              "infinite_canvas_image_upscale_source",
+              0
+            ]
+          }
+        },
+        {
+          "op": "set",
+          "node": "161",
+          "input": "megapixels",
+          "value": {
+            "float": {
+              "control": "megapixels"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "157",
+          "input": "images",
+          "value": {
+            "link": [
+              "161",
+              0
+            ]
+          }
+        }
+      ],
+      "record": {
+        "modelName": {
+          "input": {
+            "node": "98",
+            "input": "unet_name"
+          }
+        }
+      }
+    }
+  }
+}

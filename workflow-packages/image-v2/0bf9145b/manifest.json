@@ -1,0 +1,30 @@
+{
+  "id": "workflow-module-0bf9145b-ac9f-47ac-a85d-24d81612a643",
+  "name": "Krea2 文生图（可选放大）",
+  "capability": "image-generation",
+  "variant": "image-generation",
+  "revision": "v2",
+  "packageSchemaVersion": 1,
+  "engineApiVersion": "2",
+  "adapterKind": "workflow-package-v2",
+  "adapterEntry": "adapter.json",
+  "uiSchemaEntry": "ui-schema.json",
+  "sourceWorkflowName": "workflow.json",
+  "createdAt": "2026-08-16T19:36:52.829699300+00:00",
+  "updatedAt": "2026-08-17T00:28:04.020447300+00:00",
+  "deletedAt": null,
+  "defaults": {
+    "primaryVideoSteps": 6,
+    "primaryAudioSteps": 8,
+    "secondarySchedulerSteps": 4,
+    "primaryBrightness": 1.0,
+    "primaryContrast": 0.9,
+    "primarySaturation": 0.9,
+    "secondaryBrightness": 1.0,
+    "secondaryContrast": 0.9,
+    "secondarySaturation": 1.0,
+    "diffusionModelName": "Krea2\\pornmasterKrea2_v2TurboBF16.safetensors",
+    "loraName": "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors",
+    "loraStrength": 1.0
+  }
+}

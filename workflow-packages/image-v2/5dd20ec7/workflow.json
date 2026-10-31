@@ -1,0 +1,276 @@
+{
+  "28": {
+    "inputs": {
+      "unet_name": "Moss\\pornmasterMoss_v1.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "29": {
+    "inputs": {
+      "text": [
+        "57",
+        0
+      ],
+      "clip": [
+        "30",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "30": {
+    "inputs": {
+      "clip_name": "qwen3.5_9b_w4a8_gptq.safetensors",
+      "type": "moss_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "31": {
+    "inputs": {
+      "seed": 92925844317081,
+      "steps": 25,
+      "cfg": 3,
+      "sampler_name": "er_sde",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "38",
+        0
+      ],
+      "positive": [
+        "29",
+        0
+      ],
+      "negative": [
+        "36",
+        0
+      ],
+      "latent_image": [
+        "35",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "32": {
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "35": {
+    "inputs": {
+      "width": 912,
+      "height": 1632,
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "空Latent图像（Flux2）",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "36": {
+    "inputs": {
+      "text": "worst quality, bad anatomy, watermark, jpeg artifact",
+      "clip": [
+        "30",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "37": {
+    "inputs": {
+      "samples": [
+        "31",
+        0
+      ],
+      "vae": [
+        "32",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "38": {
+    "inputs": {
+      "double_layers": "",
+      "single_layers": "22",
+      "start_percent": 0,
+      "end_percent": 0.5,
+      "model": [
+        "28",
+        0
+      ]
+    },
+    "class_type": "SkipLayerGuidanceDiTSimple",
+    "_meta": {
+      "title": "跳过层引导（DiT简化）",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "57": {
+    "inputs": {
+      "value": "亚洲性美丽御姐 35 岁，乳房丰满柔软下垂严重。女人穿白色衬衫和黑色包臀裙，黑色吊带丝袜。\n\n衬衫敞开，露出一侧完整乳房。\n\n虐你拇指食指用力掐自己的乳头，女人吐舌头。"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Text (User Prompt)",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "64": {
+    "inputs": {
+      "output_path": "[time(%Y-%m-%d)]",
+      "filename_prefix": "moss_",
+      "filename_delimiter": "_",
+      "filename_number_padding": 4,
+      "filename_number_start": "false",
+      "extension": "png",
+      "dpi": 300,
+      "quality": 100,
+      "optimize_image": "true",
+      "lossless_webp": "false",
+      "overwrite_mode": "false",
+      "show_history": "false",
+      "show_history_by_prefix": "true",
+      "embed_workflow": "true",
+      "show_previews": "true",
+      "images": [
+        "37",
+        0
+      ]
+    },
+    "class_type": "Image Save",
+    "_meta": {
+      "title": "Image Save",
+      "cnr_id": "pr-was-node-suite-comfyui-47064894",
+      "ver": "056badacda52e88d29d6a65f9509cd3115ace0f2"
+    }
+  },
+  "9701": {
+    "inputs": {
+      "model": [
+        "28",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 1"
+    }
+  },
+  "9702": {
+    "inputs": {
+      "model": [
+        "9701",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 2"
+    }
+  },
+  "9703": {
+    "inputs": {
+      "model": [
+        "9702",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 3"
+    }
+  },
+  "9704": {
+    "inputs": {
+      "model": [
+        "9703",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 4"
+    }
+  },
+  "9705": {
+    "inputs": {
+      "model": [
+        "9704",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 5"
+    }
+  },
+  "9706": {
+    "inputs": {
+      "model": [
+        "9705",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 6"
+    }
+  }
+}

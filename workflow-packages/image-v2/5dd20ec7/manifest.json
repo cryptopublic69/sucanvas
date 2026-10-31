@@ -1,0 +1,31 @@
+{
+  "id": "workflow-module-5dd20ec7-3b46-4b49-8ff9-7040b52fb90b",
+  "name": "Moss全能王 文生图",
+  "capability": "image-generation",
+  "variant": "image-generation",
+  "revision": "v2",
+  "packageSchemaVersion": 1,
+  "engineApiVersion": "2",
+  "adapterKind": "workflow-package-v2",
+  "adapterEntry": "adapter.json",
+  "uiSchemaEntry": "ui-schema.json",
+  "sourceWorkflowName": "workflow-50d965db83a949a5bbb03371c25513d3.json",
+  "createdAt": "2026-10-31T16:39:54.501770500+00:00",
+  "updatedAt": "2026-10-31T16:39:54.501770500+00:00",
+  "deletedAt": null,
+  "defaults": {
+    "primaryVideoSteps": 6,
+    "primaryAudioSteps": 8,
+    "secondarySchedulerSteps": 4,
+    "primaryUpscaleFactor": 1.0,
+    "primaryBrightness": 1.0,
+    "primaryContrast": 0.9,
+    "primarySaturation": 0.9,
+    "secondaryBrightness": 1.0,
+    "secondaryContrast": 0.9,
+    "secondarySaturation": 1.0,
+    "diffusionModelName": "Moss\\pornmasterMoss_v1.safetensors",
+    "loraName": "",
+    "loraStrength": 1.0
+  }
+}

@@ -1,0 +1,330 @@
+{
+  "engineApiVersion": 2,
+  "capability": "image-generation",
+  "variant": "image-generation",
+  "operations": {
+    "generate": {
+      "label": "生成",
+      "inputs": [
+        {
+          "id": "prompt",
+          "type": "text",
+          "label": "提示词",
+          "min": 1,
+          "max": 1
+        }
+      ],
+      "outputs": [
+        {
+          "id": "image",
+          "type": "image",
+          "min": 0,
+          "max": 1
+        }
+      ],
+      "controls": [
+        {
+          "id": "modelName",
+          "type": "select",
+          "label": "模型",
+          "default": "",
+          "options": {
+            "comfyui": {
+              "classType": "UNETLoader",
+              "input": "unet_name",
+              "dirs": [
+                "Moss"
+              ]
+            }
+          },
+          "allowEmpty": true,
+          "setting": "diffusionModelName"
+        },
+        {
+          "id": "loras",
+          "type": "repeat",
+          "label": "LoRA",
+          "max": 6,
+          "fields": [
+            {
+              "id": "name",
+              "type": "select",
+              "label": "LoRA",
+              "default": "",
+              "allowEmpty": true,
+              "emptyLabel": "不使用",
+              "options": {
+                "comfyui": {
+                  "classType": "LoraLoaderModelOnly",
+                  "input": "lora_name",
+                  "dirs": [
+                    "moss"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "weight",
+              "type": "slider",
+              "label": "权重",
+              "default": 1,
+              "min": 0,
+              "max": 2,
+              "step": 0.05,
+              "number": "float"
+            },
+            {
+              "id": "on",
+              "type": "toggle",
+              "label": "启用",
+              "default": true
+            }
+          ]
+        },
+        {
+          "id": "negativePrompt",
+          "type": "textarea",
+          "label": "负向提示词",
+          "default": "",
+          "help": "可选：直接输入不希望出现的内容"
+        },
+        {
+          "id": "width",
+          "type": "number",
+          "label": "宽度",
+          "default": 1280,
+          "min": 64.0,
+          "max": 4096.0,
+          "number": "int",
+          "group": "size",
+          "unit": "px",
+          "increment": 64.0
+        },
+        {
+          "id": "height",
+          "type": "number",
+          "label": "高度",
+          "default": 720,
+          "min": 64.0,
+          "max": 4096.0,
+          "number": "int",
+          "group": "size",
+          "unit": "px",
+          "increment": 64.0
+        },
+        {
+          "id": "steps",
+          "type": "number",
+          "label": "生图步数",
+          "default": 25,
+          "min": 1.0,
+          "max": 1000.0,
+          "number": "int",
+          "group": "sampling",
+          "help": "基础文生图 K 采样器的采样步数"
+        },
+        {
+          "id": "seed",
+          "type": "seed",
+          "label": "种子"
+        }
+      ],
+      "groups": [
+        {
+          "id": "size",
+          "swap": true
+        },
+        {
+          "id": "sampling"
+        }
+      ],
+      "steps": [
+        {
+          "op": "set",
+          "node": "28",
+          "input": "unet_name",
+          "value": {
+            "path": {
+              "control": "modelName"
+            }
+          },
+          "when": {
+            "not": {
+              "empty": {
+                "trim": {
+                  "control": "modelName"
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "57",
+          "input": "value",
+          "value": {
+            "trim": {
+              "media": {
+                "port": "prompt",
+                "index": 0
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "36",
+          "input": "text",
+          "value": {
+            "trim": {
+              "control": "negativePrompt"
+            }
+          },
+          "when": {
+            "not": {
+              "empty": {
+                "trim": {
+                  "control": "negativePrompt"
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "31",
+          "input": "seed",
+          "value": {
+            "seed": true
+          }
+        },
+        {
+          "op": "set",
+          "node": "31",
+          "input": "steps",
+          "value": {
+            "int": {
+              "control": "steps"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "35",
+          "input": "width",
+          "value": {
+            "roundTo": {
+              "value": {
+                "int": {
+                  "control": "width"
+                }
+              },
+              "multiple": 16,
+              "min": 16
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "35",
+          "input": "height",
+          "value": {
+            "roundTo": {
+              "value": {
+                "int": {
+                  "control": "height"
+                }
+              },
+              "multiple": 16,
+              "min": 16
+            }
+          }
+        },
+        {
+          "op": "chain",
+          "id": "lora",
+          "repeat": "loras",
+          "slots": [
+            "9701",
+            "9702",
+            "9703",
+            "9704",
+            "9705",
+            "9706"
+          ],
+          "linkInput": "model",
+          "itemWhen": {
+            "all": [
+              {
+                "truthy": {
+                  "item": "on"
+                }
+              },
+              {
+                "not": {
+                  "empty": {
+                    "trim": {
+                      "item": "name"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "fields": {
+            "lora_name": {
+              "path": {
+                "item": "name"
+              }
+            },
+            "strength_model": {
+              "float": {
+                "item": "weight"
+              }
+            }
+          },
+          "from": {
+            "link": [
+              "28",
+              0
+            ]
+          },
+          "to": [
+            {
+              "node": "38",
+              "input": "model"
+            }
+          ]
+        },
+        {
+          "op": "keepReachable",
+          "from": [
+            "64"
+          ]
+        }
+      ],
+      "results": [
+        {
+          "node": "64"
+        }
+      ],
+      "record": {
+        "modelName": {
+          "input": {
+            "node": "28",
+            "input": "unet_name"
+          }
+        }
+      }
+    }
+  },
+  "resultUpscale": false,
+  "nodeTypes": {
+    "9701": "LoraLoaderModelOnly",
+    "9702": "LoraLoaderModelOnly",
+    "9703": "LoraLoaderModelOnly",
+    "9704": "LoraLoaderModelOnly",
+    "9705": "LoraLoaderModelOnly",
+    "9706": "LoraLoaderModelOnly"
+  }
+}
