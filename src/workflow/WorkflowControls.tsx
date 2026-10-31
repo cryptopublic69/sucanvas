@@ -271,11 +271,13 @@ type ControlsProps = {
   values: ControlValues;
   choicesFor: ChoicesFor;
   onChange: (values: ControlValues) => void;
+  /** Something the node shell draws right before the row of one control (its prompt box). */
+  before?: { controlId: string; content: ReactNode };
 };
 
 /** Every visible control of the operation except the seed (drawn by the node shell), in the
  * package's order; consecutive controls of one group share a row. */
-export function WorkflowControls({ operation, values, choicesFor, onChange }: ControlsProps) {
+export function WorkflowControls({ operation, values, choicesFor, onChange, before }: ControlsProps) {
   const shown = visibleControls(operation, values).filter((control) => control.type !== "seed");
   const groups = new Map<string, GroupDescription>((operation.groups ?? []).map((group) => [group.id, group]));
   const set = (id: string, value: unknown) => {
@@ -298,11 +300,14 @@ export function WorkflowControls({ operation, values, choicesFor, onChange }: Co
   return (
     <div className="workflow-controls">
       {rows.map(({ group, controls }, index) => {
-        if (!group) return <Fragment key={controls[0].id}>{controls.map(field)}</Fragment>;
+        const lead = before && controls.some((control) => control.id === before.controlId) ? before.content : null;
+        if (!group) return <Fragment key={controls[0].id}>{lead}{controls.map(field)}</Fragment>;
         const swappable = group.swap && controls.length === 2;
         const [first, second] = controls;
         return (
-          <div className="video-resolution-pair workflow-control-row" key={`${group.id}-${index}`} aria-label={group.label || undefined}>
+          <Fragment key={`${group.id}-${index}`}>
+          {lead}
+          <div className="video-resolution-pair workflow-control-row" aria-label={group.label || undefined}>
             {group.label && <span className="workflow-control-row-label">{group.label}</span>}
             {swappable ? (
               <>
@@ -326,6 +331,7 @@ export function WorkflowControls({ operation, values, choicesFor, onChange }: Co
               </>
             ) : controls.map(field)}
           </div>
+          </Fragment>
         );
       })}
     </div>

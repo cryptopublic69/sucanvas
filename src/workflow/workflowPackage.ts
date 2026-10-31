@@ -132,6 +132,18 @@ export function visibleControls(operation: OperationDescription, values: Control
   return controls.filter((control) => conditionHolds(control.visibleWhen, values, controls));
 }
 
+/** The id the program gives the negative prompt: the old image node's field and the control the
+ * v1 converter writes (legacyImageNode.ts, legacy_v1_convert.rs). Any package may declare it. */
+export const NEGATIVE_PROMPT_CONTROL_ID = "negativePrompt";
+
+/** The control the node's prompt box is drawn right above: a visible text control with the
+ * program's negative prompt id. None means the prompt box stays above every control. */
+export function promptAnchorControl(operation: OperationDescription, values: ControlValues): ControlDescription | undefined {
+  return visibleControls(operation, values).find((control) => (
+    control.id === NEGATIVE_PROMPT_CONTROL_ID && (control.type === "textarea" || control.type === "text")
+  ));
+}
+
 /** The request for one run of `operationName`: the node's own values for declared controls
  * (unset ones are left to the server's preset/default) and, per input port, what is connected
  * to it. The first port of each type takes that type's connections; text is trimmed. */

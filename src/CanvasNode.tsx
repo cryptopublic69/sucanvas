@@ -10,10 +10,12 @@ import { WorkflowControls } from "./workflow/WorkflowControls";
 import {
   displayPorts,
   portLabel,
+  promptAnchorControl,
   resultUpscaleOffered,
   switchedControlValues,
   type ControlValues,
   type PackageDescription,
+  type PortDescription,
 } from "./workflow/workflowPackage";
 import {
   GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH,
@@ -6985,6 +6987,103 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     void runImageResize(maxEdge, true);
   };
 
+  // CANVAS-027: the image node's prompt box. When the package has a negative prompt control
+  // (found by its control fields) WorkflowControls draws it right above that control.
+  const imagePromptAnchor = imageOperation ? promptAnchorControl(imageOperation, imageControlValues) : undefined;
+  const renderImagePromptSection = (port: PortDescription) => {
+    const label = portLabel(port);
+    return (
+      <section key={port.id} className="video-input-group is-text image-prompt-input-group">
+        <div className={`video-input-group-heading ${textInputs.length ? "has-text-clear" : ""}`}>
+          <FileText size={13} />
+          <strong>{label}</strong>
+          <span>{textInputs.length}</span>
+          {textInputs.length > 0 && (
+            <button
+              type="button"
+              className="nodrag video-text-clear-button"
+              disabled={clearingTexts}
+              title={`清除当前节点的全部${label}连接`}
+              aria-label={`清除全部 ${textInputs.length} 个${label}连接`}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                setTextIdsPendingClear(textInputs.map((input) => input.id));
+              }}
+            >
+              <Trash2 size={12} aria-hidden="true" />
+            </button>
+          )}
+        </div>
+        <ol className="video-input-list image-prompt-input-list" role="listbox" aria-label={`${label}输入`}>
+          {textInputs.length ? textInputs.map((input, index) => (
+            <li
+              key={input.id}
+              className={`video-input-item is-text-input ${activeTextInputId === input.id ? "is-active-text" : ""}`}
+              role="option"
+              aria-selected={activeTextInputId === input.id}
+              tabIndex={0}
+              title={activeTextInputId === input.id ? `当前${label}` : `点击设为当前${label}`}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onActivateTextInput(id, input.id);
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                event.stopPropagation();
+                onActivateTextInput(id, input.id);
+              }}
+            >
+              <span className="video-input-index">{index + 1}</span>
+              <span className="video-input-preview is-text"><FileText size={16} /></span>
+              <span className="video-input-copy">
+                <strong title={input.title}>
+                  {input.title || "未命名文本"}{activePromptVersionLabelFromContent(input.content) ? ` · ${activePromptVersionLabelFromContent(input.content)}` : ""}
+                </strong>
+                <span className="video-text-input-preview" title={imagePromptText(input)}>{imagePromptText(input) || "空文本"}</span>
+              </span>
+              <button data-readonly-allow=""
+                type="button"
+                className="nodrag video-input-expand"
+                aria-label={`放大查看${label}：${input.title || "未命名文本"}`}
+                title="放大查看和编辑提示词"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openConnectedTextEditor(input);
+                }}
+              >
+                <Maximize2 size={13} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="nodrag video-input-remove"
+                disabled={removingMediaId === input.id}
+                aria-label={`从当前节点移除${label}：${input.title || "未命名文本"}`}
+                title="从当前节点移除，不删除原文本节点"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void removeConnectedInput(input.id);
+                }}
+              >
+                <Trash2 size={13} aria-hidden="true" />
+              </button>
+            </li>
+          )) : (
+            <li className="video-input-item is-empty">
+              <span className="video-input-index">—</span>
+              <span className="video-input-preview is-text"><FileText size={16} /></span>
+              <span className="video-input-copy"><strong>无</strong><span className="video-text-input-preview">请连接文本或提示词迭代节点</span></span>
+            </li>
+          )}
+        </ol>
+      </section>
+    );
+  };
+
   return (
     <article
       className={`canvas-node kind-${record.kind} ${isStoryboardReferenceCompiler ? "is-storyboard-reference-compiler" : ""} ${selected ? "is-selected" : ""} ${isContentIterationNode ? `is-content-iteration-node content-type-${contentNodeType}` : ""} ${usesSecondaryGreenTheme ? "is-secondary-preview" : ""} ${usesCustomPreviewTheme ? "has-custom-preview-color" : ""} ${relationHighlighted ? "is-relation-highlighted" : ""} ${matched ? "" : "is-dimmed"}`}
@@ -9894,97 +9993,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           )}
           {imageOperation && displayPorts(imageOperation).map((port) => {
             if (port.type === "text" && port === imageTextPort) {
-              const label = portLabel(port);
-              return (
-                <section key={port.id} className="video-input-group is-text image-prompt-input-group">
-                  <div className={`video-input-group-heading ${textInputs.length ? "has-text-clear" : ""}`}>
-                    <FileText size={13} />
-                    <strong>{label}</strong>
-                    <span>{textInputs.length}</span>
-                    {textInputs.length > 0 && (
-                      <button
-                        type="button"
-                        className="nodrag video-text-clear-button"
-                        disabled={clearingTexts}
-                        title={`清除当前节点的全部${label}连接`}
-                        aria-label={`清除全部 ${textInputs.length} 个${label}连接`}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setTextIdsPendingClear(textInputs.map((input) => input.id));
-                        }}
-                      >
-                        <Trash2 size={12} aria-hidden="true" />
-                      </button>
-                    )}
-                  </div>
-                  <ol className="video-input-list image-prompt-input-list" role="listbox" aria-label={`${label}输入`}>
-                    {textInputs.length ? textInputs.map((input, index) => (
-                      <li
-                        key={input.id}
-                        className={`video-input-item is-text-input ${activeTextInputId === input.id ? "is-active-text" : ""}`}
-                        role="option"
-                        aria-selected={activeTextInputId === input.id}
-                        tabIndex={0}
-                        title={activeTextInputId === input.id ? `当前${label}` : `点击设为当前${label}`}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onActivateTextInput(id, input.id);
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter" && event.key !== " ") return;
-                          event.preventDefault();
-                          event.stopPropagation();
-                          onActivateTextInput(id, input.id);
-                        }}
-                      >
-                        <span className="video-input-index">{index + 1}</span>
-                        <span className="video-input-preview is-text"><FileText size={16} /></span>
-                        <span className="video-input-copy">
-                          <strong title={input.title}>
-                            {input.title || "未命名文本"}{activePromptVersionLabelFromContent(input.content) ? ` · ${activePromptVersionLabelFromContent(input.content)}` : ""}
-                          </strong>
-                          <span className="video-text-input-preview" title={imagePromptText(input)}>{imagePromptText(input) || "空文本"}</span>
-                        </span>
-                        <button data-readonly-allow=""
-                          type="button"
-                          className="nodrag video-input-expand"
-                          aria-label={`放大查看${label}：${input.title || "未命名文本"}`}
-                          title="放大查看和编辑提示词"
-                          onPointerDown={(event) => event.stopPropagation()}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            openConnectedTextEditor(input);
-                          }}
-                        >
-                          <Maximize2 size={13} aria-hidden="true" />
-                        </button>
-                        <button
-                          type="button"
-                          className="nodrag video-input-remove"
-                          disabled={removingMediaId === input.id}
-                          aria-label={`从当前节点移除${label}：${input.title || "未命名文本"}`}
-                          title="从当前节点移除，不删除原文本节点"
-                          onPointerDown={(event) => event.stopPropagation()}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void removeConnectedInput(input.id);
-                          }}
-                        >
-                          <Trash2 size={13} aria-hidden="true" />
-                        </button>
-                      </li>
-                    )) : (
-                      <li className="video-input-item is-empty">
-                        <span className="video-input-index">—</span>
-                        <span className="video-input-preview is-text"><FileText size={16} /></span>
-                        <span className="video-input-copy"><strong>无</strong><span className="video-text-input-preview">请连接文本或提示词迭代节点</span></span>
-                      </li>
-                    )}
-                  </ol>
-                </section>
-              );
+              // CANVAS-027: with a negative prompt it is drawn right above it, inside the controls.
+              return imagePromptAnchor ? null : renderImagePromptSection(port);
             }
             if (port.type !== "image" || port !== imageMediaPort) return null;
             const label = portLabel(port);
@@ -10111,6 +10121,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               onChange={(values) => onChange(id, {
                 content: { ...imageNodeContent, controlValues: values, status: "idle", validationMessage: "" },
               })}
+              before={imagePromptAnchor && imageTextPort
+                ? { controlId: imagePromptAnchor.id, content: renderImagePromptSection(imageTextPort) }
+                : undefined}
             />
           )}
           <div className="video-execution-row image-generation-execution-row">
