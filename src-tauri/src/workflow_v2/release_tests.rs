@@ -470,3 +470,138 @@ fn text_ports_keep_their_type_after_the_release() {
     // The converter is still what produces the v1 view of these modules.
     let _ = legacy_v1_convert::convert_package;
 }
+
+// ---- CANVAS-029: the Krea2 packages get Moss's LoRA group ----
+
+fn submitted(
+    loaded: &runtime::LoadedPackage,
+    values: Value,
+    media: BTreeMap<String, Vec<String>>,
+) -> String {
+    serde_json::to_string(&build(loaded, "generate", values, media).unwrap().workflow).unwrap()
+}
+
+fn assert_moss_lora_group(short: &str) {
+    let loaded = release_loaded(short);
+    let ids = loaded.package.operations["generate"]
+        .controls
+        .iter()
+        .map(|control| control.id.as_str())
+        .collect::<Vec<_>>();
+    let at = ids.iter().position(|id| *id == "loras").expect("loras");
+    assert_eq!(ids[at - 1], "modelName", "{short}: {ids:?}");
+    assert!(!ids.contains(&"loraName"), "{short}: {ids:?}");
+    let mut expected =
+        serde_json::to_value(control(&release_loaded("5dd20ec7"), "generate", "loras")).unwrap();
+    expected["fields"][0]["options"]["comfyui"]["dirs"] = json!(["Krea2"]);
+    assert_eq!(
+        serde_json::to_value(control(&loaded, "generate", "loras")).unwrap(),
+        expected,
+        "{short}"
+    );
+}
+
+#[test]
+fn krea2_text_to_image_offers_the_moss_lora_group_in_the_krea2_directory() {
+    assert_moss_lora_group("0bf9145b");
+}
+
+/// No LoRA, or the old single LoRA as item 1 (weight 1, on): byte for byte what the package
+/// submitted before (the converted v1 package, which the release reproduces; model given so the
+/// renamed default plays no part).
+#[test]
+fn krea2_text_to_image_without_or_with_one_lora_submits_what_it_did_before() {
+    let before = v1_loaded("0bf9145b");
+    let now = release_loaded("0bf9145b");
+    let model = "Krea2\\base.safetensors";
+    let lora = "Krea2\\PornMaster_Krea2_Realism_slider_V1.safetensors";
+    let old = |name: &str| {
+        submitted(
+            &before,
+            json!({ "modelName": model, "loraName": name }),
+            prompt("fox"),
+        )
+    };
+    for values in [
+        json!({ "modelName": model }),
+        json!({ "modelName": model, "loras": [] }),
+    ] {
+        assert_eq!(submitted(&now, values, prompt("fox")), old(""));
+    }
+    for item in [
+        json!({ "name": lora }),
+        json!({ "name": lora, "weight": 1, "on": true }),
+        json!({ "name": lora, "weight": 1.0 }),
+    ] {
+        assert_eq!(
+            submitted(
+                &now,
+                json!({ "modelName": model, "loras": [item] }),
+                prompt("fox")
+            ),
+            old(lora),
+            "{item}"
+        );
+    }
+}
+
+#[test]
+fn krea2_text_to_image_writes_each_item_into_node_159_by_position() {
+    let now = release_loaded("0bf9145b");
+    let run = |items: Value| build(&now, "generate", json!({ "loras": items }), prompt("fox"));
+    let node = |items: Value| run(items).unwrap().workflow["159"]["inputs"].clone();
+    let three = node(json!([
+        { "name": "Krea2\\a.safetensors", "weight": 0.8 },
+        { "name": "Krea2\\b.safetensors", "weight": 0.5, "on": false },
+        { "name": "Krea2\\c.safetensors", "weight": 1.5 }
+    ]));
+    assert_eq!(
+        three["lora_1"],
+        json!({ "lora": "Krea2\\a.safetensors", "on": true, "strength": 0.8 })
+    );
+    assert_eq!(
+        three["lora_2"],
+        json!({ "lora": "Krea2\\b.safetensors", "on": false, "strength": 0.5 })
+    );
+    assert_eq!(
+        three["lora_3"],
+        json!({ "lora": "Krea2\\c.safetensors", "on": true, "strength": 1.5 })
+    );
+    assert!(three.get("lora_4").is_none());
+    // The node's other inputs stay as the workflow has them.
+    let original = &now.workflow["159"]["inputs"];
+    for input in [
+        "PowerLoraLoaderHeaderWidget",
+        "➕ Add Lora",
+        "model",
+        "clip",
+    ] {
+        assert_eq!(three[input], original[input], "{input}");
+    }
+    let six = node(Value::Array(
+        (1..=6)
+            .map(|n| json!({ "name": format!("Krea2\\l{n}.safetensors"), "weight": 2.0 }))
+            .collect(),
+    ));
+    for n in 1..=6 {
+        assert_eq!(
+            six[format!("lora_{n}")],
+            json!({ "lora": format!("Krea2\\l{n}.safetensors"), "on": true, "strength": 2.0 })
+        );
+    }
+    // An item without a file is not written; the workflow's own lora_1 stays when item 1 is empty.
+    let gap = node(json!([{ "name": "" }, { "name": " " }, { "name": "Krea2\\c.safetensors" }]));
+    assert_eq!(gap["lora_1"], original["lora_1"]);
+    assert!(gap.get("lora_2").is_none());
+    assert_eq!(gap["lora_3"]["lora"], json!("Krea2\\c.safetensors"));
+    // Refused: 7 items, weight out of range or off the 0.05 step, a file outside Krea2.
+    let seven = Value::Array(
+        (0..7)
+            .map(|_| json!({ "name": "Krea2\\a.safetensors" }))
+            .collect(),
+    );
+    assert!(run(seven).is_err());
+    assert!(run(json!([{ "name": "Krea2\\a.safetensors", "weight": 2.5 }])).is_err());
+    assert!(run(json!([{ "name": "Krea2\\a.safetensors", "weight": 0.33 }])).is_err());
+    assert!(run(json!([{ "name": "moss\\a.safetensors" }])).is_err());
+}
