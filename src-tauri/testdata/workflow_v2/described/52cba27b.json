@@ -20,6 +20,7 @@
             }
           },
           "preset": "Kera2\\Krea2_turbo.safetensors",
+          "setting": "diffusionModelName",
           "type": "select"
         },
         {
@@ -33,6 +34,7 @@
           "default": 1280,
           "group": "size",
           "id": "width",
+          "increment": 64.0,
           "label": "宽度",
           "max": 4096.0,
           "min": 64.0,
@@ -44,6 +46,7 @@
           "default": 720,
           "group": "size",
           "id": "height",
+          "increment": 64.0,
           "label": "高度",
           "max": 4096.0,
           "min": 64.0,
@@ -83,6 +86,7 @@
           "label": "提示词",
           "max": 1,
           "min": 1,
+          "order": 2,
           "type": "text"
         },
         {
@@ -90,6 +94,7 @@
           "label": "编辑图片",
           "max": 2,
           "min": 1,
+          "order": 1,
           "type": "image"
         }
       ],

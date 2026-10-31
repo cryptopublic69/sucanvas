@@ -31,14 +31,21 @@ pub fn load_from_files(
             control.preset = None;
         }
     }
-    for (operation, control, value) in legacy_v1_convert::module_presets(manifest, &package) {
-        if let Some(control) = package
-            .operations
-            .get_mut(&operation)
-            .and_then(|operation| operation.controls.iter_mut().find(|c| c.id == control))
-        {
-            // A setting the control would refuse is ignored (the node falls back to the default).
-            if engine::accepts(control, &value) {
+    // A control naming a module setting takes it as preset; a setting the control would
+    // refuse is ignored (the node falls back to the default).
+    for operation in package.operations.values_mut() {
+        for control in &mut operation.controls {
+            if control.setting.is_empty() {
+                continue;
+            }
+            let value = manifest
+                .get("defaults")
+                .and_then(|defaults| defaults.get(&control.setting))
+                .filter(|value| {
+                    !value.is_null() && value.as_str().is_none_or(|text| !text.trim().is_empty())
+                })
+                .cloned();
+            if let Some(value) = value.filter(|value| engine::accepts(control, value)) {
                 control.preset = Some(value);
             }
         }

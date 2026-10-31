@@ -58,7 +58,8 @@
               ]
             }
           },
-          "allowEmpty": true
+          "allowEmpty": true,
+          "setting": "diffusionModelName"
         },
         {
           "id": "negativePrompt",
@@ -76,7 +77,8 @@
           "max": 4096.0,
           "number": "int",
           "group": "size",
-          "unit": "px"
+          "unit": "px",
+          "increment": 64.0
         },
         {
           "id": "height",
@@ -87,7 +89,8 @@
           "max": 4096.0,
           "number": "int",
           "group": "size",
-          "unit": "px"
+          "unit": "px",
+          "increment": 64.0
         },
         {
           "id": "steps",
@@ -389,7 +392,8 @@
               ]
             }
           },
-          "allowEmpty": true
+          "allowEmpty": true,
+          "setting": "diffusionModelName"
         }
       ],
       "steps": [

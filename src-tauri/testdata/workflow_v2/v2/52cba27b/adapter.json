@@ -11,14 +11,16 @@
           "type": "text",
           "label": "提示词",
           "min": 1,
-          "max": 1
+          "max": 1,
+          "order": 2
         },
         {
           "id": "images",
           "type": "image",
           "label": "编辑图片",
           "min": 1,
-          "max": 2
+          "max": 2,
+          "order": 1
         }
       ],
       "outputs": [
@@ -45,7 +47,8 @@
               ]
             }
           },
-          "emptyMeansDefault": true
+          "emptyMeansDefault": true,
+          "setting": "diffusionModelName"
         },
         {
           "id": "negativePrompt",
@@ -63,7 +66,8 @@
           "max": 4096.0,
           "number": "int",
           "group": "size",
-          "unit": "px"
+          "unit": "px",
+          "increment": 64.0
         },
         {
           "id": "height",
@@ -74,7 +78,8 @@
           "max": 4096.0,
           "number": "int",
           "group": "size",
-          "unit": "px"
+          "unit": "px",
+          "increment": 64.0
         },
         {
           "id": "steps",

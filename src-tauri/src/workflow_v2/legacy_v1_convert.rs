@@ -166,6 +166,9 @@ pub fn convert_package(
     };
     let mut operations = operations;
     mark_created_inputs(&mut operations, workflow);
+    if adapter.capability == "image-generation" {
+        link_model_setting(&mut operations);
+    }
     // CANVAS-022: images made by Moss do not offer the toolbar upscale (a Krea2 branch).
     let result_upscale = adapter.adapter_id != MOSS_TEXT_TO_IMAGE_ADAPTER;
     serde_json::from_value(json!({
@@ -179,32 +182,26 @@ pub fn convert_package(
     .map_err(|error| format!("转换结果不是有效的第 2 版方案包：{error}"))
 }
 
-/// CANVAS-024c: the module settings a v1 package kept in manifest.json `defaults`, as
-/// (operation, control, value) presets. The image modules' settings page chose the base
-/// model the old frontend submitted when the node did not say otherwise.
-pub fn module_presets(manifest: &Value, package: &PackageV2) -> Vec<(String, String, Value)> {
-    let mut presets = Vec::new();
-    if package.capability != "image-generation" {
-        return presets;
-    }
-    let model = manifest
-        .pointer("/defaults/diffusionModelName")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("");
-    if model.is_empty() {
-        return presets;
-    }
-    for (name, operation) in &package.operations {
-        if operation
-            .controls
-            .iter()
-            .any(|control| control.id == "modelName")
+/// The image modules' settings page chose the base model the old frontend submitted when
+/// the node did not say otherwise (manifest `defaults.diffusionModelName`, CANVAS-024c);
+/// CANVAS-024d declares that link on the control (`setting`) instead of knowing it here.
+fn link_model_setting(operations: &mut Value) {
+    for operation in operations
+        .as_object_mut()
+        .into_iter()
+        .flat_map(|o| o.values_mut())
+    {
+        for control in operation
+            .get_mut("controls")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
         {
-            presets.push((name.clone(), "modelName".to_owned(), json!(model)));
+            if control["id"] == "modelName" {
+                control["setting"] = json!("diffusionModelName");
+            }
         }
     }
-    presets
 }
 
 /// The old code inserted values even where the workflow node had no such input yet; mark
@@ -307,6 +304,8 @@ fn image_controls(steps_default: u32) -> Vec<Value> {
     for size in [&mut width, &mut height] {
         size["group"] = json!("size");
         size["unit"] = json!("px");
+        // The old node's arrows moved by 64 (CANVAS-024d); any size stays valid.
+        size["increment"] = json!(64.0);
     }
     let mut steps = number(
         "steps",
@@ -327,6 +326,12 @@ fn image_groups() -> Value {
 
 fn prompt_port() -> Value {
     json!({ "id": "prompt", "type": "text", "label": "提示词", "min": 1, "max": 1 })
+}
+
+fn prompt_port_at(order: i32) -> Value {
+    let mut port = prompt_port();
+    port["order"] = json!(order);
+    port
 }
 
 fn model_record(node: &str) -> Value {
@@ -561,7 +566,8 @@ fn krea2_edit(b: &WorkflowBindings) -> Value {
         steps.push(set(node, "cfg", cfg_by_negative()));
     }
     json!({ "label": "生成",
-            "inputs": [prompt_port(), { "id": "images", "type": "image", "label": "编辑图片", "min": 1, "max": 2 }],
+            // Checked prompt first; shown images first, as the old node did (CANVAS-024d).
+            "inputs": [prompt_port_at(2), { "id": "images", "type": "image", "label": "编辑图片", "min": 1, "max": 2, "order": 1 }],
             "outputs": [{ "id": "image", "type": "image" }], "controls": controls, "groups": image_groups(),
             "steps": steps, "record": model_record("43") })
 }

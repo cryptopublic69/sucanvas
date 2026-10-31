@@ -117,6 +117,10 @@ pub struct Port {
     pub min: usize,
     #[serde(default = "one")]
     pub max: usize,
+    /// Display position on the node (lower first; default = declaration order). Checking
+    /// keeps the declaration order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -196,6 +200,12 @@ pub struct Control {
     /// What a select shows for the empty value (otherwise "默认" / "工作流自带").
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub empty_label: String,
+    /// How much the number's arrows change it (interface only; `step` is what is valid).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub increment: Option<f64>,
+    /// The module setting (manifest `defaults` key) that becomes this control's preset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub setting: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

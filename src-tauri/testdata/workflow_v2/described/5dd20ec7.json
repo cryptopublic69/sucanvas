@@ -19,6 +19,7 @@
             }
           },
           "preset": "Moss\\pornmasterMoss_v1.safetensors",
+          "setting": "diffusionModelName",
           "type": "select"
         },
         {
@@ -32,6 +33,7 @@
           "default": 1280,
           "group": "size",
           "id": "width",
+          "increment": 64.0,
           "label": "宽度",
           "max": 4096.0,
           "min": 64.0,
@@ -43,6 +45,7 @@
           "default": 720,
           "group": "size",
           "id": "height",
+          "increment": 64.0,
           "label": "高度",
           "max": 4096.0,
           "min": 64.0,

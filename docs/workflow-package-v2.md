@@ -37,6 +37,7 @@ CANVAS-024b 定稿。依据：su 定的「工作流即插即用」原则（CANVA
 - `inputs` / `outputs`：连线口，类型只能是 `text`、`image`、`video`、`audio`。`min` / `max` 是该口能接的素材数，引擎提交时会核对。
   - `text` 口（CANVAS-024c）：值是连到节点上、当前选中的文本节点的文字，用 `{"media": {"port": "…", "index": 0}}` 取。只算非空白的文字；`min` 不满足时报"〈label〉不能为空"。
   - 节点外壳把连线按类型分给口：每种类型的第一个口接收这种类型的全部连线（图片按节点上的顺序）。
+  - 口的 `order`（CANVAS-024d）：节点上的显示顺序，小的在前；不写按声明顺序。提交检查仍按声明顺序报错。
 - `results`：从哪些节点取结果，每项可以带 `when` 条件；不写表示取所有输出节点。输出口有 `video` 时按视频文件收集，否则按图片收集。
 - `groups`（CANVAS-024c）：节点上的控件行 `[{ "id", "label"?, "swap"? }]`。控件用 `group` 指明所在行；`swap: true` 且该行正好两个控件时，中间显示"互换"按钮。
 - `record`（CANVAS-024c）：`{ 名字: 取值 }`，在工作流写完之后求值并随结果返回。`modelName` 记在生成的图片上（例如 `{"input": {"node": "…", "input": "unet_name"}}` = 实际用的模型）。
@@ -55,6 +56,8 @@ CANVAS-024b 定稿。依据：su 定的「工作流即插即用」原则（CANVA
 | `preset` | 不写在包里：方案的设置页（第 1 版是 manifest 的 `defaults`）给这个控件定的值。请求没有给值时优先于 `default`；不符合控件校验的设置值不采用 |
 | `min` / `max` / `step` | 数值范围；对 `repeat` 来说，`max` 是最多几项。`step` 同时是校验：数值必须是 `min`（没有则 0）加整数个 `step`，否则报"…步长为 …"（CANVAS-024c） |
 | `group` / `unit` / `help` / `emptyLabel` | 所在行、数值后的单位、提示文字、下拉"空值"一项的文字（不写时显示"默认（…）"或"工作流自带"） |
+| `increment` | 数字框上下箭头每次增减多少（CANVAS-024d），只管界面；什么值合法由 `step` 管 |
+| `setting` | 这个控件取方案设置页的哪个值作 `preset`（manifest `defaults` 里的键，例如 `diffusionModelName`）。设置页按它找到要设置的控件和可选目录 |
 | `number` | `int` / `float` / `intIfWhole`，用于校验整数 |
 | `options.values` | 静态选项 `[{ "value": …, "label": … }]` |
 | `options.comfyui` | 从 ComfyUI 列文件：`classType.input` 的候选值，只保留 `dirs` 里列出的目录（可以写多个）。提交时也会检查所选值是否在这些目录里 |
@@ -114,6 +117,14 @@ CANVAS-024b 定稿。依据：su 定的「工作流即插即用」原则（CANVA
   - `options.comfyui` 列出的每个目录里有文件；
   - 默认值在文件列表中。
 - ComfyUI 不可达时，返回 `comfyui_checked = false`，并附说明"未检查 ComfyUI（节点类型、默认模型、目录）"。
+
+## 8a. 方案仓库里的第 2 版包（CANVAS-024d）
+- 方案备份（zip 或目录）里 `adapter.json` 的 `engineApiVersion` 是 2，就按第 2 版包保存：原样写入 adapter.json 和 workflow.json，先做第 8 节的静态检查（不通过就拒收），manifest 写 `adapterKind: "workflow-package-v2"`、`engineApiVersion: "2"`。
+- 「从备份恢复到原方案」（restore_bundle）用第 2 版包覆盖时，方案 id 不变，旧包留作恢复点；反过来用第 1 版备份恢复（回滚）也可以。
+- 方案记录里的 adapter 是通用占位（adapterId `workflow-package-v2`，没有第 1 版绑定）；不能再用旧的「保存方案」覆盖第 2 版包。设置页只改 manifest 的 `defaults`（命令 `update_workflow_module_defaults`）。
+- 对照 ComfyUI 的检查用命令 `check_workflow_package`：返回第 8 节的结果，另外核对设置页的值（preset）在不在 ComfyUI 里。ComfyUI 不可达时注明"未检查"。
+- 一个控件的目录列表，只要其中一个目录有文件就不算错（例如新旧目录名过渡期同时列出）。
+- 发布包的源文件在 `workflow-packages/`（例如 `image-v2/<方案>/`），由同目录的制作脚本从生产包只读拷贝和转换器输出生成。
 
 ## 9. 第 1 版过渡
 `legacy_v1_convert.rs` 在导入第 1 版包时把它转成本格式，同时把旧请求转成引擎请求。凡是需要认识具体方案的知识（adapterId、旧绑定的默认值、旧代码按图结构做的判断）都只放在这个文件里。阶段五删除。

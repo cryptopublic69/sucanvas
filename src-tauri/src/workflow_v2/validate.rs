@@ -6,7 +6,8 @@ use super::{Cond, Control, Expr, PackageV2, Step, ENGINE_API_VERSION};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashSet};
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ValidationReport {
     pub errors: Vec<String>,
     pub notes: Vec<String>,
@@ -356,18 +357,21 @@ fn check_comfyui(
             continue;
         };
         let names = choices.iter().filter_map(Value::as_str).collect::<Vec<_>>();
-        for dir in &files.dirs {
-            let has_files = names.iter().any(|name| {
+        // The list a control offers is empty only when none of its directories has files
+        // (a package may list a directory that is about to replace another, CANVAS-024d).
+        let has_files = files.dirs.iter().any(|dir| {
+            names.iter().any(|name| {
                 name.replace('/', "\\")
                     .split_once('\\')
                     .is_some_and(|(directory, _)| directory.eq_ignore_ascii_case(dir))
-            });
-            if !has_files {
-                errors.push(format!(
-                    "ComfyUI 的 {dir} 目录里没有可用文件（{}）",
-                    control.id
-                ));
-            }
+            })
+        });
+        if !has_files {
+            errors.push(format!(
+                "ComfyUI 的 {} 目录里没有可用文件（{}）",
+                files.dirs.join("、"),
+                control.id
+            ));
         }
         if let Some(default) = control.default.as_ref().and_then(Value::as_str) {
             let default = default.trim().replace('/', "\\");
