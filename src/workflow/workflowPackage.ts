@@ -226,21 +226,54 @@ function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-/** Values kept when the node switches package: only controls the new package declares, and a
- * value still equal to the old package's default gives way to the new default. */
+/** Whether a ComfyUI file choice carried over from `before` is one `control` can use: a file inside
+ * its directories, or (when it names none) a value from the very same ComfyUI list. An empty
+ * choice means "the default" and stays valid. CANVAS-028. */
+function comfyChoiceUsable(control: ControlDescription, value: unknown, before: ControlDescription | undefined): boolean {
+  const source = control.options?.comfyui;
+  if (!source) return true;
+  if (typeof value !== "string") return false;
+  if (!value.trim()) return true;
+  if (source.dirs.length) return choiceInDirectories(control, value);
+  const old = before?.options?.comfyui;
+  return Boolean(old && old.classType === source.classType && old.input === source.input);
+}
+
+/** Repeat items carried over: an item whose ComfyUI choice the new group cannot use is dropped
+ * whole; the others are kept as they are. */
+function usableRepeatItems(control: ControlDescription, value: unknown, before: ControlDescription | undefined): unknown {
+  if (!Array.isArray(value)) return value;
+  const fields = control.fields ?? [];
+  return value.filter((item) => !item || typeof item !== "object" || fields.every((field) => (
+    !(field.id in item)
+    || comfyChoiceUsable(field, (item as ControlValues)[field.id], before?.fields?.find((old) => old.id === field.id))
+  )));
+}
+
+/** Values kept when the node switches package: only controls the new package declares; a value
+ * still equal to the old package's default gives way to the new default; and a ComfyUI file
+ * choice the new package cannot use (another directory or list) is dropped, so the new package's
+ * default shows (CANVAS-028). Only used when the user switches; opening a node changes nothing. */
 export function switchedControlValues(
   values: ControlValues,
   previous: OperationDescription | undefined,
   next: OperationDescription,
 ): ControlValues {
   const kept: ControlValues = {};
+  // The same package again is not a switch: every value stays.
+  const switching = previous !== next;
   for (const control of next.controls ?? []) {
     if (!(control.id in values)) continue;
-    const value = values[control.id];
+    let value = values[control.id];
     const before = previous && previous !== next
       ? previous.controls?.find((candidate) => candidate.id === control.id)
       : undefined;
     if (before && sameValue(value, before.default) && !sameValue(before.default, control.default)) continue;
+    if (switching && !comfyChoiceUsable(control, value, before)) continue;
+    if (switching && control.type === "repeat") {
+      value = usableRepeatItems(control, value, before);
+      if (Array.isArray(value) && value.length === 0 && Array.isArray(values[control.id]) && (values[control.id] as unknown[]).length > 0) continue;
+    }
     kept[control.id] = value;
   }
   return kept;
