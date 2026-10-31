@@ -4,19 +4,12 @@ import type { ReactNode } from "react";
 import { Trash2 } from "lucide-react";
 import { H3StyleLora, MAX_STYLE_LORAS } from "./styleLoras";
 
-// Shared by the H3 video node (style LoRA) and, since CANVAS-023, the Moss image node.
-// The optional labels and `showSecondPass` default to the H3 wording and layout.
-export function StyleLoraEditor({ slots, options, hasSecondStage, onChange, renderStrengthInput,
-  label = "风格 LoRA", menuLabel = "MiniMax H3 风格 LoRA", emptyTitle = "风格化 LoRA 未设置", showSecondPass = true }: {
+export function StyleLoraEditor({ slots, options, hasSecondStage, onChange, renderStrengthInput }: {
   slots: H3StyleLora[];
   options: string[];
   hasSecondStage: boolean;
   onChange: (slots: H3StyleLora[]) => void;
   renderStrengthInput?: (props: { value: number; disabled: boolean; ariaLabel: string; onChange: (value: number) => void }) => ReactNode;
-  label?: string;
-  menuLabel?: string;
-  emptyTitle?: string;
-  showSecondPass?: boolean;
 }) {
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -38,7 +31,7 @@ export function StyleLoraEditor({ slots, options, hasSecondStage, onChange, rend
   };
   return <section className={`style-lora-editor nodrag ${openIndex !== null ? "is-menu-open" : ""}`} onPointerDown={(event) => event.stopPropagation()}>
     <div className="style-lora-heading">
-      <span>{label} {slots.length}/{MAX_STYLE_LORAS}</span>
+      <span>风格 LoRA {slots.length}/{MAX_STYLE_LORAS}</span>
       <button type="button" disabled={slots.length >= MAX_STYLE_LORAS} onClick={() => onChange([...slots, { name: "", strength: 1, bypassed: true, applyToSecondary: false, applyToSecondPass: false }])}>＋添加</button>
     </div>
     {slots.map((slot, index) => <div className={`style-lora-row ${openIndex === index ? "is-menu-open" : ""}`} key={index}>
@@ -52,14 +45,14 @@ export function StyleLoraEditor({ slots, options, hasSecondStage, onChange, rend
           }
         }}>
         <button type="button" className="nodrag video-lora-select-toggle"
-          disabled={!options.length} aria-label={`${label} ${index + 1}`} aria-haspopup="menu" aria-expanded={openIndex === index}
-          title={slot.name || emptyTitle}
+          disabled={!options.length} aria-label={`风格 LoRA ${index + 1}`} aria-haspopup="menu" aria-expanded={openIndex === index}
+          title={slot.name || "风格化 LoRA 未设置"}
           onClick={() => setOpenIndex((current) => current === index ? null : index)}>
           <span>{slot.bypassed ? "不使用 LoRA" : options.some((name) => sameName(name, slot.name))
             ? slot.name.split(/[\\/]/).pop() : slot.name ? "未找到 LoRA" : "未选择 LoRA"}</span>
           <span className="video-lora-select-arrow" aria-hidden="true">▾</span>
         </button>
-        {openIndex === index && <div className="video-lora-select-menu" role="menu" aria-label={`${menuLabel} ${index + 1}`}>
+        {openIndex === index && <div className="video-lora-select-menu" role="menu" aria-label={`MiniMax H3 风格 LoRA ${index + 1}`}>
           <button type="button" role="menuitemradio" aria-checked={slot.bypassed} className={slot.bypassed ? "is-active" : ""} onClick={() => choose(index, "")}>不使用 LoRA</button>
           {options.map((name) => <button key={name} type="button" role="menuitemradio"
             aria-checked={!slot.bypassed && sameName(slot.name, name)}
@@ -67,17 +60,17 @@ export function StyleLoraEditor({ slots, options, hasSecondStage, onChange, rend
             title={name} onClick={() => choose(index, name)}>{name.split(/[\\/]/).pop()}</button>)}
         </div>}
       </div>
-      {renderStrengthInput ? renderStrengthInput({ value: slot.strength, disabled: slot.bypassed, ariaLabel: `${label} ${index + 1} 权重`, onChange: (strength) => {
+      {renderStrengthInput ? renderStrengthInput({ value: slot.strength, disabled: slot.bypassed, ariaLabel: `风格 LoRA ${index + 1} 权重`, onChange: (strength) => {
         if (Number.isFinite(strength)) update(index, { strength: Math.max(0, Math.min(10, strength)) });
-      } }) : <input className="nowheel" type="number" min={0} max={10} step={0.01} value={slot.strength} disabled={slot.bypassed} aria-label={`${label} ${index + 1} 权重`} onChange={(event) => {
+      } }) : <input className="nowheel" type="number" min={0} max={10} step={0.01} value={slot.strength} disabled={slot.bypassed} aria-label={`风格 LoRA ${index + 1} 权重`} onChange={(event) => {
         const strength = event.currentTarget.valueAsNumber;
         if (Number.isFinite(strength)) update(index, { strength: Math.max(0, Math.min(10, strength)) });
       }} />}
-      <button type="button" aria-label={`删除${label} ${index + 1}`} title={`删除${label}`} onClick={() => { setOpenIndex(null); onChange(slots.filter((_, i) => i !== index)); }}><Trash2 size={18} aria-hidden="true" /></button>
+      <button type="button" aria-label={`删除风格 LoRA ${index + 1}`} title="删除风格 LoRA" onClick={() => { setOpenIndex(null); onChange(slots.filter((_, i) => i !== index)); }}><Trash2 size={18} aria-hidden="true" /></button>
       <div className="style-lora-options">
         <label><input type="checkbox" checked={slot.bypassed} onChange={(event) => update(index, { bypassed: event.currentTarget.checked })} />Bypass</label>
         {hasSecondStage && <label><input type="checkbox" checked={slot.applyToSecondary} onChange={(event) => update(index, { applyToSecondary: event.currentTarget.checked })} />应用到二段</label>}
-        {showSecondPass && <label><input type="checkbox" checked={slot.applyToSecondPass} onChange={(event) => update(index, { applyToSecondPass: event.currentTarget.checked })} />应用到2采</label>}
+        <label><input type="checkbox" checked={slot.applyToSecondPass} onChange={(event) => update(index, { applyToSecondPass: event.currentTarget.checked })} />应用到2采</label>
       </div>
     </div>)}
   </section>;

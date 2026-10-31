@@ -7,7 +7,7 @@ import { WebRequestTimeoutError } from "./web/requestTimeout";
 import { recoverableWebGenerationFailure } from "./web/generationRequest";
 import { imageRegenerationPrompt, type WebImagePromptRequest } from "./web/imageGenerationPrompt";
 import { deduplicateRegenerationPromptOptions } from "./video/regenerationPromptOptions";
-import { defaultImageSteps, effectiveImageModelName, effectiveImageOptions, effectiveMossLoras, imageModelDirectoryLabel, imageUpscaleModule, isImageModelNameForModule, isMossImageModule, mossLoraValidationError, mossLorasFromContent } from "./image/imageWorkflowAdapter";
+import { defaultImageSteps, effectiveImageOptions, imageModelDirectoryLabel, imageUpscaleModule, isImageModelNameForModule } from "./image/imageWorkflowAdapter";
 import { generationQueuePositions } from "./generationQueuePositions";
 import { VideoPosterViewportCache } from "./VideoPosterViewportCache";
 import { summarizeProject } from "./projects/projectSummaries";
@@ -560,8 +560,6 @@ function CanvasWorkspace() {
   }, []);
   const [h3LoraOptions, setH3LoraOptions] = useState<string[]>([]);
   const [krea2LoraOptions, setKrea2LoraOptions] = useState<string[]>([]);
-  const [mossLoraOptions, setMossLoraOptions] = useState<string[]>([]);
-  const [mossModelOptions, setMossModelOptions] = useState<string[]>([]);
   const [h3LoraCatalogLoaded, setH3LoraCatalogLoaded] = useState(false);
   const [h3LoraPreference, setH3LoraPreference] = useState(h3LoraPreferenceFromStorage);
   const [h3DiffusionModelOptions, setH3DiffusionModelOptions] = useState<string[]>([DEFAULT_H3_DIFFUSION_MODEL_NAME]);
@@ -1104,25 +1102,6 @@ function CanvasWorkspace() {
     void refresh();
     return () => { disposed = true; };
   }, [activeProjectId, comfyUiServerUrl, workflowModulesReady]);
-
-  // CANVAS-023: Moss LoRAs (loras\moss) and Moss base models (the Moss module's own
-  // directory) for the image generation node; only when a Moss module exists.
-  const mossImageModuleId = workflowModules.find((module) => (
-    !module.deletedAt && module.capability === "image-generation" && isMossImageModule(module)
-  ))?.id ?? "";
-  useEffect(() => {
-    if (!workflowModulesReady || !mossImageModuleId) return;
-    let disposed = false;
-    const sameList = (current: string[], next: string[]) => current.length === next.length
-      && current.every((item, index) => sameH3LoraName(item, next[index]));
-    void invoke<string[]>("get_comfyui_moss_loras", { serverUrl: comfyUiServerUrl })
-      .then((loras) => { if (!disposed) setMossLoraOptions((current) => sameList(current, loras) ? current : loras); })
-      .catch(() => { if (!disposed) setMossLoraOptions([]); });
-    void invoke<string[]>("get_comfyui_krea2_diffusion_models", { serverUrl: comfyUiServerUrl, workflowModuleId: mossImageModuleId })
-      .then((models) => { if (!disposed) setMossModelOptions((current) => sameList(current, models) ? current : models); })
-      .catch(() => { if (!disposed) setMossModelOptions([]); });
-    return () => { disposed = true; };
-  }, [activeProjectId, comfyUiServerUrl, mossImageModuleId, workflowModulesReady]);
 
   useEffect(() => {
     if (!workflowModulesReady) return;
@@ -2289,9 +2268,6 @@ function CanvasWorkspace() {
           && module.capability === "image-generation"
           && module.variant === "image-edit"
         ));
-        const isMossImage = workflowModules.some((module) => (
-          !module.deletedAt && module.id === configuredModuleId && isMossImageModule(module)
-        ));
         const imageInputCount = (mediaKindsByTarget.get(node.id) ?? [])
           .filter((kind) => kind === "image")
           .length;
@@ -2299,7 +2275,6 @@ function CanvasWorkspace() {
           currentTextInputCount,
           isImageEdit,
           imageInputCount,
-          isMossImage ? mossLorasFromContent(record.content).length : null,
         );
         const connectedTextRecords = (textInputIdsByTarget.get(node.id) ?? [])
           .map((inputId) => recordsById.get(inputId))
@@ -6542,8 +6517,6 @@ function CanvasWorkspace() {
           h3LoraOptions,
           h3DiffusionModelOptions,
           krea2LoraOptions,
-          mossLoraOptions,
-          mossModelOptions,
           workflowModules,
           workflowModuleDefaults,
           workflowModuleVisibleIds,
@@ -6590,7 +6563,7 @@ function CanvasWorkspace() {
         },
       };
     },
-    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, downloadGeneratedImage, downloadGeneratedVideo, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, mossLoraOptions, mossModelOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, downloadGeneratedImage, downloadGeneratedVideo, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -8591,10 +8564,10 @@ function CanvasWorkspace() {
       && module.id === moduleId
     ));
     const isImageEdit = selectedImageModule?.variant === "image-edit";
-    // Moss: the node's own Moss model, else the settings default (Krea2: the default only).
-    const imageModelName = effectiveImageModelName(target.content, selectedImageModule);
-    // Moss LoRA slots (CANVAS-023); null for every other module, whose submission carries no list.
-    const mossLoras = effectiveMossLoras(target.content, selectedImageModule);
+    const imageModelName = selectedImageModule
+      && isImageModelNameForModule(selectedImageModule.defaults.diffusionModelName, selectedImageModule)
+      ? selectedImageModule.defaults.diffusionModelName
+      : "";
     const recordsById = new Map(
       nodesSnapshot.current.map((node) => [node.id, node.data.record]),
     );
@@ -8649,11 +8622,8 @@ function CanvasWorkspace() {
     // LoRA and upscale only for modules that have them (Moss and image edit do not); stale values
     // left on the node from another module are neither submitted nor recorded in the snapshot.
     const { loraName: imageLoraName, upscaleEnabled } = effectiveImageOptions(target.content, selectedImageModule);
-    const mossLoraError = mossLoras ? mossLoraValidationError(mossLorasFromContent(target.content)) : null;
-    if (!prompt.trim() || !moduleId || mossLoraError || (isImageEdit && (imageInputs.length < 1 || imageInputs.length > 2)) || (isImageEdit && imagePaths.some((path) => !path))) {
-      const message = mossLoraError
-        ? mossLoraError
-        : !moduleId
+    if (!prompt.trim() || !moduleId || (isImageEdit && (imageInputs.length < 1 || imageInputs.length > 2)) || (isImageEdit && imagePaths.some((path) => !path))) {
+      const message = !moduleId
         ? "请先选择图片生成方案"
         : isImageEdit && (imageInputs.length < 1 || imageInputs.length > 2)
           ? "Krea2 图像编辑请连接 1 张图片；第二张图片可选，最多 2 张"
@@ -8788,7 +8758,6 @@ function CanvasWorkspace() {
           imagePaths,
           upscaleEnabled: effectiveUpscaleEnabled,
           upscaleMegapixels,
-          ...(mossLoras ? { loras: mossLoras } : {}),
         },
       });
       const [firstOutput, ...additionalOutputs] = result.outputs;
@@ -8824,8 +8793,6 @@ function CanvasWorkspace() {
           generationHeight: height,
           ...(effectiveUpscaleEnabled ? { generationUpscaleMegapixels: upscaleMegapixels } : {}),
           generationLoraName: isImageEdit ? "" : imageLoraName,
-          // The Moss LoRAs that went into this image (switched-off / unnamed slots dropped).
-          ...(mossLoras ? { generationMossLoras: mossLoras.filter((slot) => !slot.bypassed && slot.name) } : {}),
           upscaleEnabled: effectiveUpscaleEnabled,
           ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
         };
@@ -10572,8 +10539,6 @@ function CanvasWorkspace() {
           && previousData.videoRegenerationPresets === videoRegenerationPresets
           && previousData.h3LoraOptions === h3LoraOptions
           && previousData.krea2LoraOptions === krea2LoraOptions
-          && previousData.mossLoraOptions === mossLoraOptions
-          && previousData.mossModelOptions === mossModelOptions
           && previousData.workflowModules === workflowModules
           && previousData.workflowModuleDefaults === workflowModuleDefaults
           && previousData.workflowModuleVisibleIds === workflowModuleVisibleIds,
@@ -10598,8 +10563,6 @@ function CanvasWorkspace() {
             h3LoraOptions,
             h3DiffusionModelOptions,
             krea2LoraOptions,
-            mossLoraOptions,
-            mossModelOptions,
             workflowModules,
             workflowModuleDefaults,
             workflowModuleVisibleIds,
@@ -10613,7 +10576,7 @@ function CanvasWorkspace() {
       visibleNodeCache.current = nextCache;
       return results;
     },
-    [activeComfyTaskCounts, contentNodes, edges, relations, queuePositions, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, mossLoraOptions, mossModelOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [activeComfyTaskCounts, contentNodes, edges, relations, queuePositions, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
   );
 
   const updateGuideOverlays = useCallback((nextAlignment: AlignmentGuide[], nextSpacing: SpacingGuide[]) => {

@@ -781,21 +781,6 @@ pub struct ComfyImageSubmitInput {
     pub upscale_enabled: bool,
     #[serde(default = "default_image_upscale_megapixels")]
     pub upscale_megapixels: f64,
-    /// Moss model-only LoRA slots (CANVAS-023); other image modules never send it.
-    #[serde(default)]
-    pub loras: Vec<ImageLoraSlot>,
-}
-
-/// One LoRA slot of an image generation node. A switched-off slot or one without
-/// a name is skipped; its weight must still be a number in range.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageLoraSlot {
-    #[serde(default)]
-    pub name: String,
-    pub strength: f64,
-    #[serde(default)]
-    pub bypassed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
