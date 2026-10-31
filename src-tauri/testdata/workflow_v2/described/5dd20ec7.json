@@ -1,0 +1,101 @@
+{
+  "capability": "image-generation",
+  "engineApiVersion": 2,
+  "operations": {
+    "generate": {
+      "controls": [
+        {
+          "allowEmpty": true,
+          "default": "",
+          "id": "modelName",
+          "label": "模型",
+          "options": {
+            "comfyui": {
+              "classType": "UNETLoader",
+              "dirs": [
+                "Moss"
+              ],
+              "input": "unet_name"
+            }
+          },
+          "preset": "Moss\\pornmasterMoss_v1.safetensors",
+          "type": "select"
+        },
+        {
+          "default": "",
+          "help": "可选：直接输入不希望出现的内容",
+          "id": "negativePrompt",
+          "label": "负向提示词",
+          "type": "textarea"
+        },
+        {
+          "default": 1280,
+          "group": "size",
+          "id": "width",
+          "label": "宽度",
+          "max": 4096.0,
+          "min": 64.0,
+          "number": "int",
+          "type": "number",
+          "unit": "px"
+        },
+        {
+          "default": 720,
+          "group": "size",
+          "id": "height",
+          "label": "高度",
+          "max": 4096.0,
+          "min": 64.0,
+          "number": "int",
+          "type": "number",
+          "unit": "px"
+        },
+        {
+          "default": 25,
+          "group": "sampling",
+          "help": "基础文生图 K 采样器的采样步数",
+          "id": "steps",
+          "label": "生图步数",
+          "max": 1000.0,
+          "min": 1.0,
+          "number": "int",
+          "type": "number"
+        },
+        {
+          "id": "seed",
+          "label": "种子",
+          "type": "seed"
+        }
+      ],
+      "groups": [
+        {
+          "id": "size",
+          "swap": true
+        },
+        {
+          "id": "sampling"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "prompt",
+          "label": "提示词",
+          "max": 1,
+          "min": 1,
+          "type": "text"
+        }
+      ],
+      "label": "生成",
+      "outputs": [
+        {
+          "id": "image",
+          "max": 1,
+          "min": 0,
+          "type": "image"
+        }
+      ]
+    }
+  },
+  "resultUpscale": false,
+  "variant": "image-generation"
+}

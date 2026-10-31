@@ -1,0 +1,186 @@
+{
+  "capability": "image-generation",
+  "engineApiVersion": 2,
+  "operations": {
+    "generate": {
+      "controls": [
+        {
+          "allowEmpty": true,
+          "default": "",
+          "emptyLabel": "不使用 LoRA",
+          "id": "loraName",
+          "label": "LoRA",
+          "options": {
+            "comfyui": {
+              "classType": "LoraLoaderModelOnly",
+              "dirs": [
+                "Krea2"
+              ],
+              "input": "lora_name"
+            }
+          },
+          "type": "select"
+        },
+        {
+          "allowEmpty": true,
+          "default": "",
+          "id": "modelName",
+          "label": "模型",
+          "options": {
+            "comfyui": {
+              "classType": "UNETLoader",
+              "dirs": [
+                "Krea2",
+                "Kera2"
+              ],
+              "input": "unet_name"
+            }
+          },
+          "preset": "Kera2\\pornmasterKrea2_v2TurboBF16.safetensors",
+          "type": "select"
+        },
+        {
+          "default": "",
+          "help": "可选：直接输入不希望出现的内容",
+          "id": "negativePrompt",
+          "label": "负向提示词",
+          "type": "textarea"
+        },
+        {
+          "default": 1280,
+          "group": "size",
+          "id": "width",
+          "label": "宽度",
+          "max": 4096.0,
+          "min": 64.0,
+          "number": "int",
+          "type": "number",
+          "unit": "px"
+        },
+        {
+          "default": 720,
+          "group": "size",
+          "id": "height",
+          "label": "高度",
+          "max": 4096.0,
+          "min": 64.0,
+          "number": "int",
+          "type": "number",
+          "unit": "px"
+        },
+        {
+          "default": 8,
+          "group": "sampling",
+          "help": "基础文生图 K 采样器的采样步数",
+          "id": "steps",
+          "label": "生图步数",
+          "max": 1000.0,
+          "min": 1.0,
+          "number": "int",
+          "type": "number"
+        },
+        {
+          "id": "seed",
+          "label": "种子",
+          "type": "seed"
+        },
+        {
+          "default": false,
+          "group": "sampling",
+          "id": "upscaleEnabled",
+          "label": "输出放大",
+          "type": "toggle"
+        },
+        {
+          "default": 8.0,
+          "group": "sampling",
+          "help": "放大后的目标像素数（MP）",
+          "id": "upscaleMegapixels",
+          "label": "放大像素数",
+          "max": 64.0,
+          "min": 0.1,
+          "number": "float",
+          "type": "number",
+          "unit": "MP"
+        }
+      ],
+      "groups": [
+        {
+          "id": "size",
+          "swap": true
+        },
+        {
+          "id": "sampling"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "prompt",
+          "label": "提示词",
+          "max": 1,
+          "min": 1,
+          "type": "text"
+        }
+      ],
+      "label": "生成",
+      "outputs": [
+        {
+          "id": "image",
+          "max": 1,
+          "min": 0,
+          "type": "image"
+        }
+      ]
+    },
+    "upscaleImage": {
+      "controls": [
+        {
+          "default": 8.0,
+          "id": "megapixels",
+          "label": "放大像素数",
+          "max": 64.0,
+          "min": 0.1,
+          "number": "float",
+          "type": "number"
+        },
+        {
+          "allowEmpty": true,
+          "default": "",
+          "id": "modelName",
+          "label": "模型",
+          "options": {
+            "comfyui": {
+              "classType": "UNETLoader",
+              "dirs": [
+                "Krea2",
+                "Kera2"
+              ],
+              "input": "unet_name"
+            }
+          },
+          "preset": "Kera2\\pornmasterKrea2_v2TurboBF16.safetensors",
+          "type": "select"
+        }
+      ],
+      "inputs": [
+        {
+          "id": "source",
+          "label": "源图片",
+          "max": 1,
+          "min": 1,
+          "type": "image"
+        }
+      ],
+      "label": "放大图片",
+      "outputs": [
+        {
+          "id": "image",
+          "max": 1,
+          "min": 0,
+          "type": "image"
+        }
+      ]
+    }
+  },
+  "variant": "image-generation"
+}

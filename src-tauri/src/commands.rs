@@ -2559,7 +2559,7 @@ fn h3_workflow_aspect_ratio(value: &str) -> Option<&'static str> {
     }
 }
 
-fn resolve_generation_seed(seed_mode: &str, seed: &str) -> Result<u64, String> {
+pub(crate) fn resolve_generation_seed(seed_mode: &str, seed: &str) -> Result<u64, String> {
     match seed_mode {
         "random" => Ok(Uuid::new_v4().as_u128() as u64),
         "fixed" => seed
@@ -2570,7 +2570,7 @@ fn resolve_generation_seed(seed_mode: &str, seed: &str) -> Result<u64, String> {
     }
 }
 
-async fn upload_comfy_input(
+pub(crate) async fn upload_comfy_input(
     client: &Client,
     server_url: &str,
     path: &str,
@@ -2620,7 +2620,7 @@ async fn upload_comfy_input(
     })
 }
 
-async fn upload_comfy_output_as_input(
+pub(crate) async fn upload_comfy_output_as_input(
     client: &Client,
     server_url: &str,
     output: &ComfyOutputFile,
@@ -2887,7 +2887,7 @@ fn configure_v3_independent_secondary_source(
     Ok(())
 }
 
-fn collect_video_files(value: &Value, files: &mut Vec<(String, String, String)>) {
+pub(crate) fn collect_video_files(value: &Value, files: &mut Vec<(String, String, String)>) {
     match value {
         Value::Array(items) => {
             for item in items {
@@ -2925,7 +2925,7 @@ fn collect_video_files(value: &Value, files: &mut Vec<(String, String, String)>)
     }
 }
 
-fn collect_image_files(value: &Value, files: &mut Vec<(String, String, String)>) {
+pub(crate) fn collect_image_files(value: &Value, files: &mut Vec<(String, String, String)>) {
     match value {
         Value::Array(items) => items
             .iter()
@@ -4015,7 +4015,7 @@ pub(crate) fn comfy_execution_elapsed_seconds(entry: &Value) -> Option<f64> {
     (completed_at >= started_at).then_some((completed_at - started_at) / 1000.0)
 }
 
-fn comfy_view_url(
+pub(crate) fn comfy_view_url(
     server_url: &str,
     filename: &str,
     subfolder: &str,

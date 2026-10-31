@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
+import { loadWorkflowModule, readJson } from "./workflowTestLoader.mjs";
 
 const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
 const canvas = await readFile(new URL("../src/CanvasNode.tsx", import.meta.url), "utf8");
@@ -10,9 +11,11 @@ const compile = (source) => ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext },
 }).outputText;
 const { imageRegenerationPrompt } = await import(`data:text/javascript;base64,${Buffer.from(compile(promptSource)).toString("base64")}`);
-// CANVAS-022: the image submission also uses the real Krea2/Moss module rules.
-const adapterSource = await readFile(new URL("../src/image/imageWorkflowAdapter.ts", import.meta.url), "utf8");
-const { defaultImageSteps, effectiveImageOptions, isImageModelNameForModule } = await import(`data:text/javascript;base64,${Buffer.from(compile(adapterSource)).toString("base64")}`);
+// CANVAS-024c: the image submission is the generic node's: real request builder, real legacy
+// node conversion, and the package description the server returns for the text-to-image module.
+const workflowPackage = await loadWorkflowModule("workflowPackage");
+const { convertLegacyImageNodeContent } = await loadWorkflowModule("legacyImageNode");
+const imagePackage = await readJson("src-tauri/testdata/workflow_v2/described/0bf9145b.json");
 
 // Exercise the real callbacks without rendering or automating the UI.
 function callback(source, name, env, mode = "web") {
@@ -74,8 +77,9 @@ function imageExecutionEnvironment() {
     edgesSnapshot: { current: ["prompt-a", "prompt-b"].map((source) => ({ source, target: "generator" })) },
     flushNodePatches: async (ids) => saved.push(ids), recordAtCurrentFlowPosition: (node) => node.data.record,
     workflowModuleDefaults: {}, workflowModules: [{ id: "image", capability: "image-generation", defaults: {} }],
-    isKrea2DiffusionModelName: () => false, orderedNodeRecordsFromContent: (_, __, inputs) => inputs,
-    defaultImageSteps, effectiveImageOptions, isImageModelNameForModule,
+    workflowPackages: { image: imagePackage }, workflowPackageFailures: {},
+    ...workflowPackage, convertLegacyImageNodeContent, comfyOutputFromContent: () => null,
+    orderedNodeRecordsFromContent: (_, __, inputs) => inputs,
     videoInputMediaKind: () => null,
     activeTextInputFromContent: (content, inputs) => inputs.find((input) => input.id === content.activeTextInputId) ?? null,
     isContentIterationContent: () => false, activePromptVersionFromContent: () => null,
@@ -86,9 +90,11 @@ function imageExecutionEnvironment() {
     runningComfyClients: { current: new Map() },
     rememberComfyTask: noop, registerComfyTask: noop, changeNode: noop, setNotice: noop,
     openComfyProgressSocket: async () => null, comfyUiServerUrlRef: { current: "http://comfy" },
+    createComfyPreviewReceiver: () => noop, showGenerationLivePreview: noop, clearGenerationLivePreview: noop,
+    activeProjectIdRef: { current: "canvas" }, completedGenerationPlaceholders: { current: new Set() },
     updateGenerationPlaceholder: noop, comfyOutputRootRef: { current: "" }, mappedComfyOutputPath: () => "",
     invoke: async (command, { input }) => {
-      assert.equal(command, "submit_comfyui_image_workflow");
+      assert.equal(command, "submit_comfyui_workflow_operation");
       submitted.push(input);
       return { outputs: [{ filename: "result.png", url: "http://comfy/result.png" }], seed: "123" };
     },
@@ -104,7 +110,7 @@ test("image submission uses the clicked text even when another text was active",
   const { env, submitted, completed, saved, errors } = imageExecutionEnvironment();
   await callback(app, "executeImageNode", env)("generator", undefined, { kind: "text", promptNodeId: "prompt-a" });
   assert.deepEqual(errors, []);
-  assert.equal(submitted[0].prompt, "prompt A");
+  assert.deepEqual(submitted[0].inputs.prompt, [{ text: "prompt A" }]);
   assert.equal(completed[0].promptSourceNodeId, "prompt-a");
   assert.deepEqual(saved[0], ["generator", "prompt-a", "prompt-b"]);
 });
@@ -117,8 +123,10 @@ test("regeneration submits and records the exact historical prompts despite chan
   });
   await callback(app, "executeImageNode", env)("generator", undefined, request);
   assert.deepEqual(errors, []);
-  assert.equal(submitted[0].prompt, " original\nscene ");
-  assert.equal(submitted[0].negativePrompt, "original negative");
+  // The text port carries the historical prompt (trimmed like every text input; the
+  // engine trims it again), the negative prompt is the historical one, not the node's.
+  assert.deepEqual(submitted[0].inputs.prompt, [{ text: "original\nscene" }]);
+  assert.equal(submitted[0].values.negativePrompt, "original negative");
   assert.equal(completed[0].generationPrompt, request.prompt);
   assert.equal(completed[0].promptSourceNodeId, "deleted-text");
 });
@@ -194,7 +202,7 @@ test("Web text-generated images share the video placement rule and keep generato
         return { node };
       }
       if (command === "create_edge") { const edge = { id: `edge-${edges.length}`, ...input }; edges.push(edge); return edge; }
-      assert.equal(command, "submit_comfyui_image_workflow");
+      assert.equal(command, "submit_comfyui_workflow_operation");
       return { outputs: [1, 2, 3].map((n) => ({ filename: `${n}.png`, url: `http://comfy/${n}.png` })), seed: "123" };
     },
   });

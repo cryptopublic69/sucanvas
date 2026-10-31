@@ -530,12 +530,46 @@ fn object(value: &Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
 }
 
+const IMAGE_MODULES: [&str; 3] = ["0bf9145b", "52cba27b", "5dd20ec7"];
+
+/// Regenerates testdata/workflow_v2/described (what get_workflow_package returns for the
+/// image modules; the frontend tests read it). Run with --ignored.
+#[test]
+#[ignore]
+fn write_described_packages() {
+    let dir = testdata().join("described");
+    fs::create_dir_all(&dir).unwrap();
+    for short in IMAGE_MODULES {
+        let described = runtime::describe(&load_v1(short).package);
+        fs::write(
+            dir.join(format!("{short}.json")),
+            serde_json::to_string_pretty(&described).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn checked_in_descriptions_are_the_runtime_output() {
+    for short in IMAGE_MODULES {
+        assert_eq!(
+            runtime::describe(&load_v1(short).package),
+            read_json(testdata().join("described").join(format!("{short}.json"))),
+            "{short}: testdata/workflow_v2/described is stale, regenerate it"
+        );
+    }
+}
+
 #[test]
 fn generic_requests_reproduce_every_image_golden_byte_for_byte() {
     let goldens = fs::read_to_string(testdata().join("goldens.json")).unwrap();
     let fixture = read_json(testdata().join("generic-requests.json"));
     let cases = fixture["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 12, "every image golden case has a generic request");
+    assert_eq!(
+        cases.len(),
+        12,
+        "every image golden case has a generic request"
+    );
     let mut failures = Vec::new();
     for case in cases {
         let name = case["case"].as_str().unwrap();
@@ -553,7 +587,12 @@ fn generic_requests_reproduce_every_image_golden_byte_for_byte() {
             "2026-11-01",
         )
         .and_then(|engine_request| {
-            engine::build(&loaded.package, operation, &loaded.workflow, &engine_request)
+            engine::build(
+                &loaded.package,
+                operation,
+                &loaded.workflow,
+                &engine_request,
+            )
         });
         match built {
             Ok(built) => {
@@ -581,7 +620,10 @@ fn image_packages_take_the_prompt_from_a_text_port() {
         assert_eq!(serde_json::to_value(port.port_type).unwrap(), json!("text"));
         assert_eq!((port.min, port.max), (1, 1), "{short}");
         assert!(
-            !generate.controls.iter().any(|control| control.id == "prompt"),
+            !generate
+                .controls
+                .iter()
+                .any(|control| control.id == "prompt"),
             "{short}: prompt must not also be a control"
         );
         let blank = runtime::engine_request(
@@ -599,7 +641,11 @@ fn image_packages_take_the_prompt_from_a_text_port() {
     }
 }
 
-fn control<'a>(loaded: &'a runtime::LoadedPackage, operation: &str, id: &str) -> &'a super::Control {
+fn control<'a>(
+    loaded: &'a runtime::LoadedPackage,
+    operation: &str,
+    id: &str,
+) -> &'a super::Control {
     loaded.package.operations[operation]
         .controls
         .iter()
@@ -674,7 +720,10 @@ fn the_record_reports_the_model_the_workflow_actually_used() {
         run(""),
         loaded.workflow["98"]["inputs"]["unet_name"].clone()
     );
-    assert_eq!(run("Krea2/base.safetensors"), json!("Krea2\\base.safetensors"));
+    assert_eq!(
+        run("Krea2/base.safetensors"),
+        json!("Krea2\\base.safetensors")
+    );
 }
 
 #[test]
@@ -695,7 +744,10 @@ fn the_description_is_what_the_node_needs_and_nothing_it_does_not() {
     assert!(!group_of("width").is_empty());
     assert_eq!(group_of("width"), group_of("height"));
     let groups = generate["groups"].as_array().unwrap();
-    let size = groups.iter().find(|g| g["id"] == group_of("width")).unwrap();
+    let size = groups
+        .iter()
+        .find(|g| g["id"] == group_of("width"))
+        .unwrap();
     assert_eq!(size["swap"], json!(true));
     // Toolbar upscale is offered for Krea2 results but not for Moss results (CANVAS-022).
     assert!(described.get("resultUpscale").is_none());
@@ -778,7 +830,10 @@ fn generic_frontend_sources() -> Vec<(String, String)> {
         .filter(|path| !path.ends_with("legacyImageNode.ts"))
         .map(|path| {
             (
-                format!("src/workflow/{}", path.file_name().unwrap().to_string_lossy()),
+                format!(
+                    "src/workflow/{}",
+                    path.file_name().unwrap().to_string_lossy()
+                ),
                 fs::read_to_string(&path).unwrap(),
             )
         })
@@ -809,8 +864,14 @@ fn generic_engine_files_name_no_module_and_no_node_id() {
     let mut sources = vec![
         ("mod.rs".to_owned(), include_str!("mod.rs").to_owned()),
         ("engine.rs".to_owned(), include_str!("engine.rs").to_owned()),
-        ("validate.rs".to_owned(), include_str!("validate.rs").to_owned()),
-        ("runtime.rs".to_owned(), include_str!("runtime.rs").to_owned()),
+        (
+            "validate.rs".to_owned(),
+            include_str!("validate.rs").to_owned(),
+        ),
+        (
+            "runtime.rs".to_owned(),
+            include_str!("runtime.rs").to_owned(),
+        ),
         ("submit.rs".to_owned(), include_str!("submit.rs").to_owned()),
     ];
     let frontend = generic_frontend_sources();

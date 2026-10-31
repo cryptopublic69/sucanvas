@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 
 pub mod engine;
 pub mod legacy_v1_convert;
+pub mod runtime;
+pub mod submit;
 pub mod validate;
 
 #[cfg(test)]

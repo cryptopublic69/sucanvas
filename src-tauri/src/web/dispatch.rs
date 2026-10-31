@@ -24,6 +24,7 @@ use crate::{
     },
     platform::{Channel, State},
     video_upscale,
+    workflow_v2::submit as workflow_submit,
 };
 use serde_json::Value;
 use std::sync::RwLock;
@@ -125,6 +126,9 @@ commands! {
     GetRuntimeInfo => "get_runtime_info",
     SubmitComfyuiVideoUpscale => "submit_comfyui_video_upscale",
     CaptureVideoPoster => "capture_video_poster",
+    GetWorkflowPackage => "get_workflow_package",
+    GetComfyuiControlChoices => "get_comfyui_control_choices",
+    SubmitComfyuiWorkflowOperation => "submit_comfyui_workflow_operation",
 }
 
 impl Command {
@@ -349,7 +353,10 @@ pub fn permissions(
         | GetComfyuiClientTaskStatuses
         | GetRuntimeInfo
         | SubmitComfyuiVideoUpscale
-        | CaptureVideoPoster => vec![Permission::Authenticated],
+        | CaptureVideoPoster
+        | GetWorkflowPackage
+        | GetComfyuiControlChoices
+        | SubmitComfyuiWorkflowOperation => vec![Permission::Authenticated],
         VerifyAppLockPassword | SetAppLockPassword | DisableAppLock => {
             vec![Permission::Unavailable]
         }
@@ -491,7 +498,8 @@ pub fn submitted_client_id(command: Command, args: &Value) -> Option<String> {
         SubmitComfyuiImageWorkflow
         | SubmitComfyuiImageUpscale
         | SubmitComfyuiWorkflow
-        | SubmitComfyuiVideoUpscale => args["input"]["clientId"]
+        | SubmitComfyuiVideoUpscale
+        | SubmitComfyuiWorkflowOperation => args["input"]["clientId"]
             .as_str()
             .filter(|id| !id.is_empty())
             .map(str::to_owned),
@@ -1131,6 +1139,28 @@ pub async fn dispatch(
             serde_json::to_value(super::posters::capture(state, argument(args, "source")?).await?)
                 .map_err(|e| e.to_string())
         }
+        Command::GetWorkflowPackage => {
+            workflow_submit::get_workflow_package(
+                argument(args, "workflowModuleId")?,
+                State(&state.core),
+            )
+            .await
+        }
+        Command::GetComfyuiControlChoices => serde_json::to_value(
+            workflow_submit::get_comfyui_control_choices(
+                argument(args, "serverUrl")?,
+                argument(args, "classType")?,
+                argument(args, "input")?,
+                argument(args, "dirs")?,
+            )
+            .await?,
+        )
+        .map_err(|e| e.to_string()),
+        Command::SubmitComfyuiWorkflowOperation => serde_json::to_value(
+            workflow_submit::submit_comfyui_workflow_operation(input(args)?, State(&state.core))
+                .await?,
+        )
+        .map_err(|e| e.to_string()),
     }
 }
 
@@ -1148,6 +1178,7 @@ mod tests {
         for source in [
             include_str!("../commands.rs"),
             include_str!("../video_upscale.rs"),
+            include_str!("../workflow_v2/submit.rs"),
         ] {
             let mut pending = false;
             for line in source.lines() {
@@ -1243,6 +1274,9 @@ mod tests {
             "submit_comfyui_video_upscale",
             "capture_video_poster",
             "presence_leave",
+            "get_workflow_package",
+            "get_comfyui_control_choices",
+            "submit_comfyui_workflow_operation",
         ] {
             rows.push((name, none.clone(), "authenticated"));
         }

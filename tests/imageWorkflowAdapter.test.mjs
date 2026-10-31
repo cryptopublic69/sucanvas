@@ -109,13 +109,20 @@ test("images made by Moss do not offer the toolbar upscale", () => {
   assert.equal(adapter.generatedImageUpscaleSupported({ generationWorkflowModuleId: "gone" }, modules), true);
 });
 
-test("the node, the submission and the toolbar use these rules", () => {
-  assert.match(canvas, /imageModuleSupportsLora\(selectedImageWorkflowModule\)/);
-  assert.match(canvas, /imageModuleSupportsUpscale\(selectedImageWorkflowModule\)/);
-  assert.match(canvas, /imageModuleSwitchContent\(/);
-  assert.match(canvas, /generatedImageUpscaleSupported\(/);
-  assert.match(app, /effectiveImageOptions\(target\.content, selectedImageModule\)/);
-  assert.match(app, /imageUpscaleModule\(workflowModules, /);
-  assert.match(app, /defaultImageSteps\(module\)/);
+// CANVAS-024c: these rules now live in the packages (the v1 converter declares them); the image
+// node, its submission and the toolbar go through the generic workflow node instead.
+test("the node, the submission and the toolbar use the generic workflow node, not these rules", () => {
+  for (const name of ["imageModuleSupportsLora", "imageModuleSupportsUpscale", "imageModuleSwitchContent", "generatedImageUpscaleSupported"]) {
+    assert.doesNotMatch(canvas, new RegExp(`${name}\\(`), name);
+  }
+  for (const name of ["effectiveImageOptions", "imageUpscaleModule", "defaultImageSteps"]) {
+    assert.doesNotMatch(app, new RegExp(`${name}\\(`), name);
+  }
+  assert.match(canvas, /<WorkflowControls\b/);
+  assert.match(canvas, /switchedControlValues\(/);
+  assert.match(canvas, /resultUpscaleOffered\(/);
+  assert.doesNotMatch(app, /"submit_comfyui_image_workflow"|"submit_comfyui_image_upscale"/);
+  assert.equal(app.match(/"submit_comfyui_workflow_operation"/g)?.length, 2);
+  // The settings page still checks the module's default model against its directory.
   assert.match(app, /isImageModelNameForModule\(/);
 });

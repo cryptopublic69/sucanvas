@@ -7,7 +7,22 @@ import { WebRequestTimeoutError } from "./web/requestTimeout";
 import { recoverableWebGenerationFailure } from "./web/generationRequest";
 import { imageRegenerationPrompt, type WebImagePromptRequest } from "./web/imageGenerationPrompt";
 import { deduplicateRegenerationPromptOptions } from "./video/regenerationPromptOptions";
-import { defaultImageSteps, effectiveImageOptions, imageModelDirectoryLabel, imageUpscaleModule, isImageModelNameForModule } from "./image/imageWorkflowAdapter";
+import { imageModelDirectoryLabel, isImageModelNameForModule } from "./image/imageWorkflowAdapter";
+import { choiceKey, createChoiceStore } from "./workflow/choiceCache";
+import { convertLegacyImageNodeContent, needsLegacyImageConversion } from "./workflow/legacyImageNode";
+import {
+  buildOperationRequest,
+  controlValue,
+  operationRequestError,
+  UPSCALE_OPERATION,
+  upscaleModuleFor,
+  WORKFLOW_NODE_SHELL,
+  type ComfyFilesOption,
+  type ControlValues,
+  type OperationDescription,
+  type PackageDescription,
+  type WorkflowMediaItem,
+} from "./workflow/workflowPackage";
 import { generationQueuePositions } from "./generationQueuePositions";
 import { VideoPosterViewportCache } from "./VideoPosterViewportCache";
 import { summarizeProject } from "./projects/projectSummaries";
@@ -423,11 +438,6 @@ function videoInputMediaKind(record: NodeRecord): "image" | "audio" | "video" | 
   return null;
 }
 
-function isKrea2DiffusionModelName(value: string): boolean {
-  const normalized = value.trim().replace(/\//g, "\\");
-  return normalized.startsWith("Krea2\\") || normalized.startsWith("Kera2\\");
-}
-
 // Admin on another user's private canvas without edit mode (Web).
 const READ_ONLY_NOTICE = "这是其他用户的私有画布，开启编辑模式后才能修改";
 
@@ -559,7 +569,13 @@ function CanvasWorkspace() {
     setNoticeToastSequence((current) => current + 1);
   }, []);
   const [h3LoraOptions, setH3LoraOptions] = useState<string[]>([]);
-  const [krea2LoraOptions, setKrea2LoraOptions] = useState<string[]>([]);
+  // CANVAS-024c: package descriptions of the image modules (the generic node draws itself from
+  // them) and the ComfyUI file lists their select controls choose from.
+  const [workflowPackages, setWorkflowPackages] = useState<Record<string, PackageDescription>>({});
+  const [workflowPackageFailures, setWorkflowPackageFailures] = useState<Record<string, string>>({});
+  const workflowChoices = useMemo(() => createChoiceStore(), []);
+  const [workflowChoicesVersion, setWorkflowChoicesVersion] = useState(0);
+  const workflowChoiceRequests = useRef(new Set<string>());
   const [h3LoraCatalogLoaded, setH3LoraCatalogLoaded] = useState(false);
   const [h3LoraPreference, setH3LoraPreference] = useState(h3LoraPreferenceFromStorage);
   const [h3DiffusionModelOptions, setH3DiffusionModelOptions] = useState<string[]>([DEFAULT_H3_DIFFUSION_MODEL_NAME]);
@@ -1079,29 +1095,67 @@ function CanvasWorkspace() {
     };
   }, [activeProjectId, activeSettingsSection, comfyUiServerUrl, settingsOpen, showGlobalNotice, workflowModulesReady]);
 
+  useEffect(() => workflowChoices.subscribe(() => setWorkflowChoicesVersion((version) => version + 1)), [workflowChoices]);
+
   useEffect(() => {
     if (!workflowModulesReady) return;
     let disposed = false;
-    const refresh = async () => {
+    const modules = workflowModules.filter((module) => !module.deletedAt && module.capability === "image-generation");
+    void Promise.all(modules.map(async (module) => {
       try {
-        const loras = await invoke<string[]>("get_comfyui_krea2_loras", {
-          serverUrl: comfyUiServerUrl,
-        });
-        if (!disposed) {
-          setKrea2LoraOptions((current) => (
-            current.length === loras.length
-              && current.every((item, index) => sameH3LoraName(item, loras[index]))
-              ? current
-              : loras
-          ));
-        }
-      } catch {
-        if (!disposed) setKrea2LoraOptions([]);
+        const description = await invoke<PackageDescription>("get_workflow_package", { workflowModuleId: module.id });
+        return { id: module.id, description, error: "" };
+      } catch (error) {
+        return { id: module.id, description: null, error: error instanceof Error ? error.message : String(error) };
       }
-    };
-    void refresh();
+    })).then((results) => {
+      if (disposed) return;
+      setWorkflowPackages(Object.fromEntries(results.flatMap(({ id, description }) => (description ? [[id, description]] : []))));
+      setWorkflowPackageFailures(Object.fromEntries(results.flatMap(({ id, error }) => (error ? [[id, error]] : []))));
+    });
     return () => { disposed = true; };
-  }, [activeProjectId, comfyUiServerUrl, workflowModulesReady]);
+  }, [workflowModules, workflowModulesReady]);
+
+  // Lists are read again when a canvas opens or the ComfyUI address changes; until a list is
+  // in, its controls say 加载中.
+  useEffect(() => {
+    workflowChoiceRequests.current.clear();
+    workflowChoices.forget();
+  }, [activeProjectId, comfyUiServerUrl, workflowChoices]);
+
+  useEffect(() => {
+    if (!workflowModulesReady) return;
+    const wanted = new Map<string, ComfyFilesOption>();
+    for (const description of Object.values(workflowPackages)) {
+      for (const operation of Object.values(description.operations)) {
+        for (const control of operation.controls ?? []) {
+          for (const candidate of [control, ...(control.fields ?? [])]) {
+            const files = candidate.options?.comfyui;
+            if (files) wanted.set(choiceKey(candidate), files);
+          }
+        }
+      }
+    }
+    const serverUrl = comfyUiServerUrl;
+    for (const [key, files] of wanted) {
+      if (workflowChoices.has(key) || workflowChoiceRequests.current.has(key)) continue;
+      workflowChoiceRequests.current.add(key);
+      void invoke<string[]>("get_comfyui_control_choices", {
+        serverUrl,
+        classType: files.classType,
+        input: files.input,
+        dirs: files.dirs,
+      }).then((values) => {
+        if (comfyUiServerUrlRef.current === serverUrl) workflowChoices.set(key, values);
+      }).catch((error) => {
+        if (comfyUiServerUrlRef.current === serverUrl) {
+          workflowChoices.fail(key, error instanceof Error ? error.message : String(error));
+        }
+      }).finally(() => {
+        workflowChoiceRequests.current.delete(key);
+      });
+    }
+  }, [activeProjectId, comfyUiServerUrl, workflowChoices, workflowChoicesVersion, workflowModulesReady, workflowPackages]);
 
   useEffect(() => {
     if (!workflowModulesReady) return;
@@ -2262,20 +2316,22 @@ function CanvasWorkspace() {
         const configuredModuleId = typeof record.content.workflowModuleId === "string"
           ? record.content.workflowModuleId
           : workflowModuleDefaults["image-generation"] ?? "";
-        const isImageEdit = workflowModules.some((module) => (
-          !module.deletedAt
-          && module.id === configuredModuleId
-          && module.capability === "image-generation"
-          && module.variant === "image-edit"
-        ));
+        // CANVAS-024c: an old image node becomes the generic node in place, once its package
+        // is known (or cannot be: module gone or unreadable). Read-only canvases are shown
+        // converted but not written.
+        const moduleKnown = workflowModules.some((module) => !module.deletedAt && module.id === configuredModuleId);
+        const generate = workflowPackages[configuredModuleId]?.operations.generate;
+        if (
+          needsLegacyImageConversion(record.content)
+          && !canvasReadOnlyRef.current
+          && (generate || workflowPackageFailures[configuredModuleId] || !moduleKnown)
+        ) {
+          changeNode(node.id, { content: convertLegacyImageNodeContent(record.content, generate) });
+          continue;
+        }
         const imageInputCount = (mediaKindsByTarget.get(node.id) ?? [])
           .filter((kind) => kind === "image")
           .length;
-        const desiredHeight = imageGenerationAutoHeight(
-          currentTextInputCount,
-          isImageEdit,
-          imageInputCount,
-        );
         const connectedTextRecords = (textInputIdsByTarget.get(node.id) ?? [])
           .map((inputId) => recordsById.get(inputId))
           .filter((input): input is NodeRecord => input?.kind === "text");
@@ -2298,22 +2354,18 @@ function CanvasWorkspace() {
           && Number.isFinite(record.content.layoutImageInputCount)
           ? Math.max(0, Math.floor(record.content.layoutImageInputCount))
           : null;
-        const storedImageEditLayout = record.content.imageEditLayout === true;
+        // The generic node fits its own height to what it draws (CanvasNode measures it).
         if (
-          Math.abs(record.height - desiredHeight) < 0.5
-          && storedLayoutTextInputCount === currentTextInputCount
+          storedLayoutTextInputCount === currentTextInputCount
           && storedLayoutImageInputCount === imageInputCount
-          && storedImageEditLayout === isImageEdit
           && storedActiveTextId === activeTextInputId
         ) continue;
         changeNode(node.id, {
-          height: desiredHeight,
           content: {
             ...record.content,
             activeTextInputId,
             layoutTextInputCount: currentTextInputCount,
             layoutImageInputCount: imageInputCount,
-            imageEditLayout: isImageEdit,
           },
         });
         continue;
@@ -2448,7 +2500,7 @@ function CanvasWorkspace() {
         },
       });
     }
-  }, [changeNode, contentNodes, edges, workflowModuleDefaults, workflowModules]);
+  }, [changeNode, contentNodes, edges, workflowModuleDefaults, workflowModules, workflowPackageFailures, workflowPackages]);
 
   const rememberDeletedBatch = useCallback((batch: DeletedBatch) => {
     undoStack.current.push({ kind: "node-delete", batch });
@@ -6516,7 +6568,9 @@ function CanvasWorkspace() {
           videoRegenerationPresets,
           h3LoraOptions,
           h3DiffusionModelOptions,
-          krea2LoraOptions,
+          workflowPackages,
+          workflowChoices,
+          workflowChoicesVersion,
           workflowModules,
           workflowModuleDefaults,
           workflowModuleVisibleIds,
@@ -6563,7 +6617,7 @@ function CanvasWorkspace() {
         },
       };
     },
-    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, downloadGeneratedImage, downloadGeneratedVideo, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, downloadGeneratedImage, downloadGeneratedVideo, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -8533,15 +8587,18 @@ function CanvasWorkspace() {
     ));
     const module = visibleImageModules.find((candidate) => candidate.id === workflowModuleDefaults["image-generation"])
       ?? visibleImageModules[0];
-    const height = imageGenerationAutoHeight(0, module?.variant === "image-edit", 0);
+    // The generic node starts with the package's defaults (no values of its own) and then
+    // fits its height to what the package draws.
+    const operation = module ? workflowPackages[module.id]?.operations.generate : undefined;
+    const height = imageGenerationAutoHeight(0, Boolean(operation?.inputs?.some((port) => port.type === "image")), 0);
     const placement = reserveNodePlacement(activeProjectId, position, width, height);
     try {
-      const result = await invoke<CreateNodeResult>("create_node", { input: { canvasId: activeProjectId, kind: "image-generation", title: "图片生成", content: { status: "idle", workflowModuleId: module?.id ?? "", workflowModuleRevision: module?.revision ?? "", activeTextInputId: "", imageLoraName: "", imageEditLayout: module?.variant === "image-edit", width: 1280, height: 720, steps: defaultImageSteps(module), upscaleEnabled: false, upscaleMegapixels: 8, seedMode: "random", seed: "" }, source: "manual", x: placement.position.x, y: placement.position.y, width, height } });
+      const result = await invoke<CreateNodeResult>("create_node", { input: { canvasId: activeProjectId, kind: "image-generation", title: "图片生成", content: { status: "idle", nodeShell: WORKFLOW_NODE_SHELL, operation: "generate", workflowModuleId: module?.id ?? "", workflowModuleRevision: module?.revision ?? "", activeTextInputId: "", controlValues: {}, seedMode: "random", seed: "" }, source: "manual", x: placement.position.x, y: placement.position.y, width, height } });
       finishNodePlacementReservation(placement.reservationId, [result.node]);
       setNodes((current) => [...current, makeFlowNode(result.node)]);
       setNotice("图片生成节点已创建");
     } catch (error) { finishNodePlacementReservation(placement.reservationId); reportError(error); }
-  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setNodes, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules]);
+  }, [activeProjectId, finishNodePlacementReservation, makeFlowNode, reportError, reserveNodePlacement, setNodes, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages]);
 
   const executeImageNode = useCallback(async (targetId: string, placementSourceId?: string, promptRequest?: WebImagePromptRequest) => {
     const webPromptRequest = import.meta.env.MODE === "web" ? promptRequest : undefined;
@@ -8558,16 +8615,13 @@ function CanvasWorkspace() {
       ? recordAtCurrentFlowPosition(placementSourceFlowNode)
       : undefined;
     const moduleId = typeof target.content.workflowModuleId === "string" ? target.content.workflowModuleId : workflowModuleDefaults["image-generation"] ?? "";
-    const selectedImageModule = workflowModules.find((module) => (
-      !module.deletedAt
-      && module.capability === "image-generation"
-      && module.id === moduleId
-    ));
-    const isImageEdit = selectedImageModule?.variant === "image-edit";
-    const imageModelName = selectedImageModule
-      && isImageModelNameForModule(selectedImageModule.defaults.diffusionModelName, selectedImageModule)
-      ? selectedImageModule.defaults.diffusionModelName
-      : "";
+    // CANVAS-024c: the generic node. What it needs and sends comes from the package.
+    const operation: OperationDescription | undefined = workflowPackages[moduleId]?.operations.generate;
+    const nodeContent = convertLegacyImageNodeContent(target.content, operation);
+    const controlValues = nodeContent.controlValues && typeof nodeContent.controlValues === "object"
+      && !Array.isArray(nodeContent.controlValues)
+      ? nodeContent.controlValues as ControlValues
+      : {};
     const recordsById = new Map(
       nodesSnapshot.current.map((node) => [node.id, node.data.record]),
     );
@@ -8591,15 +8645,19 @@ function CanvasWorkspace() {
       "mediaInputOrder",
       connectedImageInputs,
     );
-    const imagePaths = imageInputs.map((record) => {
+    // A connected image goes as its local file when there is one, else as the ComfyUI output.
+    const imageItems = imageInputs.map((record): WorkflowMediaItem | null => {
       if (typeof record.content.assetPath === "string" && record.content.assetPath.trim()) {
-        return record.content.assetPath.trim();
+        return { path: record.content.assetPath.trim() };
       }
-      return mappedComfyOutputPath(comfyOutputRootRef.current, {
+      const mapped = mappedComfyOutputPath(comfyOutputRootRef.current, {
         filename: typeof record.content.filename === "string" ? record.content.filename : "",
         subfolder: typeof record.content.subfolder === "string" ? record.content.subfolder : "",
         fileType: typeof record.content.fileType === "string" ? record.content.fileType : "",
-      }) ?? "";
+      });
+      if (mapped) return { path: mapped };
+      const output = comfyOutputFromContent(record.content);
+      return output ? { output } : null;
     });
     const positiveInput = webPromptRequest?.kind === "text"
       ? textInputs.find((input) => input.id === webPromptRequest.promptNodeId) ?? null
@@ -8615,33 +8673,46 @@ function CanvasWorkspace() {
       ? webPromptRequest.prompt : promptFromInput(positiveInput).trim();
     const promptSourceNodeId = webPromptRequest?.kind === "snapshot"
       ? webPromptRequest.promptSourceNodeId : positiveInput?.id ?? "";
-    const negativePrompt = webPromptRequest?.kind === "snapshot"
-      ? webPromptRequest.negativePrompt : typeof target.content.negativePrompt === "string"
-      ? target.content.negativePrompt.trim()
-      : "";
-    // LoRA and upscale only for modules that have them (Moss and image edit do not); stale values
-    // left on the node from another module are neither submitted nor recorded in the snapshot.
-    const { loraName: imageLoraName, upscaleEnabled } = effectiveImageOptions(target.content, selectedImageModule);
-    if (!prompt.trim() || !moduleId || (isImageEdit && (imageInputs.length < 1 || imageInputs.length > 2)) || (isImageEdit && imagePaths.some((path) => !path))) {
-      const message = !moduleId
-        ? "请先选择图片生成方案"
-        : isImageEdit && (imageInputs.length < 1 || imageInputs.length > 2)
-          ? "Krea2 图像编辑请连接 1 张图片；第二张图片可选，最多 2 张"
-          : isImageEdit && imagePaths.some((path) => !path)
-            ? "接入图片缺少本地文件路径，无法提交到 ComfyUI"
-            : !positiveInput
-              ? "请通过连线接入正向提示词文本节点"
-              : "当前正向提示词节点内容为空，请先填写";
-      changeNode(targetId, { content: { ...target.content, status: "invalid", validationMessage: message } });
+    // Regenerating from a recorded image keeps that image's negative prompt.
+    const requestValues: ControlValues = webPromptRequest?.kind === "snapshot"
+      && operation?.controls?.some((control) => control.id === "negativePrompt")
+      ? { ...controlValues, negativePrompt: webPromptRequest.negativePrompt }
+      : controlValues;
+    const request = operation
+      ? buildOperationRequest("generate", operation, requestValues, {
+        text: positiveInput || webPromptRequest?.kind === "snapshot" ? [{ text: prompt }] : [],
+        image: imageItems.filter((item): item is WorkflowMediaItem => Boolean(item)),
+      }, {
+        seedMode: nodeContent.seedMode === "fixed" ? "fixed" : "random",
+        seed: typeof nodeContent.seed === "string" ? nodeContent.seed : "",
+      })
+      : null;
+    const requestProblem = !moduleId
+      ? "请先选择图片生成方案"
+      : !operation || !request
+        ? workflowPackageFailures[moduleId] ? `方案无法使用：${workflowPackageFailures[moduleId]}` : "方案描述尚未读取完成，请稍后再试"
+        : imageItems.some((item) => !item)
+          ? "接入图片缺少本地文件路径，无法提交到 ComfyUI"
+          : !positiveInput && webPromptRequest?.kind !== "snapshot" && operation.inputs?.some((port) => port.type === "text" && (port.min ?? 0) > 0)
+            ? "请通过连线接入正向提示词文本节点"
+            : operationRequestError(operation, request);
+    if (requestProblem || !operation || !request) {
+      const message = requestProblem || "方案描述尚未读取完成，请稍后再试";
+      changeNode(targetId, { content: { ...nodeContent, status: "invalid", validationMessage: message } });
       setNotice(message);
       return;
     }
-
-    const width = Number(target.content.width) || 1280;
-    const height = Number(target.content.height) || 720;
-    const steps = Number(target.content.steps) || defaultImageSteps(selectedImageModule);
-    const effectiveUpscaleEnabled = !isImageEdit && upscaleEnabled;
-    const upscaleMegapixels = Number(target.content.upscaleMegapixels) || 8;
+    // What the generated image records about its settings (effective values, defaults included).
+    const effective = (id: string): unknown => {
+      const control = operation.controls?.find((candidate) => candidate.id === id);
+      return control ? controlValue(control, request.values) : undefined;
+    };
+    const negativePrompt = typeof effective("negativePrompt") === "string" ? String(effective("negativePrompt")).trim() : "";
+    const width = Number(effective("width")) || 1024;
+    const height = Number(effective("height")) || 1024;
+    const imageLoraName = typeof effective("loraName") === "string" ? String(effective("loraName")).trim() : "";
+    const effectiveUpscaleEnabled = effective("upscaleEnabled") === true;
+    const upscaleMegapixels = Number(effective("upscaleMegapixels")) || 8;
     const clientId = crypto.randomUUID();
     const imageRecoverySnapshot = imageRecoveryGenerationSnapshot({
       kind: "generation",
@@ -8653,10 +8724,10 @@ function CanvasWorkspace() {
       workflowModuleRevision: typeof target.content.workflowModuleRevision === "string"
         ? target.content.workflowModuleRevision
         : "",
-      modelName: imageModelName,
+      modelName: typeof effective("modelName") === "string" ? String(effective("modelName")) : "",
       width,
       height,
-      loraName: isImageEdit ? "" : imageLoraName,
+      loraName: imageLoraName,
       upscaleEnabled: effectiveUpscaleEnabled,
       ...(effectiveUpscaleEnabled ? { upscaleMegapixels } : {}),
     });
@@ -8715,8 +8786,19 @@ function CanvasWorkspace() {
       if (cancelledComfyClients.current.has(clientId)) {
         throw new Error("ComfyUI 图片生成已取消");
       }
+      // Sampler previews when the package names a preview node.
+      const livePreviewNodeId = operation.livePreviewNode ?? "";
+      const receivePreview = createComfyPreviewReceiver(
+        livePreviewNodeId,
+        () => Boolean(livePreviewNodeId) && activeProjectIdRef.current === target.canvasId
+          && !document.hidden && !cancelledComfyClients.current.has(clientId)
+          && !completedGenerationPlaceholders.current.has(placeholder.id),
+        (image) => showGenerationLivePreview(placeholder.id, image),
+      );
       progressSocket?.addEventListener("message", (event) => {
         if (cancelledComfyClients.current.has(clientId)) return;
+        receivePreview(event.data);
+        if (typeof event.data !== "string") return;
         const update = comfyProgressFromSocketData(event.data);
         if (!update) return;
         const latest = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record ?? target;
@@ -8741,23 +8823,12 @@ function CanvasWorkspace() {
       if (cancelledComfyClients.current.has(clientId)) {
         throw new Error("ComfyUI 图片生成已取消");
       }
-      const result = await invoke<ComfySubmitResult>("submit_comfyui_image_workflow", {
+      const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow_operation", {
         input: {
           serverUrl: comfyUiServerUrlRef.current,
           workflowModuleId: moduleId,
           clientId,
-          prompt,
-          negativePrompt,
-          seedMode: target.content.seedMode === "fixed" ? "fixed" : "random",
-          seed: typeof target.content.seed === "string" ? target.content.seed : "",
-          width,
-          height,
-          steps,
-          loraName: imageLoraName,
-          modelName: imageModelName,
-          imagePaths,
-          upscaleEnabled: effectiveUpscaleEnabled,
-          upscaleMegapixels,
+          ...request,
         },
       });
       const [firstOutput, ...additionalOutputs] = result.outputs;
@@ -8792,8 +8863,9 @@ function CanvasWorkspace() {
           generationWidth: width,
           generationHeight: height,
           ...(effectiveUpscaleEnabled ? { generationUpscaleMegapixels: upscaleMegapixels } : {}),
-          generationLoraName: isImageEdit ? "" : imageLoraName,
+          generationLoraName: imageLoraName,
           upscaleEnabled: effectiveUpscaleEnabled,
+          generationControlValues: request.values,
           ...(generationElapsedSeconds === null ? {} : { generationElapsedSeconds }),
         };
       };
@@ -8854,10 +8926,10 @@ function CanvasWorkspace() {
           ...latest.content,
           status: "succeeded",
           executionProgress: 100,
-          validationMessage: effectiveUpscaleEnabled ? "已生成放大图" : isImageEdit ? "图像编辑完成" : "已生成原始分辨率图片",
+          validationMessage: effectiveUpscaleEnabled ? "已生成放大图" : "图片生成完成",
         },
       });
-      setNotice(effectiveUpscaleEnabled ? "图片生成与放大完成" : isImageEdit ? "图像编辑完成" : "图片生成完成");
+      setNotice(effectiveUpscaleEnabled ? "图片生成与放大完成" : "图片生成完成");
     } catch (error) {
       if (cancelledComfyClients.current.has(clientId)) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -8882,8 +8954,9 @@ function CanvasWorkspace() {
       ownedComfyClients.current.delete(clientId);
       if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
       unregisterComfyTask(targetId, clientId);
+      clearGenerationLivePreview(placeholder.id);
     }
-  }, [changeNode, completeGenerationPlaceholder, createImageGenerationPlaceholder, finalizeGenerationPlaceholder, flushNodePatches, forgetComfyTask, imageRecoveryGenerationSnapshot, makeFlowNode, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
+  }, [changeNode, clearGenerationLivePreview, completeGenerationPlaceholder, createImageGenerationPlaceholder, finalizeGenerationPlaceholder, flushNodePatches, forgetComfyTask, imageRecoveryGenerationSnapshot, makeFlowNode, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, showGenerationLivePreview, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowPackageFailures, workflowPackages]);
   executeImageNodeRef.current = executeImageNode;
 
   const upscaleGeneratedImage = useCallback(async (previewId: string) => {
@@ -8910,26 +8983,44 @@ function CanvasWorkspace() {
     const sourceGenerator = sourceGeneratorId
       ? nodesSnapshot.current.find((node) => node.id === sourceGeneratorId)?.data.record
       : undefined;
-    // The upscale branch belongs to the Krea2 text-to-image workflow; a Moss default is skipped.
-    const upscaleModule = imageUpscaleModule(workflowModules, workflowModuleDefaults["image-generation"] ?? "");
-    const moduleId = upscaleModule?.id ?? "";
-    const imageModelName = upscaleModule
-      && isKrea2DiffusionModelName(upscaleModule.defaults.diffusionModelName)
-      ? upscaleModule.defaults.diffusionModelName
+    // CANVAS-024c: the toolbar runs a package's upscaleImage operation (the image's own
+    // package if it has one, else the default image module's, else the first offering it).
+    const generatingModuleId = typeof preview.content.generationWorkflowModuleId === "string"
+      ? preview.content.generationWorkflowModuleId
       : "";
-    if (!moduleId) {
-      setNotice("无法放大：请先配置 Krea2 文生图生成方案");
+    const moduleId = upscaleModuleFor(
+      generatingModuleId,
+      workflowModuleDefaults["image-generation"] ?? "",
+      workflowModules.filter((module) => !module.deletedAt && module.capability === "image-generation").map((module) => module.id),
+      workflowPackages,
+    );
+    const upscaleOperation = moduleId ? workflowPackages[moduleId]?.operations[UPSCALE_OPERATION] : undefined;
+    if (!moduleId || !upscaleOperation) {
+      setNotice("无法放大：没有提供图片放大的生成方案");
       return;
     }
+    const sourceGeneratorValues = sourceGenerator
+      ? convertLegacyImageNodeContent(sourceGenerator.content, workflowPackages[
+        typeof sourceGenerator.content.workflowModuleId === "string" ? sourceGenerator.content.workflowModuleId : ""
+      ]?.operations.generate).controlValues as ControlValues | undefined
+      : undefined;
     const megapixels = Number(
       preview.content.generationUpscaleMegapixels
-      ?? sourceGenerator?.content.upscaleMegapixels
+      ?? sourceGeneratorValues?.upscaleMegapixels
       ?? 8,
     );
-    if (!Number.isFinite(megapixels) || megapixels < 0.1 || megapixels > 64) {
-      setNotice("无法放大：目标像素数必须在 0.1–64 MP 之间");
+    const upscaleRequest = buildOperationRequest(UPSCALE_OPERATION, upscaleOperation, { megapixels }, {
+      image: [{ output: source }],
+    }, { seedMode: "random", seed: "" });
+    const upscaleProblem = operationRequestError(upscaleOperation, upscaleRequest);
+    if (upscaleProblem) {
+      setNotice(`无法放大：${upscaleProblem}`);
       return;
     }
+    const upscaleModel = upscaleOperation.controls?.find((control) => control.id === "modelName");
+    const imageModelName = upscaleModel && typeof controlValue(upscaleModel, upscaleRequest.values) === "string"
+      ? String(controlValue(upscaleModel, upscaleRequest.values))
+      : "";
     const sourceWidth = Number(preview.content.generationWidth)
       || Number(sourceGenerator?.content.width)
       || 1280;
@@ -9034,14 +9125,12 @@ function CanvasWorkspace() {
           validationMessage,
         });
       });
-      const result = await invoke<ComfySubmitResult>("submit_comfyui_image_upscale", {
+      const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow_operation", {
         input: {
           serverUrl: comfyUiServerUrlRef.current,
           workflowModuleId: moduleId,
           clientId,
-          source,
-          megapixels,
-          modelName: imageModelName,
+          ...upscaleRequest,
         },
       });
       const [firstOutput, ...additionalOutputs] = result.outputs;
@@ -9168,7 +9257,7 @@ function CanvasWorkspace() {
       if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
       unregisterComfyTask(previewId, clientId);
     }
-  }, [changeNode, completeGenerationPlaceholder, createImageGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, imageRecoveryGenerationSnapshot, makeFlowNode, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
+  }, [changeNode, completeGenerationPlaceholder, createImageGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, imageRecoveryGenerationSnapshot, makeFlowNode, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules, workflowPackages]);
   upscaleGeneratedImageRef.current = upscaleGeneratedImage;
 
   const regenerateGeneratedImage = useCallback(async (previewId: string) => {
@@ -10538,7 +10627,8 @@ function CanvasWorkspace() {
           && previousData.h3DiffusionModelOptions === h3DiffusionModelOptions
           && previousData.videoRegenerationPresets === videoRegenerationPresets
           && previousData.h3LoraOptions === h3LoraOptions
-          && previousData.krea2LoraOptions === krea2LoraOptions
+          && previousData.workflowPackages === workflowPackages
+          && previousData.workflowChoicesVersion === workflowChoicesVersion
           && previousData.workflowModules === workflowModules
           && previousData.workflowModuleDefaults === workflowModuleDefaults
           && previousData.workflowModuleVisibleIds === workflowModuleVisibleIds,
@@ -10562,7 +10652,9 @@ function CanvasWorkspace() {
             videoRegenerationPresets,
             h3LoraOptions,
             h3DiffusionModelOptions,
-            krea2LoraOptions,
+            workflowPackages,
+            workflowChoices,
+            workflowChoicesVersion,
             workflowModules,
             workflowModuleDefaults,
             workflowModuleVisibleIds,
@@ -10576,7 +10668,7 @@ function CanvasWorkspace() {
       visibleNodeCache.current = nextCache;
       return results;
     },
-    [activeComfyTaskCounts, contentNodes, edges, relations, queuePositions, h3DiffusionModelOptions, h3LoraOptions, krea2LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules],
+    [activeComfyTaskCounts, contentNodes, edges, relations, queuePositions, h3DiffusionModelOptions, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
   );
 
   const updateGuideOverlays = useCallback((nextAlignment: AlignmentGuide[], nextSpacing: SpacingGuide[]) => {

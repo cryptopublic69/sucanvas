@@ -4,7 +4,16 @@ import { resolveComfyOutputPath } from "./web/outputFiles";
 import { videoUpscaleFromValue } from "./video/videoUpscale";
 import { referenceLimits, referenceModuleFor, referenceSubmitError, type ReferenceLimits } from "./video/referenceLimits";
 import { comfyOutputFromContent, videoUpscaleSourceUnavailableReason } from "./video/videoUpscaleSource";
-import { generatedImageUpscaleSupported, imageModuleSupportsLora, imageModuleSupportsUpscale, imageModuleSwitchContent } from "./image/imageWorkflowAdapter";
+import { choiceKey, type ChoiceStore } from "./workflow/choiceCache";
+import { convertLegacyImageNodeContent } from "./workflow/legacyImageNode";
+import { WorkflowControls } from "./workflow/WorkflowControls";
+import {
+  portLabel,
+  resultUpscaleOffered,
+  switchedControlValues,
+  type ControlValues,
+  type PackageDescription,
+} from "./workflow/workflowPackage";
 import {
   GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH,
   GENERATED_VIDEO_PREVIEW_WIDTH,
@@ -48,7 +57,6 @@ import {
   useStore,
 } from "@xyflow/react";
 import {
-  ArrowLeftRight,
   Check,
   ChevronDown,
   ChevronUp,
@@ -1660,7 +1668,9 @@ interface CanvasNodeData extends Record<string, unknown> {
   videoRegenerationPresets: VideoRegenerationPresetCollection;
   h3LoraOptions: string[];
   h3DiffusionModelOptions: string[];
-  krea2LoraOptions: string[];
+  workflowPackages: Record<string, PackageDescription>;
+  workflowChoices: ChoiceStore;
+  workflowChoicesVersion: number;
   workflowModules: WorkflowModuleRecord[];
   workflowModuleDefaults: WorkflowModuleDefaultMap;
   workflowModuleVisibleIds: string[];
@@ -4633,7 +4643,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     videoRegenerationPresets,
     h3LoraOptions,
     h3DiffusionModelOptions,
-    krea2LoraOptions,
+    workflowPackages,
+    workflowChoices,
     workflowModules,
     workflowModuleDefaults,
     workflowModuleVisibleIds,
@@ -5006,11 +5017,69 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const selectedImageWorkflowModule = allAvailableImageWorkflowModules.find(
     (module) => module.id === configuredWorkflowModuleId,
   ) ?? null;
-  const isKrea2ImageEdit = isImageGeneration
-    && selectedImageWorkflowModule?.variant === "image-edit";
-  const imageEditInputs = isKrea2ImageEdit
+  // CANVAS-024c: the image node is the generic workflow node; its look comes from the package.
+  const imageOperation = isImageGeneration
+    ? workflowPackages[configuredWorkflowModuleId]?.operations.generate
+    : undefined;
+  const imageNodeContent = isImageGeneration
+    ? convertLegacyImageNodeContent(record.content, imageOperation)
+    : record.content;
+  const imageControlValues = imageNodeContent.controlValues && typeof imageNodeContent.controlValues === "object"
+    && !Array.isArray(imageNodeContent.controlValues)
+    ? imageNodeContent.controlValues as ControlValues
+    : {};
+  const imageTextPort = imageOperation?.inputs?.find((port) => port.type === "text");
+  const imageMediaPort = imageOperation?.inputs?.find((port) => port.type === "image");
+  const imageMediaInputs = imageMediaPort
     ? mediaInputs.filter((input) => videoInputMediaKind(input) === "image")
     : [];
+  const imageNodeBodyRef = useRef<HTMLDivElement>(null);
+  const imageLayoutRecordRef = useRef(record);
+  imageLayoutRecordRef.current = record;
+  useEffect(() => {
+    // The generic node fits its height to what the package draws (grow and shrink).
+    if (!isImageGeneration) return;
+    const body = imageNodeBodyRef.current;
+    const article = body?.parentElement;
+    if (!body || !article) return;
+    let frame = 0;
+    const number = (value: string) => Number.parseFloat(value) || 0;
+    const measure = () => {
+      frame = 0;
+      const style = getComputedStyle(body);
+      const rows = Array.from(body.children).filter((child): child is HTMLElement => (
+        child instanceof HTMLElement && getComputedStyle(child).display !== "none"
+        && !["absolute", "fixed"].includes(getComputedStyle(child).position)
+      ));
+      const contentHeight = rows.reduce((height, row) => {
+        const rowStyle = getComputedStyle(row);
+        return height + row.offsetHeight + number(rowStyle.marginTop) + number(rowStyle.marginBottom);
+      }, number(style.paddingTop) + number(style.paddingBottom))
+        + Math.max(0, rows.length - 1) * number(style.rowGap);
+      const difference = contentHeight - body.clientHeight;
+      const current = imageLayoutRecordRef.current;
+      const height = Math.ceil((article.offsetHeight + difference + 2) / CANVAS_GRID_SIZE) * CANVAS_GRID_SIZE;
+      if (Math.abs(height - current.height) >= CANVAS_GRID_SIZE) onChange(id, { height });
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    const observer = new ResizeObserver(schedule);
+    const observeRows = () => {
+      observer.disconnect();
+      observer.observe(body);
+      for (const row of Array.from(body.children)) observer.observe(row);
+      schedule();
+    };
+    const mutationObserver = new MutationObserver(observeRows);
+    mutationObserver.observe(body, { childList: true, subtree: true });
+    observeRows();
+    return () => {
+      observer.disconnect();
+      mutationObserver.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [id, isImageGeneration, onChange]);
   const videoDuration = videoDurationFromContent(record.content);
   const videoDetailsExpanded = record.content.videoDetailsExpanded === true;
   const videoAspectRatio = videoAspectRatioFromContent(record.content);
@@ -5149,14 +5218,22 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     })),
   }, currentPresetSettings) : undefined;
   const selectableH3Loras = h3LoraOptions;
-  const imageLoraName = typeof record.content.imageLoraName === "string"
-    ? record.content.imageLoraName.trim()
-    : "";
-  const availableImageLoraName = krea2LoraOptions.find(
-    (lora) => sameH3LoraName(lora, imageLoraName),
-  );
   const seedMode = seedModeFromContent(record.content);
   const fixedSeed = fixedSeedFromContent(record.content);
+  const imageInputsComplete = Boolean(imageOperation?.inputs?.every((port) => {
+    const count = port.type === "text" ? (imagePositivePromptInput ? 1 : 0)
+      : port === imageMediaPort ? imageMediaInputs.length : 0;
+    return count >= (port.min ?? 0);
+  }));
+  const imageInputBadge = !imageOperation
+    ? "等待选择方案"
+    : (imageOperation.inputs ?? []).map((port) => {
+      const label = portLabel(port);
+      if (port.type === "text") {
+        return `${label} ${textInputs.length} 个${textInputs.length ? `（${imagePositivePromptInput ? "已选" : "未选"}）` : ""}`;
+      }
+      return port === imageMediaPort ? `${label} ${imageMediaInputs.length}/${port.max ?? 1}` : "";
+    }).filter(Boolean).join(" · ") || "无需输入";
   const validationStatus = record.content.status === "ready"
     ? "valid"
     : record.content.status === "succeeded"
@@ -8043,7 +8120,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           </div>
           <span className="generated-video-footer-spacer" />
           <div className="generated-video-actions" aria-label="图片预览操作">
-            {generatedImageUrl && generatedImageUpscaleSupported(record.content, workflowModules) && (
+            {generatedImageUrl && resultUpscaleOffered(
+              typeof record.content.generationWorkflowModuleId === "string" ? record.content.generationWorkflowModuleId : "",
+              workflowPackages,
+            ) && (
               <button
                 type="button"
                 className={`nodrag node-action generated-video-secondary-action ${executionRunning ? "is-cancel" : ""}`}
@@ -9705,18 +9785,29 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         </div>
       )}
       {isImageGeneration && (
-        <div className="nodrag video-node-body has-media image-generation-node-body">
+        <div ref={imageNodeBodyRef} className="nodrag video-node-body has-media image-generation-node-body workflow-node-body">
           <label className="video-workflow-module-select image-generation-workflow-select">
             <span>生成方案</span>
             <select
               className="image-generation-select"
-              value={typeof record.content.workflowModuleId === "string" ? record.content.workflowModuleId : ""}
+              aria-label="生成方案"
+              value={configuredWorkflowModuleId}
               onChange={(event) => {
-              const module = availableImageWorkflowModules.find((candidate) => candidate.id === event.currentTarget.value);
-              if (!module) return;
-              onChange(id, {
-                content: imageModuleSwitchContent(record.content, module, selectedImageWorkflowModule),
-              });
+                const module = availableImageWorkflowModules.find((candidate) => candidate.id === event.currentTarget.value);
+                if (!module) return;
+                const nextOperation = workflowPackages[module.id]?.operations.generate;
+                onChange(id, {
+                  content: {
+                    ...imageNodeContent,
+                    workflowModuleId: module.id,
+                    workflowModuleRevision: module.revision,
+                    controlValues: nextOperation
+                      ? switchedControlValues(imageControlValues, imageOperation, nextOperation)
+                      : imageControlValues,
+                    status: "idle",
+                    validationMessage: "",
+                  },
+                });
               }}
             >
               <option value="">请选择方案</option>
@@ -9728,7 +9819,13 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               {availableImageWorkflowModules.map((module) => <option key={module.id} value={module.id}>{module.name} · {module.revision}</option>)}
             </select>
           </label>
-          <div className={`video-seed-control image-generation-seed-control ${isKrea2ImageEdit ? "is-image-edit-seed" : ""}`}>
+          {configuredWorkflowModuleId && !imageOperation && (
+            <div className="video-validation-message is-idle workflow-package-pending">
+              <span>{selectedImageWorkflowModule ? "正在读取方案描述…" : "所选方案已不存在，请重新选择"}</span>
+            </div>
+          )}
+          {(!imageOperation || imageOperation.controls?.some((control) => control.type === "seed")) && (
+          <div className="video-seed-control image-generation-seed-control">
             <div className="image-generation-seed-primary">
               <span>生成种子</span>
               <div className="video-seed-mode" aria-label="图片种子模式">
@@ -9740,7 +9837,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     aria-pressed={seedMode === mode}
                     onClick={() => onChange(id, {
                       content: {
-                        ...record.content,
+                        ...imageNodeContent,
                         seedMode: mode,
                         status: "idle",
                         validationMessage: "",
@@ -9763,7 +9860,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   value={fixedSeed}
                   onChange={(event) => onChange(id, {
                     content: {
-                      ...record.content,
+                      ...imageNodeContent,
                       seed: event.currentTarget.value.replace(/\D/g, ""),
                       status: "idle",
                       validationMessage: "",
@@ -9781,7 +9878,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   onPointerDown={(event) => event.stopPropagation()}
                   onClick={() => onChange(id, {
                     content: {
-                      ...record.content,
+                      ...imageNodeContent,
                       seed: randomFixedSeed(),
                       status: "idle",
                       validationMessage: "",
@@ -9793,133 +9890,81 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               </div>
             ) : <span className="video-seed-hint">每次生成自动更换</span>}
           </div>
-          {isKrea2ImageEdit && (
-            <div className="video-resolution-pair image-generation-size-row is-image-edit-size">
-              <label className="video-resolution-inline">
-                <span>宽度</span>
-                <input className="image-generation-number" type="number" min="64" max="4096" step="64" value={typeof record.content.width === "number" ? record.content.width : 1280} onChange={(event) => onChange(id, { content: { ...record.content, width: Number(event.currentTarget.value), status: "idle", validationMessage: "" } })} />
-                <output>px</output>
-              </label>
-              <button
-                type="button"
-                className="image-generation-swap-size"
-                title="互换宽度和高度（等同于旋转 90°）"
-                aria-label="互换宽度和高度（等同于旋转 90°）"
-                onClick={() => onChange(id, {
-                  content: {
-                    ...record.content,
-                    width: typeof record.content.height === "number" ? record.content.height : 720,
-                    height: typeof record.content.width === "number" ? record.content.width : 1280,
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                })}
-              >
-                <ArrowLeftRight size={16} aria-hidden="true" />
-              </button>
-              <label className="video-resolution-inline">
-                <span>高度</span>
-                <input className="image-generation-number" type="number" min="64" max="4096" step="64" value={typeof record.content.height === "number" ? record.content.height : 720} onChange={(event) => onChange(id, { content: { ...record.content, height: Number(event.currentTarget.value), status: "idle", validationMessage: "" } })} />
-                <output>px</output>
-              </label>
-            </div>
           )}
-          {isKrea2ImageEdit && (
-            <section className="video-input-group is-image image-edit-input-group">
-              <div className="video-input-group-heading">
-                <ImageIcon size={13} />
-                <strong>编辑图片</strong>
-                <span>{imageEditInputs.length}/2</span>
-              </div>
-              <ol className="video-input-list image-edit-input-list" aria-label="Krea2 图像编辑输入图片">
-                {[0, 1].map((index) => {
-                  const input = imageEditInputs[index];
-                  const inputAssetPath = typeof input?.content.assetPath === "string"
-                    ? input.content.assetPath
-                    : "";
-                  const inputPreviewUrl = input?.kind === "generated-image"
-                    && typeof input.content.imageUrl === "string"
-                    ? input.content.imageUrl
-                    : inputAssetPath ? convertFileSrc(inputAssetPath) : "";
-                  const inputName = typeof input?.content.originalName === "string"
-                    ? input.content.originalName
-                    : input?.title || "未连接";
-                  return (
-                    <li
-                      key={input?.id ?? `empty-${index}`}
-                      data-media-input-id={input?.id}
-                      className={`video-input-item image-edit-input-item ${input ? "is-text-input" : "is-empty"} ${draggedMediaId === input?.id ? "is-dragging" : ""} ${dragOverMediaId === input?.id ? "is-drop-target" : ""}`}
-                      tabIndex={input ? 0 : undefined}
-                      aria-label={input ? `图像编辑图片 ${index + 1}：${inputName}` : undefined}
-                      onPointerDown={(event) => {
-                        if (!input || event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
-                        event.preventDefault();
-                        event.stopPropagation();
-                        event.currentTarget.setPointerCapture(event.pointerId);
-                        setDraggedMediaId(input.id);
-                        setDragOverMediaId(null);
-                      }}
-                      onPointerMove={(event) => {
-                        if (!input || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const targetId = mediaInputIdAtPoint(event.clientX, event.clientY);
-                        const reorderTarget = imageEditInputs.find((candidate) => (
-                          candidate.id === targetId && candidate.id !== input.id
-                        ));
-                        setDragOverMediaId(reorderTarget?.id ?? null);
-                        if (reorderTarget) moveMediaInputTo(input.id, reorderTarget.id);
-                      }}
-                      onPointerUp={(event) => {
-                        if (!input || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const targetId = mediaInputIdAtPoint(event.clientX, event.clientY);
-                        const reorderTarget = imageEditInputs.find((candidate) => candidate.id === targetId);
-                        moveMediaInputTo(input.id, reorderTarget?.id ?? null);
-                        event.currentTarget.releasePointerCapture(event.pointerId);
-                        setDraggedMediaId(null);
-                        setDragOverMediaId(null);
-                      }}
-                      onPointerCancel={(event) => {
-                        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                          event.currentTarget.releasePointerCapture(event.pointerId);
-                        }
-                        setDraggedMediaId(null);
-                        setDragOverMediaId(null);
-                      }}
-                      onLostPointerCapture={() => {
-                        setDraggedMediaId(null);
-                        setDragOverMediaId(null);
-                      }}
-                      onKeyDown={(event) => {
-                        if (!input || event.target !== event.currentTarget) return;
-                        if (event.key === "ArrowLeft" && index > 0) {
+          {imageOperation?.inputs?.map((port) => {
+            if (port.type === "text" && port === imageTextPort) {
+              const label = portLabel(port);
+              return (
+                <section key={port.id} className="video-input-group is-text image-prompt-input-group">
+                  <div className={`video-input-group-heading ${textInputs.length ? "has-text-clear" : ""}`}>
+                    <FileText size={13} />
+                    <strong>{label}</strong>
+                    <span>{textInputs.length}</span>
+                    {textInputs.length > 0 && (
+                      <button
+                        type="button"
+                        className="nodrag video-text-clear-button"
+                        disabled={clearingTexts}
+                        title={`清除当前节点的全部${label}连接`}
+                        aria-label={`清除全部 ${textInputs.length} 个${label}连接`}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setTextIdsPendingClear(textInputs.map((input) => input.id));
+                        }}
+                      >
+                        <Trash2 size={12} aria-hidden="true" />
+                      </button>
+                    )}
+                  </div>
+                  <ol className="video-input-list image-prompt-input-list" role="listbox" aria-label={`${label}输入`}>
+                    {textInputs.length ? textInputs.map((input, index) => (
+                      <li
+                        key={input.id}
+                        className={`video-input-item is-text-input ${activeTextInputId === input.id ? "is-active-text" : ""}`}
+                        role="option"
+                        aria-selected={activeTextInputId === input.id}
+                        tabIndex={0}
+                        title={activeTextInputId === input.id ? `当前${label}` : `点击设为当前${label}`}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onActivateTextInput(id, input.id);
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter" && event.key !== " ") return;
                           event.preventDefault();
-                          moveMediaInputTo(input.id, imageEditInputs[index - 1].id);
-                        } else if (event.key === "ArrowRight" && index < imageEditInputs.length - 1) {
-                          event.preventDefault();
-                          moveMediaInputTo(input.id, imageEditInputs[index + 1].id);
-                        }
-                      }}
-                    >
-                      <span className="video-input-index">{index + 1}</span>
-                      <span className="video-input-preview is-image">
-                        {inputPreviewUrl ? import.meta.env.MODE === "web" && input?.kind === "image"
-                          ? <SessionImagePreview src={inputPreviewUrl} alt="" draggable={false} />
-                          : <img src={inputPreviewUrl} alt="" draggable={false} /> : <ImageIcon size={16} />}
-                      </span>
-                      <span className="video-input-copy">
-                        <strong>{input ? inputName : index === 0 ? "图 1（必填）" : "图 2（可选）"}</strong>
-                        <span>{input ? "已接入" : index === 0 ? "请连接要编辑的图片" : "可连接第二张参考图"}</span>
-                      </span>
-                      {input && (
+                          event.stopPropagation();
+                          onActivateTextInput(id, input.id);
+                        }}
+                      >
+                        <span className="video-input-index">{index + 1}</span>
+                        <span className="video-input-preview is-text"><FileText size={16} /></span>
+                        <span className="video-input-copy">
+                          <strong title={input.title}>
+                            {input.title || "未命名文本"}{activePromptVersionLabelFromContent(input.content) ? ` · ${activePromptVersionLabelFromContent(input.content)}` : ""}
+                          </strong>
+                          <span className="video-text-input-preview" title={imagePromptText(input)}>{imagePromptText(input) || "空文本"}</span>
+                        </span>
+                        <button data-readonly-allow=""
+                          type="button"
+                          className="nodrag video-input-expand"
+                          aria-label={`放大查看${label}：${input.title || "未命名文本"}`}
+                          title="放大查看和编辑提示词"
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openConnectedTextEditor(input);
+                          }}
+                        >
+                          <Maximize2 size={13} aria-hidden="true" />
+                        </button>
                         <button
                           type="button"
                           className="nodrag video-input-remove"
                           disabled={removingMediaId === input.id}
-                          aria-label={`从图像编辑节点移除${inputName}`}
-                          title="从当前图像编辑节点移除，不删除原图片"
+                          aria-label={`从当前节点移除${label}：${input.title || "未命名文本"}`}
+                          title="从当前节点移除，不删除原文本节点"
                           onPointerDown={(event) => event.stopPropagation()}
                           onClick={(event) => {
                             event.stopPropagation();
@@ -9928,242 +9973,152 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                         >
                           <Trash2 size={13} aria-hidden="true" />
                         </button>
-                      )}
-                    </li>
-                  );
-                })}
-              </ol>
-            </section>
-          )}
-          {imageModuleSupportsLora(selectedImageWorkflowModule) && (
-          <label className="video-workflow-module-select image-generation-lora-select">
-            <span>LoRA</span>
-            <select
-              className="image-generation-select"
-              value={availableImageLoraName ?? imageLoraName}
-              onChange={(event) => onChange(id, {
-                content: {
-                  ...record.content,
-                  imageLoraName: event.currentTarget.value,
-                  status: "idle",
-                  validationMessage: "",
-                },
-              })}
-            >
-              <option value="">不使用 LoRA</option>
-              {krea2LoraOptions.map((lora) => (
-                <option key={lora} value={lora}>{h3LoraDisplayName(lora)}</option>
-              ))}
-            </select>
-          </label>
-          )}
-          <section className="video-input-group is-text image-prompt-input-group">
-            <div className={`video-input-group-heading ${textInputs.length ? "has-text-clear" : ""}`}>
-              <FileText size={13} />
-              <strong>正向提示词</strong>
-              <span>{textInputs.length}</span>
-              {textInputs.length > 0 && (
-                <button
-                  type="button"
-                  className="nodrag video-text-clear-button"
-                  disabled={clearingTexts}
-                  title="清除当前图片生成节点的全部正向提示词连接"
-                  aria-label={`清除全部 ${textInputs.length} 个正向提示词连接`}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setTextIdsPendingClear(textInputs.map((input) => input.id));
-                  }}
-                >
-                  <Trash2 size={12} aria-hidden="true" />
-                </button>
-              )}
-            </div>
-            <ol className="video-input-list image-prompt-input-list" role="listbox" aria-label="正向提示词输入">
-              {textInputs.length ? textInputs.map((input, index) => (
-                <li
-                  key={input.id}
-                  className={`video-input-item is-text-input ${activeTextInputId === input.id ? "is-active-text" : ""}`}
-                  role="option"
-                  aria-selected={activeTextInputId === input.id}
-                  tabIndex={0}
-                  title={activeTextInputId === input.id ? "当前正向提示词" : "点击设为当前正向提示词"}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onActivateTextInput(id, input.id);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" && event.key !== " ") return;
-                    event.preventDefault();
-                    event.stopPropagation();
-                    onActivateTextInput(id, input.id);
-                  }}
-                >
-                  <span className="video-input-index">{index + 1}</span>
-                  <span className="video-input-preview is-text"><FileText size={16} /></span>
-                  <span className="video-input-copy">
-                    <strong title={input.title}>
-                      {input.title || "未命名文本"}{activePromptVersionLabelFromContent(input.content) ? ` · ${activePromptVersionLabelFromContent(input.content)}` : ""}
-                    </strong>
-                    <span className="video-text-input-preview" title={imagePromptText(input)}>{imagePromptText(input) || "空文本"}</span>
-                  </span>
-                  <button data-readonly-allow=""
-                    type="button"
-                    className="nodrag video-input-expand"
-                    aria-label={`放大查看正向提示词：${input.title || "未命名文本"}`}
-                    title="放大查看和编辑提示词"
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      openConnectedTextEditor(input);
-                    }}
-                  >
-                    <Maximize2 size={13} aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    className="nodrag video-input-remove"
-                    disabled={removingMediaId === input.id}
-                    aria-label={`从图片生成节点移除正向提示词：${input.title || "未命名文本"}`}
-                    title="从当前图片生成节点移除，不删除原文本节点"
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void removeConnectedInput(input.id);
-                    }}
-                  >
-                    <Trash2 size={13} aria-hidden="true" />
-                  </button>
-                </li>
-              )) : (
-                <li className="video-input-item is-empty">
-                  <span className="video-input-index">—</span>
-                  <span className="video-input-preview is-text"><FileText size={16} /></span>
-                  <span className="video-input-copy"><strong>无</strong><span className="video-text-input-preview">请连接文本或提示词迭代节点</span></span>
-                </li>
-              )}
-            </ol>
-          </section>
-          <label className="image-generation-negative-field">
-            <span>负向提示词</span>
-            <textarea
-              value={typeof record.content.negativePrompt === "string" ? record.content.negativePrompt : ""}
-              placeholder="可选：直接输入不希望出现的内容"
-              spellCheck={false}
-              onChange={(event) => onChange(id, {
-                content: {
-                  ...record.content,
-                  negativePrompt: event.currentTarget.value,
-                  status: "idle",
-                  validationMessage: "",
-                },
+                      </li>
+                    )) : (
+                      <li className="video-input-item is-empty">
+                        <span className="video-input-index">—</span>
+                        <span className="video-input-preview is-text"><FileText size={16} /></span>
+                        <span className="video-input-copy"><strong>无</strong><span className="video-text-input-preview">请连接文本或提示词迭代节点</span></span>
+                      </li>
+                    )}
+                  </ol>
+                </section>
+              );
+            }
+            if (port.type !== "image" || port !== imageMediaPort) return null;
+            const label = portLabel(port);
+            const max = port.max ?? 1;
+            const min = port.min ?? 0;
+            const slots = max <= 4 ? max : Math.min(max, imageMediaInputs.length + 1);
+            return (
+              <section key={port.id} className="video-input-group is-image image-edit-input-group">
+                <div className="video-input-group-heading">
+                  <ImageIcon size={13} />
+                  <strong>{label}</strong>
+                  <span>{imageMediaInputs.length}/{max}</span>
+                </div>
+                <ol className="video-input-list image-edit-input-list" aria-label={`${label}输入`}>
+                  {Array.from({ length: slots }, (_, index) => {
+                    const input = imageMediaInputs[index];
+                    const inputAssetPath = typeof input?.content.assetPath === "string"
+                      ? input.content.assetPath
+                      : "";
+                    const inputPreviewUrl = input?.kind === "generated-image"
+                      && typeof input.content.imageUrl === "string"
+                      ? input.content.imageUrl
+                      : inputAssetPath ? convertFileSrc(inputAssetPath) : "";
+                    const inputName = typeof input?.content.originalName === "string"
+                      ? input.content.originalName
+                      : input?.title || "未连接";
+                    return (
+                      <li
+                        key={input?.id ?? `empty-${index}`}
+                        data-media-input-id={input?.id}
+                        className={`video-input-item image-edit-input-item ${input ? "is-text-input" : "is-empty"} ${draggedMediaId === input?.id ? "is-dragging" : ""} ${dragOverMediaId === input?.id ? "is-drop-target" : ""}`}
+                        tabIndex={input ? 0 : undefined}
+                        aria-label={input ? `${label} ${index + 1}：${inputName}` : undefined}
+                        onPointerDown={(event) => {
+                          if (!input || event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          event.currentTarget.setPointerCapture(event.pointerId);
+                          setDraggedMediaId(input.id);
+                          setDragOverMediaId(null);
+                        }}
+                        onPointerMove={(event) => {
+                          if (!input || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const targetId = mediaInputIdAtPoint(event.clientX, event.clientY);
+                          const reorderTarget = imageMediaInputs.find((candidate) => (
+                            candidate.id === targetId && candidate.id !== input.id
+                          ));
+                          setDragOverMediaId(reorderTarget?.id ?? null);
+                          if (reorderTarget) moveMediaInputTo(input.id, reorderTarget.id);
+                        }}
+                        onPointerUp={(event) => {
+                          if (!input || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const targetId = mediaInputIdAtPoint(event.clientX, event.clientY);
+                          const reorderTarget = imageMediaInputs.find((candidate) => candidate.id === targetId);
+                          moveMediaInputTo(input.id, reorderTarget?.id ?? null);
+                          event.currentTarget.releasePointerCapture(event.pointerId);
+                          setDraggedMediaId(null);
+                          setDragOverMediaId(null);
+                        }}
+                        onPointerCancel={(event) => {
+                          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                            event.currentTarget.releasePointerCapture(event.pointerId);
+                          }
+                          setDraggedMediaId(null);
+                          setDragOverMediaId(null);
+                        }}
+                        onLostPointerCapture={() => {
+                          setDraggedMediaId(null);
+                          setDragOverMediaId(null);
+                        }}
+                        onKeyDown={(event) => {
+                          if (!input || event.target !== event.currentTarget) return;
+                          if (event.key === "ArrowLeft" && index > 0) {
+                            event.preventDefault();
+                            moveMediaInputTo(input.id, imageMediaInputs[index - 1].id);
+                          } else if (event.key === "ArrowRight" && index < imageMediaInputs.length - 1) {
+                            event.preventDefault();
+                            moveMediaInputTo(input.id, imageMediaInputs[index + 1].id);
+                          }
+                        }}
+                      >
+                        <span className="video-input-index">{index + 1}</span>
+                        <span className="video-input-preview is-image">
+                          {inputPreviewUrl ? import.meta.env.MODE === "web" && input?.kind === "image"
+                            ? <SessionImagePreview src={inputPreviewUrl} alt="" draggable={false} />
+                            : <img src={inputPreviewUrl} alt="" draggable={false} /> : <ImageIcon size={16} />}
+                        </span>
+                        <span className="video-input-copy">
+                          <strong>{input ? inputName : `图 ${index + 1}（${index < min ? "必填" : "可选"}）`}</strong>
+                          <span>{input ? "已接入" : index < min ? "请连接图片" : "可连接图片"}</span>
+                        </span>
+                        {input && (
+                          <button
+                            type="button"
+                            className="nodrag video-input-remove"
+                            disabled={removingMediaId === input.id}
+                            aria-label={`从当前节点移除${inputName}`}
+                            title="从当前节点移除，不删除原图片"
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void removeConnectedInput(input.id);
+                            }}
+                          >
+                            <Trash2 size={13} aria-hidden="true" />
+                          </button>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ol>
+              </section>
+            );
+          })}
+          {imageOperation && (
+            <WorkflowControls
+              operation={imageOperation}
+              values={imageControlValues}
+              choicesFor={(control) => workflowChoices.get(choiceKey(control))}
+              onChange={(values) => onChange(id, {
+                content: { ...imageNodeContent, controlValues: values, status: "idle", validationMessage: "" },
               })}
             />
-          </label>
-          {!isKrea2ImageEdit && (
-          <div className="video-resolution-pair image-generation-size-row">
-            <label className="video-resolution-inline">
-              <span>宽度</span>
-              <input className="image-generation-number" type="number" min="64" max="4096" step="64" value={typeof record.content.width === "number" ? record.content.width : 1280} onChange={(event) => onChange(id, { content: { ...record.content, width: Number(event.currentTarget.value), status: "idle", validationMessage: "" } })} />
-              <output>px</output>
-            </label>
-            <button
-              type="button"
-              className="image-generation-swap-size"
-              title="互换宽度和高度（等同于旋转 90°）"
-              aria-label="互换宽度和高度（等同于旋转 90°）"
-              onClick={() => onChange(id, {
-                content: {
-                  ...record.content,
-                  width: typeof record.content.height === "number" ? record.content.height : 720,
-                  height: typeof record.content.width === "number" ? record.content.width : 1280,
-                  status: "idle",
-                  validationMessage: "",
-                },
-              })}
-            >
-              <ArrowLeftRight size={16} aria-hidden="true" />
-            </button>
-            <label className="video-resolution-inline">
-              <span>高度</span>
-              <input className="image-generation-number" type="number" min="64" max="4096" step="64" value={typeof record.content.height === "number" ? record.content.height : 720} onChange={(event) => onChange(id, { content: { ...record.content, height: Number(event.currentTarget.value), status: "idle", validationMessage: "" } })} />
-              <output>px</output>
-            </label>
-          </div>
           )}
-          <div className={`image-generation-sampling-row ${isKrea2ImageEdit ? "is-single" : ""}`}>
-            <label className="image-generation-steps" title="基础文生图 K 采样器的采样步数">
-              <span>生图步数</span>
-              <input
-                className="image-generation-number"
-                type="number"
-                min="1"
-                max="1000"
-                step="1"
-                value={typeof record.content.steps === "number" ? record.content.steps : 8}
-                aria-label="生图步数"
-                onChange={(event) => onChange(id, {
-                  content: {
-                    ...record.content,
-                    steps: Number(event.currentTarget.value),
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                })}
-              />
-            </label>
-            {imageModuleSupportsUpscale(selectedImageWorkflowModule) && (
-            <div className="image-generation-upscale">
-              <span>输出放大</span>
-              <label className="image-generation-upscale-megapixels" title="放大后的目标像素数（MP）">
-                <input
-                  className="image-generation-number"
-                  type="number"
-                  min="0.1"
-                  max="64"
-                  step="0.1"
-                  value={typeof record.content.upscaleMegapixels === "number" ? record.content.upscaleMegapixels : 8}
-                  aria-label="输出放大像素数（MP）"
-                  onChange={(event) => onChange(id, {
-                    content: {
-                      ...record.content,
-                      upscaleMegapixels: Number(event.currentTarget.value),
-                      status: "idle",
-                      validationMessage: "",
-                    },
-                  })}
-                />
-                <span>MP</span>
-              </label>
-              <button
-                type="button"
-                className="video-lora-bypass-switch"
-                role="switch"
-                aria-checked={record.content.upscaleEnabled === true}
-                aria-label="启用输出放大"
-                title={record.content.upscaleEnabled === true ? "已启用输出放大" : "未启用输出放大"}
-                onClick={() => onChange(id, {
-                  content: {
-                    ...record.content,
-                    upscaleEnabled: record.content.upscaleEnabled !== true,
-                    status: "idle",
-                    validationMessage: "",
-                  },
-                })}
-              >
-                <span />
-              </button>
-            </div>
-            )}
-          </div>
           <div className="video-execution-row image-generation-execution-row">
             <div className="video-execution-slot">
               {validationMessage ? (
                 <div className={`video-validation-message is-${validationStatus ?? "idle"}`}>
                   <span title={validationMessage}>{validationMessage}</span>
                   {executionRunning && (
-                    <div className={`video-execution-progress ${executionProgress === null ? "is-indeterminate" : ""}`} role="progressbar" aria-label="图片生成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={executionProgress ?? undefined}>
+                    <div className={`video-execution-progress ${executionProgress === null ? "is-indeterminate" : ""}`} role="progressbar" aria-label="生成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={executionProgress ?? undefined}>
                       <span style={executionProgress === null ? undefined : { width: `${executionProgress}%` }} />
                     </div>
                   )}
@@ -10180,11 +10135,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   disabled={executionCancelling || activeTaskCount === 0}
                   onClick={() => void onCancelExecution(id)}
                   title={activeTaskCount === 0
-                    ? "正在提交首个图片任务，暂时无法取消"
-                    : `取消最早提交的图片任务；当前共有 ${activeTaskCount} 个任务`}
+                    ? "正在提交首个任务，暂时无法取消"
+                    : `取消最早提交的任务；当前共有 ${activeTaskCount} 个任务`}
                   aria-label={activeTaskCount === 0
-                    ? "正在提交首个图片任务，暂时无法取消"
-                    : `取消最早提交的图片任务；当前共有 ${activeTaskCount} 个任务`}
+                    ? "正在提交首个任务，暂时无法取消"
+                    : `取消最早提交的任务；当前共有 ${activeTaskCount} 个任务`}
                 >
                   <X size={13} />
                   {activeTaskCount || null}
@@ -10196,17 +10151,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 disabled={executionCancelling || (seedMode === "fixed" && executionRunning)}
                 title={seedMode === "fixed" && executionRunning
                   ? "固定种子已有任务正在执行，不能重复排队"
-                  : executionRunning ? "将当前图片任务加入队列" : "开始生成图片"}
+                  : executionRunning ? "将当前任务加入队列" : "开始生成"}
                 aria-label={seedMode === "fixed" && executionRunning
                   ? "固定种子已有任务正在执行，不能重复排队"
-                  : executionRunning ? "将当前图片任务加入队列" : "开始生成图片"}
+                  : executionRunning ? "将当前任务加入队列" : "开始生成"}
                 onClick={() => void checkAndExecuteImage()}
               >
                 <Play size={15} fill="currentColor" />
               </button>
             </div>
           </div>
-          <div className={`input-badge ${(textInputs.length && (!isKrea2ImageEdit || imageEditInputs.length)) ? "has-input" : ""}`}>{textInputs.length ? `${isKrea2ImageEdit ? `已接入 ${imageEditInputs.length}/2 张编辑图片 · ` : ""}已接入 ${textInputs.length} 个文本 · 正向${imagePositivePromptInput ? "已选" : "未选"}` : "等待接入正向文本或提示词迭代节点"}</div>
+          <div className={`input-badge ${imageInputsComplete ? "has-input" : ""}`}>{imageInputBadge}</div>
         </div>
       )}
       {!isGeneratedVideo && !isGeneratedImage && (
