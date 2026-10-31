@@ -369,8 +369,14 @@ fn import_check_reports_the_krea2_default_missing_while_the_directory_is_still_k
         "LoraLoaderModelOnly": { "input": { "required": { "lora_name": [["Krea2\\PornMaster_Krea2_Realism_slider_V1.safetensors"]] } } }
     });
     let report = validate::validate_package(&loaded.package, &loaded.workflow, Some(&object_info));
-    assert!(
-        report.errors.iter().any(|e| e == "ComfyUI 中找不到 modelName 的默认值 Krea2\\pornmasterKrea2_v2TurboBF16.safetensors"),
+    // Reported once, though both operations (generate, upscaleImage) declare that default.
+    assert_eq!(
+        report
+            .errors
+            .iter()
+            .filter(|e| *e == "ComfyUI 中找不到 modelName 的默认值 Krea2\\pornmasterKrea2_v2TurboBF16.safetensors")
+            .count(),
+        1,
         "{:?}",
         report.errors
     );
