@@ -627,3 +627,159 @@ fn krea2_text_to_image_writes_each_item_into_node_159_by_position() {
     assert!(run(json!([{ "name": "Krea2\\a.safetensors", "weight": 0.33 }])).is_err());
     assert!(run(json!([{ "name": "moss\\a.safetensors" }])).is_err());
 }
+
+#[test]
+fn krea2_image_edit_offers_the_moss_lora_group_in_the_krea2_directory() {
+    assert_moss_lora_group("52cba27b");
+}
+
+fn edit_media(images: usize) -> BTreeMap<String, Vec<String>> {
+    let mut media = prompt("swap the hat");
+    media.insert(
+        "images".to_owned(),
+        ["a.png", "b.png"][..images]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+    );
+    media
+}
+
+/// No item, or none switched on with a file: byte for byte what the edit package submitted
+/// before, on both branches (the converted v1 package; model given, see above).
+#[test]
+fn krea2_image_edit_without_an_active_lora_submits_what_it_did_before() {
+    let before = v1_loaded("52cba27b");
+    let now = release_loaded("52cba27b");
+    let model = "Krea2\\edit.safetensors";
+    for images in [1, 2] {
+        let old = submitted(&before, json!({ "modelName": model }), edit_media(images));
+        for loras in [
+            json!(null),
+            json!([]),
+            json!([{ "name": "Krea2\\a.safetensors", "on": false }, { "name": "" }]),
+        ] {
+            let mut values = json!({ "modelName": model });
+            if !loras.is_null() {
+                values["loras"] = loras.clone();
+            }
+            assert_eq!(
+                submitted(&now, values, edit_media(images)),
+                old,
+                "{images} images, {loras}"
+            );
+        }
+    }
+}
+
+/// User LoRAs sit between the edit LoRA (42 / 17, unchanged) and the model patch (35 / 5), one
+/// model-only loader per item that is on and has a file, on the branch the images select.
+#[test]
+fn krea2_image_edit_chains_active_loras_between_the_edit_lora_and_the_model_patch() {
+    let before = v1_loaded("52cba27b");
+    let now = release_loaded("52cba27b");
+    let model = "Krea2\\edit.safetensors";
+    let three = json!([
+        { "name": "Krea2\\a.safetensors", "weight": 0.8 },
+        { "name": "Krea2\\b.safetensors", "weight": 0.5, "on": false },
+        { "name": "Krea2\\c.safetensors", "weight": 1.5 }
+    ]);
+    // (images, its edit LoRA, its model patch, the other branch's model patch and edit LoRA)
+    for (images, edit, patch, other_patch, other_edit) in
+        [(1, "42", "35", "5", "17"), (2, "17", "5", "35", "42")]
+    {
+        let old = build(
+            &before,
+            "generate",
+            json!({ "modelName": model }),
+            edit_media(images),
+        )
+        .unwrap()
+        .workflow;
+        let new = |loras: Value| {
+            build(
+                &now,
+                "generate",
+                json!({ "modelName": model, "loras": loras }),
+                edit_media(images),
+            )
+            .unwrap()
+            .workflow
+        };
+        let added = |workflow: &Value| {
+            workflow
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|id| old.get(id.as_str()).is_none())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let one = new(json!([{ "name": "Krea2\\a.safetensors" }]));
+        let slot = added(&one);
+        assert_eq!(slot.len(), 1, "{images} images: {slot:?}");
+        let slot = &slot[0];
+        assert_eq!(one[slot]["class_type"], json!("LoraLoaderModelOnly"));
+        assert_eq!(
+            one[slot]["inputs"],
+            json!({ "model": [edit, 0], "lora_name": "Krea2\\a.safetensors", "strength_model": 1.0 })
+        );
+        assert_eq!(one[patch]["inputs"]["model"], json!([slot, 0]));
+        // Nothing else changes: the edit LoRA, the other branch, every other node.
+        let mut diff = Vec::new();
+        differences("", &old, &one, &mut diff);
+        let paths = diff
+            .iter()
+            .map(|(path, _, _)| path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![format!("/{patch}/inputs/model"), format!("/{slot}")],
+            "{images} images"
+        );
+        assert_eq!(one[edit], old[edit]);
+        assert_eq!(one[other_patch]["inputs"]["model"], json!([other_edit, 0]));
+
+        let chained = new(three.clone());
+        let slots = added(&chained);
+        assert_eq!(
+            slots.len(),
+            2,
+            "{images} images: the switched-off item adds no node: {slots:?}"
+        );
+        let (first, second) = if chained[&slots[0]]["inputs"]["model"] == json!([edit, 0]) {
+            (&slots[0], &slots[1])
+        } else {
+            (&slots[1], &slots[0])
+        };
+        assert_eq!(
+            chained[first]["inputs"],
+            json!({ "model": [edit, 0], "lora_name": "Krea2\\a.safetensors", "strength_model": 0.8 })
+        );
+        assert_eq!(
+            chained[second]["inputs"],
+            json!({ "model": [first, 0], "lora_name": "Krea2\\c.safetensors", "strength_model": 1.5 })
+        );
+        assert_eq!(chained[patch]["inputs"]["model"], json!([second, 0]));
+        assert_eq!(
+            chained[other_patch]["inputs"]["model"],
+            json!([other_edit, 0])
+        );
+
+        let six = new(Value::Array(
+            (1..=6)
+                .map(|n| json!({ "name": format!("Krea2\\l{n}.safetensors"), "weight": 2.0 }))
+                .collect(),
+        ));
+        assert_eq!(added(&six).len(), 6, "{images} images");
+    }
+    let run = |loras: Value| build(&now, "generate", json!({ "loras": loras }), edit_media(1));
+    let seven = Value::Array(
+        (0..7)
+            .map(|_| json!({ "name": "Krea2\\a.safetensors" }))
+            .collect(),
+    );
+    assert!(run(seven).is_err());
+    assert!(run(json!([{ "name": "Krea2\\a.safetensors", "weight": 2.5 }])).is_err());
+    assert!(run(json!([{ "name": "moss\\a.safetensors" }])).is_err());
+}

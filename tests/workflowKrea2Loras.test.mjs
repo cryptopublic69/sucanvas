@@ -16,7 +16,7 @@ const render = (operation, values) => renderToStaticMarkup(createElement(control
   operation, values, choicesFor: () => ({ status: "ready", values: ["d\\a.safetensors", "d\\b.safetensors"] }), onChange: () => {},
 }));
 
-for (const short of ["0bf9145b"]) {
+for (const short of ["0bf9145b", "52cba27b"]) {
   test(`${short}: the LoRA group is Moss's, in the Krea2 directory, right after the model`, async () => {
     const moss = loraGroup(await source("5dd20ec7"));
     const operation = await source(short);
@@ -57,5 +57,23 @@ test("an old Krea2 text-to-image node's LoRA becomes the first item, weight 1 an
   assert.equal(field("on").default, true);
   const request = pkg.buildOperationRequest("generate", operation, converted.controlValues, { text: [{ text: "fox" }] }, { seedMode: "fixed", seed: "7" });
   assert.deepEqual(request.values.loras, [{ name: "Krea2\\PornMaster_Krea2_Realism_slider_V1.safetensors" }]);
+  assert.equal(pkg.operationRequestError(operation, request), "");
+});
+
+test("an existing image edit node opens with an empty LoRA group and its values unchanged", async () => {
+  const operation = await source("52cba27b");
+  const content = {
+    workflowModuleId: "workflow-module-52cba27b-07ed-4fda-b95e-c5e90c8f3fa1",
+    nodeShell: "workflow", nodeShellVersion: legacy.NODE_SHELL_VERSION, operation: "generate",
+    controlValues: { width: 1024, height: 1024, steps: 8 },
+  };
+  const opened = legacy.convertLegacyImageNodeContent(content, operation);
+  assert.equal(opened, content, "a node already on the generic shell is left alone");
+  const markup = render(operation, opened.controlValues);
+  assert.match(markup, /<section class="workflow-repeat" aria-label="LoRA">/);
+  assert.match(markup, />0\/6</);
+  assert.doesNotMatch(markup, /class="workflow-repeat-item"/);
+  const request = pkg.buildOperationRequest("generate", operation, opened.controlValues, { text: [{ text: "fox" }], image: [{ path: "a.png" }] }, { seedMode: "fixed", seed: "7" });
+  assert.equal("loras" in request.values, false);
   assert.equal(pkg.operationRequestError(operation, request), "");
 });
