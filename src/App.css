@@ -257,7 +257,14 @@ button { color: inherit; }
 .image-generation-lora-select { order: -5; }
 .image-generation-seed-control { order: -4; }
 .image-generation-seed-control.is-image-edit-seed { order: -6; }
-.video-seed-control.image-generation-seed-control { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+/* CANVAS-025b: halves as before while both fit; when the node is too narrow the seed input / hint moves to
+   its own line instead of squeezing the 随机/固定 buttons. */
+.video-seed-control.image-generation-seed-control { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.image-generation-seed-control > .image-generation-seed-primary { flex: 1 1 0; min-width: max-content; }
+/* the hint's 26px left padding counts in its flex basis: the same on this side keeps the halves equal */
+.image-generation-seed-control > .image-generation-seed-primary:has(+ .video-seed-hint) { flex-basis: 26px; }
+.image-generation-seed-control > .video-seed-fixed,
+.image-generation-seed-control > .video-seed-hint { flex: 1 1 0; min-width: 100px; }
 .image-generation-seed-primary { display: grid; min-width: 0; grid-template-columns: 61px minmax(0, 1fr); align-items: center; gap: 5px; }
 .image-generation-seed-primary > span { overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .image-generation-seed-control > .video-seed-fixed,
@@ -1224,11 +1231,11 @@ button { color: inherit; }
 .video-lora-bypass-switch:focus-visible { outline: 2px solid rgba(139, 124, 246, .48); outline-offset: 2px; }
 .video-lora-control.is-bypassed > .video-parameter-range,
 .video-lora-control.is-bypassed > .video-lora-strength { opacity: .42; }
-.video-seed-control { display: grid; width: 100%; min-height: 45px; flex: 0 0 auto; grid-template-columns: 60px minmax(0, 1fr) 58px 48px 56px; align-items: center; gap: 5px; padding: 5px 7px 5px 9px; color: #8d95a5; background: #10131a; border: 1px solid #2d323e; border-radius: 9px; font-size: calc(12.5px + var(--ui-font-adjust)); }
+.video-seed-control { display: grid; width: 100%; min-height: 45px; flex: 0 0 auto; grid-template-columns: 60px minmax(max-content, 1fr) minmax(0, 58px) minmax(0, 48px) minmax(0, 56px); align-items: center; gap: 5px; padding: 5px 7px 5px 9px; color: #8d95a5; background: #10131a; border: 1px solid #2d323e; border-radius: 9px; font-size: calc(12.5px + var(--ui-font-adjust)); }
 .video-seed-control { order: -3; }
 .video-seed-control > span:first-child { text-align: left; white-space: nowrap; }
 .video-seed-mode { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px; padding: 2px; background: #171b24; border: 1px solid #303643; border-radius: 6px; }
-.video-seed-mode button { height: 31px; padding: 0 6px; color: #747d8e; background: transparent; border: 0; border-radius: 5px; cursor: pointer; font-size: calc(12.5px + var(--ui-font-adjust)); font-weight: 700; }
+.video-seed-mode button { height: 31px; padding: 0 6px; white-space: nowrap; color: #747d8e; background: transparent; border: 0; border-radius: 5px; cursor: pointer; font-size: calc(12.5px + var(--ui-font-adjust)); font-weight: 700; }
 .video-seed-mode button.is-active { color: #f4f1ff; background: #6256bd; }
 .video-seed-fixed { display: grid; min-width: 0; grid-column: 3 / 6; grid-template-columns: minmax(0, 1fr) 34px; align-items: center; gap: 5px; }
 .video-seed-input { width: 100%; min-width: 0; height: 33px; padding: 0 8px; color: #d8d3ff; background: #1c1a2c; border: 1px solid #4e477e; border-radius: 7px; outline: none; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: calc(12.5px + var(--ui-font-adjust)); }
@@ -2509,12 +2516,25 @@ button { color: inherit; }
 
 /* CANVAS-024c: generic workflow node. Its rows come from the package in document order. */
 .image-generation-node-body.workflow-node-body > * { order: 0; }
-.workflow-controls { display: grid; width: 100%; min-width: 0; gap: 8px; }
+/* CANVAS-025b: one column no wider than the node; content too wide for it (a long prompt line) shrinks or
+   is cut off with an ellipsis instead of widening every control past the node's edge. */
+.workflow-controls { display: grid; width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .workflow-controls > *, .workflow-control-row > * { order: 0; }
 .workflow-control-row { display: flex; width: 100%; min-height: 0; flex-wrap: wrap; align-items: stretch; gap: 6px; }
 .workflow-control-row > .workflow-control { min-width: 0; flex: 1 1 150px; }
 .workflow-control-row > .image-generation-swap-size { flex: 0 0 34px; align-self: center; }
 .workflow-control-row-label { width: 100%; color: #aaa0f2; font-size: calc(11px + var(--ui-font-adjust)); font-weight: 650; }
+/* CANVAS-025b: a swappable pair (field ⇄ field) stays on one line at any node width: the two fields share
+   the room, the input shrinks, and a field too narrow for its unit drops the unit. */
+.workflow-control-row:has(> .image-generation-swap-size) { flex-wrap: nowrap; }
+.workflow-control-row:has(> .image-generation-swap-size) > .workflow-control { flex: 1 1 0; container-type: inline-size; }
+.workflow-control-row:has(> .image-generation-swap-size) > .workflow-control.is-number { grid-template-columns: auto minmax(0, 1fr) auto; }
+@container (max-width: 110px) {
+  .workflow-control.is-number > output { display: none; }
+  .workflow-control.is-number > input[type="number"] { padding-right: 2px; padding-left: 2px; appearance: textfield; }
+  .workflow-control.is-number > input[type="number"]::-webkit-inner-spin-button,
+  .workflow-control.is-number > input[type="number"]::-webkit-outer-spin-button { margin: 0; appearance: none; }
+}
 .workflow-control.is-number { grid-template-columns: auto minmax(52px, 1fr) auto; gap: 4px; padding: 4px 6px; }
 .workflow-control.is-number > span { overflow: hidden; text-overflow: ellipsis; }
 .workflow-control.is-number > output { width: auto; height: auto; padding: 0 2px; color: #8f88bd; background: transparent; border: 0; font-size: calc(9.5px + var(--ui-font-adjust)); }
