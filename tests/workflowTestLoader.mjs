@@ -1,11 +1,24 @@
 // CANVAS-024c: loads src/workflow/*.ts(x) for node tests. Files are transpiled into
 // node_modules/.cache/workflow-tests so bare imports (react, react-dom) resolve from the repo;
 // relative imports between workflow files are pointed at the transpiled copies.
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import ts from "typescript";
 
 const cache = new URL("../node_modules/.cache/workflow-tests/", import.meta.url);
 const done = new Map();
+
+// Windows refuses a rename over a file another process has open for a moment: retry briefly.
+async function renameOver(from, to) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      if (attempt >= 20 || !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+}
 
 async function transpile(name) {
   if (done.has(name)) return done.get(name);
@@ -21,7 +34,11 @@ async function transpile(name) {
     for (const dependency of relative) await transpile(dependency);
     await mkdir(cache, { recursive: true });
     const target = new URL(`${name}.mjs`, cache);
-    await writeFile(target, output.replace(/from\s+"\.\/([A-Za-z0-9_]+)"/g, 'from "./$1.mjs"'));
+    // Test files run in parallel processes that transpile the same modules: write a private
+    // file and rename it over the target, so no process ever imports a half-written copy.
+    const temporary = new URL(`${name}.${process.pid}.tmp`, cache);
+    await writeFile(temporary, output.replace(/from\s+"\.\/([A-Za-z0-9_]+)"/g, 'from "./$1.mjs"'));
+    await renameOver(temporary, target);
     return target;
   })();
   done.set(name, promise);
