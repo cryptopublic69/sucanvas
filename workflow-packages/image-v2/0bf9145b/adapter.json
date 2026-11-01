@@ -27,23 +27,6 @@
       ],
       "controls": [
         {
-          "id": "loraName",
-          "type": "select",
-          "label": "LoRA",
-          "default": "",
-          "options": {
-            "comfyui": {
-              "classType": "LoraLoaderModelOnly",
-              "input": "lora_name",
-              "dirs": [
-                "Krea2"
-              ]
-            }
-          },
-          "allowEmpty": true,
-          "emptyLabel": "不使用 LoRA"
-        },
-        {
           "id": "modelName",
           "type": "select",
           "label": "模型",
@@ -60,6 +43,47 @@
           },
           "allowEmpty": true,
           "setting": "diffusionModelName"
+        },
+        {
+          "id": "loras",
+          "type": "repeat",
+          "label": "LoRA",
+          "max": 6,
+          "fields": [
+            {
+              "id": "name",
+              "type": "select",
+              "label": "LoRA",
+              "default": "",
+              "allowEmpty": true,
+              "emptyLabel": "不使用",
+              "options": {
+                "comfyui": {
+                  "classType": "LoraLoaderModelOnly",
+                  "input": "lora_name",
+                  "dirs": [
+                    "Krea2"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "weight",
+              "type": "slider",
+              "label": "权重",
+              "default": 1,
+              "min": 0,
+              "max": 2,
+              "step": 0.05,
+              "number": "float"
+            },
+            {
+              "id": "on",
+              "type": "toggle",
+              "label": "启用",
+              "default": true
+            }
+          ]
         },
         {
           "id": "negativePrompt",
@@ -158,29 +182,32 @@
           }
         },
         {
-          "op": "set",
+          "op": "fill",
+          "repeat": "loras",
           "node": "159",
-          "input": "lora_1",
+          "inputPattern": "lora_{n}",
+          "itemWhen": {
+            "not": {
+              "empty": {
+                "trim": {
+                  "item": "name"
+                }
+              }
+            }
+          },
           "value": {
             "object": {
               "lora": {
                 "trim": {
-                  "control": "loraName"
+                  "item": "name"
                 }
               },
               "on": {
-                "const": true
+                "item": "on"
               },
               "strength": {
-                "const": 1.0
-              }
-            }
-          },
-          "when": {
-            "not": {
-              "empty": {
-                "trim": {
-                  "control": "loraName"
+                "float": {
+                  "item": "weight"
                 }
               }
             }

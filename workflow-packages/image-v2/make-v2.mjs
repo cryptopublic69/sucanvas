@@ -34,16 +34,50 @@ const renameDeep = (value) => {
 const control = (operation, id) => operation.controls.find((c) => c.id === id);
 
 // Each package's revision goes up when its release changes (v1 = the production package before 024d).
-const REVISIONS = { "0bf9145b": "v2", "52cba27b": "v2", "5dd20ec7": "v3" };
+const REVISIONS = { "0bf9145b": "v3", "52cba27b": "v2", "5dd20ec7": "v3" };
+
+// The LoRA group every image package offers (Moss first, Krea2 since CANVAS-029): up to six
+// items of file / weight 0–2 / on, files from the package's own LoRA directory. It goes right
+// after the model control.
+const addLoraGroup = (operation, dir) => {
+  const modelIndex = operation.controls.findIndex((c) => c.id === "modelName");
+  if (modelIndex < 0) throw new Error("no modelName control");
+  operation.controls.splice(modelIndex + 1, 0, {
+    id: "loras", type: "repeat", label: "LoRA", max: 6,
+    fields: [
+      { id: "name", type: "select", label: "LoRA", default: "", allowEmpty: true, emptyLabel: "不使用",
+        options: { comfyui: { classType: "LoraLoaderModelOnly", input: "lora_name", dirs: [dir] } } },
+      { id: "weight", type: "slider", label: "权重", default: 1.0, min: 0.0, max: 2.0, step: 0.05, number: "float" },
+      { id: "on", type: "toggle", label: "启用", default: true },
+    ],
+  });
+};
 
 const packages = {
   // Krea2 text-to-image: the default model is named on the control (so the import check can
   // see it), the workflow's own loader and the module setting use Krea2. LoRA node 159 is
   // written by explicit steps (no binding defaults left to the program).
+  // CANVAS-029 (v3): the single LoRA control becomes the LoRA group. Node 159 (Power Lora
+  // Loader) takes any number of lora_<n> inputs: item n is written to lora_<n> as
+  // {lora, on, strength}; an item without a file is not written. No item leaves the workflow's
+  // own lora_1 (switched off) as before; one item at weight 1 writes what the old control wrote.
+  // Old nodes' single LoRA becomes item 1 (src/workflow/legacyImageNode.ts, by field).
   "0bf9145b": ({ adapter, workflow, manifest }) => {
     for (const name of ["generate", "upscaleImage"]) {
       control(adapter.operations[name], "modelName").default = renamed(workflow["98"].inputs.unet_name);
     }
+    const generate = adapter.operations.generate;
+    const single = generate.controls.findIndex((c) => c.id === "loraName");
+    const write = generate.steps.findIndex((step) => step.op === "set" && step.node === "159" && step.input === "lora_1");
+    if (single < 0 || write < 0) throw new Error("Krea2: no single LoRA control / step");
+    if (workflow["159"].class_type !== "Power Lora Loader (rgthree)") throw new Error("Krea2: node 159 is not a Power Lora Loader");
+    generate.controls.splice(single, 1);
+    addLoraGroup(generate, "Krea2");
+    generate.steps.splice(write, 1, {
+      op: "fill", repeat: "loras", node: "159", inputPattern: "lora_{n}",
+      itemWhen: { not: { empty: { trim: { item: "name" } } } },
+      value: { object: { lora: { trim: { item: "name" } }, on: { item: "on" }, strength: { float: { item: "weight" } } } },
+    });
     return { adapter, workflow: renameDeep(workflow), manifest: renameDeep(manifest) };
   },
   // Krea2 image edit: same rename of its default model and loaders.
@@ -70,16 +104,7 @@ const packages = {
       };
     });
     const generate = adapter.operations.generate;
-    const modelIndex = generate.controls.findIndex((c) => c.id === "modelName");
-    generate.controls.splice(modelIndex + 1, 0, {
-      id: "loras", type: "repeat", label: "LoRA", max: 6,
-      fields: [
-        { id: "name", type: "select", label: "LoRA", default: "", allowEmpty: true, emptyLabel: "不使用",
-          options: { comfyui: { classType: "LoraLoaderModelOnly", input: "lora_name", dirs: ["moss"] } } },
-        { id: "weight", type: "slider", label: "权重", default: 1.0, min: 0.0, max: 2.0, step: 0.05, number: "float" },
-        { id: "on", type: "toggle", label: "启用", default: true },
-      ],
-    });
+    addLoraGroup(generate, "moss");
     const keep = generate.steps.findIndex((step) => step.op === "keepReachable");
     generate.steps.splice(keep, 0, {
       op: "chain", id: "lora", repeat: "loras", slots, linkInput: "model",

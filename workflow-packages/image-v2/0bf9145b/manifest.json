@@ -3,7 +3,7 @@
   "name": "Krea2 文生图（可选放大）",
   "capability": "image-generation",
   "variant": "image-generation",
-  "revision": "v2",
+  "revision": "v3",
   "packageSchemaVersion": 1,
   "engineApiVersion": "2",
   "adapterKind": "workflow-package-v2",

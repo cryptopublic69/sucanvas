@@ -217,6 +217,27 @@ fn uploaded_names(inputs: &Value) -> BTreeMap<String, Vec<String>> {
     media
 }
 
+/// CANVAS-029: where the package has a LoRA group instead of the single LoRA control, a request
+/// written for the single control carries its LoRA as item 1 (what an old node converts to,
+/// src/workflow/legacyImageNode.ts).
+fn single_lora_as_first_item(loaded: &runtime::LoadedPackage, values: &mut Map<String, Value>) {
+    let has = |id: &str| {
+        loaded
+            .package
+            .operations
+            .values()
+            .any(|operation| operation.controls.iter().any(|control| control.id == id))
+    };
+    if has("loraName") || !has("loras") {
+        return;
+    }
+    if let Some(Value::String(name)) = values.remove("loraName") {
+        if !name.trim().is_empty() {
+            values.insert("loras".to_owned(), json!([{ "name": name }]));
+        }
+    }
+}
+
 /// Release package vs the converted v1 package, same generic requests (the 12 image golden
 /// cases): identical except where a default model now names the Krea2 directory.
 #[test]
@@ -230,8 +251,9 @@ fn release_packages_submit_what_the_converted_v1_packages_submit_except_the_rena
         let operation = request["operation"].as_str().unwrap();
         let seed: u64 = request["seed"].as_str().unwrap().parse().unwrap_or(0);
         let run = |loaded: &runtime::LoadedPackage| {
-            let values: Map<String, Value> =
+            let mut values: Map<String, Value> =
                 serde_json::from_value(request["values"].clone()).unwrap();
+            single_lora_as_first_item(loaded, &mut values);
             let engine_request = runtime::engine_request(
                 &loaded.package,
                 operation,
