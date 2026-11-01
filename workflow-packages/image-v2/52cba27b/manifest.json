@@ -3,7 +3,7 @@
   "name": "Krea2 图像编辑（单图或双图）",
   "capability": "image-generation",
   "variant": "image-edit",
-  "revision": "v2",
+  "revision": "v3",
   "packageSchemaVersion": 1,
   "engineApiVersion": "2",
   "adapterKind": "workflow-package-v2",

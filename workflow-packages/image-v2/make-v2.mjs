@@ -34,7 +34,7 @@ const renameDeep = (value) => {
 const control = (operation, id) => operation.controls.find((c) => c.id === id);
 
 // Each package's revision goes up when its release changes (v1 = the production package before 024d).
-const REVISIONS = { "0bf9145b": "v3", "52cba27b": "v2", "5dd20ec7": "v3" };
+const REVISIONS = { "0bf9145b": "v3", "52cba27b": "v3", "5dd20ec7": "v3" };
 
 // The LoRA group every image package offers (Moss first, Krea2 since CANVAS-029): up to six
 // items of file / weight 0–2 / on, files from the package's own LoRA directory. It goes right
@@ -81,9 +81,44 @@ const packages = {
     return { adapter, workflow: renameDeep(workflow), manifest: renameDeep(manifest) };
   },
   // Krea2 image edit: same rename of its default model and loaders.
+  // CANVAS-029 (v3): the LoRA group. Each branch gets six model-only loader slots between its
+  // edit LoRA (fixed, not a user item) and its model patch: one image 42 -> slots -> 35, two
+  // images 17 -> slots -> 5. Only the branch the images select is chained; an item switched off
+  // or without a file is skipped. The last step keeps every node of the original workflow and
+  // drops the slots nothing uses, so with no active item the submission is what it was.
   "52cba27b": ({ adapter, workflow, manifest }) => {
-    const model = control(adapter.operations.generate, "modelName");
+    const generate = adapter.operations.generate;
+    const model = control(generate, "modelName");
     model.default = renamed(model.default);
+    const original = Object.keys(workflow);
+    const twoImages = { mediaAtLeast: { port: "images", count: 2 } };
+    const branches = [
+      { edit: "42", patch: "35", slots: ["9701", "9702", "9703", "9704", "9705", "9706"], when: { not: twoImages } },
+      { edit: "17", patch: "5", slots: ["9711", "9712", "9713", "9714", "9715", "9716"], when: twoImages },
+    ];
+    addLoraGroup(generate, "Krea2");
+    for (const { edit, patch, slots, when } of branches) {
+      if (workflow[edit].class_type !== "LoraLoaderModelOnly") throw new Error(`Krea2 edit: ${edit} is not the edit LoRA`);
+      if (JSON.stringify(workflow[patch].inputs.model) !== JSON.stringify([edit, 0])) throw new Error(`Krea2 edit: ${patch}.model is not ${edit}`);
+      slots.forEach((id, index) => {
+        if (workflow[id]) throw new Error(`Krea2 edit: node ${id} exists`);
+        workflow[id] = {
+          inputs: { model: index ? [slots[index - 1], 0] : [edit, 0], lora_name: "", strength_model: 1.0 },
+          class_type: "LoraLoaderModelOnly",
+          _meta: { title: `LoRA 槽 ${index + 1}` },
+        };
+      });
+      generate.steps.push({
+        op: "chain", id: `lora${patch}`, repeat: "loras", slots, linkInput: "model",
+        itemWhen: { all: [{ truthy: { item: "on" } }, { not: { empty: { trim: { item: "name" } } } }] },
+        fields: { lora_name: { path: { item: "name" } }, strength_model: { float: { item: "weight" } } },
+        from: { link: [edit, 0] },
+        to: [{ node: patch, input: "model" }],
+        when,
+      });
+      adapter.nodeTypes = { ...(adapter.nodeTypes ?? {}), ...Object.fromEntries(slots.map((id) => [id, "LoraLoaderModelOnly"])) };
+    }
+    generate.steps.push({ op: "keepReachable", from: original });
     return { adapter, workflow: renameDeep(workflow), manifest: renameDeep(manifest) };
   },
   // Moss: six model-only LoRA slots placed after the model loader (28 -> 38). A slot whose

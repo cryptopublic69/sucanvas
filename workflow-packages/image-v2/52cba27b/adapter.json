@@ -51,6 +51,47 @@
           "setting": "diffusionModelName"
         },
         {
+          "id": "loras",
+          "type": "repeat",
+          "label": "LoRA",
+          "max": 6,
+          "fields": [
+            {
+              "id": "name",
+              "type": "select",
+              "label": "LoRA",
+              "default": "",
+              "allowEmpty": true,
+              "emptyLabel": "不使用",
+              "options": {
+                "comfyui": {
+                  "classType": "LoraLoaderModelOnly",
+                  "input": "lora_name",
+                  "dirs": [
+                    "Krea2"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "weight",
+              "type": "slider",
+              "label": "权重",
+              "default": 1,
+              "min": 0,
+              "max": 2,
+              "step": 0.05,
+              "number": "float"
+            },
+            {
+              "id": "on",
+              "type": "toggle",
+              "label": "启用",
+              "default": true
+            }
+          ]
+        },
+        {
           "id": "negativePrompt",
           "type": "textarea",
           "label": "负向提示词",
@@ -438,6 +479,170 @@
               }
             }
           }
+        },
+        {
+          "op": "chain",
+          "id": "lora35",
+          "repeat": "loras",
+          "slots": [
+            "9701",
+            "9702",
+            "9703",
+            "9704",
+            "9705",
+            "9706"
+          ],
+          "linkInput": "model",
+          "itemWhen": {
+            "all": [
+              {
+                "truthy": {
+                  "item": "on"
+                }
+              },
+              {
+                "not": {
+                  "empty": {
+                    "trim": {
+                      "item": "name"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "fields": {
+            "lora_name": {
+              "path": {
+                "item": "name"
+              }
+            },
+            "strength_model": {
+              "float": {
+                "item": "weight"
+              }
+            }
+          },
+          "from": {
+            "link": [
+              "42",
+              0
+            ]
+          },
+          "to": [
+            {
+              "node": "35",
+              "input": "model"
+            }
+          ],
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 2
+              }
+            }
+          }
+        },
+        {
+          "op": "chain",
+          "id": "lora5",
+          "repeat": "loras",
+          "slots": [
+            "9711",
+            "9712",
+            "9713",
+            "9714",
+            "9715",
+            "9716"
+          ],
+          "linkInput": "model",
+          "itemWhen": {
+            "all": [
+              {
+                "truthy": {
+                  "item": "on"
+                }
+              },
+              {
+                "not": {
+                  "empty": {
+                    "trim": {
+                      "item": "name"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "fields": {
+            "lora_name": {
+              "path": {
+                "item": "name"
+              }
+            },
+            "strength_model": {
+              "float": {
+                "item": "weight"
+              }
+            }
+          },
+          "from": {
+            "link": [
+              "17",
+              0
+            ]
+          },
+          "to": [
+            {
+              "node": "5",
+              "input": "model"
+            }
+          ],
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 2
+            }
+          }
+        },
+        {
+          "op": "keepReachable",
+          "from": [
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "11",
+            "14",
+            "15",
+            "16",
+            "17",
+            "18",
+            "20",
+            "21",
+            "28",
+            "29",
+            "30",
+            "34",
+            "35",
+            "36",
+            "37",
+            "40",
+            "41",
+            "42",
+            "43",
+            "44",
+            "45",
+            "51",
+            "57",
+            "141",
+            "142",
+            "500"
+          ]
         }
       ],
       "record": {
@@ -449,5 +654,19 @@
         }
       }
     }
+  },
+  "nodeTypes": {
+    "9701": "LoraLoaderModelOnly",
+    "9702": "LoraLoaderModelOnly",
+    "9703": "LoraLoaderModelOnly",
+    "9704": "LoraLoaderModelOnly",
+    "9705": "LoraLoaderModelOnly",
+    "9706": "LoraLoaderModelOnly",
+    "9711": "LoraLoaderModelOnly",
+    "9712": "LoraLoaderModelOnly",
+    "9713": "LoraLoaderModelOnly",
+    "9714": "LoraLoaderModelOnly",
+    "9715": "LoraLoaderModelOnly",
+    "9716": "LoraLoaderModelOnly"
   }
 }

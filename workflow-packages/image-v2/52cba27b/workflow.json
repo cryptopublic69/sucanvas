@@ -430,5 +430,173 @@
       ],
       "filename_prefix": "krea2_image_edit"
     }
+  },
+  "9701": {
+    "inputs": {
+      "model": [
+        "42",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 1"
+    }
+  },
+  "9702": {
+    "inputs": {
+      "model": [
+        "9701",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 2"
+    }
+  },
+  "9703": {
+    "inputs": {
+      "model": [
+        "9702",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 3"
+    }
+  },
+  "9704": {
+    "inputs": {
+      "model": [
+        "9703",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 4"
+    }
+  },
+  "9705": {
+    "inputs": {
+      "model": [
+        "9704",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 5"
+    }
+  },
+  "9706": {
+    "inputs": {
+      "model": [
+        "9705",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 6"
+    }
+  },
+  "9711": {
+    "inputs": {
+      "model": [
+        "17",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 1"
+    }
+  },
+  "9712": {
+    "inputs": {
+      "model": [
+        "9711",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 2"
+    }
+  },
+  "9713": {
+    "inputs": {
+      "model": [
+        "9712",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 3"
+    }
+  },
+  "9714": {
+    "inputs": {
+      "model": [
+        "9713",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 4"
+    }
+  },
+  "9715": {
+    "inputs": {
+      "model": [
+        "9714",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 5"
+    }
+  },
+  "9716": {
+    "inputs": {
+      "model": [
+        "9715",
+        0
+      ],
+      "lora_name": "",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA 槽 6"
+    }
   }
 }
