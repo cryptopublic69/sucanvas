@@ -46,8 +46,9 @@ test("text start dispatches its own prompt to the connected image generator", as
     onExecuteImage: async (...args) => calls.push(["image", ...args]),
     onExecutionCheck: () => assert.fail("Unexpected validation failure"),
   });
-  await run(true);
-  assert.deepEqual(calls, [["activate", "generator", "prompt-a"], ["image", "generator", "prompt-a"]]);
+  await run();
+  // CANVAS-037: prompt and placement sources are separate request fields (Alt drops only the placement).
+  assert.deepEqual(calls, [["activate", "generator", "prompt-a"], ["image", "generator", { promptNodeId: "prompt-a", placementSourceId: "prompt-a" }]]);
 });
 
 test("ambiguous connections reject submission and desktop keeps its existing video route", async () => {
@@ -172,11 +173,30 @@ test("only the Web text shortcut forwards the text as the placement source", asy
     const calls = [];
     await callback(app, "onExecuteImage", {
       executeImageNodeRef: { current: async (...args) => calls.push(args) },
-    }, mode)("generator", "prompt-a");
+    }, mode)("generator", { promptNodeId: "prompt-a", placementSourceId: "prompt-a" });
     assert.equal(calls[0][0], "generator");
     assert.equal(calls[0][1], mode === "web" ? "prompt-a" : undefined);
     assert.deepEqual(calls[0][2], mode === "web" ? { kind: "text", promptNodeId: "prompt-a" } : undefined);
   }
+});
+
+test("CANVAS-037: a text prompt without a placement source is placed exactly like the generator's own button", async () => {
+  const placements = [];
+  const run = async (...args) => {
+    const { env, completed, errors } = imageExecutionEnvironment();
+    env.createImageGenerationPlaceholder = async (options) => {
+      placements.push({ source: options.source.id, placeBelowSource: options.placeBelowSource, sourceGeneratorId: options.sourceGeneratorId, edgeSourceId: options.edgeSourceId });
+      return record("placeholder", "generated-image");
+    };
+    await callback(app, "executeImageNode", env)(...args);
+    assert.deepEqual(errors, []);
+    return completed[0];
+  };
+  await run("generator");
+  const altResult = await run("generator", undefined, { kind: "text", promptNodeId: "prompt-a" });
+  assert.deepEqual(placements[1], placements[0], "same placement arguments as the generator's own ▶");
+  assert.deepEqual(placements[1], { source: "generator", placeBelowSource: false, sourceGeneratorId: "generator", edgeSourceId: "generator" });
+  assert.equal(altResult.promptSourceNodeId, "prompt-a", "the prompt still comes from the clicked text");
 });
 
 test("Web text-generated images share the video placement rule and keep generator output edges", async () => {
