@@ -14,6 +14,17 @@
   "updatedAt": "2026-11-04T10:00:00.000000000+00:00",
   "deletedAt": null,
   "defaults": {
-    "diffusionModelName": "Qwen2.1\\qwen_image_2.1_int8_convrot.safetensors"
+    "primaryVideoSteps": 6,
+    "primaryAudioSteps": 8,
+    "secondarySchedulerSteps": 4,
+    "primaryBrightness": 1,
+    "primaryContrast": 0.9,
+    "primarySaturation": 0.9,
+    "secondaryBrightness": 1,
+    "secondaryContrast": 0.9,
+    "secondarySaturation": 1,
+    "diffusionModelName": "Qwen2.1\\qwen_image_2.1_int8_convrot.safetensors",
+    "loraName": "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors",
+    "loraStrength": 1
   }
 }
