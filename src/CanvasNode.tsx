@@ -33,6 +33,7 @@ import {
   GENERATED_IMAGE_PREVIEW_LAYOUT_VERSION,
   generatedImageNodeHeight,
 } from "./media/generatedImageLayout";
+import { isGeneratorResult, latestByCreation } from "./canvas/generatorResults";
 import { videoDurationAspectLabel, videoElapsedWithDuration } from "./video/videoDurationLabel";
 import { Settings as PresetSettingsIcon } from "lucide-react";
 import { useDropdownWheel } from "./useDropdownWheel";
@@ -1702,6 +1703,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   onExecutionCheck: (message: string, valid: boolean) => void;
   onExecute: (id: string, regeneration?: VideoRegenerationRequest, options?: VideoExecutionOptions) => Promise<void>;
   onExecuteImage: (id: string, request?: ImageExecutionRequest) => Promise<void>;
+  onJumpToLatestResult: (generatorId: string) => void;
   onBatchExecute: (id: string) => Promise<void>;
   onVideoUpscale: (id: string) => Promise<void>;
   onConfigureVideoUpscale: (id: string) => void;
@@ -2735,21 +2737,8 @@ function generatedPreviewPosition(
     }
     return y;
   };
-  const previousPreviews = existingNodes.filter((node) => (
-    node.kind === previewKind
-    && node.content.sourceGeneratorId === generator.id
-    && typeof node.content.sourcePreviewId !== "string"
-    && (
-      previewKind !== "generated-image"
-      || (node.content.generatedImageCopy !== true && node.source !== "clipboard")
-    )
-  ));
-  const latestPreview = previousPreviews.reduce<NodeRecord | null>((latest, node) => {
-    if (!latest) return node;
-    const latestCreatedAt = Date.parse(latest.createdAt) || 0;
-    const nodeCreatedAt = Date.parse(node.createdAt) || 0;
-    return nodeCreatedAt >= latestCreatedAt ? node : latest;
-  }, null);
+  const previousPreviews = existingNodes.filter((node) => isGeneratorResult(node, generator.id, previewKind));
+  const latestPreview = latestByCreation(previousPreviews);
   if (latestPreview) {
     if (continuationDirection === "right") {
       const x = snapCanvasCoordinate(latestPreview.x + latestPreview.width + horizontalGap);
@@ -4684,6 +4673,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     onUpscaleGeneratedImage,
     onRegenerateGeneratedImage,
     onLocateGeneratedImage,
+    onJumpToLatestResult,
     onCancelExecution,
     onRevealGeneratedVideo,
     onRevealGeneratedImage,
@@ -6744,6 +6734,16 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       return;
     }
     await checkAndExecuteVideo(targets[0].data, { placementSourceNodeId: id });
+  };
+
+  // A generator's start button (image and video alike): Alt moves the canvas to this node's latest result,
+  // keeping the zoom, and submits nothing; a plain click runs (CANVAS-038).
+  const executeOrJumpToLatest = (altKey: boolean, execute: () => Promise<void>) => {
+    if (altKey) {
+      onJumpToLatestResult(id);
+      return;
+    }
+    void execute();
   };
 
   const checkAndExecuteImage = async () => {
@@ -9899,14 +9899,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 disabled={batchSubmitting || executionCancelling}
                 title={batchSubmitting
                   ? "批量任务正在按顺序提交，请稍后"
-                  : "提交一个新的生成任务；Alt＋点击调整生成参数"}
+                  : "提交一个新的生成任务；Alt＋点击跳到最后一个生成内容"}
                 aria-label={batchSubmitting
                   ? "批量任务正在按顺序提交，请稍后"
                   : "开始执行"}
-                onClick={(event) => {
-                  if (event.altKey) onConfigureRegenerateVideo(id, true, {});
-                  else void checkAndExecute();
-                }}
+                onClick={(event) => executeOrJumpToLatest(event.altKey, checkAndExecute)}
               >
                 <Play size={15} fill="currentColor" />
               </button>
@@ -10201,11 +10198,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 disabled={executionCancelling || (seedMode === "fixed" && executionRunning)}
                 title={seedMode === "fixed" && executionRunning
                   ? "固定种子已有任务正在执行，不能重复排队"
-                  : executionRunning ? "将当前任务加入队列" : "开始生成"}
+                  : executionRunning ? "将当前任务加入队列；Alt＋点击跳到最后一个生成内容" : "开始生成；Alt＋点击跳到最后一个生成内容"}
                 aria-label={seedMode === "fixed" && executionRunning
                   ? "固定种子已有任务正在执行，不能重复排队"
                   : executionRunning ? "将当前任务加入队列" : "开始生成"}
-                onClick={() => void checkAndExecuteImage()}
+                onClick={(event) => executeOrJumpToLatest(event.altKey, checkAndExecuteImage)}
               >
                 <Play size={15} fill="currentColor" />
               </button>

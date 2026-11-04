@@ -2,6 +2,7 @@ import { withSubmissionWaitNotice } from "./video/submissionWait";
 import { takeUploadedVideoMetadata } from "./media/uploadedVideoMetadata";
 import { videoAssetLayout } from "./media/videoAssetLayout";
 import { measureImageUrl, withGeneratedImageLayout } from "./media/generatedImageLayout";
+import { latestGeneratorResult } from "./canvas/generatorResults";
 import type { ComfySocket } from "./web/comfySocket";
 import { generatedVideoDeletionPaths } from "./web/outputFiles";
 import { WebRequestTimeoutError } from "./web/requestTimeout";
@@ -6456,6 +6457,30 @@ function CanvasWorkspace() {
     setNotice(`已定位提示词：${promptNode.data.record.title || "未命名文本"}`);
   }, [flowStore, setCenter, setNodes]);
 
+  // Alt on a generator's start button (CANVAS-038): move to its latest result like the locate actions above,
+  // but keep the current zoom. Nothing is submitted.
+  const jumpToLatestGeneratedResult = useCallback((generatorId: string) => {
+    const generator = nodesSnapshot.current.find((node) => node.id === generatorId)?.data.record;
+    const latest = generator
+      ? latestGeneratorResult(generator, nodesSnapshot.current.map((node) => node.data.record))
+      : null;
+    const target = latest ? nodesSnapshot.current.find((node) => node.id === latest.id) : undefined;
+    if (!target) {
+      showGlobalNotice("还没有生成内容");
+      return;
+    }
+    const width = target.width ?? target.data.record.width;
+    const height = target.height ?? target.data.record.height;
+    setRelationAnchorId(null);
+    flowStore.setState({ nodesSelectionActive: false });
+    setNodes((current) => current.map((node) => ({ ...node, selected: node.id === target.id })));
+    void setCenter(target.position.x + width / 2, target.position.y + height / 2, {
+      zoom: getViewport().zoom,
+      duration: 350,
+    });
+    setNotice(`已定位最新生成内容：${target.data.record.title || "生成结果"}`);
+  }, [flowStore, getViewport, setCenter, setNodes, showGlobalNotice]);
+
   const copyNodesToClipboard = useCallback((nodeIds: string[]) => {
     const copiedIds = new Set(nodeIds);
     const copiedNodes = nodesSnapshot.current
@@ -6618,6 +6643,7 @@ function CanvasWorkspace() {
           onUpscaleGeneratedImage: (nodeId: string) => upscaleGeneratedImageRef.current(nodeId),
           onRegenerateGeneratedImage: (nodeId: string) => regenerateGeneratedImageRef.current(nodeId),
           onLocateGeneratedImage: locateGeneratedImageOrigin,
+          onJumpToLatestResult: jumpToLatestGeneratedResult,
           onCancelExecution: cancelVideoExecution,
           onRevealGeneratedVideo: import.meta.env.MODE === "web" ? downloadGeneratedVideo : revealGeneratedVideo,
           onRevealGeneratedImage: import.meta.env.MODE === "web" ? downloadGeneratedImage : revealGeneratedImage,
