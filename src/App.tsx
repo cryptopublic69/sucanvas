@@ -15,6 +15,8 @@ import {
   controlValue,
   settingControl,
   operationRequestError,
+  imageConnectionLimitError,
+  isImageConnectionLimitNotice,
   UPSCALE_OPERATION,
   upscaleModuleFor,
   WORKFLOW_NODE_SHELL,
@@ -333,6 +335,10 @@ import { SecuritySettingsPanel } from "./settings/SecuritySettingsPanel";
 import { VideoDefaultsSettingsPanel } from "./settings/VideoDefaultsSettingsPanel";
 import { VideoModelSettingsPanel } from "./settings/VideoModelSettingsPanel";
 import { WorkflowSettingsPanel } from "./settings/WorkflowSettingsPanel";
+
+/** Connection refusals for a full input (reference or image-edit) go to the top notice as well as the status bar. */
+const isConnectionLimitNotice = (message: string | null | undefined) =>
+  isReferenceLimitNotice(message) || isImageConnectionLimitNotice(message);
 
 const H3_FLA_REFERENCE_V3_BINDINGS: WorkflowBindings = {
   promptNodeId: "138",
@@ -9863,7 +9869,11 @@ function CanvasWorkspace() {
           .map((edge) => contentNodes.find((node) => node.id === edge.source)?.data.record)
           .filter((record): record is NodeRecord => Boolean(record) && videoInputMediaKind(record!) === "image")
           .length;
-        return imageCount >= 2 ? "Krea2 图像编辑最多只能连接两张图片" : null;
+        // CANVAS-031a: the package's image port max (packages without one keep the old limit).
+        return imageConnectionLimitError(
+          imageModule ? workflowPackages[imageModule.id]?.operations.generate : undefined,
+          imageCount,
+        );
       }
       const sourceMediaKind = videoInputMediaKind(source);
       if (!(source.kind === "text" || sourceMediaKind) || target.kind !== "video-generation") {
@@ -9942,7 +9952,7 @@ function CanvasWorkspace() {
 
       return null;
     },
-    [contentNodes, edges, workflowModuleDefaults, workflowModules],
+    [contentNodes, edges, workflowModuleDefaults, workflowModules, workflowPackages],
   );
 
   // Same batch as connectNodes picks, so hovering, dropping and connecting agree on
@@ -10107,7 +10117,7 @@ function CanvasWorkspace() {
         );
         if (validationError) {
           const sourceTitle = source.data.record.title.trim() || "未命名素材";
-          (isReferenceLimitNotice(validationError) ? showGlobalNotice : setNotice)(
+          (isConnectionLimitNotice(validationError) ? showGlobalNotice : setNotice)(
             batchSources.length > 1
               ? `批量连接失败：“${sourceTitle}”${validationError}`
               : validationError,
@@ -11585,7 +11595,7 @@ function CanvasWorkspace() {
           // A refused multi-selection explains the batch, not the single dragged node.
           const error = referenceBatchError(source, target, contentNodes, edges)
             ?? connectionValidationError({ source, target, sourceHandle: null, targetHandle: null });
-          if (error) (isReferenceLimitNotice(error) ? showGlobalNotice : setNotice)(error);
+          if (error) (isConnectionLimitNotice(error) ? showGlobalNotice : setNotice)(error);
         }}
         onNodeClick={(_, node) => {
           handleNodeRelationClick(node);

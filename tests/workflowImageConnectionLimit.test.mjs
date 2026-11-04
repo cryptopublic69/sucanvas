@@ -50,7 +50,8 @@ test("the refusal is recognised as a limit notice (top toast), other messages ar
 
 test("App connects image-edit nodes through the package limit and shows it as a toast", async () => {
   const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
-  assert.ok(!app.includes("最多只能连接两张图片"), "the fixed two-image message is gone");
+  // (The first/last-frame video mode keeps its own two-image rule; that is a mode, not a package.)
+  assert.ok(!app.includes("图像编辑最多只能连接两张图片"), "the fixed two-image message is gone");
   const start = app.indexOf('if (target.kind === "image-generation") {');
   const branch = app.slice(start, app.indexOf("const sourceMediaKind = videoInputMediaKind(source);", start));
   assert.match(branch, /imageConnectionLimitError\(\s*imageModule \? workflowPackages\[imageModule\.id\]\?\.operations\.generate : undefined,\s*imageCount,?\s*\)/);

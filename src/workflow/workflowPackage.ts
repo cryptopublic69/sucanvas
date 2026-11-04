@@ -207,6 +207,29 @@ function portInputs(operation: OperationDescription, connected: ConnectedInputs)
   return inputs;
 }
 
+/** The `max` of the operation's first port of `type`: the port the run request fills with that
+ * type's connections. undefined when there is no such port or it declares no max. */
+export function declaredInputMax(operation: OperationDescription | undefined, type: PortType): number | undefined {
+  const port = (operation?.inputs ?? []).find((candidate) => candidate.type === type);
+  return typeof port?.max === "number" && Number.isInteger(port.max) && port.max >= 0 ? port.max : undefined;
+}
+
+/** Image limit when connecting to a package that declares no max on its image port (the old rule). */
+export const LEGACY_IMAGE_CONNECTION_MAX = 2;
+
+const IMAGE_LIMIT_NOTICE_PREFIX = "本方案最多连接 ";
+
+/** CANVAS-031a: refusing one more image on an image-edit node that already has `connectedImages`. */
+export function imageConnectionLimitError(operation: OperationDescription | undefined, connectedImages: number): string | null {
+  const max = declaredInputMax(operation, "image") ?? LEGACY_IMAGE_CONNECTION_MAX;
+  return connectedImages >= max ? `${IMAGE_LIMIT_NOTICE_PREFIX}${max} 张图片` : null;
+}
+
+/** Limit refusals go to the top notice, so they are seen while dragging. */
+export function isImageConnectionLimitNotice(message: string | null | undefined): boolean {
+  return Boolean(message?.startsWith(IMAGE_LIMIT_NOTICE_PREFIX));
+}
+
 /** How many items each input port would send (the run request's own mapping), for visibleWhen. */
 export function connectedMediaCounts(operation: OperationDescription, connected: ConnectedInputs): MediaCounts {
   return Object.fromEntries(Object.entries(portInputs(operation, connected)).map(([port, items]) => [port, items.length]));
