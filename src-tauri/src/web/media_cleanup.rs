@@ -1675,6 +1675,104 @@ mod tests {
         }
     }
 
+    // CANVAS-033: every refresh reports its time, the files it scanned, the
+    // cleanup candidates it leaves and whether it was the first since start.
+    #[test]
+    fn a_refresh_records_its_size_candidates_and_whether_it_was_first() {
+        let media = media();
+        media.file("sucanvas-input://sucanvas-imports/kept.png");
+        media.file("sucanvas-input://sucanvas-imports/orphan.png");
+        media.file("sucanvas-output://foreign.png");
+        media.node(json!({"assetPath": "sucanvas-input://sucanvas-imports/kept.png"}));
+        media
+            .registry
+            .refresh(&media.roots, media.t0, None)
+            .unwrap();
+        let first = media.registry.scan_stats().1.unwrap();
+        assert!(first.first);
+        assert_eq!(first.files, 3);
+        // Unreferenced since t0: not a candidate before the grace period ends.
+        assert_eq!(first.candidates, 0);
+        assert!(first.total >= first.held);
+        let later = media.days(GRACE_DAYS + 1);
+        media.registry.refresh(&media.roots, later, None).unwrap();
+        let second = media.registry.scan_stats().1.unwrap();
+        assert!(!second.first);
+        assert_eq!(second.files, 3);
+        assert_eq!(second.candidates, 1);
+        assert_eq!(second.candidates, media.candidates(later).len());
+    }
+
+    #[test]
+    fn every_refresh_logs_one_info_line_with_its_time() {
+        let media = media();
+        media.file("sucanvas-input://sucanvas-imports/orphan.png");
+        media
+            .registry
+            .refresh(&media.roots, media.t0, None)
+            .unwrap();
+        let stats = media.registry.scan_stats().1.unwrap();
+        let lines = scan_log_lines(&stats);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let (level, line) = &lines[0];
+        assert_eq!(*level, LogLevel::Info);
+        assert_eq!(
+            line,
+            &format!(
+                "素材登记刷新完成：耗时 {} ms（持写锁 {} ms），扫描 {} 个文件、{} 个节点，候选 {} 个，首次 是",
+                stats.total.as_millis(),
+                stats.held.as_millis(),
+                stats.files,
+                stats.nodes,
+                stats.candidates
+            )
+        );
+        // One short line: no paths or lists.
+        assert!(!line.contains('\n') && !line.contains("orphan") && !line.contains("://"));
+    }
+
+    #[test]
+    fn a_slow_refresh_still_warns() {
+        let stats = ScanStats {
+            nodes: 12,
+            held: std::time::Duration::from_millis(1500),
+            total: std::time::Duration::from_millis(1600),
+            files: 40,
+            candidates: 2,
+            first: false,
+        };
+        let lines = scan_log_lines(&stats);
+        assert_eq!(
+            lines,
+            vec![
+                (
+                    LogLevel::Info,
+                    "素材登记刷新完成：耗时 1600 ms（持写锁 1500 ms），扫描 40 个文件、12 个节点，候选 2 个，首次 否".to_owned()
+                ),
+                (
+                    LogLevel::Warn,
+                    "素材登记刷新持有写锁 1500 ms（12 个节点）".to_owned()
+                ),
+            ]
+        );
+        let fast = ScanStats {
+            held: std::time::Duration::from_millis(1000),
+            ..stats
+        };
+        assert_eq!(scan_log_lines(&fast).len(), 1, "1 s exactly does not warn");
+    }
+
+    // The refresh itself writes those lines (not only the tests).
+    #[test]
+    fn the_refresh_writes_its_log_lines() {
+        let source = include_str!("media_cleanup.rs");
+        let start = source.find("    pub fn refresh(").unwrap();
+        let end = source.find("    pub fn schedule_refresh(").unwrap();
+        let body = &source[start..end];
+        assert!(body.contains("for (level, line) in scan_log_lines(&stats)"));
+        assert!(!body.contains("eprintln!(\n") && !body.contains("eprintln!(\r\n"), "the warn text lives in scan_log_lines only");
+    }
+
     #[test]
     fn constants_match_the_decision() {
         assert_eq!((GRACE_DAYS, TRASH_RETENTION_DAYS), (7, 30));
