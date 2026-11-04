@@ -6,6 +6,7 @@ import { referenceLimits, referenceModuleFor, referenceSubmitError, type Referen
 import { comfyOutputFromContent, videoUpscaleSourceUnavailableReason } from "./video/videoUpscaleSource";
 import { choiceKey, type ChoiceStore } from "./workflow/choiceCache";
 import { convertLegacyImageNodeContent } from "./workflow/legacyImageNode";
+import { generatedImageLoras } from "./workflow/loraInfo";
 import { WorkflowControls } from "./workflow/WorkflowControls";
 import {
   connectedMediaCounts,
@@ -5338,9 +5339,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       ? record.content.generationWorkflowModuleRevision
       : generatedImageWorkflowModule.revision}`
     : generatedImageWorkflowModuleId ? "方案已缺失" : "未记录";
-  const generatedImageLoraName = isGeneratedImage && typeof record.content.generationLoraName === "string"
-    ? record.content.generationLoraName
-    : "";
+  // CANVAS-032: the LoRAs that took effect, read from the stored control values with the
+  // generating package's controls; old images keep their single old LoRA name.
+  const generatedImageLoraInfo = isGeneratedImage
+    ? generatedImageLoras(
+      record.content,
+      generatedImageWorkflowModuleId ? workflowPackages[generatedImageWorkflowModuleId]?.operations.generate : undefined,
+    )
+    : null;
   const generatedImageModelName = isGeneratedImage && typeof record.content.generationModelName === "string"
     ? record.content.generationModelName
     : "";
@@ -8423,7 +8429,18 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                             <dd>{Number.isFinite(generatedImageMegapixels) ? `${generatedImageMegapixels.toFixed(1)} MP` : "未记录"}</dd>
                           </>
                         )}
-                        <dt>LoRA</dt><dd title={generatedImageLoraName || "—"}>{generatedImageLoraName || "—"}</dd>
+                        <dt>LoRA</dt>
+                        {generatedImageLoraInfo?.kind === "legacy"
+                          ? <dd title={generatedImageLoraInfo.name}>{generatedImageLoraInfo.name}</dd>
+                          : <dd>{generatedImageLoraInfo?.kind !== "entries"
+                            ? "未记录"
+                            : generatedImageLoraInfo.entries.length === 0
+                              ? "无"
+                              : generatedImageLoraInfo.entries.map((lora, index) => (
+                                <div key={index} title={lora.name}>
+                                  <LoraNameWithStrength name={lora.name} strength={lora.strength ?? 0} recorded={lora.strength !== null} />
+                                </div>
+                              ))}</dd>}
                         <dt data-exclude-from-copy>负向提示词</dt><dd title={generatedImageNegativePrompt || "—"}>{generatedImageNegativePrompt || "—"}</dd>
                       </dl>
                     </section>

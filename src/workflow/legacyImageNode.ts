@@ -9,7 +9,7 @@
 // Version 2 (CANVAS-024d): model paths stored on a node in the "Kera2" directory (a typo of
 // Krea2, su 11-01; the directory is renamed at go-live) are rewritten to "Krea2" once. A
 // node already at this version is left alone, so a Kera2 file picked afterwards stays.
-import { WORKFLOW_NODE_SHELL, type ControlValues, type OperationDescription } from "./workflowPackage";
+import { WORKFLOW_NODE_SHELL, isNamedRepeatGroup, type ControlValues, type OperationDescription } from "./workflowPackage";
 
 type Content = Record<string, unknown>;
 
@@ -21,9 +21,7 @@ export function needsLegacyImageConversion(content: Content): boolean {
 
 /** A repeat group whose items have a `name` field: where a single old LoRA goes. */
 function loraGroup(operation: OperationDescription | undefined): string {
-  return operation?.controls?.find((control) => (
-    control.type === "repeat" && control.id === "loras" && control.fields?.some((field) => field.id === "name")
-  ))?.id ?? "";
+  return operation?.controls?.find((control) => control.id === "loras" && isNamedRepeatGroup(control))?.id ?? "";
 }
 
 /** Every stored value, inside repeat items too: `Kera2\…` / `Kera2/…` become `Krea2…`. */

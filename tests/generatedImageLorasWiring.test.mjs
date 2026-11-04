@@ -30,7 +30,8 @@ test("the image info panel lists the LoRA group through LoraNameWithStrength, �
   assert.ok(!node.includes('{generatedImageLoraName || "—"}'), "the panel no longer prints only the old field");
   const start = node.indexOf("<dt>LoRA</dt>", node.indexOf('{isImageUpscalePreview ? "图片放大" : "图片生成"}'));
   assert.ok(start > 0, "the image panel's LoRA row exists");
-  const row = node.slice(start, node.indexOf("</dd>", node.indexOf("<dd", start)) + 5);
+  // The row has two <dd> branches (old single name / list), so read up to the end of the list.
+  const row = node.slice(start, node.indexOf("</dl>", start));
   assert.ok(/<LoraNameWithStrength/.test(row), "row matches /<LoraNameWithStrength/");
   assert.ok(/"无"/.test(row), "the row says 无 when nothing took effect");
   assert.ok(/"未记录"/.test(row), "the row says 未记录 when it cannot be known");

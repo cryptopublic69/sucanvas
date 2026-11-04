@@ -86,6 +86,11 @@ export function portLabel(port: PortDescription): string {
   return port.label || port.id;
 }
 
+/** A repeat group whose items have a `name` field: a list of named files (a LoRA group). */
+export function isNamedRepeatGroup(control: ControlDescription): boolean {
+  return control.type === "repeat" && Boolean(control.fields?.some((field) => field.id === "name"));
+}
+
 /** The value a control has on this node: its own, else the module setting, else the package default. */
 export function controlValue(control: ControlDescription, values: ControlValues): unknown {
   const own = values[control.id];
