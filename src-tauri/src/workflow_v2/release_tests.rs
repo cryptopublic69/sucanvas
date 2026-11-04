@@ -1092,6 +1092,29 @@ fn qwen_edit_writes_model_prompts_steps_seed_and_keeps_the_rest_of_the_workflow(
     }
 }
 
+/// Through the module store's own import (what the settings page does), not only the package loader:
+/// the store also reads the manifest's module settings.
+#[test]
+fn qwen_edit_imports_through_the_module_store_as_a_v2_package() {
+    let root = module_root();
+    fs::create_dir_all(&root).unwrap();
+    let imported = workflow_modules::import_bundle(&root, &release_dir(QWEN_EDIT)).unwrap();
+    assert_eq!(
+        imported.adapter.adapter_id,
+        workflow_modules::PACKAGE_V2_ADAPTER
+    );
+    assert_eq!(imported.manifest.revision, "v1");
+    assert_eq!(
+        imported.manifest.defaults.diffusion_model_name,
+        "Qwen2.1\\qwen_image_2.1_int8_convrot.safetensors"
+    );
+    assert_eq!(
+        read_json(PathBuf::from(&imported.adapter_path)),
+        read_json(release_dir(QWEN_EDIT).join("adapter.json"))
+    );
+    fs::remove_dir_all(&root).ok();
+}
+
 #[test]
 fn qwen_edit_refuses_no_image_nine_images_and_sizes_out_of_range() {
     let loaded = release_loaded(QWEN_EDIT);
