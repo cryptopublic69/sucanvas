@@ -402,6 +402,55 @@ pub struct MediaOutcome {
 pub struct ScanStats {
     pub nodes: usize,
     pub held: std::time::Duration,
+    // CANVAS-033: whole pass (waiting for the write lock included), files
+    // found in the managed folders, candidates past the grace period after
+    // the pass, and whether this was the first pass since the server started.
+    pub total: std::time::Duration,
+    pub files: usize,
+    pub candidates: usize,
+    pub first: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogLevel {
+    Info,
+    Warn,
+}
+
+// What a finished refresh writes to the server log: always one info line;
+// the warning when the write lock was held for more than a second.
+pub fn scan_log_lines(stats: &ScanStats) -> Vec<(LogLevel, String)> {
+    let mut lines = vec![(
+        LogLevel::Info,
+        format!(
+            "素材登记刷新完成：耗时 {} ms（持写锁 {} ms），扫描 {} 个文件、{} 个节点，候选 {} 个，首次 {}",
+            stats.total.as_millis(),
+            stats.held.as_millis(),
+            stats.files,
+            stats.nodes,
+            stats.candidates,
+            if stats.first { "是" } else { "否" }
+        ),
+    )];
+    if stats.held > std::time::Duration::from_secs(1) {
+        lines.push((
+            LogLevel::Warn,
+            format!(
+                "素材登记刷新持有写锁 {} ms（{} 个节点）",
+                stats.held.as_millis(),
+                stats.nodes
+            ),
+        ));
+    }
+    lines
+}
+
+// The cleanup candidates: unreferenced, not in the trash, past the grace period.
+fn candidate_condition(now: DateTime<Utc>) -> String {
+    let cutoff = time(now - Duration::days(GRACE_DAYS));
+    format!(
+        "media_files.trashed_at IS NULL AND media_files.unreferenced_since IS NOT NULL AND media_files.unreferenced_since <= '{cutoff}'"
+    )
 }
 
 // Refresh requests from deletions (see schedule_refresh).
@@ -444,6 +493,7 @@ impl MediaRegistry {
         now: DateTime<Utc>,
         actor: Option<&str>,
     ) -> Result<(), String> {
+        let started = std::time::Instant::now();
         let mut connection = lock(&self.connection);
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -455,7 +505,9 @@ impl MediaRegistry {
             .map_err(error)? as usize;
         let references = referenced(&transaction, roots)?;
         let stamp = time(now);
-        for (path, category, size) in scan(roots) {
+        let found = scan(roots);
+        let files = found.len();
+        for (path, category, size) in found {
             if let Some(reference) = roots.reference_of(&path) {
                 transaction
                     .execute(
@@ -528,15 +580,34 @@ impl MediaRegistry {
             }
         }
         expire_trash(&transaction, roots, now)?;
+        let candidates = transaction
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM media_files WHERE {}",
+                    candidate_condition(now)
+                ),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(error)? as usize;
         transaction.commit().map_err(error)?;
         let held = locked.elapsed();
-        self.scans.fetch_add(1, Ordering::SeqCst);
-        *lock(&self.last_scan) = Some(ScanStats { nodes, held });
-        if held > std::time::Duration::from_secs(1) {
-            eprintln!(
-                "素材登记刷新持有写锁 {} ms（{nodes} 个节点）",
-                held.as_millis()
-            );
+        let first = self.scans.fetch_add(1, Ordering::SeqCst) == 0;
+        let stats = ScanStats {
+            nodes,
+            held,
+            total: started.elapsed(),
+            files,
+            candidates,
+            first,
+        };
+        *lock(&self.last_scan) = Some(stats);
+        drop(connection);
+        for (level, line) in scan_log_lines(&stats) {
+            match level {
+                LogLevel::Info => println!("{line}"),
+                LogLevel::Warn => eprintln!("{line}"),
+            }
         }
         Ok(())
     }
@@ -698,10 +769,7 @@ impl MediaRegistry {
     // and the trash.
     pub fn list(&self, roots: &MediaRoots, now: DateTime<Utc>) -> Result<MediaListing, String> {
         self.refresh(roots, now, None)?;
-        let cutoff = time(now - Duration::days(GRACE_DAYS));
-        let candidates = self.items(&format!(
-            "media_files.trashed_at IS NULL AND media_files.unreferenced_since IS NOT NULL AND media_files.unreferenced_since <= '{cutoff}'"
-        ))?;
+        let candidates = self.items(&candidate_condition(now))?;
         let trash = self.items("media_files.trashed_at IS NOT NULL")?;
         Ok(MediaListing {
             candidate_bytes: candidates.iter().map(|item| item.size).sum(),
@@ -1682,6 +1750,7 @@ mod tests {
         let media = media();
         media.file("sucanvas-input://sucanvas-imports/kept.png");
         media.file("sucanvas-input://sucanvas-imports/orphan.png");
+        // Not stock: the shared ComfyUI output is never scanned (see scan()).
         media.file("sucanvas-output://foreign.png");
         media.node(json!({"assetPath": "sucanvas-input://sucanvas-imports/kept.png"}));
         media
@@ -1690,7 +1759,7 @@ mod tests {
             .unwrap();
         let first = media.registry.scan_stats().1.unwrap();
         assert!(first.first);
-        assert_eq!(first.files, 3);
+        assert_eq!(first.files, 2);
         // Unreferenced since t0: not a candidate before the grace period ends.
         assert_eq!(first.candidates, 0);
         assert!(first.total >= first.held);
@@ -1698,7 +1767,7 @@ mod tests {
         media.registry.refresh(&media.roots, later, None).unwrap();
         let second = media.registry.scan_stats().1.unwrap();
         assert!(!second.first);
-        assert_eq!(second.files, 3);
+        assert_eq!(second.files, 2);
         assert_eq!(second.candidates, 1);
         assert_eq!(second.candidates, media.candidates(later).len());
     }
@@ -1770,7 +1839,10 @@ mod tests {
         let end = source.find("    pub fn schedule_refresh(").unwrap();
         let body = &source[start..end];
         assert!(body.contains("for (level, line) in scan_log_lines(&stats)"));
-        assert!(!body.contains("eprintln!(\n") && !body.contains("eprintln!(\r\n"), "the warn text lives in scan_log_lines only");
+        assert!(
+            !body.contains("eprintln!(\n") && !body.contains("eprintln!(\r\n"),
+            "the warn text lives in scan_log_lines only"
+        );
     }
 
     #[test]
