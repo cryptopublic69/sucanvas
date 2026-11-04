@@ -807,6 +807,14 @@ interface VideoRegenerationRequest {
   seed: string;
 }
 
+// An image run started from somewhere else than the generator's own button. The prompt source (which text
+// node is the prompt) and the placement source (whose position the new result is placed by) are separate:
+// without a placement source the result goes where the generator's own button would put it (CANVAS-037).
+interface ImageExecutionRequest {
+  promptNodeId?: string;
+  placementSourceId?: string;
+}
+
 interface VideoExecutionOptions {
   placementSourceNodeId?: string;
   seed?: string;
@@ -1693,7 +1701,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   onMarkGeneratedVideoFullyPlayed: (id: string) => void;
   onExecutionCheck: (message: string, valid: boolean) => void;
   onExecute: (id: string, regeneration?: VideoRegenerationRequest, options?: VideoExecutionOptions) => Promise<void>;
-  onExecuteImage: (id: string, promptNodeId?: string) => Promise<void>;
+  onExecuteImage: (id: string, request?: ImageExecutionRequest) => Promise<void>;
   onBatchExecute: (id: string) => Promise<void>;
   onVideoUpscale: (id: string) => Promise<void>;
   onConfigureVideoUpscale: (id: string) => void;
@@ -6727,7 +6735,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     }
     if (import.meta.env.MODE === "web" && targets[0].data.record.kind === "image-generation") {
       onActivateTextInput(targets[0].id, id);
-      await onExecuteImage(targets[0].id, id);
+      // Alt: same prompt, placed like the generator's own button; a plain click places it below this text.
+      await onExecuteImage(targets[0].id, configure ? { promptNodeId: id } : { promptNodeId: id, placementSourceId: id });
       return;
     }
     if (configure) {
@@ -7273,7 +7282,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               event.stopPropagation();
               void executeConnectedVideo(event.altKey);
             }}
-            title={import.meta.env.MODE === "web" ? "执行相连的图片或视频生成节点；视频支持 Alt＋点击调整生成参数" : "执行相连的视频生成节点；Alt＋点击调整生成参数"}
+            title={import.meta.env.MODE === "web" ? "执行相连的图片或视频生成节点；图片：Alt＋点击时新结果放在生成节点旁；视频：Alt＋点击调整生成参数" : "执行相连的视频生成节点；Alt＋点击调整生成参数"}
             aria-label={import.meta.env.MODE === "web" ? "执行相连的图片或视频生成节点" : "执行相连的视频生成节点"}
           >
             <Play size={13} fill="currentColor" />
@@ -11205,6 +11214,7 @@ export type {
   VideoDeletionRequest,
   ImageDeletionRequest,
   ImageRecoverySnapshot,
+  ImageExecutionRequest,
   VideoExecutionOptions,
   VideoGenerationMode,
   VideoRegenerationDraft,

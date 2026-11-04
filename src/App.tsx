@@ -165,6 +165,7 @@ import type {
   VideoAspectRatio,
   VideoDeletionChoice,
   VideoDeletionRequest,
+  ImageExecutionRequest,
   VideoExecutionOptions,
   VideoGenerationMode,
   VideoRegenerationDraft,
@@ -6601,9 +6602,10 @@ function CanvasWorkspace() {
           onMarkGeneratedVideoFullyPlayed: markGeneratedVideoFullyPlayed,
           onExecutionCheck: reportExecutionCheck,
           onExecute: executeVideoNode,
-          onExecuteImage: (nodeId: string, promptNodeId?: string) => executeImageNodeRef.current(
-            nodeId, import.meta.env.MODE === "web" ? promptNodeId : undefined,
-            import.meta.env.MODE === "web" && promptNodeId ? { kind: "text", promptNodeId } : undefined,
+          // Web only: the prompt text and the placement source arrive separately (CANVAS-037).
+          onExecuteImage: (nodeId: string, request?: ImageExecutionRequest) => executeImageNodeRef.current(
+            nodeId, import.meta.env.MODE === "web" ? request?.placementSourceId : undefined,
+            import.meta.env.MODE === "web" && request?.promptNodeId ? { kind: "text", promptNodeId: request.promptNodeId } : undefined,
           ),
           onBatchExecute: executeVideoNodeBatch,
           onVideoUpscale: videoUpscale.execute,
