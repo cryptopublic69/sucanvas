@@ -114,8 +114,8 @@ test("WorkflowControls draws only the counted groups", async () => {
   assert.deepEqual(labels(render({ images: 0, prompt: 1 })), []);
   assert.deepEqual(labels(render({ images: 2, prompt: 1 })), [1, 2]);
   assert.deepEqual(labels(render({ images: 8, prompt: 1 })), [1, 2, 3, 4, 5, 6, 7, 8]);
-  assert.doesNotMatch(render({ images: 2 }), /最长边/);
-  assert.match(render({ images: 2 }, { scale2: true }), /最长边/);
+  assert.doesNotMatch(render({ images: 2 }), /aria-label="最长边"/);
+  assert.equal(render({ images: 2 }, { scale2: true }).match(/aria-label="最长边"/g)?.length, 1);
 });
 
 test("the node passes its counts to the controls and to the prompt anchor", async () => {

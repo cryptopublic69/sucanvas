@@ -8,6 +8,7 @@ import { choiceKey, type ChoiceStore } from "./workflow/choiceCache";
 import { convertLegacyImageNodeContent } from "./workflow/legacyImageNode";
 import { WorkflowControls } from "./workflow/WorkflowControls";
 import {
+  connectedMediaCounts,
   displayPorts,
   portLabel,
   promptAnchorControl,
@@ -6989,7 +6990,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
 
   // CANVAS-027: the image node's prompt box. When the package has a negative prompt control
   // (found by its control fields) WorkflowControls draws it right above that control.
-  const imagePromptAnchor = imageOperation ? promptAnchorControl(imageOperation, imageControlValues) : undefined;
+  // CANVAS-031a: per input port, how many items a run would send (the request's own mapping), so a
+  // package can show controls by what is connected (visibleWhen mediaAtLeast).
+  const imageMediaCounts = imageOperation
+    ? connectedMediaCounts(imageOperation, {
+      text: imagePositivePromptInput ? [{ text: imagePromptText(imagePositivePromptInput) }] : [],
+      image: imageMediaInputs.map(() => ({ path: "" })),
+    })
+    : undefined;
+  const imagePromptAnchor = imageOperation ? promptAnchorControl(imageOperation, imageControlValues, imageMediaCounts) : undefined;
   const renderImagePromptSection = (port: PortDescription) => {
     const label = portLabel(port);
     return (
@@ -10117,6 +10126,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             <WorkflowControls
               operation={imageOperation}
               values={imageControlValues}
+              mediaCounts={imageMediaCounts}
               choicesFor={(control) => workflowChoices.get(choiceKey(control))}
               onChange={(values) => onChange(id, {
                 content: { ...imageNodeContent, controlValues: values, status: "idle", validationMessage: "" },

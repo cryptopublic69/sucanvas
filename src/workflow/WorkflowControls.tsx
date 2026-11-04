@@ -11,6 +11,7 @@ import {
   type ControlDescription,
   type ControlValues,
   type GroupDescription,
+  type MediaCounts,
   type OperationDescription,
 } from "./workflowPackage";
 
@@ -273,12 +274,14 @@ type ControlsProps = {
   onChange: (values: ControlValues) => void;
   /** Something the node shell draws right before the row of one control (its prompt box). */
   before?: { controlId: string; content: ReactNode };
+  /** Items connected per input port (connectedMediaCounts), for visibleWhen's mediaAtLeast. */
+  mediaCounts?: MediaCounts;
 };
 
 /** Every visible control of the operation except the seed (drawn by the node shell), in the
  * package's order; consecutive controls of one group share a row. */
-export function WorkflowControls({ operation, values, choicesFor, onChange, before }: ControlsProps) {
-  const shown = visibleControls(operation, values).filter((control) => control.type !== "seed");
+export function WorkflowControls({ operation, values, choicesFor, onChange, before, mediaCounts }: ControlsProps) {
+  const shown = visibleControls(operation, values, mediaCounts).filter((control) => control.type !== "seed");
   const groups = new Map<string, GroupDescription>((operation.groups ?? []).map((group) => [group.id, group]));
   const set = (id: string, value: unknown) => {
     const next = { ...values };

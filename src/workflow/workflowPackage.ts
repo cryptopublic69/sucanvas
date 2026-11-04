@@ -70,10 +70,13 @@ export type OperationRequest = {
   seed: string;
 };
 
-// A subset of the package condition language that only reads control values (enough for
-// visibleWhen; the server evaluates the full language).
+// A subset of the package condition language for visibleWhen: it reads control values and, when
+// the node gives them, how many items are connected to each input port (mediaAtLeast). The server
+// evaluates the full language.
 type Condition = Record<string, unknown>;
 type Expression = Record<string, unknown>;
+/** Input port id -> number of connected items the run request would send for it. */
+export type MediaCounts = Record<string, number>;
 
 export function controlLabel(control: { id: string; label?: string }): string {
   return control.label || control.id;
@@ -109,7 +112,13 @@ function isEmptyValue(value: unknown): boolean {
   return value === null || value === undefined || value === "" || (Array.isArray(value) && value.length === 0);
 }
 
-export function conditionHolds(condition: Condition | undefined, values: ControlValues, controls: ControlDescription[]): boolean {
+function mentionsMediaCount(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(mentionsMediaCount);
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value).some(([key, inner]) => key === "mediaAtLeast" || mentionsMediaCount(inner));
+}
+
+function holds(condition: Condition | undefined, values: ControlValues, controls: ControlDescription[], counts: MediaCounts): boolean {
   if (!condition) return true;
   const [key, inner] = Object.entries(condition)[0] ?? [];
   switch (key) {
@@ -120,16 +129,34 @@ export function conditionHolds(condition: Condition | undefined, values: Control
       return JSON.stringify(expressionValue(expression, values, controls)) === JSON.stringify(expected);
     }
     case "defined": return values[String(inner)] !== undefined && values[String(inner)] !== null;
-    case "all": return Array.isArray(inner) && inner.every((item) => conditionHolds(item as Condition, values, controls));
-    case "any": return Array.isArray(inner) && inner.some((item) => conditionHolds(item as Condition, values, controls));
-    case "not": return !conditionHolds(inner as Condition, values, controls);
+    case "mediaAtLeast": {
+      const { port, count } = (inner ?? {}) as { port?: unknown; count?: unknown };
+      return (counts[String(port)] ?? 0) >= Number(count ?? 0);
+    }
+    case "all": return Array.isArray(inner) && inner.every((item) => holds(item as Condition, values, controls, counts));
+    case "any": return Array.isArray(inner) && inner.some((item) => holds(item as Condition, values, controls, counts));
+    case "not": return !holds(inner as Condition, values, controls, counts);
     default: return true;
   }
 }
 
-export function visibleControls(operation: OperationDescription, values: ControlValues): ControlDescription[] {
+/** Whether a condition holds. Without `mediaCounts` a condition that mentions mediaAtLeast
+ * anywhere cannot be decided and counts as holding (shown): a `not` around it must not hide a
+ * control just because the counts are unknown. */
+export function conditionHolds(
+  condition: Condition | undefined,
+  values: ControlValues,
+  controls: ControlDescription[],
+  mediaCounts?: MediaCounts,
+): boolean {
+  if (!condition) return true;
+  if (!mediaCounts && mentionsMediaCount(condition)) return true;
+  return holds(condition, values, controls, mediaCounts ?? {});
+}
+
+export function visibleControls(operation: OperationDescription, values: ControlValues, mediaCounts?: MediaCounts): ControlDescription[] {
   const controls = operation.controls ?? [];
-  return controls.filter((control) => conditionHolds(control.visibleWhen, values, controls));
+  return controls.filter((control) => conditionHolds(control.visibleWhen, values, controls, mediaCounts));
 }
 
 /** The id the program gives the negative prompt: the old image node's field and the control the
@@ -138,8 +165,8 @@ export const NEGATIVE_PROMPT_CONTROL_ID = "negativePrompt";
 
 /** The control the node's prompt box is drawn right above: a visible text control with the
  * program's negative prompt id. None means the prompt box stays above every control. */
-export function promptAnchorControl(operation: OperationDescription, values: ControlValues): ControlDescription | undefined {
-  return visibleControls(operation, values).find((control) => (
+export function promptAnchorControl(operation: OperationDescription, values: ControlValues, mediaCounts?: MediaCounts): ControlDescription | undefined {
+  return visibleControls(operation, values, mediaCounts).find((control) => (
     control.id === NEGATIVE_PROMPT_CONTROL_ID && (control.type === "textarea" || control.type === "text")
   ));
 }
@@ -160,6 +187,12 @@ export function buildOperationRequest(
     const value = nodeValues[control.id];
     if (value !== undefined && value !== null) values[control.id] = value;
   }
+  return { operation: operationName, values, inputs: portInputs(operation, connected), seedMode: seed.seedMode, seed: seed.seed };
+}
+
+/** Per input port, what is connected to it: the first port of each type takes that type's
+ * connections; text is trimmed; ports without items are left out. */
+function portInputs(operation: OperationDescription, connected: ConnectedInputs): Record<string, WorkflowMediaItem[]> {
   const inputs: Record<string, WorkflowMediaItem[]> = {};
   const taken = new Set<PortType>();
   for (const port of operation.inputs ?? []) {
@@ -171,7 +204,12 @@ export function buildOperationRequest(
       : items;
     if (prepared.length) inputs[port.id] = prepared;
   }
-  return { operation: operationName, values, inputs, seedMode: seed.seedMode, seed: seed.seed };
+  return inputs;
+}
+
+/** How many items each input port would send (the run request's own mapping), for visibleWhen. */
+export function connectedMediaCounts(operation: OperationDescription, connected: ConnectedInputs): MediaCounts {
+  return Object.fromEntries(Object.entries(portInputs(operation, connected)).map(([port, items]) => [port, items.length]));
 }
 
 function numberProblem(control: ControlDescription, value: unknown): string {
