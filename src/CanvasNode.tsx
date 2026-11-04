@@ -28,6 +28,11 @@ import {
   mediaNodeHeightForAspectRatio,
   videoAssetLayout,
 } from "./media/videoAssetLayout";
+import {
+  GENERATED_IMAGE_CHROME_HEIGHT,
+  GENERATED_IMAGE_PREVIEW_LAYOUT_VERSION,
+  generatedImageNodeHeight,
+} from "./media/generatedImageLayout";
 import { videoDurationAspectLabel, videoElapsedWithDuration } from "./video/videoDurationLabel";
 import { Settings as PresetSettingsIcon } from "lucide-react";
 import { useDropdownWheel } from "./useDropdownWheel";
@@ -2154,8 +2159,6 @@ const DEFAULT_IMAGE_RESIZE_MAX_EDGE = 2048;
 const MIN_IMAGE_RESIZE_MAX_EDGE = 32;
 const MAX_IMAGE_RESIZE_MAX_EDGE = 16_384;
 const GENERATED_VIDEO_FOOTER_HEIGHT = 38;
-const GENERATED_IMAGE_CHROME_HEIGHT = GENERATED_VIDEO_FOOTER_HEIGHT;
-const GENERATED_IMAGE_PREVIEW_LAYOUT_VERSION = 2;
 const LEGACY_GENERATED_VIDEO_PREVIEW_WIDTH = 360;
 const BATCH_GENERATION_PREVIEW_GAP_OFFSET = 130;
 const GENERATED_VIDEO_PREVIEW_LAYOUT_VERSION = 5;
@@ -6490,10 +6493,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         Math.max(180, fittedWidth / aspectRatio + GENERATED_VIDEO_FOOTER_HEIGHT),
       )
       : isGeneratedImage
-        ? Math.min(
-          2400,
-          Math.max(180, fittedWidth / aspectRatio + GENERATED_IMAGE_CHROME_HEIGHT),
-        )
+        ? generatedImageNodeHeight(fittedWidth, aspectRatio)
       : isImage
         ? Math.min(2400, fittedWidth / aspectRatio + IMAGE_NODE_CHROME_HEIGHT)
         : mediaNodeHeightForAspectRatio(fittedWidth, aspectRatio);

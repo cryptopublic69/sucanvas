@@ -102,6 +102,8 @@ function imageExecutionEnvironment() {
     completeGenerationPlaceholder: async (_, __, content) => completed.push(content),
     finalizeGenerationPlaceholder: noop, reportError: (error) => errors.push(error),
     forgetComfyTask: noop, unregisterComfyTask: noop,
+    // CANVAS-036: results are shaped by their real size (tests/generatedImageLayout.test.mjs); here unmeasured.
+    withGeneratedImageLayout: async (content) => ({ content }), measureImageUrl: noop,
   };
   return { env, submitted, completed, saved, errors };
 }

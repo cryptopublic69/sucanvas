@@ -1,6 +1,7 @@
 import { withSubmissionWaitNotice } from "./video/submissionWait";
 import { takeUploadedVideoMetadata } from "./media/uploadedVideoMetadata";
 import { videoAssetLayout } from "./media/videoAssetLayout";
+import { measureImageUrl, withGeneratedImageLayout } from "./media/generatedImageLayout";
 import type { ComfySocket } from "./web/comfySocket";
 import { generatedVideoDeletionPaths } from "./web/outputFiles";
 import { WebRequestTimeoutError } from "./web/requestTimeout";
@@ -4102,16 +4103,26 @@ function CanvasWorkspace() {
     if (!placeholderNodeId) return null;
     completedGenerationPlaceholders.current.add(placeholderNodeId);
     try {
+      // An image result takes its real shape here, whatever the zoom (CANVAS-036).
+      const placeholderWidth = nodesSnapshot.current.find((node) => node.id === placeholderNodeId)?.data.record.width ?? 420;
+      const shaped = await withGeneratedImageLayout(content, placeholderWidth, measureImageUrl);
       await flushNodePatches([placeholderNodeId]);
       const record = await invoke<NodeRecord>("update_node", {
         input: {
           id: placeholderNodeId,
           title,
-          content,
+          content: shaped.content,
+          ...(shaped.height === undefined ? {} : { width: shaped.width, height: shaped.height }),
         },
       });
       setNodes((current) => current.map((node) => node.id === placeholderNodeId
-        ? { ...node, data: { ...node.data, record } }
+        ? {
+          ...node,
+          width: record.width,
+          height: record.height,
+          style: { ...node.style, width: record.width, height: record.height },
+          data: { ...node.data, record },
+        }
         : node));
       return record;
     } catch (error) {
@@ -6766,11 +6777,13 @@ function CanvasWorkspace() {
             continue;
           }
         }
+        const shapedOutput = await withGeneratedImageLayout(outputContent, previewWidth, measureImageUrl);
+        const shapedHeight = shapedOutput.height ?? previewHeight;
         const position = generatedPreviewPosition(
           source,
           placementRecords,
           previewWidth,
-          previewHeight,
+          shapedHeight,
           "generated-image",
           "right",
         );
@@ -6783,7 +6796,7 @@ function CanvasWorkspace() {
           x: position.x,
           y: position.y,
           width: previewWidth,
-          height: previewHeight,
+          height: shapedHeight,
           createdAt: new Date().toISOString(),
         };
         reservationIds.add(reservationId);
@@ -6793,7 +6806,7 @@ function CanvasWorkspace() {
             canvasId: task.canvasId,
             kind: "generated-image",
             title,
-            content: outputContent,
+            content: shapedOutput.content,
             source: "comfyui-recovery",
             requestId: comfyPreviewRequestId(
               task.canvasId,
@@ -6804,7 +6817,7 @@ function CanvasWorkspace() {
             x: position.x,
             y: position.y,
             width: previewWidth,
-            height: previewHeight,
+            height: shapedHeight,
           },
         });
         incomingPlacementReservations.current = incomingPlacementReservations.current
@@ -8880,7 +8893,8 @@ function CanvasWorkspace() {
       const createdEdges: Edge[] = [];
       for (const [index, output] of additionalOutputs.entries()) {
         const previewWidth = 420;
-        const previewHeight = Math.min(
+        const shapedOutput = await withGeneratedImageLayout(imageContent(output), previewWidth, measureImageUrl);
+        const previewHeight = shapedOutput.height ?? Math.min(
           1200,
           Math.max(180, Math.round(previewWidth * height / width) + GENERATED_IMAGE_CHROME_HEIGHT),
         );
@@ -8897,7 +8911,7 @@ function CanvasWorkspace() {
             canvasId: target.canvasId,
             kind: "generated-image",
             title: `图片预览 ${index + 2}`,
-            content: imageContent(output),
+            content: shapedOutput.content,
             source: "comfyui",
             x: position.x,
             y: position.y,
@@ -9193,17 +9207,18 @@ function CanvasWorkspace() {
       const createdNodes: CanvasFlowNode[] = [];
       const createdEdges: Edge[] = [];
       for (const [index, output] of additionalOutputs.entries()) {
+        const shapedOutput = await withGeneratedImageLayout(imageContent(output), 420, measureImageUrl);
         const previewResult = await invoke<CreateNodeResult>("create_node", {
           input: {
             canvasId: preview.canvasId,
             kind: "generated-image",
             title: `图片放大预览 ${index + 2}`,
-            content: imageContent(output),
+            content: shapedOutput.content,
             source: "comfyui",
             x: preview.x + preview.width + 116 + index * 36,
             y: preview.y + 36 + index * 36,
             width: 420,
-            height: Math.min(
+            height: shapedOutput.height ?? Math.min(
               1200,
               Math.max(180, Math.round(420 * outputHeight / outputWidth) + GENERATED_IMAGE_CHROME_HEIGHT),
             ),
