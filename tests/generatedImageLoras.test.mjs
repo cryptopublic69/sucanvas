@@ -79,7 +79,7 @@ test("all switched off or unnamed: nothing listed and no count (the panel shows 
 
 test("a package without a LoRA group: 无, and an old name still shows", async () => {
   const generatedImageLoras = await lorasOf();
-  const operation = await generate("ba6a4b31");
+  const operation = await generate("5a9e19a3");
   assert.ok(!operation.controls.some((control) => control.type === "repeat"));
   assert.deepEqual(generatedImageLoras({ generationLoraName: "", generationControlValues: { resolution: 1024 } }, operation), { kind: "entries", entries: [] });
   assert.deepEqual(generatedImageLoras({ generationLoraName: "dir\\old.safetensors", generationControlValues: {} }, operation), { kind: "legacy", name: "dir\\old.safetensors" });

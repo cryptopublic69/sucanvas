@@ -786,7 +786,7 @@ fn krea2_image_edit_chains_active_loras_between_the_edit_lora_and_the_model_patc
 
 // ---- CANVAS-031a: Qwen Image 2.1 image edit, up to 8 images, each optionally scaled ----
 
-const QWEN_EDIT: &str = "ba6a4b31";
+const QWEN_EDIT: &str = "5a9e19a3";
 /// Image n's LoadImage and ImageScaleToMaxDimension nodes in the package's workflow.
 fn qwen_load(n: usize) -> String {
     format!("96{:02}", n)
@@ -842,7 +842,7 @@ fn qwen_edit_is_a_new_module_with_eight_images_and_its_controls() {
     let manifest = read_json(dir.join("manifest.json"));
     assert_eq!(
         manifest["id"],
-        json!("workflow-module-ba6a4b31-e6fc-4596-b296-7bf2e3b432b7")
+        json!("workflow-module-5a9e19a3-c5cb-43fe-a76f-641e2a5c6e33")
     );
     assert_eq!(manifest["name"], json!("Qwen Image 2.1 图像编辑"));
     assert_eq!(manifest["revision"], json!("v1"));

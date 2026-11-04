@@ -89,7 +89,7 @@ test("visibleControls and promptAnchorControl take the counts", () => {
   assert.equal(pkg.promptAnchorControl(operation, {}, { images: 1 })?.id, "negativePrompt");
 });
 
-const qwen = async () => (await readJson("workflow-packages/image-v2/ba6a4b31/adapter.json")).operations.generate;
+const qwen = async () => (await readJson("workflow-packages/image-v2/5a9e19a3/adapter.json")).operations.generate;
 const scaleIds = (operation, values, counts) => pkg.visibleControls(operation, values, counts)
   .map((control) => control.id).filter((id) => /^(scale|maxSize)\d$/.test(id));
 

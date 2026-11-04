@@ -11,7 +11,7 @@ const generate = async (dir) => (await readJson(`workflow-packages/image-v2/${di
 const op = (...inputs) => ({ inputs });
 
 test("the connect limit is the max of the first image port", async () => {
-  assert.equal(pkg.declaredInputMax(await generate("ba6a4b31"), "image"), 8);
+  assert.equal(pkg.declaredInputMax(await generate("5a9e19a3"), "image"), 8);
   assert.equal(pkg.declaredInputMax(await generate("52cba27b"), "image"), 2);
   assert.equal(pkg.declaredInputMax(op({ id: "a", type: "image", max: 3 }, { id: "b", type: "image", max: 5 }), "image"), 3);
   assert.equal(pkg.declaredInputMax(op({ id: "a", type: "image" }), "image"), undefined);
@@ -27,7 +27,7 @@ test("the limited port is the one the run request counts", () => {
 });
 
 test("connecting one more image is refused at the declared max, with a generic message", async () => {
-  const qwen = await generate("ba6a4b31");
+  const qwen = await generate("5a9e19a3");
   for (let connected = 0; connected < 8; connected += 1) assert.equal(pkg.imageConnectionLimitError(qwen, connected), null, String(connected));
   assert.equal(pkg.imageConnectionLimitError(qwen, 8), "本方案最多连接 8 张图片");
   const krea = await generate("52cba27b");
