@@ -108,10 +108,12 @@ test("limit refusals are recognised as such; other refusals are not", () => {
 test("a refused connection over the reference limit shows in the top notice, not only the status bar", async () => {
   const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   const connectEnd = app.slice(app.indexOf("onConnectEnd={"), app.indexOf("onNodeClick={"));
-  assert.match(connectEnd, /isReferenceLimitNotice\(error\)/);
+  // CANVAS-031a: both places pick the top notice through isConnectionLimitNotice, which covers reference limits.
+  assert.match(app, /const isConnectionLimitNotice = \(message: string \| null \| undefined\) =>\s*isReferenceLimitNotice\(message\) \|\|/);
+  assert.match(connectEnd, /isConnectionLimitNotice\(error\)/);
   assert.match(connectEnd, /showGlobalNotice/);
   const connectStart = app.slice(app.indexOf("const connectNodes = useCallback("));
   const connect = connectStart.slice(0, connectStart.indexOf("const createdEdges: Edge[] = [];"));
   assert.match(connect, /if \(batchError\) \{\s*showGlobalNotice\(batchError\);/);
-  assert.match(connect, /isReferenceLimitNotice\(validationError\)/);
+  assert.match(connect, /isConnectionLimitNotice\(validationError\)/);
 });
