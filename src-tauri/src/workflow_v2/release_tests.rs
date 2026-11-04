@@ -783,3 +783,292 @@ fn krea2_image_edit_chains_active_loras_between_the_edit_lora_and_the_model_patc
     assert!(run(json!([{ "name": "Krea2\\a.safetensors", "weight": 2.5 }])).is_err());
     assert!(run(json!([{ "name": "moss\\a.safetensors" }])).is_err());
 }
+
+// ---- CANVAS-031a: Qwen Image 2.1 image edit, up to 8 images, each optionally scaled ----
+
+const QWEN_EDIT: &str = "ba6a4b31";
+/// Image n's LoadImage and ImageScaleToMaxDimension nodes in the package's workflow.
+fn qwen_load(n: usize) -> String {
+    format!("96{:02}", n)
+}
+fn qwen_scale(n: usize) -> String {
+    format!("96{:02}", 10 + n)
+}
+
+fn qwen_media(images: usize) -> BTreeMap<String, Vec<String>> {
+    let mut media = prompt("  让图 1 人物做出图 2 的姿势。  ");
+    media.insert(
+        "images".to_owned(),
+        (1..=images).map(|n| format!("img{n}.png")).collect(),
+    );
+    media
+}
+
+fn qwen_prompt(values: Value, images: usize) -> Value {
+    build(
+        &release_loaded(QWEN_EDIT),
+        "generate",
+        values,
+        qwen_media(images),
+    )
+    .unwrap_or_else(|e| panic!("{images} images: {e}"))
+    .workflow
+}
+
+/// The encoder's image inputs: `images.image_n` -> the link it carries.
+fn qwen_images(prompt: &Value) -> BTreeMap<String, Value> {
+    prompt["493"]["inputs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| name.starts_with("images."))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+fn qwen_classes(prompt: &Value, class_type: &str) -> Vec<String> {
+    prompt
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, node)| node["class_type"] == class_type)
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+#[test]
+fn qwen_edit_is_a_new_module_with_eight_images_and_its_controls() {
+    let dir = release_dir(QWEN_EDIT);
+    let manifest = read_json(dir.join("manifest.json"));
+    assert_eq!(
+        manifest["id"],
+        json!("workflow-module-ba6a4b31-e6fc-4596-b296-7bf2e3b432b7")
+    );
+    assert_eq!(manifest["name"], json!("Qwen Image 2.1 图像编辑"));
+    assert_eq!(manifest["revision"], json!("v1"));
+    assert_eq!(manifest["engineApiVersion"], json!("2"));
+    let loaded = release_loaded(QWEN_EDIT);
+    let report = validate::validate_package(&loaded.package, &loaded.workflow, None);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let generate = &loaded.package.operations["generate"];
+    let port = |id: &str| generate.inputs.iter().find(|p| p.id == id).unwrap();
+    assert_eq!(
+        (port("images").port_type, port("images").min, port("images").max, port("images").order),
+        (PortType::Image, 1, 8, Some(1))
+    );
+    assert_eq!(
+        (port("prompt").port_type, port("prompt").order),
+        (PortType::Text, Some(2))
+    );
+    let mut expected = vec![
+        "modelName",
+        "negativePrompt",
+        "customSize",
+        "width",
+        "height",
+        "steps",
+        "seed",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    for n in 1..=8 {
+        expected.push(format!("scale{n}"));
+        expected.push(format!("maxSize{n}"));
+    }
+    let ids = generate
+        .controls
+        .iter()
+        .map(|c| c.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, expected);
+    let model = control(&loaded, "generate", "modelName");
+    assert_eq!(
+        model.default,
+        Some(json!("Qwen2.1\\qwen_image_2.1_int8_convrot.safetensors"))
+    );
+    let files = model.options.as_ref().unwrap().comfyui.as_ref().unwrap();
+    assert_eq!(
+        (files.class_type.as_str(), files.input.as_str(), files.dirs.clone()),
+        ("UNETLoader", "unet_name", vec!["Qwen2.1".to_owned()])
+    );
+    assert_eq!(control(&loaded, "generate", "steps").default, Some(json!(40)));
+    assert_eq!(
+        control(&loaded, "generate", "customSize").default,
+        Some(json!(false))
+    );
+    for id in ["width", "height"] {
+        assert_eq!(
+            serde_json::to_value(&control(&loaded, "generate", id).visible_when).unwrap(),
+            json!({ "truthy": { "control": "customSize" } }),
+            "{id}"
+        );
+    }
+    for n in 1..=8 {
+        let scale = control(&loaded, "generate", &format!("scale{n}"));
+        assert_eq!(scale.default, Some(json!(false)), "scale{n}");
+        let shown = json!({ "mediaAtLeast": { "port": "images", "count": n } });
+        assert_eq!(serde_json::to_value(&scale.visible_when).unwrap(), shown);
+        let size = control(&loaded, "generate", &format!("maxSize{n}"));
+        assert_eq!(size.default, Some(json!(1536)), "maxSize{n}");
+        assert_eq!(
+            serde_json::to_value(&size.visible_when).unwrap(),
+            json!({ "all": [shown, { "truthy": { "control": format!("scale{n}") } }] })
+        );
+    }
+}
+
+/// 1, 2 and 8 images with every scale switch off (the default): the encoder gets exactly
+/// image_1..image_n, each straight from its LoadImage; no scale node, no unused loader.
+#[test]
+fn qwen_edit_wires_only_the_connected_images_straight_from_their_loaders() {
+    for images in [1, 2, 8] {
+        let prompt = qwen_prompt(json!({}), images);
+        let expected = (1..=images)
+            .map(|n| (format!("images.image_{n}"), json!([qwen_load(n), 0])))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(qwen_images(&prompt), expected, "{images} images");
+        for n in 1..=8 {
+            let load = &prompt[qwen_load(n)];
+            if n <= images {
+                assert_eq!(load["class_type"], json!("LoadImage"));
+                assert_eq!(load["inputs"]["image"], json!(format!("img{n}.png")));
+            } else {
+                assert!(load.is_null(), "{images} images: loader {n} left");
+            }
+        }
+        assert!(qwen_classes(&prompt, "ImageScaleToMaxDimension").is_empty());
+        assert_eq!(qwen_classes(&prompt, "LoadImage").len(), images);
+        assert_eq!(prompt["491"]["inputs"]["switch"], json!(false));
+        assert_eq!(prompt["491"]["inputs"]["on_false"], json!(["493", 2]));
+        assert_eq!(prompt["491"]["inputs"]["on_true"], json!(["488", 0]));
+        assert_eq!(prompt["490"]["inputs"]["latent_image"], json!(["491", 0]));
+        assert!(prompt["13"].is_null() && prompt["494"].is_null());
+    }
+}
+
+#[test]
+fn qwen_edit_scales_an_image_through_its_own_node_when_its_switch_is_on() {
+    // Two images, image 2 scaled to 768.
+    let prompt = qwen_prompt(json!({ "scale2": true, "maxSize2": 768 }), 2);
+    assert_eq!(
+        qwen_images(&prompt),
+        BTreeMap::from([
+            ("images.image_1".to_owned(), json!([qwen_load(1), 0])),
+            ("images.image_2".to_owned(), json!([qwen_scale(2), 0])),
+        ])
+    );
+    assert_eq!(
+        qwen_classes(&prompt, "ImageScaleToMaxDimension"),
+        vec![qwen_scale(2)]
+    );
+    let scale = &prompt[qwen_scale(2)]["inputs"];
+    assert_eq!(scale["image"], json!([qwen_load(2), 0]));
+    assert_eq!(scale["largest_size"], json!(768));
+    assert_eq!(scale["upscale_method"], json!("lanczos"));
+    // Eight images, 1 / 4 / 8 scaled (4 with its own size, the others at the default 1536).
+    let prompt = qwen_prompt(
+        json!({ "scale1": true, "scale4": true, "maxSize4": 2048, "scale8": true }),
+        8,
+    );
+    let wired = qwen_images(&prompt);
+    for n in 1..=8 {
+        let scaled = [1, 4, 8].contains(&n);
+        let source = if scaled { qwen_scale(n) } else { qwen_load(n) };
+        assert_eq!(wired[&format!("images.image_{n}")], json!([source, 0]), "image {n}");
+        if scaled {
+            assert_eq!(
+                prompt[qwen_scale(n)]["inputs"]["image"],
+                json!([qwen_load(n), 0])
+            );
+            let size = if n == 4 { 2048 } else { 1536 };
+            assert_eq!(
+                prompt[qwen_scale(n)]["inputs"]["largest_size"],
+                json!(size)
+            );
+        } else {
+            assert!(prompt[qwen_scale(n)].is_null(), "scale node {n} left");
+        }
+    }
+}
+
+#[test]
+fn qwen_edit_ignores_the_scale_switch_of_an_image_that_is_not_connected() {
+    assert_eq!(
+        qwen_prompt(json!({ "scale5": true, "maxSize5": 512 }), 2),
+        qwen_prompt(json!({}), 2)
+    );
+}
+
+#[test]
+fn qwen_edit_custom_size_switches_the_latent_to_the_empty_latent_of_that_size() {
+    let follow = qwen_prompt(json!({ "width": 832, "height": 1216 }), 2);
+    assert_eq!(follow["491"]["inputs"]["switch"], json!(false));
+    let custom = qwen_prompt(
+        json!({ "customSize": true, "width": 832, "height": 1216 }),
+        2,
+    );
+    assert_eq!(custom["491"]["inputs"]["switch"], json!(true));
+    assert_eq!(custom["488"]["inputs"]["width"], json!(832));
+    assert_eq!(custom["488"]["inputs"]["height"], json!(1216));
+    assert_eq!(custom["488"]["inputs"]["batch_size"], json!(1));
+    let default_size = qwen_prompt(json!({ "customSize": true }), 1);
+    assert_eq!(default_size["488"]["inputs"]["width"], json!(1024));
+    assert_eq!(default_size["488"]["inputs"]["height"], json!(1024));
+}
+
+/// Model, prompts, steps, seed and output; everything else keeps the source workflow's value.
+#[test]
+fn qwen_edit_writes_model_prompts_steps_seed_and_keeps_the_rest_of_the_workflow() {
+    let prompt = qwen_prompt(json!({}), 1);
+    assert_eq!(
+        prompt["485"]["inputs"]["unet_name"],
+        json!("Qwen2.1\\qwen_image_2.1_int8_convrot.safetensors")
+    );
+    let encoder = &prompt["493"]["inputs"];
+    assert_eq!(encoder["prompt"], json!("让图 1 人物做出图 2 的姿势。"));
+    assert_eq!(encoder["negative_prompt"], json!(""));
+    assert_eq!(encoder["resolution"], json!(1024));
+    let sampler = &prompt["490"]["inputs"];
+    assert_eq!(
+        (&sampler["steps"], &sampler["seed"], &sampler["cfg"], &sampler["sampler_name"], &sampler["scheduler"]),
+        (&json!(40), &json!(7), &json!(1), &json!("euler"), &json!("simple"))
+    );
+    assert_eq!(prompt["503"]["inputs"]["attention"], json!("kitchen_int8"));
+    assert_eq!(prompt["503"]["inputs"]["step_cache"], json!("te_predictor"));
+    assert_eq!(prompt["484"]["class_type"], json!("Image Save"));
+    assert_eq!(prompt["484"]["inputs"]["images"], json!(["489", 0]));
+    assert_eq!(prompt["484"]["inputs"]["output_path"], json!("[time(%Y-%m-%d)]"));
+    assert_eq!(
+        prompt["484"]["inputs"]["filename_prefix"],
+        json!("ComfyUI_qwen21_image_edit")
+    );
+    let chosen = qwen_prompt(
+        json!({
+            "modelName": "Qwen2.1\\qwen_image_2.1_bf16.safetensors",
+            "negativePrompt": "  blurry ",
+            "steps": 30
+        }),
+        1,
+    );
+    assert_eq!(
+        chosen["485"]["inputs"]["unet_name"],
+        json!("Qwen2.1\\qwen_image_2.1_bf16.safetensors")
+    );
+    assert_eq!(chosen["493"]["inputs"]["negative_prompt"], json!("blurry"));
+    assert_eq!(chosen["490"]["inputs"]["steps"], json!(30));
+    // Nothing but the controls' inputs and the image wiring differs from the source workflow.
+    let source = read_json(release_dir(QWEN_EDIT).join("workflow.json"));
+    for id in ["486", "487", "489", "492", "502", "503"] {
+        assert_eq!(prompt[id], source[id], "node {id}");
+    }
+}
+
+#[test]
+fn qwen_edit_refuses_no_image_nine_images_and_sizes_out_of_range() {
+    let loaded = release_loaded(QWEN_EDIT);
+    assert!(build(&loaded, "generate", json!({}), qwen_media(0)).is_err());
+    assert!(build(&loaded, "generate", json!({}), qwen_media(9)).is_err());
+    assert!(build(&loaded, "generate", json!({ "maxSize1": 100 }), qwen_media(1)).is_err());
+    assert!(build(&loaded, "generate", json!({ "width": 8192 }), qwen_media(1)).is_err());
+}
