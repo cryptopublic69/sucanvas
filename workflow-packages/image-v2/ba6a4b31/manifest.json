@@ -1,0 +1,19 @@
+{
+  "id": "workflow-module-ba6a4b31-e6fc-4596-b296-7bf2e3b432b7",
+  "name": "Qwen Image 2.1 图像编辑",
+  "capability": "image-generation",
+  "variant": "image-edit",
+  "revision": "v1",
+  "packageSchemaVersion": 1,
+  "engineApiVersion": "2",
+  "adapterKind": "workflow-package-v2",
+  "adapterEntry": "adapter.json",
+  "uiSchemaEntry": "ui-schema.json",
+  "sourceWorkflowName": "workflow.json",
+  "createdAt": "2026-11-04T10:00:00.000000000+00:00",
+  "updatedAt": "2026-11-04T10:00:00.000000000+00:00",
+  "deletedAt": null,
+  "defaults": {
+    "diffusionModelName": "Qwen2.1\\qwen_image_2.1_int8_convrot.safetensors"
+  }
+}

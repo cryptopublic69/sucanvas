@@ -1,0 +1,1172 @@
+{
+  "engineApiVersion": 2,
+  "capability": "image-generation",
+  "variant": "image-edit",
+  "operations": {
+    "generate": {
+      "label": "生成",
+      "inputs": [
+        {
+          "id": "images",
+          "type": "image",
+          "label": "编辑图片",
+          "min": 1,
+          "max": 8,
+          "order": 1
+        },
+        {
+          "id": "prompt",
+          "type": "text",
+          "label": "提示词",
+          "min": 1,
+          "max": 1,
+          "order": 2
+        }
+      ],
+      "outputs": [
+        {
+          "id": "image",
+          "type": "image",
+          "min": 0,
+          "max": 1
+        }
+      ],
+      "controls": [
+        {
+          "id": "modelName",
+          "type": "select",
+          "label": "模型",
+          "default": "Qwen2.1\\qwen_image_2.1_int8_convrot.safetensors",
+          "options": {
+            "comfyui": {
+              "classType": "UNETLoader",
+              "input": "unet_name",
+              "dirs": [
+                "Qwen2.1"
+              ]
+            }
+          },
+          "emptyMeansDefault": true,
+          "setting": "diffusionModelName"
+        },
+        {
+          "id": "negativePrompt",
+          "type": "textarea",
+          "label": "负向提示词",
+          "default": "",
+          "help": "可选：直接输入不希望出现的内容"
+        },
+        {
+          "id": "customSize",
+          "type": "toggle",
+          "label": "自定义尺寸",
+          "default": false,
+          "help": "关：出图尺寸跟随图 1；开：使用下面的宽高"
+        },
+        {
+          "id": "width",
+          "type": "number",
+          "label": "宽度",
+          "default": 1024,
+          "min": 256,
+          "max": 4096,
+          "step": 16,
+          "number": "int",
+          "visibleWhen": {
+            "truthy": {
+              "control": "customSize"
+            }
+          },
+          "group": "size",
+          "unit": "px",
+          "increment": 16
+        },
+        {
+          "id": "height",
+          "type": "number",
+          "label": "高度",
+          "default": 1024,
+          "min": 256,
+          "max": 4096,
+          "step": 16,
+          "number": "int",
+          "visibleWhen": {
+            "truthy": {
+              "control": "customSize"
+            }
+          },
+          "group": "size",
+          "unit": "px",
+          "increment": 16
+        },
+        {
+          "id": "steps",
+          "type": "number",
+          "label": "生图步数",
+          "default": 40,
+          "min": 1,
+          "max": 200,
+          "number": "int",
+          "group": "sampling",
+          "help": "K 采样器的采样步数"
+        },
+        {
+          "id": "seed",
+          "type": "seed",
+          "label": "种子"
+        },
+        {
+          "id": "scale1",
+          "type": "toggle",
+          "label": "图 1 缩放",
+          "default": false,
+          "visibleWhen": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 1
+            }
+          },
+          "group": "scale1",
+          "help": "开：图 1 先按最长边缩放（保持比例）再送进编码节点；关：原图直接送入"
+        },
+        {
+          "id": "maxSize1",
+          "type": "number",
+          "label": "最长边",
+          "default": 1536,
+          "min": 256,
+          "max": 4096,
+          "step": 16,
+          "number": "int",
+          "visibleWhen": {
+            "all": [
+              {
+                "mediaAtLeast": {
+                  "port": "images",
+                  "count": 1
+                }
+              },
+              {
+                "truthy": {
+                  "control": "scale1"
+                }
+              }
+            ]
+          },
+          "group": "scale1",
+          "unit": "px",
+          "increment": 64
+        },
+        {
+          "id": "scale2",
+          "type": "toggle",
+          "label": "图 2 缩放",
+          "default": false,
+          "visibleWhen": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 2
+            }
+          },
+          "group": "scale2",
+          "help": "开：图 2 先按最长边缩放（保持比例）再送进编码节点；关：原图直接送入"
+        },
+        {
+          "id": "maxSize2",
+          "type": "number",
+          "label": "最长边",
+          "default": 1536,
+          "min": 256,
+          "max": 4096,
+          "step": 16,
+          "number": "int",
+          "visibleWhen": {
+            "all": [
+              {
+                "mediaAtLeast": {
+                  "port": "images",
+                  "count": 2
+                }
+              },
+              {
+                "truthy": {
+                  "control": "scale2"
+                }
+              }
+            ]
+          },
+          "group": "scale2",
+          "unit": "px",
+          "increment": 64
+        },
+        {
+          "id": "scale3",
+          "type": "toggle",
+          "label": "图 3 缩放",
+          "default": false,
+          "visibleWhen": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 3
+            }
+          },
+          "group": "scale3",
+          "help": "开：图 3 先按最长边缩放（保持比例）再送进编码节点；关：原图直接送入"
+        },
+        {
+          "id": "maxSize3",
+          "type": "number",
+          "label": "最长边",
+          "default": 1536,
+          "min": 256,
+          "max": 4096,
+          "step": 16,
+          "number": "int",
+          "visibleWhen": {
+            "all": [
+              {
+                "mediaAtLeast": {
+                  "port": "images",
+                  "count": 3
+                }
+              },
+              {
+                "truthy": {
+                  "control": "scale3"
+                }
+              }
+            ]
+          },
+          "group": "scale3",
+          "unit": "px",
+          "increment": 64
+        },
+        {
+          "id": "scale4",
+          "type": "toggle",
+          "label": "图 4 缩放",
+          "default": false,
+          "visibleWhen": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 4
+            }
+          },
+          "group": "scale4",
+          "help": "开：图 4 先按最长边缩放（保持比例）再送进编码节点；关：原图直接送入"
+        },
+        {
+          "id": "maxSize4",
+          "type": "number",
+          "label": "最长边",
+          "default": 1536,
+          "min": 256,
+          "max": 4096,
+          "step": 16,
+          "number": "int",
+          "visibleWhen": {
+            "all": [
+              {
+                "mediaAtLeast": {
+                  "port": "images",
+                  "count": 4
+                }
+              },
+              {
+                "truthy": {
+                  "control": "scale4"
+                }
+              }
+            ]
+          },
+          "group": "scale4",
+          "unit": "px",
+          "increment": 64
+        },
+        {
+          "id": "scale5",
+          "type": "toggle",
+          "label": "图 5 缩放",
+          "default": false,
+          "visibleWhen": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 5
+            }
+          },
+          "group": "scale5",
+          "help": "开：图 5 先按最长边缩放（保持比例）再送进编码节点；关：原图直接送入"
+        },
+        {
+          "id": "maxSize5",
+          "type": "number",
+          "label": "最长边",
+          "default": 1536,
+          "min": 256,
+          "max": 4096,
+          "step": 16,
+          "number": "int",
+          "visibleWhen": {
+            "all": [
+              {
+                "mediaAtLeast": {
+                  "port": "images",
+                  "count": 5
+                }
+              },
+              {
+                "truthy": {
+                  "control": "scale5"
+                }
+              }
+            ]
+          },
+          "group": "scale5",
+          "unit": "px",
+          "increment": 64
+        },
+        {
+          "id": "scale6",
+          "type": "toggle",
+          "label": "图 6 缩放",
+          "default": false,
+          "visibleWhen": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 6
+            }
+          },
+          "group": "scale6",
+          "help": "开：图 6 先按最长边缩放（保持比例）再送进编码节点；关：原图直接送入"
+        },
+        {
+          "id": "maxSize6",
+          "type": "number",
+          "label": "最长边",
+          "default": 1536,
+          "min": 256,
+          "max": 4096,
+          "step": 16,
+          "number": "int",
+          "visibleWhen": {
+            "all": [
+              {
+                "mediaAtLeast": {
+                  "port": "images",
+                  "count": 6
+                }
+              },
+              {
+                "truthy": {
+                  "control": "scale6"
+                }
+              }
+            ]
+          },
+          "group": "scale6",
+          "unit": "px",
+          "increment": 64
+        },
+        {
+          "id": "scale7",
+          "type": "toggle",
+          "label": "图 7 缩放",
+          "default": false,
+          "visibleWhen": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 7
+            }
+          },
+          "group": "scale7",
+          "help": "开：图 7 先按最长边缩放（保持比例）再送进编码节点；关：原图直接送入"
+        },
+        {
+          "id": "maxSize7",
+          "type": "number",
+          "label": "最长边",
+          "default": 1536,
+          "min": 256,
+          "max": 4096,
+          "step": 16,
+          "number": "int",
+          "visibleWhen": {
+            "all": [
+              {
+                "mediaAtLeast": {
+                  "port": "images",
+                  "count": 7
+                }
+              },
+              {
+                "truthy": {
+                  "control": "scale7"
+                }
+              }
+            ]
+          },
+          "group": "scale7",
+          "unit": "px",
+          "increment": 64
+        },
+        {
+          "id": "scale8",
+          "type": "toggle",
+          "label": "图 8 缩放",
+          "default": false,
+          "visibleWhen": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 8
+            }
+          },
+          "group": "scale8",
+          "help": "开：图 8 先按最长边缩放（保持比例）再送进编码节点；关：原图直接送入"
+        },
+        {
+          "id": "maxSize8",
+          "type": "number",
+          "label": "最长边",
+          "default": 1536,
+          "min": 256,
+          "max": 4096,
+          "step": 16,
+          "number": "int",
+          "visibleWhen": {
+            "all": [
+              {
+                "mediaAtLeast": {
+                  "port": "images",
+                  "count": 8
+                }
+              },
+              {
+                "truthy": {
+                  "control": "scale8"
+                }
+              }
+            ]
+          },
+          "group": "scale8",
+          "unit": "px",
+          "increment": 64
+        }
+      ],
+      "groups": [
+        {
+          "id": "size",
+          "swap": true
+        },
+        {
+          "id": "sampling"
+        },
+        {
+          "id": "scale1"
+        },
+        {
+          "id": "scale2"
+        },
+        {
+          "id": "scale3"
+        },
+        {
+          "id": "scale4"
+        },
+        {
+          "id": "scale5"
+        },
+        {
+          "id": "scale6"
+        },
+        {
+          "id": "scale7"
+        },
+        {
+          "id": "scale8"
+        }
+      ],
+      "steps": [
+        {
+          "op": "set",
+          "node": "485",
+          "input": "unet_name",
+          "value": {
+            "path": {
+              "control": "modelName"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "493",
+          "input": "prompt",
+          "value": {
+            "trim": {
+              "media": {
+                "port": "prompt",
+                "index": 0
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "493",
+          "input": "negative_prompt",
+          "value": {
+            "trim": {
+              "control": "negativePrompt"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "490",
+          "input": "seed",
+          "value": {
+            "seed": true
+          }
+        },
+        {
+          "op": "set",
+          "node": "490",
+          "input": "steps",
+          "value": {
+            "int": {
+              "control": "steps"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "491",
+          "input": "switch",
+          "value": {
+            "if": {
+              "cond": {
+                "truthy": {
+                  "control": "customSize"
+                }
+              },
+              "then": {
+                "const": true
+              },
+              "else": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "488",
+          "input": "width",
+          "value": {
+            "int": {
+              "control": "width"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "488",
+          "input": "height",
+          "value": {
+            "int": {
+              "control": "height"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9601",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 0
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9611",
+          "input": "largest_size",
+          "value": {
+            "int": {
+              "control": "maxSize1"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "493",
+          "input": "images.image_1",
+          "value": {
+            "if": {
+              "cond": {
+                "truthy": {
+                  "control": "scale1"
+                }
+              },
+              "then": {
+                "link": [
+                  "9611",
+                  0
+                ]
+              },
+              "else": {
+                "link": [
+                  "9601",
+                  0
+                ]
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9602",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 1
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 2
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9612",
+          "input": "largest_size",
+          "value": {
+            "int": {
+              "control": "maxSize2"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "493",
+          "input": "images.image_2",
+          "value": {
+            "if": {
+              "cond": {
+                "truthy": {
+                  "control": "scale2"
+                }
+              },
+              "then": {
+                "link": [
+                  "9612",
+                  0
+                ]
+              },
+              "else": {
+                "link": [
+                  "9602",
+                  0
+                ]
+              }
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 2
+            }
+          }
+        },
+        {
+          "op": "removeInput",
+          "node": "493",
+          "input": "images.image_2",
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 2
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9603",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 2
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 3
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9613",
+          "input": "largest_size",
+          "value": {
+            "int": {
+              "control": "maxSize3"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "493",
+          "input": "images.image_3",
+          "value": {
+            "if": {
+              "cond": {
+                "truthy": {
+                  "control": "scale3"
+                }
+              },
+              "then": {
+                "link": [
+                  "9613",
+                  0
+                ]
+              },
+              "else": {
+                "link": [
+                  "9603",
+                  0
+                ]
+              }
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 3
+            }
+          }
+        },
+        {
+          "op": "removeInput",
+          "node": "493",
+          "input": "images.image_3",
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 3
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9604",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 3
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 4
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9614",
+          "input": "largest_size",
+          "value": {
+            "int": {
+              "control": "maxSize4"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "493",
+          "input": "images.image_4",
+          "value": {
+            "if": {
+              "cond": {
+                "truthy": {
+                  "control": "scale4"
+                }
+              },
+              "then": {
+                "link": [
+                  "9614",
+                  0
+                ]
+              },
+              "else": {
+                "link": [
+                  "9604",
+                  0
+                ]
+              }
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 4
+            }
+          }
+        },
+        {
+          "op": "removeInput",
+          "node": "493",
+          "input": "images.image_4",
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 4
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9605",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 4
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 5
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9615",
+          "input": "largest_size",
+          "value": {
+            "int": {
+              "control": "maxSize5"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "493",
+          "input": "images.image_5",
+          "value": {
+            "if": {
+              "cond": {
+                "truthy": {
+                  "control": "scale5"
+                }
+              },
+              "then": {
+                "link": [
+                  "9615",
+                  0
+                ]
+              },
+              "else": {
+                "link": [
+                  "9605",
+                  0
+                ]
+              }
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 5
+            }
+          }
+        },
+        {
+          "op": "removeInput",
+          "node": "493",
+          "input": "images.image_5",
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 5
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9606",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 5
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 6
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9616",
+          "input": "largest_size",
+          "value": {
+            "int": {
+              "control": "maxSize6"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "493",
+          "input": "images.image_6",
+          "value": {
+            "if": {
+              "cond": {
+                "truthy": {
+                  "control": "scale6"
+                }
+              },
+              "then": {
+                "link": [
+                  "9616",
+                  0
+                ]
+              },
+              "else": {
+                "link": [
+                  "9606",
+                  0
+                ]
+              }
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 6
+            }
+          }
+        },
+        {
+          "op": "removeInput",
+          "node": "493",
+          "input": "images.image_6",
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 6
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9607",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 6
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 7
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9617",
+          "input": "largest_size",
+          "value": {
+            "int": {
+              "control": "maxSize7"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "493",
+          "input": "images.image_7",
+          "value": {
+            "if": {
+              "cond": {
+                "truthy": {
+                  "control": "scale7"
+                }
+              },
+              "then": {
+                "link": [
+                  "9617",
+                  0
+                ]
+              },
+              "else": {
+                "link": [
+                  "9607",
+                  0
+                ]
+              }
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 7
+            }
+          }
+        },
+        {
+          "op": "removeInput",
+          "node": "493",
+          "input": "images.image_7",
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 7
+              }
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9608",
+          "input": "image",
+          "value": {
+            "media": {
+              "port": "images",
+              "index": 7
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 8
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "9618",
+          "input": "largest_size",
+          "value": {
+            "int": {
+              "control": "maxSize8"
+            }
+          }
+        },
+        {
+          "op": "set",
+          "node": "493",
+          "input": "images.image_8",
+          "value": {
+            "if": {
+              "cond": {
+                "truthy": {
+                  "control": "scale8"
+                }
+              },
+              "then": {
+                "link": [
+                  "9618",
+                  0
+                ]
+              },
+              "else": {
+                "link": [
+                  "9608",
+                  0
+                ]
+              }
+            }
+          },
+          "when": {
+            "mediaAtLeast": {
+              "port": "images",
+              "count": 8
+            }
+          }
+        },
+        {
+          "op": "removeInput",
+          "node": "493",
+          "input": "images.image_8",
+          "when": {
+            "not": {
+              "mediaAtLeast": {
+                "port": "images",
+                "count": 8
+              }
+            }
+          }
+        },
+        {
+          "op": "keepReachable",
+          "from": [
+            "484"
+          ]
+        }
+      ],
+      "record": {
+        "modelName": {
+          "input": {
+            "node": "485",
+            "input": "unet_name"
+          }
+        }
+      }
+    }
+  },
+  "nodeTypes": {
+    "484": "Image Save",
+    "485": "UNETLoader",
+    "488": "EmptyLatentImage",
+    "490": "KSampler",
+    "491": "ComfySwitchNode",
+    "493": "TextEncodeQwenImage21",
+    "9601": "LoadImage",
+    "9602": "LoadImage",
+    "9603": "LoadImage",
+    "9604": "LoadImage",
+    "9605": "LoadImage",
+    "9606": "LoadImage",
+    "9607": "LoadImage",
+    "9608": "LoadImage",
+    "9611": "ImageScaleToMaxDimension",
+    "9612": "ImageScaleToMaxDimension",
+    "9613": "ImageScaleToMaxDimension",
+    "9614": "ImageScaleToMaxDimension",
+    "9615": "ImageScaleToMaxDimension",
+    "9616": "ImageScaleToMaxDimension",
+    "9617": "ImageScaleToMaxDimension",
+    "9618": "ImageScaleToMaxDimension"
+  }
+}

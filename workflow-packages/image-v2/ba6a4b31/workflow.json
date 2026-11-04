@@ -1,0 +1,417 @@
+{
+  "484": {
+    "inputs": {
+      "output_path": "[time(%Y-%m-%d)]",
+      "filename_prefix": "ComfyUI_qwen21_image_edit",
+      "filename_delimiter": "_",
+      "filename_number_padding": 4,
+      "filename_number_start": "false",
+      "extension": "png",
+      "dpi": 300,
+      "quality": 100,
+      "optimize_image": "true",
+      "lossless_webp": "false",
+      "overwrite_mode": "false",
+      "show_history": "false",
+      "show_history_by_prefix": "true",
+      "embed_workflow": "true",
+      "show_previews": "true",
+      "images": [
+        "489",
+        0
+      ]
+    },
+    "class_type": "Image Save",
+    "_meta": {
+      "title": "Image Save",
+      "cnr_id": "pr-was-node-suite-comfyui-47064894",
+      "ver": "056badacda52e88d29d6a65f9509cd3115ace0f2"
+    }
+  },
+  "485": {
+    "inputs": {
+      "unet_name": "Qwen2.1\\qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "486": {
+    "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "487": {
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "488": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像"
+    }
+  },
+  "489": {
+    "inputs": {
+      "samples": [
+        "490",
+        0
+      ],
+      "vae": [
+        "487",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "490": {
+    "inputs": {
+      "seed": 383979449099487,
+      "steps": 40,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "492",
+        0
+      ],
+      "positive": [
+        "493",
+        0
+      ],
+      "negative": [
+        "493",
+        1
+      ],
+      "latent_image": [
+        "491",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "491": {
+    "inputs": {
+      "switch": false,
+      "on_false": [
+        "493",
+        2
+      ],
+      "on_true": [
+        "488",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换"
+    }
+  },
+  "492": {
+    "inputs": {
+      "device": "auto",
+      "dtype": "default",
+      "model": [
+        "502",
+        0
+      ]
+    },
+    "class_type": "QwenImage21Cache",
+    "_meta": {
+      "title": "Qwen Image 2.1 缓存"
+    }
+  },
+  "493": {
+    "inputs": {
+      "prompt": "",
+      "negative_prompt": "",
+      "resolution": 1024,
+      "clip": [
+        "486",
+        0
+      ],
+      "images.image_1": [
+        "9601",
+        0
+      ],
+      "images.image_2": [
+        "9602",
+        0
+      ],
+      "images.image_3": [
+        "9603",
+        0
+      ],
+      "images.image_4": [
+        "9604",
+        0
+      ],
+      "images.image_5": [
+        "9605",
+        0
+      ],
+      "images.image_6": [
+        "9606",
+        0
+      ],
+      "images.image_7": [
+        "9607",
+        0
+      ],
+      "images.image_8": [
+        "9608",
+        0
+      ],
+      "vae": [
+        "487",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": {
+      "title": "文本编码 Qwen Image 2.1"
+    }
+  },
+  "502": {
+    "inputs": {
+      "device": "auto",
+      "dtype": "default",
+      "model": [
+        "503",
+        0
+      ]
+    },
+    "class_type": "QwenImage21Cache",
+    "_meta": {
+      "title": "Qwen Image 2.1 缓存"
+    }
+  },
+  "503": {
+    "inputs": {
+      "attention": "kitchen_int8",
+      "step_cache": "te_predictor",
+      "reuse_threshold": 0.06,
+      "start_percent": 0,
+      "end_percent": 0,
+      "predictor_error_limit": 0.08,
+      "verbose": false,
+      "model": [
+        "485",
+        0
+      ]
+    },
+    "class_type": "TESpeedQwenImage21",
+    "_meta": {
+      "title": "TE-Speed Qwen Image 2.1"
+    }
+  },
+  "9601": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "图 1"
+    }
+  },
+  "9602": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "图 2"
+    }
+  },
+  "9603": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "图 3"
+    }
+  },
+  "9604": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "图 4"
+    }
+  },
+  "9605": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "图 5"
+    }
+  },
+  "9606": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "图 6"
+    }
+  },
+  "9607": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "图 7"
+    }
+  },
+  "9608": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "图 8"
+    }
+  },
+  "9611": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "largest_size": 1536,
+      "image": [
+        "9601",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToMaxDimension",
+    "_meta": {
+      "title": "图 1 按最长边缩放"
+    }
+  },
+  "9612": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "largest_size": 1536,
+      "image": [
+        "9602",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToMaxDimension",
+    "_meta": {
+      "title": "图 2 按最长边缩放"
+    }
+  },
+  "9613": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "largest_size": 1536,
+      "image": [
+        "9603",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToMaxDimension",
+    "_meta": {
+      "title": "图 3 按最长边缩放"
+    }
+  },
+  "9614": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "largest_size": 1536,
+      "image": [
+        "9604",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToMaxDimension",
+    "_meta": {
+      "title": "图 4 按最长边缩放"
+    }
+  },
+  "9615": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "largest_size": 1536,
+      "image": [
+        "9605",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToMaxDimension",
+    "_meta": {
+      "title": "图 5 按最长边缩放"
+    }
+  },
+  "9616": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "largest_size": 1536,
+      "image": [
+        "9606",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToMaxDimension",
+    "_meta": {
+      "title": "图 6 按最长边缩放"
+    }
+  },
+  "9617": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "largest_size": 1536,
+      "image": [
+        "9607",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToMaxDimension",
+    "_meta": {
+      "title": "图 7 按最长边缩放"
+    }
+  },
+  "9618": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "largest_size": 1536,
+      "image": [
+        "9608",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToMaxDimension",
+    "_meta": {
+      "title": "图 8 按最长边缩放"
+    }
+  }
+}
