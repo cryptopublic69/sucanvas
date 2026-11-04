@@ -853,7 +853,12 @@ fn qwen_edit_is_a_new_module_with_eight_images_and_its_controls() {
     let generate = &loaded.package.operations["generate"];
     let port = |id: &str| generate.inputs.iter().find(|p| p.id == id).unwrap();
     assert_eq!(
-        (port("images").port_type, port("images").min, port("images").max, port("images").order),
+        (
+            port("images").port_type,
+            port("images").min,
+            port("images").max,
+            port("images").order
+        ),
         (PortType::Image, 1, 8, Some(1))
     );
     assert_eq!(
@@ -889,10 +894,17 @@ fn qwen_edit_is_a_new_module_with_eight_images_and_its_controls() {
     );
     let files = model.options.as_ref().unwrap().comfyui.as_ref().unwrap();
     assert_eq!(
-        (files.class_type.as_str(), files.input.as_str(), files.dirs.clone()),
+        (
+            files.class_type.as_str(),
+            files.input.as_str(),
+            files.dirs.clone()
+        ),
         ("UNETLoader", "unet_name", vec!["Qwen2.1".to_owned()])
     );
-    assert_eq!(control(&loaded, "generate", "steps").default, Some(json!(40)));
+    assert_eq!(
+        control(&loaded, "generate", "steps").default,
+        Some(json!(40))
+    );
     assert_eq!(
         control(&loaded, "generate", "customSize").default,
         Some(json!(false))
@@ -975,17 +987,18 @@ fn qwen_edit_scales_an_image_through_its_own_node_when_its_switch_is_on() {
     for n in 1..=8 {
         let scaled = [1, 4, 8].contains(&n);
         let source = if scaled { qwen_scale(n) } else { qwen_load(n) };
-        assert_eq!(wired[&format!("images.image_{n}")], json!([source, 0]), "image {n}");
+        assert_eq!(
+            wired[&format!("images.image_{n}")],
+            json!([source, 0]),
+            "image {n}"
+        );
         if scaled {
             assert_eq!(
                 prompt[qwen_scale(n)]["inputs"]["image"],
                 json!([qwen_load(n), 0])
             );
             let size = if n == 4 { 2048 } else { 1536 };
-            assert_eq!(
-                prompt[qwen_scale(n)]["inputs"]["largest_size"],
-                json!(size)
-            );
+            assert_eq!(prompt[qwen_scale(n)]["inputs"]["largest_size"], json!(size));
         } else {
             assert!(prompt[qwen_scale(n)].is_null(), "scale node {n} left");
         }
@@ -1031,14 +1044,29 @@ fn qwen_edit_writes_model_prompts_steps_seed_and_keeps_the_rest_of_the_workflow(
     assert_eq!(encoder["resolution"], json!(1024));
     let sampler = &prompt["490"]["inputs"];
     assert_eq!(
-        (&sampler["steps"], &sampler["seed"], &sampler["cfg"], &sampler["sampler_name"], &sampler["scheduler"]),
-        (&json!(40), &json!(7), &json!(1), &json!("euler"), &json!("simple"))
+        (
+            &sampler["steps"],
+            &sampler["seed"],
+            &sampler["cfg"],
+            &sampler["sampler_name"],
+            &sampler["scheduler"]
+        ),
+        (
+            &json!(40),
+            &json!(7),
+            &json!(1),
+            &json!("euler"),
+            &json!("simple")
+        )
     );
     assert_eq!(prompt["503"]["inputs"]["attention"], json!("kitchen_int8"));
     assert_eq!(prompt["503"]["inputs"]["step_cache"], json!("te_predictor"));
     assert_eq!(prompt["484"]["class_type"], json!("Image Save"));
     assert_eq!(prompt["484"]["inputs"]["images"], json!(["489", 0]));
-    assert_eq!(prompt["484"]["inputs"]["output_path"], json!("[time(%Y-%m-%d)]"));
+    assert_eq!(
+        prompt["484"]["inputs"]["output_path"],
+        json!("[time(%Y-%m-%d)]")
+    );
     assert_eq!(
         prompt["484"]["inputs"]["filename_prefix"],
         json!("ComfyUI_qwen21_image_edit")
@@ -1069,6 +1097,12 @@ fn qwen_edit_refuses_no_image_nine_images_and_sizes_out_of_range() {
     let loaded = release_loaded(QWEN_EDIT);
     assert!(build(&loaded, "generate", json!({}), qwen_media(0)).is_err());
     assert!(build(&loaded, "generate", json!({}), qwen_media(9)).is_err());
-    assert!(build(&loaded, "generate", json!({ "maxSize1": 100 }), qwen_media(1)).is_err());
+    assert!(build(
+        &loaded,
+        "generate",
+        json!({ "maxSize1": 100 }),
+        qwen_media(1)
+    )
+    .is_err());
     assert!(build(&loaded, "generate", json!({ "width": 8192 }), qwen_media(1)).is_err());
 }
