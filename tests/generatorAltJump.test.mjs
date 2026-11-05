@@ -131,6 +131,47 @@ test("the jump keeps the zoom, centres the latest result and selects it like the
   assert.deepEqual(calls, [["toast", "还没有生成内容"]], "no result: a notice, the canvas doesn't move");
 });
 
+// CANVAS-038b (su 11-05, A): a fixed-seed image generator with a run going used to disable ▶ entirely, so
+// Alt could not reach the running placeholder. Now only the plain click is blocked there.
+test("fixed seed while running: Alt still jumps, a plain click submits nothing", async () => {
+  for (const [alt, blocked, expected] of [
+    [true, true, [["jump", "gen"]]],
+    [false, true, []],
+    [false, false, [["execute"]]],
+    [true, false, [["jump", "gen"]]],
+  ]) {
+    const calls = [];
+    callback(canvas, "executeOrJumpToLatest", {
+      id: "gen",
+      onJumpToLatestResult: (...args) => calls.push(["jump", ...args]),
+    })(alt, async () => { calls.push(["execute"]); }, blocked);
+    await Promise.resolve();
+    assert.deepEqual(calls, expected, `alt=${alt} blocked=${blocked}`);
+  }
+});
+
+test("the image ▶ stays clickable while a fixed-seed run is going, looks unavailable and says Alt still works", () => {
+  const start = canvas.indexOf("executeOrJumpToLatest(event.altKey, checkAndExecuteImage");
+  assert.ok(start > 0);
+  const button = canvas.slice(canvas.lastIndexOf("<button", start), canvas.indexOf(">", start));
+  assert.ok(/disabled=\{executionCancelling\}/.test(button), "only cancelling disables the button");
+  assert.ok(!/disabled=\{executionCancelling \|\| \(seedMode === "fixed" && executionRunning\)\}/.test(button), "a fixed-seed run no longer disables it");
+  assert.ok(/aria-disabled=\{fixedSeedRunning \|\| undefined\}/.test(button), "aria-disabled while a fixed-seed run is going");
+  assert.ok(/executeOrJumpToLatest\(event\.altKey, checkAndExecuteImage, fixedSeedRunning\)/.test(button), "the plain click is blocked in that state");
+  assert.ok(button.includes("固定种子已有任务正在执行，不能重复排队；Alt＋点击跳到最后一个生成内容"), "the tooltip says Alt still jumps");
+  assert.ok(/const fixedSeedRunning = seedMode === "fixed" && executionRunning;/.test(canvas));
+  // The video start button is unchanged.
+  const videoStart = canvas.indexOf("disabled={batchSubmitting || executionCancelling}");
+  assert.ok(/executeOrJumpToLatest\(event\.altKey, checkAndExecute\)/.test(canvas.slice(videoStart, canvas.indexOf("</button>", videoStart))));
+});
+
+test("an aria-disabled start button looks like a disabled one (both themes)", async () => {
+  const css = await readFile(new URL("../src/App.css", import.meta.url), "utf8");
+  assert.ok(/\.video-execute-button:disabled,\s*\.video-execute-button\[aria-disabled="true"\]\s*\{ opacity: \.65; cursor: wait; transform: none; \}/.test(css), "same look as :disabled");
+  assert.ok(/\.video-execute-button\[aria-disabled="true"\]:hover \{ background: #6256bd; \}/.test(css), "no hover highlight");
+  assert.ok(/:root\[data-theme="light"\] \.video-execute-button\[aria-disabled="true"\]:hover \{ background: #6f61cf; \}/.test(css), "no hover highlight (light)");
+});
+
 test("tooltips say what Alt does on both start buttons", () => {
   assert.ok(!canvas.includes("提交一个新的生成任务；Alt＋点击调整生成参数"), "old video tooltip gone");
   const count = canvas.split("Alt＋点击跳到最后一个生成内容").length - 1;
