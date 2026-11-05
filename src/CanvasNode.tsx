@@ -5355,6 +5355,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     && Boolean(generatedVideoUrl)
     && record.content.hasBeenPlayed === false;
   const executionRunning = activeTaskCount > 0;
+  // A fixed seed can't be queued twice: while it runs the image ▶ only takes Alt (CANVAS-038b).
+  const fixedSeedRunning = seedMode === "fixed" && executionRunning;
   const executionCancelling = record.content.status === "cancelling";
   const executionProgress = typeof record.content.executionProgress === "number"
     && Number.isFinite(record.content.executionProgress)
@@ -6737,12 +6739,14 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   };
 
   // A generator's start button (image and video alike): Alt moves the canvas to this node's latest result,
-  // keeping the zoom, and submits nothing; a plain click runs (CANVAS-038).
-  const executeOrJumpToLatest = (altKey: boolean, execute: () => Promise<void>) => {
+  // keeping the zoom, and submits nothing; a plain click runs (CANVAS-038) unless the direct start is
+  // blocked (a fixed-seed image run is going: Alt still works then, CANVAS-038b).
+  const executeOrJumpToLatest = (altKey: boolean, execute: () => Promise<void>, directBlocked = false) => {
     if (altKey) {
       onJumpToLatestResult(id);
       return;
     }
+    if (directBlocked) return;
     void execute();
   };
 
@@ -10195,14 +10199,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <button
                 type="button"
                 className="video-execute-button"
-                disabled={executionCancelling || (seedMode === "fixed" && executionRunning)}
-                title={seedMode === "fixed" && executionRunning
-                  ? "固定种子已有任务正在执行，不能重复排队"
+                disabled={executionCancelling}
+                aria-disabled={fixedSeedRunning || undefined}
+                title={fixedSeedRunning
+                  ? "固定种子已有任务正在执行，不能重复排队；Alt＋点击跳到最后一个生成内容"
                   : executionRunning ? "将当前任务加入队列；Alt＋点击跳到最后一个生成内容" : "开始生成；Alt＋点击跳到最后一个生成内容"}
-                aria-label={seedMode === "fixed" && executionRunning
+                aria-label={fixedSeedRunning
                   ? "固定种子已有任务正在执行，不能重复排队"
                   : executionRunning ? "将当前任务加入队列" : "开始生成"}
-                onClick={(event) => executeOrJumpToLatest(event.altKey, checkAndExecuteImage)}
+                onClick={(event) => executeOrJumpToLatest(event.altKey, checkAndExecuteImage, fixedSeedRunning)}
               >
                 <Play size={15} fill="currentColor" />
               </button>

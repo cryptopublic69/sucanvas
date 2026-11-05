@@ -90,7 +90,8 @@ test("start button: Alt jumps to the latest result and submits nothing; a plain 
 });
 
 test("both generator start buttons go through it; the video button's Alt no longer opens the settings", () => {
-  const image = between(canvas, "onClick={(event) => executeOrJumpToLatest(event.altKey, checkAndExecuteImage)}", "</button>");
+  // 038b adds the "direct start blocked" argument; the full call is checked in the 038b test below.
+  const image = between(canvas, "onClick={(event) => executeOrJumpToLatest(event.altKey, checkAndExecuteImage", "</button>");
   assert.ok(image.length > 0);
   const videoStart = canvas.indexOf("disabled={batchSubmitting || executionCancelling}");
   assert.ok(videoStart > 0, "video start button found");
