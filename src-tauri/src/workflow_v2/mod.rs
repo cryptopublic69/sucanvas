@@ -19,6 +19,8 @@ pub mod validate;
 #[cfg(test)]
 mod release_tests;
 #[cfg(test)]
+mod sampler_tests;
+#[cfg(test)]
 mod tests;
 
 /// The only engine API version this program implements.

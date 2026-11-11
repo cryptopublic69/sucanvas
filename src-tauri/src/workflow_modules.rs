@@ -2399,6 +2399,10 @@ fn import_package_bytes(
 }
 
 #[cfg(test)]
+#[path = "workflow_modules_sampler_tests.rs"]
+mod sampler_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         export, get, import_bundle, list, restore_bundle, restore_from_trash,

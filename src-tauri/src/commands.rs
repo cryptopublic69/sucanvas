@@ -5018,6 +5018,11 @@ pub fn get_runtime_info(state: State<'_, ApplicationState>) -> RuntimeInfo {
     state.runtime.clone()
 }
 
+// The stand-in submission needs the server build's Channel.
+#[cfg(all(test, not(feature = "desktop")))]
+#[path = "commands_sampler_tests.rs"]
+mod sampler_tests;
+
 #[cfg(test)]
 mod tests {
     use super::{
