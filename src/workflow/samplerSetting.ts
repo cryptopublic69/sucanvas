@@ -53,3 +53,16 @@ export function samplerOptions(choices: SamplerChoices | null, current: string):
 export function samplerDefaults<T extends object>(defaults: T, value: string): T & { samplerName: string | null } {
   return { ...defaults, samplerName: value.trim() || null };
 }
+
+// CANVAS-041: on the settings page the sampler is a draft like the scheme's name; 「保存」 and
+// 「另存为新方案」 write it, choosing one writes nothing.
+
+/** The settings a save sends: the scheme's own settings, with the draft where the package declares sampler nodes. */
+export function samplerDraftDefaults<T extends object>(module: SamplerModule & { defaults: T }, draft: string): T {
+  return hasSamplerSetting(module) ? samplerDefaults(module.defaults, draft) : module.defaults;
+}
+
+/** The draft differs from the scheme's saved sampler. */
+export function samplerDraftDirty(module: SamplerModule, draft: string): boolean {
+  return hasSamplerSetting(module) && draft.trim() !== currentSampler(module);
+}

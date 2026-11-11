@@ -70,7 +70,9 @@ type WorkflowSettingsPanelProps = {
   restoreSelectedWorkflowModule: () => Promise<void>;
   workflowModulesReady: boolean;
   comfyUiServerUrl: string;
-  saveWorkflowModuleSampler: (module: WorkflowModuleRecord, value: string) => Promise<void>;
+  /** CANVAS-041: the sampler is a draft; 「保存」 and 「另存为新方案」 write it. */
+  workflowModuleSamplerDraft: string;
+  setWorkflowModuleSamplerDraft: React.Dispatch<React.SetStateAction<string>>;
 };
 
 type SamplerChoicesState = { moduleId: string; choices: SamplerChoices | null; error: string; loading: boolean };
@@ -117,7 +119,8 @@ export function WorkflowSettingsPanel({
   restoreSelectedWorkflowModule,
   workflowModulesReady,
   comfyUiServerUrl,
-  saveWorkflowModuleSampler,
+  workflowModuleSamplerDraft,
+  setWorkflowModuleSamplerDraft,
 }: WorkflowSettingsPanelProps) {
   const [uploadError, setUploadError] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -368,11 +371,12 @@ export function WorkflowSettingsPanel({
           {selectedWorkflowModule && (
             <WorkflowSamplerSetting
               module={selectedWorkflowModule}
+              value={workflowModuleSamplerDraft}
               choices={samplerChoices?.choices ?? null}
               loading={samplerChoices?.loading ?? true}
               error={samplerChoices?.error ?? ""}
               busy={workflowModulesBusy}
-              onChange={(value) => void saveWorkflowModuleSampler(selectedWorkflowModule, value)}
+              onChange={setWorkflowModuleSamplerDraft}
               Select={SettingsSelect}
             />
           )}

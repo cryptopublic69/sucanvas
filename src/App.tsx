@@ -57,7 +57,7 @@ import {
 import { SecondarySampleDialog } from "./video/SecondarySampleDialog";
 import { h3StyleLorasFromContent, styleLoraValidationError, usedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { samplerDefaults } from "./workflow/samplerSetting";
+import { currentSampler, samplerDefaults, samplerDraftDefaults } from "./workflow/samplerSetting";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -628,6 +628,8 @@ function CanvasWorkspace() {
   const [selectedWorkflowModuleId, setSelectedWorkflowModuleId] = useState("");
   const [workflowModuleNameDraft, setWorkflowModuleNameDraft] = useState("MiniMax H3 全能参考");
   const [workflowModuleRevisionDraft, setWorkflowModuleRevisionDraft] = useState("V2");
+  // CANVAS-041: the selected scheme's sampler as a draft ("" = unset), like the name.
+  const [workflowModuleSamplerDraft, setWorkflowModuleSamplerDraft] = useState("");
   const [workflowModuleCapabilityDraft, setWorkflowModuleCapabilityDraft] = useState<WorkflowCapability>("video-generation");
   const [workflowModuleVariantDraft, setWorkflowModuleVariantDraft] = useState<WorkflowVariant>("reference-to-video");
   const [workflowModulePathDraft, setWorkflowModulePathDraft] = useState(h3WorkflowPath);
@@ -1512,6 +1514,7 @@ function CanvasWorkspace() {
     if (!selectedWorkflowModule) return;
     setWorkflowModuleNameDraft(selectedWorkflowModule.name);
     setWorkflowModuleRevisionDraft(selectedWorkflowModule.revision);
+    setWorkflowModuleSamplerDraft(currentSampler(selectedWorkflowModule));
     setWorkflowModuleCapabilityDraft(selectedWorkflowModule.capability);
     setWorkflowModuleVariantDraft(selectedWorkflowModule.variant);
     setWorkflowModulePathDraft(selectedWorkflowModule.workflowPath);
@@ -1641,8 +1644,10 @@ function CanvasWorkspace() {
             }
             : undefined),
           uiSchema: processingPackage?.uiSchema ?? (overwrite ? selectedWorkflowModule?.uiSchema : undefined),
-          defaults: overwrite && selectedWorkflowModule
-            ? selectedWorkflowModule.defaults
+          // CANVAS-041: saving and saving as both start from the selected scheme's own settings
+          // plus the sampler draft; only a brand-new scheme takes the global video settings.
+          defaults: selectedWorkflowModule
+            ? samplerDraftDefaults(selectedWorkflowModule, workflowModuleSamplerDraft)
             : {
               ...h3ModelParameters,
               diffusionModelName: h3DiffusionModelName,
@@ -1651,6 +1656,14 @@ function CanvasWorkspace() {
             },
         },
       });
+      // The store keeps a scheme's sampler when a save names none (so restores keep it): a draft
+      // back at "unset" is cleared with the settings command.
+      if (overwrite && !workflowModuleSamplerDraft.trim() && currentSampler(saved)) {
+        await invoke<WorkflowModuleRecord>("update_workflow_module_defaults", {
+          workflowModuleId: saved.id,
+          defaults: samplerDefaults(saved.defaults, ""),
+        });
+      }
       await refreshWorkflowModules(true);
       setSelectedWorkflowModuleId(saved.id);
       const savedFamilyKey = workflowModuleFamilyKey(saved);
@@ -1664,7 +1677,7 @@ function CanvasWorkspace() {
     } finally {
       setWorkflowModulesBusy(false);
     }
-  }, [h3DiffusionModelName, h3LoraPreference, h3ModelParameters, refreshWorkflowModules, reportError, selectedWorkflowModule, showGlobalNotice, workflowModuleBindingsDraft, workflowModuleCapabilityDraft, workflowModuleNameDraft, workflowModulePathDraft, workflowModuleRevisionDraft, workflowModuleVariantDraft]);
+  }, [h3DiffusionModelName, h3LoraPreference, h3ModelParameters, refreshWorkflowModules, reportError, selectedWorkflowModule, showGlobalNotice, workflowModuleBindingsDraft, workflowModuleCapabilityDraft, workflowModuleNameDraft, workflowModulePathDraft, workflowModuleRevisionDraft, workflowModuleSamplerDraft, workflowModuleVariantDraft]);
 
   const setWorkflowModuleFrontendVisibility = useCallback((
     module: WorkflowModuleRecord,
@@ -3411,24 +3424,6 @@ function CanvasWorkspace() {
       setWorkflowModulesBusy(false);
     }
   }, [imageModelDirectoryLabel, isImageModelNameForModule, krea2DiffusionModelCatalogLoaded, krea2DiffusionModelName, krea2DiffusionModelOptions, refreshWorkflowModules, reportError, selectedImageWorkflowModule, showGlobalNotice, workflowModuleDefaults, workflowModules]);
-
-  // CANVAS-039: a scheme's sampler is a module setting (manifest defaults), saved as soon as it is
-  // chosen on the 「工作流方案」 tab; the server applies it to the scheme's submissions.
-  const saveWorkflowModuleSampler = useCallback(async (module: WorkflowModuleRecord, value: string) => {
-    setWorkflowModulesBusy(true);
-    try {
-      await invoke<WorkflowModuleRecord>("update_workflow_module_defaults", {
-        workflowModuleId: module.id,
-        defaults: samplerDefaults(module.defaults, value),
-      });
-      await refreshWorkflowModules(true);
-      showGlobalNotice(value.trim() ? `采样器已保存：${value.trim()}` : "采样器已恢复为方案包原值");
-    } catch (error) {
-      reportError(error);
-    } finally {
-      setWorkflowModulesBusy(false);
-    }
-  }, [refreshWorkflowModules, reportError, showGlobalNotice]);
 
   const saveVideoGenerationDefaults = useCallback(() => {
     if (!Number.isInteger(videoGenerationDefaultsDraft.generationDuration)
@@ -11278,7 +11273,8 @@ function CanvasWorkspace() {
                   restoreSelectedWorkflowModule={restoreSelectedWorkflowModule}
                   workflowModulesReady={workflowModulesReady}
                   comfyUiServerUrl={comfyUiServerUrl}
-                  saveWorkflowModuleSampler={saveWorkflowModuleSampler}
+                  workflowModuleSamplerDraft={workflowModuleSamplerDraft}
+              setWorkflowModuleSamplerDraft={setWorkflowModuleSamplerDraft}
                 />
               )}
               {activeSettingsSection === "video-defaults" && (
