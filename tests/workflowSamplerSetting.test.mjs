@@ -9,7 +9,7 @@ import { loadWorkflowModule } from "./workflowTestLoader.mjs";
 // CANVAS-039 (su 11-11): an H3 scheme's sampler is chosen per scheme on the settings page's
 // 「工作流方案」 tab. Only packages that declare sampler nodes (adapter bindings
 // samplerSelectNodeIds) get the dropdown; the value is the module setting samplerName
-// (manifest defaults), saved right away; unset = the package's own value. Options come from
+// (manifest defaults), saved with the scheme (CANVAS-041: a draft until 「保存」); unset = the package's own value. Options come from
 // ComfyUI through the server; without ComfyUI the dropdown still shows the current value.
 // Nodes and regeneration presets get no sampler.
 // A missing module fails each test on its own instead of the whole file.
@@ -117,29 +117,8 @@ function callback(source, name, env) {
   return new Function(...Object.keys(env), `${code}; return run;`)(...Object.values(env));
 }
 
-test("choosing a sampler saves the module setting at once (only defaults, nothing else)", async () => {
-  const calls = [];
-  const notices = [];
-  let refreshed = 0;
-  const env = {
-    invoke: async (command, args) => { calls.push([command, args]); return {}; },
-    refreshWorkflowModules: async () => { refreshed += 1; },
-    showGlobalNotice: (text) => notices.push(text),
-    reportError: (error) => { throw error; },
-    setWorkflowModulesBusy: () => {},
-    samplerDefaults: setting.samplerDefaults,
-  };
-  const save = callback(app, "saveWorkflowModuleSampler", env);
-  const module = scheme(["a", "b"]);
-  await save(module, "res_multistep");
-  await save(module, "");
-  assert.deepEqual(calls, [
-    ["update_workflow_module_defaults", { workflowModuleId: module.id, defaults: { ...module.defaults, samplerName: "res_multistep" } }],
-    ["update_workflow_module_defaults", { workflowModuleId: module.id, defaults: { ...module.defaults, samplerName: null } }],
-  ]);
-  assert.equal(refreshed, 2);
-  assert.equal(notices.length, 2);
-});
+// CANVAS-041: choosing a sampler no longer saves; it is a draft saved by 「保存」/「另存为新方案」
+// (tests/workflowSamplerDraft.test.mjs).
 
 test("the 「工作流方案」 tab loads the choices from the server and draws the setting", () => {
   assert.match(panel, /<WorkflowSamplerSetting\b/);
