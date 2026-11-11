@@ -4,7 +4,10 @@
 use super::{get, restore_bundle, save, update_defaults, validate_workflow_bytes};
 use super::{SaveWorkflowModuleInput, WorkflowAdapter, WorkflowModuleDefaults};
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 
 fn testdata(short: &str) -> PathBuf {
@@ -80,13 +83,13 @@ fn store(short: &str, declare: Option<&[&str]>) -> (PathBuf, String) {
     (root, id)
 }
 
-fn defaults_with(root: &PathBuf, id: &str, sampler: Value) -> WorkflowModuleDefaults {
+fn defaults_with(root: &Path, id: &str, sampler: Value) -> WorkflowModuleDefaults {
     let mut defaults = serde_json::to_value(&get(root, id).unwrap().manifest.defaults).unwrap();
     defaults["samplerName"] = sampler;
     serde_json::from_value(defaults).unwrap()
 }
 
-fn sampler_of(root: &PathBuf, id: &str) -> Value {
+fn sampler_of(root: &Path, id: &str) -> Value {
     serde_json::to_value(&get(root, id).unwrap().manifest.defaults).unwrap()["samplerName"].clone()
 }
 
@@ -165,6 +168,49 @@ fn validation_reports_a_wrong_sampler_declaration() {
             "{ids:?}: {:?}",
             report.issues
         );
+    }
+}
+
+#[test]
+fn each_release_bundle_restores_onto_its_production_module() {
+    // What the deployment does: 「从备份恢复当前方案」 with workflow-packages/h3-v1/bundles.
+    let bundles = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("workflow-packages")
+        .join("h3-v1")
+        .join("bundles");
+    for (short, nodes) in [
+        ("0dca5130", vec!["123"]),
+        ("24f40f6d", vec!["123", "389"]),
+        ("3e0ce25b", vec!["123"]),
+        ("eb7a5470", vec!["123", "389"]),
+        ("ec9f2156", vec!["123"]),
+    ] {
+        let (root, id) = store(short, None);
+        let before = get(&root, &id).unwrap();
+        let bundle = bundles.join(format!("{short}.zip")).canonicalize().unwrap();
+        let after = restore_bundle(&root, &id, &bundle).unwrap();
+        assert_eq!(after.manifest.id, id, "{short}: same module");
+        assert_eq!(
+            after.adapter.bindings.sampler_select_node_ids, nodes,
+            "{short}"
+        );
+        assert!(
+            after.manifest.revision.starts_with("V3.1-"),
+            "{short}: {}",
+            after.manifest.revision
+        );
+        assert_eq!(
+            serde_json::to_value(&after.manifest.defaults).unwrap(),
+            serde_json::to_value(&before.manifest.defaults).unwrap(),
+            "{short}: settings unchanged"
+        );
+        assert_eq!(
+            fs::read(&after.workflow_path).unwrap(),
+            fs::read(testdata(short).join("workflow.json")).unwrap(),
+            "{short}: workflow unchanged"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }
 

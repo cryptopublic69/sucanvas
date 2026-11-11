@@ -1,0 +1,2 @@
+# CANVAS-039: the release files and bundles/*.zip must stay byte for byte (the bundle test compares them).
+* -text

@@ -207,6 +207,23 @@ fn a_declared_node_must_exist_with_a_sampler_name_input() {
     }
 }
 
+#[test]
+fn sampler_choices_are_read_from_both_object_info_shapes() {
+    // ComfyUI (192.168.5.108, 11-11) answers object_info/KSamplerSelect in the COMBO shape;
+    // older servers list the choices directly. Abridged from the real answer.
+    let combo = json!({ "KSamplerSelect": { "input": { "required": { "sampler_name":
+        ["COMBO", { "multiselect": false, "options": ["euler", "res_multistep", "er_sde"] }] } } } });
+    let listed = json!({ "KSamplerSelect": { "input": { "required": { "sampler_name":
+        [["euler", "res_multistep", "er_sde"]] } } } });
+    for info in [combo, listed] {
+        assert_eq!(
+            super::submit::combo_choices(&info, "KSamplerSelect", "sampler_name"),
+            ["euler", "res_multistep", "er_sde"]
+        );
+    }
+    assert!(super::submit::combo_choices(&json!({}), "KSamplerSelect", "sampler_name").is_empty());
+}
+
 // ---- the H3 release packages (workflow-packages/h3-v1/<short>) ----
 
 #[test]
@@ -263,6 +280,36 @@ fn each_h3_release_package_is_the_production_package_plus_the_sampler_declaratio
             .collect::<Vec<_>>();
         selects.sort();
         assert_eq!(selects, declared(short), "{short}: declared nodes");
+    }
+}
+
+/// Writes workflow-packages/h3-v1/bundles/<short>.zip from the package directories (run with
+/// --ignored). Fixed entry times and order: the same files always give the same bytes.
+#[test]
+#[ignore]
+fn write_h3_release_bundles() {
+    use std::io::Write;
+    let out = release_dir("bundles");
+    fs::create_dir_all(&out).unwrap();
+    for short in H3_MODULES {
+        let mut archive =
+            zip::ZipWriter::new(fs::File::create(out.join(format!("{short}.zip"))).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(zip::DateTime::default())
+            .unix_permissions(0o644);
+        for name in [
+            "manifest.json",
+            "workflow.json",
+            "adapter.json",
+            "ui-schema.json",
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive
+                .write_all(&fs::read(release_dir(short).join(name)).unwrap())
+                .unwrap();
+        }
+        archive.finish().unwrap();
     }
 }
 

@@ -14,7 +14,7 @@ use crate::workflow_modules::{self, WorkflowModuleDefaults, WorkflowModuleRecord
 use crate::ApplicationState;
 use chrono::Local;
 use reqwest::{Client, Url};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -211,6 +211,130 @@ pub async fn get_comfyui_control_choices(
     names.sort_by_key(|name| name.to_ascii_lowercase());
     names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
     Ok(names)
+}
+
+/// What the settings page offers for a module's sampler (CANVAS-039).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SamplerChoices {
+    /// The value the package's workflow carries (used while the setting is unset).
+    pub package_value: String,
+    /// ComfyUI's `sampler_name` choices for the declared nodes' class (all of them, in
+    /// ComfyUI's order); empty when ComfyUI could not be read.
+    pub options: Vec<String>,
+    pub comfyui_error: Option<String>,
+}
+
+/// A combo input's choices in either object_info shape: `[[...]]` or `["COMBO", {options}]`.
+pub(crate) fn combo_choices(info: &Value, class_type: &str, input: &str) -> Vec<String> {
+    let Some(inputs) = info.get(class_type).and_then(|class| class.get("input")) else {
+        return Vec::new();
+    };
+    let Some(spec) = ["required", "optional"]
+        .iter()
+        .find_map(|kind| inputs.get(*kind)?.get(input))
+    else {
+        return Vec::new();
+    };
+    spec.get(0)
+        .and_then(Value::as_array)
+        .or_else(|| spec.get(1)?.get("options")?.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `sampler_name` choices ComfyUI offers for every class (those all classes share).
+async fn sampler_options(server_url: &str, classes: &[String]) -> Result<Vec<String>, String> {
+    let server_url = comfy_server(server_url)?;
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("创建 ComfyUI 客户端失败：{error}"))?;
+    let mut shared: Option<Vec<String>> = None;
+    for class_type in classes {
+        let mut url = Url::parse(&server_url).map_err(|error| error.to_string())?;
+        url.path_segments_mut()
+            .map_err(|_| "ComfyUI 地址无效".to_owned())?
+            .pop_if_empty()
+            .push("object_info")
+            .push(class_type);
+        let info = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| format!("读取 ComfyUI 采样器列表失败：{error}"))?
+            .error_for_status()
+            .map_err(|error| format!("读取 ComfyUI 采样器列表失败：{error}"))?
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("解析 ComfyUI 采样器列表失败：{error}"))?;
+        let names = combo_choices(&info, class_type, "sampler_name");
+        if names.is_empty() {
+            return Err(format!(
+                "ComfyUI 没有列出 {class_type} 的 sampler_name 选项"
+            ));
+        }
+        shared = Some(match shared {
+            None => names,
+            Some(previous) => previous
+                .into_iter()
+                .filter(|name| names.contains(name))
+                .collect(),
+        });
+    }
+    Ok(shared.unwrap_or_default())
+}
+
+/// The sampler choices of a module whose package declares sampler nodes. The package value
+/// comes from the module's own workflow; ComfyUI being unreachable is reported, not an error.
+/// Web settings page only (the desktop build is frozen, CANVAS-RULES 2).
+#[cfg_attr(feature = "desktop", allow(dead_code))]
+pub async fn get_workflow_sampler_choices(
+    server_url: String,
+    workflow_module_id: String,
+    state: State<'_, ApplicationState>,
+) -> Result<SamplerChoices, String> {
+    let record = workflow_modules::get(&state.workflow_modules_dir, &workflow_module_id)?;
+    let bindings = &record.adapter.bindings;
+    let Some(first) = bindings.sampler_select_node_ids.first() else {
+        return Err("这个方案的方案包没有声明采样器节点".to_owned());
+    };
+    let workflow: Value = serde_json::from_slice(
+        &std::fs::read(&record.workflow_path)
+            .map_err(|error| format!("读取工作流失败：{error}"))?,
+    )
+    .map_err(|error| format!("解析工作流失败：{error}"))?;
+    if let Some(issue) = workflow_modules::sampler_declaration_issues(&workflow, bindings)
+        .into_iter()
+        .next()
+    {
+        return Err(format!("方案包的采样器声明无效：{issue}"));
+    }
+    let package_value = workflow[first.as_str()]["inputs"]["sampler_name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let mut classes = bindings
+        .sampler_select_node_ids
+        .iter()
+        .filter_map(|id| workflow[id.as_str()]["class_type"].as_str())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    classes.sort();
+    classes.dedup();
+    let (options, comfyui_error) = match sampler_options(&server_url, &classes).await {
+        Ok(options) => (options, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    Ok(SamplerChoices {
+        package_value,
+        options,
+        comfyui_error,
+    })
 }
 
 fn extension_fits(port: PortType, filename: &str) -> bool {

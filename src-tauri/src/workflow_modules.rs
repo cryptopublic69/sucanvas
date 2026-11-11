@@ -155,6 +155,10 @@ pub struct WorkflowBindings {
     pub single_image_input_node_id: String,
     #[serde(default)]
     pub secondary_image_input_node_id: String,
+    /// CANVAS-039: nodes whose `sampler_name` takes the module's sampler setting (manifest
+    /// `defaults.samplerName`). Empty = the package offers no sampler choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sampler_select_node_ids: Vec<String>,
 }
 
 impl Default for WorkflowBindings {
@@ -217,6 +221,7 @@ impl Default for WorkflowBindings {
             secondary_conditioning_node_id: String::new(),
             single_image_input_node_id: String::new(),
             secondary_image_input_node_id: String::new(),
+            sampler_select_node_ids: Vec::new(),
         }
     }
 }
@@ -272,6 +277,7 @@ impl WorkflowBindings {
             secondary_conditioning_node_id: String::new(),
             single_image_input_node_id: String::new(),
             secondary_image_input_node_id: String::new(),
+            sampler_select_node_ids: Vec::new(),
         }
     }
 
@@ -347,6 +353,7 @@ impl WorkflowBindings {
             secondary_conditioning_node_id: "3".to_owned(),
             single_image_input_node_id: "45".to_owned(),
             secondary_image_input_node_id: "9".to_owned(),
+            sampler_select_node_ids: Vec::new(),
         }
     }
     pub fn first_last_frame() -> Self {
@@ -403,6 +410,7 @@ impl WorkflowBindings {
             secondary_conditioning_node_id: String::new(),
             single_image_input_node_id: String::new(),
             secondary_image_input_node_id: String::new(),
+            sampler_select_node_ids: Vec::new(),
         }
     }
 
@@ -791,6 +799,10 @@ pub struct WorkflowModuleDefaults {
     pub diffusion_model_name: String,
     pub lora_name: String,
     pub lora_strength: f64,
+    /// CANVAS-039: the scheme's sampler, written to the package's `samplerSelectNodeIds`.
+    /// None (also an old manifest without the key) = the workflow's own value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampler_name: Option<String>,
 }
 
 impl Default for WorkflowModuleDefaults {
@@ -809,8 +821,59 @@ impl Default for WorkflowModuleDefaults {
             diffusion_model_name: default_diffusion_model_name(),
             lora_name: "MinimaxH3\\minimax_h3_turbo_4STEPS_comfyui.safetensors".to_owned(),
             lora_strength: 1.0,
+            sampler_name: None,
         }
     }
+}
+
+/// What is wrong with a package's sampler declaration (CANVAS-039): every declared node must
+/// exist in the workflow and have a `sampler_name` text input, once each.
+pub fn sampler_declaration_issues(workflow: &Value, bindings: &WorkflowBindings) -> Vec<String> {
+    let mut issues = Vec::new();
+    let mut seen = HashSet::new();
+    for id in &bindings.sampler_select_node_ids {
+        if id.trim().is_empty() {
+            issues.push("采样器节点 ID 不能为空".to_owned());
+        } else if !seen.insert(id.as_str()) {
+            issues.push(format!("采样器节点 {id} 重复声明"));
+        } else if let Some(node) = workflow.get(id) {
+            if !node
+                .pointer("/inputs/sampler_name")
+                .is_some_and(Value::is_string)
+            {
+                let class = node
+                    .get("class_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                issues.push(format!("采样器节点 {id}（{class}）没有 sampler_name 输入"));
+            }
+        } else {
+            issues.push(format!("采样器节点 {id} 不存在于工作流"));
+        }
+    }
+    issues
+}
+
+/// A sampler setting is a non-empty name on a package that declares sampler nodes.
+fn check_sampler_setting(
+    defaults: &mut WorkflowModuleDefaults,
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    let Some(name) = defaults.sampler_name.as_mut() else {
+        return Ok(());
+    };
+    let trimmed = name.trim().to_owned();
+    if trimmed.is_empty() {
+        return Err("采样器不能为空；要沿用方案包里的值请选「未设置」".to_owned());
+    }
+    if trimmed.chars().count() > 100 {
+        return Err("采样器名称不能超过 100 个字符".to_owned());
+    }
+    if bindings.sampler_select_node_ids.is_empty() {
+        return Err("这个方案的方案包没有声明采样器节点，不能设置采样器".to_owned());
+    }
+    *name = trimmed;
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1448,6 +1511,9 @@ pub fn update_defaults(
     if manifest.deleted_at.is_some() {
         return Err(format!("工作流方案 {id} 已在回收站中"));
     }
+    let mut defaults = defaults;
+    let current = read_or_migrate_package(root, manifest.clone())?;
+    check_sampler_setting(&mut defaults, &current.adapter.bindings)?;
     backup_current(root, id)?;
     manifest.defaults = defaults;
     manifest.updated_at = now();
@@ -1650,6 +1716,7 @@ pub fn validate_workflow_bytes(
             }
         }
     }
+    issues.extend(sampler_declaration_issues(&workflow, bindings));
     if let Some(processing) = adapter.video_processing.as_ref() {
         require_input(
             &workflow,
@@ -2036,7 +2103,23 @@ pub fn save(root: &Path, input: SaveWorkflowModuleInput) -> Result<WorkflowModul
     validate_adapter_contract(&adapter, &capability, &variant)?;
     let ui_schema = input.ui_schema.unwrap_or_default();
     validate_ui_schema(&ui_schema, &adapter)?;
-    let defaults = input.defaults.unwrap_or_default();
+    let previous = input
+        .id
+        .as_deref()
+        .map(|id| read_manifest(root, id))
+        .transpose()?;
+    let mut defaults = input.defaults.unwrap_or_default();
+    // CANVAS-039: the sampler is chosen on the settings page, not in the package. Saving or
+    // restoring a package keeps the module's choice unless the defaults name one; a package
+    // without sampler nodes has none.
+    if adapter.bindings.sampler_select_node_ids.is_empty() {
+        defaults.sampler_name = None;
+    } else if defaults.sampler_name.is_none() {
+        defaults.sampler_name = previous
+            .as_ref()
+            .and_then(|previous| previous.defaults.sampler_name.clone());
+    }
+    check_sampler_setting(&mut defaults, &adapter.bindings)?;
     let source = PathBuf::from(input.source_workflow_path.trim().trim_matches('"'));
     if !source.is_absolute() || !source.is_file() {
         return Err("工作流文件必须是存在的绝对路径".to_owned());
@@ -2052,17 +2135,17 @@ pub fn save(root: &Path, input: SaveWorkflowModuleInput) -> Result<WorkflowModul
     }
 
     let timestamp = now();
-    let (id, created_at, upgraded_from) = if let Some(id) = input.id.as_deref() {
-        let previous = read_manifest(root, id)?;
-        backup_current(root, id)?;
-        (id.to_owned(), previous.created_at, previous.upgraded_from)
-    } else {
-        (
-            format!("workflow-module-{}", Uuid::new_v4()),
-            timestamp.clone(),
-            None,
-        )
-    };
+    let (id, created_at, upgraded_from) =
+        if let (Some(id), Some(previous)) = (input.id.as_deref(), previous) {
+            backup_current(root, id)?;
+            (id.to_owned(), previous.created_at, previous.upgraded_from)
+        } else {
+            (
+                format!("workflow-module-{}", Uuid::new_v4()),
+                timestamp.clone(),
+                None,
+            )
+        };
     let manifest = WorkflowModuleManifest {
         id: id.clone(),
         name,

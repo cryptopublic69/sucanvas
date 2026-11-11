@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "groups": [
+    {
+      "id": "sampling-steps",
+      "title": "采样步数",
+      "fields": [
+        {
+          "key": "primaryVideoSteps",
+          "label": "一采 Video Steps",
+          "type": "number",
+          "min": 1.0,
+          "max": 1000.0,
+          "step": 1.0,
+          "default": 6.0
+        },
+        {
+          "key": "primaryAudioSteps",
+          "label": "一采 Audio Steps",
+          "type": "number",
+          "min": 1.0,
+          "max": 1000.0,
+          "step": 1.0,
+          "default": 8.0,
+          "minKey": "primaryVideoSteps"
+        },
+        {
+          "key": "secondarySchedulerSteps",
+          "label": "二采基本调度 Steps",
+          "type": "number",
+          "min": 1.0,
+          "max": 10000.0,
+          "step": 1.0,
+          "default": 4.0
+        }
+      ],
+      "note": "Audio Steps 不能小于 Video Steps；默认值分别为 6、8、4。"
+    },
+    {
+      "id": "primary-color",
+      "title": "一采画面调整",
+      "fields": [
+        {
+          "key": "primaryBrightness",
+          "label": "亮度",
+          "type": "number",
+          "min": 0.0,
+          "max": 3.0,
+          "step": 0.01,
+          "default": 1.0
+        },
+        {
+          "key": "primaryContrast",
+          "label": "对比度",
+          "type": "number",
+          "min": 0.0,
+          "max": 3.0,
+          "step": 0.01,
+          "default": 0.9
+        },
+        {
+          "key": "primarySaturation",
+          "label": "饱和度",
+          "type": "number",
+          "min": 0.0,
+          "max": 3.0,
+          "step": 0.01,
+          "default": 0.9
+        }
+      ],
+      "note": "默认值：1.00、0.90、0.90。"
+    },
+    {
+      "id": "secondary-color",
+      "title": "二采画面调整",
+      "fields": [
+        {
+          "key": "secondaryBrightness",
+          "label": "亮度",
+          "type": "number",
+          "min": 0.0,
+          "max": 3.0,
+          "step": 0.01,
+          "default": 1.0
+        },
+        {
+          "key": "secondaryContrast",
+          "label": "对比度",
+          "type": "number",
+          "min": 0.0,
+          "max": 3.0,
+          "step": 0.01,
+          "default": 0.9
+        },
+        {
+          "key": "secondarySaturation",
+          "label": "饱和度",
+          "type": "number",
+          "min": 0.0,
+          "max": 3.0,
+          "step": 0.01,
+          "default": 1.0
+        }
+      ],
+      "note": "默认值：1.00、0.90、1.00；六项范围均为 0.00–3.00。"
+    }
+  ]
+}

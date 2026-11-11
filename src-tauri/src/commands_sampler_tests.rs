@@ -231,17 +231,20 @@ async fn submit(
     let media = temp_dir("v1-media");
     let case = base_case(short);
     let mut request = case["request"].clone();
-    let images = request["imagePaths"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|name| {
-            let path = media.join(name.as_str().unwrap());
-            fs::write(&path, b"image").unwrap();
-            json!(path)
-        })
-        .collect::<Vec<_>>();
-    request["imagePaths"] = json!(images);
+    // The golden's image and audio names become real files to upload.
+    for key in ["imagePaths", "audioPaths"] {
+        let files = request[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| {
+                let path = media.join(name.as_str().unwrap());
+                fs::write(&path, b"media").unwrap();
+                json!(path)
+            })
+            .collect::<Vec<_>>();
+        request[key] = json!(files);
+    }
     request["serverUrl"] = json!(server);
     request["workflowModuleId"] = json!(id);
     request["inputRootPath"] = json!(media.join("comfy-input"));

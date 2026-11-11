@@ -10,10 +10,10 @@
 use super::{EngineRequest, PortType};
 use super::{PackageV2, ENGINE_API_VERSION};
 use crate::workflow_modules::{
-    WorkflowAdapter, WorkflowBindings, WorkflowUiSchema, H3_FIRST_LAST_FRAME_ADAPTER,
-    H3_IMAGE_TO_VIDEO_ADAPTER, H3_LAST_FRAME_TO_VIDEO_ADAPTER, H3_MULTI_REFERENCE_ADAPTER,
-    KREA2_IMAGE_EDIT_ADAPTER, KREA2_TEXT_TO_IMAGE_ADAPTER, MOSS_TEXT_TO_IMAGE_ADAPTER,
-    VIDEO_PROCESSING_ADAPTER,
+    sampler_declaration_issues, WorkflowAdapter, WorkflowBindings, WorkflowUiSchema,
+    H3_FIRST_LAST_FRAME_ADAPTER, H3_IMAGE_TO_VIDEO_ADAPTER, H3_LAST_FRAME_TO_VIDEO_ADAPTER,
+    H3_MULTI_REFERENCE_ADAPTER, KREA2_IMAGE_EDIT_ADAPTER, KREA2_TEXT_TO_IMAGE_ADAPTER,
+    MOSS_TEXT_TO_IMAGE_ADAPTER, VIDEO_PROCESSING_ADAPTER,
 };
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -865,6 +865,17 @@ fn h3_generate(
     if conditioning_has("strict_prompt_tags") {
         controls.push(toggle("strictPromptTags", "严格提示词标签", false));
     }
+    // CANVAS-039: a package declaring sampler nodes takes the module's sampler setting
+    // (preset from manifest `defaults.samplerName`; the node draws no control for it).
+    if !b.sampler_select_node_ids.is_empty() {
+        if let Some(issue) = sampler_declaration_issues(workflow, b).into_iter().next() {
+            return Err(format!("方案包的采样器声明无效：{issue}"));
+        }
+        controls.push(
+            json!({ "id": "samplerName", "type": "text", "label": "采样器",
+                              "setting": "samplerName" }),
+        );
+    }
     controls.push(seed_control());
 
     let mut steps = Vec::new();
@@ -984,6 +995,16 @@ fn h3_generate(
     }
     h3_media(b, variant, &mut steps)?;
     h3_secondary_source(b, node_types, &mut steps);
+    // Unset = empty: the workflow keeps its own sampler.
+    let sampler = trim(c("samplerName"));
+    for node in &b.sampler_select_node_ids {
+        steps.push(set_when(
+            node,
+            "sampler_name",
+            sampler.clone(),
+            not(empty(sampler.clone())),
+        ));
+    }
     Ok(
         json!({ "label": "生成", "inputs": inputs, "outputs": [{ "id": "video", "type": "video" }],
                "controls": controls, "steps": steps }),

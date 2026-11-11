@@ -2139,6 +2139,41 @@ fn configure_h3_steps(
     Ok(())
 }
 
+/// CANVAS-039: the scheme's sampler (manifest `defaults.samplerName`) into every node its
+/// package declares; one sampler serves both passes. Not set, or a package without sampler
+/// nodes: the workflow keeps its own value.
+fn configure_h3_sampler(
+    workflow: &mut Value,
+    sampler_name: Option<&str>,
+    bindings: &WorkflowBindings,
+) -> Result<(), String> {
+    let Some(sampler_name) = sampler_name else {
+        return Ok(());
+    };
+    if bindings.sampler_select_node_ids.is_empty() {
+        return Ok(());
+    }
+    let sampler_name = sampler_name.trim();
+    if sampler_name.is_empty() {
+        return Err("方案的采样器设置为空，请到设置页「工作流方案」重新选择".to_owned());
+    }
+    if let Some(issue) = workflow_modules::sampler_declaration_issues(workflow, bindings)
+        .into_iter()
+        .next()
+    {
+        return Err(format!("方案包的采样器声明无效：{issue}"));
+    }
+    for node_id in &bindings.sampler_select_node_ids {
+        set_workflow_input(
+            workflow,
+            node_id,
+            "sampler_name",
+            Value::String(sampler_name.to_owned()),
+        )?;
+    }
+    Ok(())
+}
+
 fn configure_h3_primary_upscale(
     workflow: &mut Value,
     primary_upscale_factor: f64,
@@ -4124,15 +4159,21 @@ async fn submit_comfyui_workflow_inner(
     if input.prompt.trim().is_empty() {
         return Err("提示词不能为空".to_owned());
     }
-    let (workflow_path, adapter) = if let Some(module_id) = input.workflow_module_id.as_deref() {
-        let module = workflow_modules::get(workflow_modules_dir, module_id)?;
-        (module.workflow_path, module.adapter)
-    } else {
-        (
-            input.workflow_path.clone(),
-            workflow_modules::WorkflowAdapter::without_module(),
-        )
-    };
+    let (workflow_path, adapter, sampler_name) =
+        if let Some(module_id) = input.workflow_module_id.as_deref() {
+            let module = workflow_modules::get(workflow_modules_dir, module_id)?;
+            (
+                module.workflow_path,
+                module.adapter,
+                module.manifest.defaults.sampler_name,
+            )
+        } else {
+            (
+                input.workflow_path.clone(),
+                workflow_modules::WorkflowAdapter::without_module(),
+                None,
+            )
+        };
     let adapter_variant = adapter.variant.clone();
     let contract = &adapter.input_contract;
     let bindings = &adapter.bindings;
@@ -4299,6 +4340,8 @@ async fn submit_comfyui_workflow_inner(
         return Err("这是普通 UI 工作流，请改用 Export Workflow (API Format)".to_owned());
     }
     configure_h3_diffusion_model(&mut workflow, diffusion_model_name, bindings)?;
+    // Before any upload: a wrong sampler declaration or setting submits nothing.
+    configure_h3_sampler(&mut workflow, sampler_name.as_deref(), bindings)?;
 
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(10))

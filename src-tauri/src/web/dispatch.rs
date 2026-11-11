@@ -131,6 +131,7 @@ commands! {
     SubmitComfyuiWorkflowOperation => "submit_comfyui_workflow_operation",
     UpdateWorkflowModuleDefaults => "update_workflow_module_defaults",
     CheckWorkflowPackage => "check_workflow_package",
+    GetWorkflowSamplerChoices => "get_workflow_sampler_choices",
 }
 
 impl Command {
@@ -316,6 +317,7 @@ pub fn permissions(
         | RestoreWorkflowModuleBundle
         | UpdateWorkflowModuleDefaults
         | CheckWorkflowPackage
+        | GetWorkflowSamplerChoices
         | SetProjectPrivate
         // Any project, other users' private ones included, without edit mode;
         // always audited (architect, 012c2 item 1).
@@ -1168,6 +1170,15 @@ pub async fn dispatch(
             )?)
             .map_err(|e| e.to_string())
         }
+        Command::GetWorkflowSamplerChoices => serde_json::to_value(
+            workflow_submit::get_workflow_sampler_choices(
+                argument(args, "serverUrl")?,
+                argument(args, "workflowModuleId")?,
+                State(&state.core),
+            )
+            .await?,
+        )
+        .map_err(|e| e.to_string()),
         Command::CheckWorkflowPackage => serde_json::to_value(
             workflow_submit::check_workflow_package(
                 argument(args, "serverUrl")?,
@@ -1255,6 +1266,7 @@ mod tests {
             "restore_workflow_module_bundle",
             "update_workflow_module_defaults",
             "check_workflow_package",
+            "get_workflow_sampler_choices",
             "set_project_private",
             "admin_delete_project",
             "update_canvas_settings",

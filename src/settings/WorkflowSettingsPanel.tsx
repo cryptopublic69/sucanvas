@@ -4,8 +4,11 @@ import {
   Trash2,
   Upload
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { WorkflowSamplerSetting } from "../workflow/WorkflowSamplerSetting";
+import { hasSamplerSetting, type SamplerChoices } from "../workflow/samplerSetting";
 import type {
   WorkflowCapability,
   WorkflowModuleRecord,
@@ -66,7 +69,11 @@ type WorkflowSettingsPanelProps = {
   restoreSelectedWorkflowModuleBackup: () => Promise<void>;
   restoreSelectedWorkflowModule: () => Promise<void>;
   workflowModulesReady: boolean;
+  comfyUiServerUrl: string;
+  saveWorkflowModuleSampler: (module: WorkflowModuleRecord, value: string) => Promise<void>;
 };
+
+type SamplerChoicesState = { moduleId: string; choices: SamplerChoices | null; error: string; loading: boolean };
 
 export function WorkflowSettingsPanel({
   showDeletedWorkflowModules,
@@ -109,9 +116,37 @@ export function WorkflowSettingsPanel({
   restoreSelectedWorkflowModuleBackup,
   restoreSelectedWorkflowModule,
   workflowModulesReady,
+  comfyUiServerUrl,
+  saveWorkflowModuleSampler,
 }: WorkflowSettingsPanelProps) {
   const [uploadError, setUploadError] = useState("");
   const [uploading, setUploading] = useState(false);
+  // CANVAS-039: sampler choices of the selected scheme (only when its package declares sampler nodes).
+  const [samplerState, setSamplerState] = useState<SamplerChoicesState | null>(null);
+  const samplerModuleId = selectedWorkflowModule && hasSamplerSetting(selectedWorkflowModule) ? selectedWorkflowModule.id : "";
+  useEffect(() => {
+    if (!samplerModuleId || !selectedWorkflowModule) return;
+    let disposed = false;
+    setSamplerState({ moduleId: samplerModuleId, choices: null, error: "", loading: true });
+    invoke<SamplerChoices>("get_workflow_sampler_choices", {
+      serverUrl: comfyUiServerUrl,
+      workflowModuleId: selectedWorkflowModule.id,
+    }).then((choices) => {
+      if (!disposed) setSamplerState({ moduleId: samplerModuleId, choices, error: choices.comfyuiError ?? "", loading: false });
+    }).catch((error: unknown) => {
+      if (!disposed) {
+        setSamplerState({
+          moduleId: samplerModuleId,
+          choices: null,
+          error: error instanceof Error ? error.message : String(error),
+          loading: false,
+        });
+      }
+    });
+    return () => { disposed = true; };
+    // Keyed by the scheme id: a refreshed record of the same scheme keeps its choices.
+  }, [samplerModuleId, comfyUiServerUrl]);
+  const samplerChoices = samplerState?.moduleId === samplerModuleId ? samplerState : null;
   async function chooseWorkflow() {
     setUploading(true); setUploadError("");
     try {
@@ -330,6 +365,17 @@ export function WorkflowSettingsPanel({
               </div>
             )}
           </div>
+          {selectedWorkflowModule && (
+            <WorkflowSamplerSetting
+              module={selectedWorkflowModule}
+              choices={samplerChoices?.choices ?? null}
+              loading={samplerChoices?.loading ?? true}
+              error={samplerChoices?.error ?? ""}
+              busy={workflowModulesBusy}
+              onChange={(value) => void saveWorkflowModuleSampler(selectedWorkflowModule, value)}
+              Select={SettingsSelect}
+            />
+          )}
           <label className="workflow-module-path-field">
             API 工作流 JSON
             {import.meta.env.MODE === "web" && <button type="button" disabled={uploading || Boolean(selectedWorkflowModule?.deletedAt)} onClick={() => void chooseWorkflow()}>{uploading ? "正在上传…" : "选择 JSON 文件"}</button>}

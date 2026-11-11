@@ -1,0 +1,31 @@
+{
+  "id": "workflow-module-0dca5130-144c-4292-a3f4-f757b76f12e2",
+  "name": "MiniMax H3 尾帧生视频",
+  "capability": "video-generation",
+  "variant": "last-frame-to-video",
+  "revision": "V3.1-HighMotion",
+  "packageSchemaVersion": 1,
+  "engineApiVersion": "1.0",
+  "adapterKind": "workflow-package-v1",
+  "adapterEntry": "adapter.json",
+  "uiSchemaEntry": "ui-schema.json",
+  "sourceWorkflowName": "workflow.json",
+  "createdAt": "2026-08-21T00:00:00.000Z",
+  "updatedAt": "2026-08-21T00:33:46.382782800+00:00",
+  "deletedAt": null,
+  "defaults": {
+    "primaryVideoSteps": 4,
+    "primaryAudioSteps": 4,
+    "secondarySchedulerSteps": 4,
+    "primaryUpscaleFactor": 1.2,
+    "primaryBrightness": 1.0,
+    "primaryContrast": 0.8,
+    "primarySaturation": 1.0,
+    "secondaryBrightness": 1.0,
+    "secondaryContrast": 0.8,
+    "secondarySaturation": 1.0,
+    "diffusionModelName": "MinimaxH3\\minimax_h3_fl2va_int8_convrot.safetensors",
+    "loraName": "MinimaxH3\\minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+    "loraStrength": 1.0
+  }
+}
