@@ -10284,8 +10284,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               className="nodrag node-action media-footer-resize"
               disabled={imageResizing}
               onClick={(event) => {
-                if (event.ctrlKey) {
-                  // Not a node click: React Flow would toggle the node's selection with Ctrl held.
+                // ⌘ too: macOS turns Ctrl+click into a right click and sends no click (su 11-13, A).
+                if (event.ctrlKey || event.metaKey) {
+                  // Not a node click: React Flow would select (with Ctrl: toggle) the node.
                   event.stopPropagation();
                   const savedDefault = imageResizeDefaultFromStorage();
                   setImageResizeDraft(String(savedDefault));
@@ -10295,8 +10296,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 }
                 void runImageResize(imageResizeDefaultFromStorage(), false);
               }}
-              title="Resize 图片；Ctrl+单击设置最长边"
-              aria-label="Resize 图片；Ctrl 加单击设置最长边"
+              title="Resize 图片；Ctrl/⌘+单击设置最长边"
+              aria-label="Resize 图片；Ctrl 或 Command 加单击设置最长边"
             >
               <Scaling size={14} />
             </button>
