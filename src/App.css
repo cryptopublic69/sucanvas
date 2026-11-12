@@ -714,10 +714,10 @@ button { color: inherit; }
 .app-shell.is-ctrl-node-selection .canvas-node * {
   pointer-events: none !important;
 }
-.app-shell.is-ctrl-node-selection .canvas-node.kind-generated-video .generated-video-footer button,
-.app-shell.is-ctrl-node-selection .canvas-node.kind-generated-video .generated-video-footer button *,
-.app-shell.is-ctrl-node-selection .canvas-node.kind-generated-image .generated-video-footer button,
-.app-shell.is-ctrl-node-selection .canvas-node.kind-generated-image .generated-video-footer button * {
+.app-shell.is-ctrl-node-selection .canvas-node .generated-video-footer button,
+.app-shell.is-ctrl-node-selection .canvas-node .generated-video-footer button *,
+.app-shell.is-ctrl-node-selection .canvas-node .node-footer button,
+.app-shell.is-ctrl-node-selection .canvas-node .node-footer button * {
   pointer-events: auto !important;
 }
 .app-shell.has-multi-node-selection .react-flow__node.selected .canvas-node * {

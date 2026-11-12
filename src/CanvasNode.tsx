@@ -5381,10 +5381,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     : executionRunning
       ? validationMessage || "正在放大图片…"
       : `${formattedGenerationElapsed(record.content)}${isImageUpscalePreview ? " / 放大图" : ""}`;
-  const preservesGeneratedToolbarCtrlClick = (target: EventTarget | null) => (
-    (isGeneratedVideo || isGeneratedImage)
-    && target instanceof Element
-    && Boolean(target.closest(".generated-video-footer button"))
+  // Footer toolbar buttons keep their own Ctrl+click (e.g. Resize: set the longest edge); Ctrl+click anywhere
+  // else on the node toggles its selection. App.css lets the same buttons take the pointer while Ctrl is held.
+  const preservesFooterToolbarCtrlClick = (target: EventTarget | null) => (
+    target instanceof Element
+    && Boolean(target.closest(".generated-video-footer button, .node-footer button"))
   );
   const mediaInputGroups = [
     { kind: "image", label: "图片", inputs: mediaInputs.filter((input) => videoInputMediaKind(input) === "image") },
@@ -7117,7 +7118,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       className={`canvas-node kind-${record.kind} ${isStoryboardReferenceCompiler ? "is-storyboard-reference-compiler" : ""} ${selected ? "is-selected" : ""} ${isContentIterationNode ? `is-content-iteration-node content-type-${contentNodeType}` : ""} ${usesSecondaryGreenTheme ? "is-secondary-preview" : ""} ${usesCustomPreviewTheme ? "has-custom-preview-color" : ""} ${relationHighlighted ? "is-relation-highlighted" : ""} ${matched ? "" : "is-dimmed"}`}
       style={previewThemeStyle}
       onPointerDownCapture={(event) => {
-        if (preservesGeneratedToolbarCtrlClick(event.target)) {
+        if (preservesFooterToolbarCtrlClick(event.target)) {
           ctrlSelectionPointerId.current = null;
           return;
         }
@@ -7149,7 +7150,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         ctrlSelectionPointerId.current = null;
       }}
       onClickCapture={(event) => {
-        if (preservesGeneratedToolbarCtrlClick(event.target)) {
+        if (preservesFooterToolbarCtrlClick(event.target)) {
           ctrlSelectionPointerId.current = null;
           return;
         }
@@ -7159,7 +7160,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         ctrlSelectionPointerId.current = null;
       }}
       onDoubleClickCapture={(event) => {
-        if (preservesGeneratedToolbarCtrlClick(event.target)) return;
+        if (preservesFooterToolbarCtrlClick(event.target)) return;
         if (!event.ctrlKey) return;
         event.preventDefault();
         event.stopPropagation();
@@ -10284,6 +10285,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               disabled={imageResizing}
               onClick={(event) => {
                 if (event.ctrlKey) {
+                  // Not a node click: React Flow would toggle the node's selection with Ctrl held.
+                  event.stopPropagation();
                   const savedDefault = imageResizeDefaultFromStorage();
                   setImageResizeDraft(String(savedDefault));
                   setImageResizeError("");
