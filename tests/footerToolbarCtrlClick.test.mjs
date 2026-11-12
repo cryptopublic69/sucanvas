@@ -124,6 +124,8 @@ function ctrlClick(kind, chain, extra) {
   return { handlers, down, click };
 }
 
+// React Flow selects (with Ctrl: toggles) a node from its wrapper's onClick, so the Ctrl+click that opens the
+// dialog must not bubble there; a plain click keeps bubbling (it selects the node as before).
 function resizeButtonClick(ctrlKey) {
   const calls = [];
   run(jsxAttribute(isResizeButton, "onClick"), {
@@ -132,7 +134,7 @@ function resizeButtonClick(ctrlKey) {
     setImageResizeError: (value) => calls.push(["error", value]),
     setImageResizeDialogOpen: (value) => calls.push(["dialog", value]),
     runImageResize: (...args) => calls.push(["resize", ...args]),
-  })({ ctrlKey });
+  })({ ctrlKey, stopPropagation: () => calls.push(["stopPropagation"]) });
   return calls;
 }
 
@@ -144,7 +146,7 @@ test("uploaded image: Ctrl+click on Resize reaches the button, opens the longest
     assert.equal(handlers.state.setNodesCalls, 0, "selection not toggled");
     assert.equal(handlers.state.nodes[0].selected, false);
   }
-  assert.deepEqual(resizeButtonClick(true), [["draft", "1536"], ["error", ""], ["dialog", true]], "Ctrl opens the dialog, no resize yet");
+  assert.deepEqual(resizeButtonClick(true), [["stopPropagation"], ["draft", "1536"], ["error", ""], ["dialog", true]], "Ctrl opens the dialog without reaching React Flow's node click, no resize yet");
   assert.deepEqual(resizeButtonClick(false), [["resize", 1536, false]], "a plain click still resizes to the saved default");
 });
 
