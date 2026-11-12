@@ -30,8 +30,18 @@ $caddyFile = Join-Path $root 'proxy/Caddyfile'
 if (Test-Path -LiteralPath $caddyFile) {
     $caddyExe = Join-Path $root 'proxy/caddy.exe'
     if (-not (Test-Path -LiteralPath $caddyExe)) { throw 'Caddy executable is missing.' }
-    $adapted = & $caddyExe adapt --config $caddyFile --adapter caddyfile
-    if ($LASTEXITCODE) { throw 'Caddyfile cannot be parsed.' }
+    # caddy writes hints such as "Caddyfile input is not formatted" to stderr and still exits 0. Under the global 'Stop',
+    # a caller that redirects PowerShell's streams (*>, 2>&1) would turn that line into a terminating NativeCommandError,
+    # so stderr is collected here and only shown; the exit code alone decides, and only stdout is the adapted JSON.
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $caddyOutput = @(& $caddyExe adapt --config $caddyFile --adapter caddyfile 2>&1)
+        $caddyExitCode = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previousPreference }
+    $caddyOutput | Where-Object { $_ -is [Management.Automation.ErrorRecord] } | ForEach-Object { Write-Host "caddy: $_" }
+    $adapted = @($caddyOutput | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] } | ForEach-Object { [string]$_ })
+    if ($caddyExitCode) { throw 'Caddyfile cannot be parsed.' }
     $caddy = ($adapted -join [Environment]::NewLine) | ConvertFrom-Json
     $hosts = @($caddy.apps.http.servers.PSObject.Properties.Value.routes.match.host | ForEach-Object { $_ } | Where-Object { $_ })
     if ($hosts.Count -and $hosts -notcontains $origin.Host) { throw 'Caddy host matcher does not contain the publicUrl hostname.' }
