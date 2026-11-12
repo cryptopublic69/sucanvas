@@ -9,6 +9,7 @@ import ts from "typescript";
 // it came from a generated node's footer button. Ctrl+click anywhere else on a node still toggles selection.
 const canvas = await readFile(new URL("../src/CanvasNode.tsx", import.meta.url), "utf8");
 const css = await readFile(new URL("../src/App.css", import.meta.url), "utf8");
+const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
 const file = ts.createSourceFile("CanvasNode.tsx", canvas, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const compile = (source) => ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext },
@@ -126,7 +127,7 @@ function ctrlClick(kind, chain, extra) {
 
 // React Flow selects (with Ctrl: toggles) a node from its wrapper's onClick, so the Ctrl+click that opens the
 // dialog must not bubble there; a plain click keeps bubbling (it selects the node as before).
-function resizeButtonClick(ctrlKey) {
+function resizeButtonClick(ctrlKey, metaKey = false) {
   const calls = [];
   run(jsxAttribute(isResizeButton, "onClick"), {
     imageResizeDefaultFromStorage: () => 1536,
@@ -134,9 +135,30 @@ function resizeButtonClick(ctrlKey) {
     setImageResizeError: (value) => calls.push(["error", value]),
     setImageResizeDialogOpen: (value) => calls.push(["dialog", value]),
     runImageResize: (...args) => calls.push(["resize", ...args]),
-  })({ ctrlKey, stopPropagation: () => calls.push(["stopPropagation"]) });
+  })({ ctrlKey, metaKey, stopPropagation: () => calls.push(["stopPropagation"]) });
   return calls;
 }
+
+// CANVAS-042b (su 11-13, A): macOS turns Ctrl+click into a right click (no click event), so ⌘+click opens the
+// dialog too. ⌘ is neither the node's Ctrl capture key nor React Flow's multi-select key ("Control"), so the
+// capture leaves it alone and only the button's stopPropagation keeps React Flow from selecting the node.
+test("uploaded image: ⌘+click on Resize opens the longest-edge dialog too, selection unchanged", () => {
+  const dialog = [["stopPropagation"], ["draft", "1536"], ["error", ""], ["dialog", true]];
+  assert.deepEqual(resizeButtonClick(false, true), dialog, "⌘ opens the dialog without reaching React Flow's node click");
+  assert.deepEqual(resizeButtonClick(true, true), dialog, "Ctrl+⌘ the same");
+  assert.deepEqual(resizeButtonClick(true), dialog, "Ctrl unchanged");
+  assert.deepEqual(resizeButtonClick(false), [["resize", 1536, false]], "plain click unchanged");
+  for (const chain of [uploadResizeIcon, uploadBody]) {
+    const { handlers, down, click } = ctrlClick("image", chain, { ctrlKey: false, metaKey: true });
+    assert.equal(down.prevented || down.stopped || click.prevented || click.stopped, false, `the Ctrl capture ignores ⌘ (${chain[0].tag})`);
+    assert.equal(handlers.state.setNodesCalls, 0);
+  }
+  assert.ok(/multiSelectionKeyCode="Control"/.test(app), "React Flow's multi-select key stays Control (⌘ is not a multi-select click)");
+  assert.ok(/if \(event\.key === "Control"\) setCtrlNodeSelectionActive\(true\);/.test(app), "the Ctrl pointer-events mode follows Control only");
+  const button = canvas.slice(canvas.lastIndexOf("<button", canvas.indexOf("media-footer-resize")), canvas.indexOf("</button>", canvas.indexOf("media-footer-resize")));
+  assert.ok(button.includes('title="Resize 图片；Ctrl/⌘+单击设置最长边"'), "the tooltip names ⌘");
+  assert.ok(button.includes('aria-label="Resize 图片；Ctrl 或 Command 加单击设置最长边"'), "the label names Command");
+});
 
 test("uploaded image: Ctrl+click on Resize reaches the button, opens the longest-edge dialog, selection unchanged", () => {
   for (const chain of [uploadResizeIcon, uploadResizeButton]) {
