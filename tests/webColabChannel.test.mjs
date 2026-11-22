@@ -233,3 +233,124 @@ test("disabling colab module cleanly falls back legacy colab nodes to local whil
     "Colab 专用 · Cobijada (Fla V3.1 1采 SS)",
   );
 });
+
+const SYNC_CALLBACK_ARRAY_METHODS = new Set([
+  "find", "findIndex", "filter", "map", "some", "every", "reduce", "forEach", "flatMap", "sort",
+]);
+const SYNC_CALLBACK_REACT_HOOKS = new Set(["useMemo", "useState"]);
+
+function collectBlockConstLetDecls(block, sf) {
+  const decls = new Map();
+  const addBindingName = (nameNode) => {
+    if (ts.isIdentifier(nameNode)) {
+      decls.set(nameNode.text, nameNode.getStart(sf));
+    } else if (ts.isObjectBindingPattern(nameNode) || ts.isArrayBindingPattern(nameNode)) {
+      for (const el of nameNode.elements) {
+        if (ts.isBindingElement(el)) addBindingName(el.name);
+      }
+    }
+  };
+  for (const stmt of block.statements) {
+    if (ts.isVariableStatement(stmt) && (stmt.declarationList.flags & (ts.NodeFlags.Const | ts.NodeFlags.Let))) {
+      for (const decl of stmt.declarationList.declarations) {
+        addBindingName(decl.name);
+      }
+    }
+  }
+  return decls;
+}
+
+function isSynchronousCallback(fnNode) {
+  const parent = fnNode.parent;
+  if (!ts.isCallExpression(parent)) return false;
+  if (ts.isPropertyAccessExpression(parent.expression)) {
+    return SYNC_CALLBACK_ARRAY_METHODS.has(parent.expression.name.text);
+  }
+  if (ts.isIdentifier(parent.expression)) {
+    return SYNC_CALLBACK_REACT_HOOKS.has(parent.expression.text);
+  }
+  return false;
+}
+
+function findSynchronousTdzReferences(relativePath, source) {
+  const scriptKind = relativePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(relativePath, source, ts.ScriptTarget.Latest, true, scriptKind);
+  const hits = [];
+
+  const checkBlock = (block) => {
+    const decls = collectBlockConstLetDecls(block, sf);
+    if (!decls.size) return;
+    const visit = (node, inDeferredFn, shadowed) => {
+      if (node !== block && ts.isBlock(node)) {
+        const innerDecls = collectBlockConstLetDecls(node, sf);
+        const nextShadow = new Set(shadowed);
+        for (const name of innerDecls.keys()) nextShadow.add(name);
+        ts.forEachChild(node, (child) => visit(child, inDeferredFn, nextShadow));
+        return;
+      }
+      if (ts.isIdentifier(node)) {
+        const parent = node.parent;
+        const isNonValueRef = (ts.isPropertyAccessExpression(parent) && parent.name === node)
+          || (ts.isPropertyAssignment(parent) && parent.name === node)
+          || ts.isTypeReferenceNode(parent)
+          || ts.isTypeQueryNode(parent)
+          || (ts.isVariableDeclaration(parent) && parent.name === node)
+          || (ts.isParameter(parent) && parent.name === node)
+          || (ts.isBindingElement(parent) && parent.name === node)
+          || (ts.isJsxAttribute(parent) && parent.name === node)
+          || (ts.isPropertySignature(parent) && parent.name === node);
+        if (!isNonValueRef && !shadowed.has(node.text) && decls.has(node.text)) {
+          const declPos = decls.get(node.text);
+          if (node.getStart(sf) < declPos && !inDeferredFn) {
+            const useLoc = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+            const declLoc = sf.getLineAndCharacterOfPosition(declPos);
+            hits.push(`${relativePath}:${useLoc.line + 1}: "${node.text}" used before line ${declLoc.line + 1}`);
+          }
+        }
+      }
+      if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+        const nextDeferred = isSynchronousCallback(node) ? inDeferredFn : true;
+        const nextShadow = new Set(shadowed);
+        for (const param of node.parameters) {
+          if (ts.isIdentifier(param.name)) nextShadow.add(param.name.text);
+        }
+        ts.forEachChild(node, (child) => visit(child, nextDeferred, nextShadow));
+        return;
+      }
+      if (ts.isFunctionDeclaration(node)) return;
+      ts.forEachChild(node, (child) => visit(child, inDeferredFn, shadowed));
+    };
+    for (const stmt of block.statements) {
+      visit(stmt, false, new Set());
+    }
+  };
+
+  const walk = (node) => {
+    if (ts.isBlock(node)) checkBlock(node);
+    ts.forEachChild(node, walk);
+  };
+  walk(sf);
+  return hits;
+}
+
+test("canvas and colab modules have no synchronous const/let TDZ references", async () => {
+  const files = [
+    "../src/CanvasNode.tsx",
+    "../src/App.tsx",
+    "../src/ComfyStatusIndicators.tsx",
+    "../src/settings/GeneralSettingsPanel.tsx",
+    "../src/video/VideoRegenerationDialogs.tsx",
+    "../src/colab/index.ts",
+    "../src/colab/useColabChannel.ts",
+    "../src/colab/ColabNodeControls.tsx",
+    "../src/colab/ColabSettingsSection.tsx",
+    "../src/colab/presets.ts",
+    "../src/colab/api.ts",
+  ];
+  const hits = [];
+  for (const relativePath of files) {
+    const source = await readFile(new URL(relativePath, import.meta.url), "utf8");
+    hits.push(...findSynchronousTdzReferences(relativePath, source));
+  }
+  assert.deepEqual(hits, []);
+});

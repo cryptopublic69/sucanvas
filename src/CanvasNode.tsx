@@ -5021,9 +5021,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ? videoExecutionChannelFromContent(record.content)
     : "local";
   const isColabChannel = videoChannel === "colab";
+  const videoGenerationMode = videoGenerationModeFromContent(record.content);
   const effectiveVideoGenerationMode: VideoGenerationMode = isColabChannel
     ? "reference-to-video"
-    : videoGenerationModeFromContent(record.content);
+    : videoGenerationMode;
   const referenceInputLimits = isColabChannel
     ? { images: 9, audios: 3 }
     : referenceLimits(
@@ -5063,7 +5064,6 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const nodeDiffusionModelOverride = typeof record.content.generationDiffusionModelOverride === "string"
     ? record.content.generationDiffusionModelOverride
     : "";
-  const videoGenerationMode = videoGenerationModeFromContent(record.content);
   const activeColabProfile: ColabProfileId | null = isColabChannel
     ? (colab?.profileStatus?.effectiveProfile ?? null)
     : null;
