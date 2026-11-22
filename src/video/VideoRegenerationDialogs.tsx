@@ -1,6 +1,6 @@
 import type { VideoRegenerationPresetCollection } from "./videoRegenerationPresets";
 import { orderedVideoRegenerationPresets } from "./videoRegenerationPresets";
-import { COLAB_PROFILE_LABELS } from "../colab";
+import { COLAB_PROFILE_LABELS, ColabRegenerationSamplerField, type ColabNodeContext } from "../colab";
 import { useEffect, useRef, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { createPortal } from "react-dom";
@@ -21,6 +21,7 @@ type VideoRegenerationDialogsProps = {
   videoRegenerationUsesSharedPrimarySteps: boolean;
   h3LoraOptions: string[];
   h3DiffusionModelOptions: string[];
+  colab?: ColabNodeContext;
   saveVideoRegenerationSettings: (asNew?: boolean) => void;
   presetCollection: VideoRegenerationPresetCollection;
   selectedPresetId: string;
@@ -45,6 +46,7 @@ export function VideoRegenerationDialogs({
   videoRegenerationUsesSharedPrimarySteps,
   h3LoraOptions,
   h3DiffusionModelOptions,
+  colab,
   saveVideoRegenerationSettings,
   selectedVideoRegenerationPrompt,
   presetCollection,
@@ -406,6 +408,16 @@ export function VideoRegenerationDialogs({
                   }))}
                 />
               </label>}
+              <ColabRegenerationSamplerField
+                colabProfile={colabProfile}
+                colab={colab}
+                value={videoRegenerationDraft.colabSampler}
+                Select={SettingsSelect}
+                onChange={(colabSampler) => setVideoRegenerationDraft((current) => current && ({
+                  ...current,
+                  colabSampler,
+                }))}
+              />
               <label className="video-regeneration-row-start">
                 亮度
                 <ModelParameterNumberInput

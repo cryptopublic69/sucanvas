@@ -20,6 +20,7 @@ export type ColabProfileStatus = {
   workflowLabel: string;
   diffusionModelName: string;
   allowedLoras: string[];
+  samplerOptions?: string[];
   error: string | null;
 };
 
@@ -37,6 +38,7 @@ export type ColabNodeContext = {
   presetsByProfile: Record<ColabProfileId, VideoRegenerationPresetCollection>;
   loraOptions: string[];
   diffusionModelOptions: string[];
+  samplerOptions: string[];
 };
 
 export type ColabSettingsParser = (value: unknown) => VideoRegenerationSettings | null;
@@ -60,6 +62,7 @@ export type ColabChannelController = {
   loraCatalogLoaded: boolean;
   diffusionModelOptions: string[];
   diffusionModelCatalogLoaded: boolean;
+  samplerOptions: string[];
   presetsByProfile: Record<ColabProfileId, VideoRegenerationPresetCollection>;
   loadProfilePresets: (profile: ColabProfileId) => VideoRegenerationPresetCollection;
   saveProfilePresets: (

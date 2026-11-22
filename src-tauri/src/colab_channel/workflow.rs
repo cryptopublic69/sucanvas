@@ -22,6 +22,19 @@ pub const COLAB_ALLOWED_LORAS: [&str; 2] = [
     "MinimaxH3/pika_h3_flex_fl2va_comfy_bf16.safetensors",
     "MinimaxH3/MysticXXX_MMH3-V1.safetensors",
 ];
+pub const COLAB_DEFAULT_SAMPLER: &str = "euler";
+pub const COLAB_FALLBACK_SAMPLERS: &[&str] = &[
+    "euler",
+    "lcm",
+    "euler_ancestral",
+    "heun",
+    "dpmpp_2m",
+    "dpmpp_2m_sde",
+    "dpmpp_3m_sde",
+    "res_multistep",
+    "uni_pc",
+    "ddim",
+];
 pub const COLAB_FLA_V3_WORKFLOW_JSON: &str =
     include_str!("../../../workflows/MiniMax+H3+Fla全能参考V3.json");
 
@@ -65,6 +78,22 @@ pub fn is_allowed_colab_lora(name: &str) -> bool {
         && COLAB_ALLOWED_LORAS
             .iter()
             .any(|allowed| normalized.eq_ignore_ascii_case(allowed))
+}
+
+/// Validates and defaults the per-node Colab `KSamplerSelect` choice (`euler` when omitted).
+pub fn normalize_colab_sampler(value: Option<&str>) -> Result<String, String> {
+    let trimmed = value.map(str::trim).unwrap_or("");
+    if trimmed.is_empty() {
+        return Ok(COLAB_DEFAULT_SAMPLER.to_owned());
+    }
+    if trimmed.len() > 128
+        || !trimmed
+            .chars()
+            .all(|ch| !ch.is_control() && !ch.is_whitespace())
+    {
+        return Err("Colab 采样器名称无效".to_owned());
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// Locked bindings for the bundled Colab `MiniMax+H3+Fla全能参考V3.json` workflow.
@@ -127,7 +156,7 @@ pub fn colab_fla_reference_v3_bindings() -> WorkflowBindings {
         secondary_conditioning_node_id: String::new(),
         single_image_input_node_id: String::new(),
         secondary_image_input_node_id: String::new(),
-        sampler_select_node_ids: Vec::new(),
+        sampler_select_node_ids: vec!["123".to_owned()],
     }
 }
 
@@ -184,10 +213,10 @@ fn validate_colab_lora_allowlist(
     Ok(())
 }
 
-/// Validates and locks a Colab submission's workflow, base model, LoRA allowlist, and 1采-only constraints.
+/// Validates and locks a Colab submission's workflow, base model, LoRA allowlist, sampler, and 1采-only constraints.
 pub(crate) fn prepare_colab_submission_input(
     input: &mut ComfySubmitInput,
-) -> Result<(WorkflowAdapter, Value), String> {
+) -> Result<(WorkflowAdapter, Value, Option<String>), String> {
     if input.secondary_sampling_enabled
         || input.secondary_source.is_some()
         || input
@@ -200,6 +229,7 @@ pub(crate) fn prepare_colab_submission_input(
     let spec = colab_profile_spec(&input.colab_profile).ok_or_else(|| {
         "未识别有效的 Colab 档位（请检查自动识别或手动选择 DaSiWa V5xs / Cobijada）".to_owned()
     })?;
+    let sampler_name = normalize_colab_sampler(input.colab_sampler.as_deref())?;
     let lora_name = input.lora_name.trim().to_owned();
     let lora_bypassed = lora_name.is_empty() || input.lora_bypassed;
     let style_lora_name = input.style_lora_name.as_deref().unwrap_or("").trim().to_owned();
@@ -217,7 +247,7 @@ pub(crate) fn prepare_colab_submission_input(
     input.secondary_lora_bypassed = Some(true);
     let workflow: Value = serde_json::from_str(COLAB_FLA_V3_WORKFLOW_JSON)
         .map_err(|error| format!("解析内置 Colab 工作流失败：{error}"))?;
-    Ok((colab_fla_reference_v3_adapter(), workflow))
+    Ok((colab_fla_reference_v3_adapter(), workflow, Some(sampler_name)))
 }
 
 fn bypass_workflow_node(
@@ -265,6 +295,39 @@ fn workflow_references_node(workflow_object: &serde_json::Map<String, Value>, ta
                     })
                 })
     })
+}
+
+fn prune_unreachable_nodes(
+    workflow_object: &mut serde_json::Map<String, Value>,
+    output_node_ids: &[String],
+) {
+    if output_node_ids.is_empty() {
+        return;
+    }
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = Vec::with_capacity(output_node_ids.len());
+    for root in output_node_ids {
+        if workflow_object.contains_key(root) && visited.insert(root.clone()) {
+            stack.push(root.clone());
+        }
+    }
+    while let Some(node_id) = stack.pop() {
+        let Some(inputs) = workflow_object
+            .get(&node_id)
+            .and_then(|node| node.get("inputs"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        for value in inputs.values() {
+            if let Some(src_id) = value.as_array().and_then(|link| link.first()).and_then(Value::as_str) {
+                if workflow_object.contains_key(src_id) && visited.insert(src_id.to_owned()) {
+                    stack.push(src_id.to_owned());
+                }
+            }
+        }
+    }
+    workflow_object.retain(|id, _| visited.contains(id));
 }
 
 pub(crate) fn adapt_workflow_for_colab_ss(
@@ -358,6 +421,7 @@ pub(crate) fn adapt_workflow_for_colab_ss(
             .map(|(id, _)| id.clone())
             .collect();
         if !linked_save_ids.is_empty() {
+            prune_unreachable_nodes(workflow_object, &linked_save_ids);
             return Ok(linked_save_ids);
         }
         let any_save_ids: Vec<String> = workflow_object
@@ -365,6 +429,7 @@ pub(crate) fn adapt_workflow_for_colab_ss(
             .filter(|(_, node)| node.get("class_type").and_then(Value::as_str) == Some("SaveImage"))
             .map(|(id, _)| id.clone())
             .collect();
+        prune_unreachable_nodes(workflow_object, &any_save_ids);
         return Ok(any_save_ids);
     }
 
@@ -456,6 +521,7 @@ pub(crate) fn adapt_workflow_for_colab_ss(
             workflow_object.remove(&create_id);
         }
     }
+    prune_unreachable_nodes(workflow_object, &ss_save_node_ids);
 
     Ok(ss_save_node_ids)
 }
@@ -646,5 +712,83 @@ mod tests {
         assert_eq!(workflow["9607"]["inputs"]["audio"], json!("aud2.mp3"));
         assert!(workflow.get("sucanvas_ss_encode_9001").is_some());
         assert_eq!(workflow["9001"]["class_type"], "SaveImage");
+
+        for dead_id in ["345", "358", "387", "397", "401", "403"] {
+            assert!(
+                workflow.get(dead_id).is_none(),
+                "expected dead secondary-pass node {dead_id} to be pruned"
+            );
+        }
+        for live_id in [
+            "123",
+            "125",
+            "127",
+            "141",
+            "147",
+            "209",
+            "9200",
+            "9606",
+            "sucanvas_ss_encode_9001",
+            "9001",
+        ] {
+            assert!(
+                workflow.get(live_id).is_some(),
+                "expected live primary node {live_id} to be kept"
+            );
+        }
+    }
+
+    #[test]
+    fn colab_sampler_defaults_to_euler_validates_and_patches_node_123() {
+        let make_input = |sampler: Value| -> ComfySubmitInput {
+            serde_json::from_value(json!({
+                "serverUrl": "https://canvas.example/api/comfy-colab",
+                "workflowPath": "",
+                "clientId": "test-client",
+                "prompt": "test prompt",
+                "seedMode": "fixed",
+                "seed": "42",
+                "durationSeconds": 10.0,
+                "primaryResolutionMegapixels": 0.8,
+                "secondaryResolutionMegapixels": 0.5,
+                "secondarySamplingEnabled": false,
+                "loraName": COLAB_ALLOWED_LORAS[0],
+                "colabMode": true,
+                "colabProfile": "dasiwa",
+                "colabSampler": sampler,
+            }))
+            .unwrap()
+        };
+
+        let mut default_input = make_input(Value::Null);
+        let (adapter, mut default_wf, default_sampler) =
+            prepare_colab_submission_input(&mut default_input).unwrap();
+        assert_eq!(default_sampler.as_deref(), Some("euler"));
+        assert_eq!(adapter.bindings.sampler_select_node_ids, vec!["123".to_owned()]);
+        crate::commands::configure_h3_sampler(
+            &mut default_wf,
+            default_sampler.as_deref(),
+            &adapter.bindings,
+        )
+        .unwrap();
+        assert_eq!(default_wf["123"]["inputs"]["sampler_name"], json!("euler"));
+
+        let mut lcm_input = make_input(json!("lcm"));
+        let (lcm_adapter, mut lcm_wf, lcm_sampler) =
+            prepare_colab_submission_input(&mut lcm_input).unwrap();
+        assert_eq!(lcm_sampler.as_deref(), Some("lcm"));
+        crate::commands::configure_h3_sampler(
+            &mut lcm_wf,
+            lcm_sampler.as_deref(),
+            &lcm_adapter.bindings,
+        )
+        .unwrap();
+        assert_eq!(lcm_wf["123"]["inputs"]["sampler_name"], json!("lcm"));
+
+        let mut invalid_space = make_input(json!("euler bad"));
+        assert!(prepare_colab_submission_input(&mut invalid_space).is_err());
+
+        let mut invalid_long = make_input(json!("a".repeat(129)));
+        assert!(prepare_colab_submission_input(&mut invalid_long).is_err());
     }
 }

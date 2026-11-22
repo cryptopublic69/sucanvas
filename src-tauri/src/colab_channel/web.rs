@@ -1,6 +1,6 @@
 use super::workflow::{
     colab_profile_for_model, colab_profile_spec, ColabProfileSpec, COLAB_ALLOWED_LORAS,
-    COLAB_WORKFLOW_LABEL,
+    COLAB_FALLBACK_SAMPLERS, COLAB_WORKFLOW_LABEL,
 };
 use super::COLAB_OUTPUTS_DIR;
 use crate::{
@@ -135,7 +135,7 @@ pub(crate) async fn prepare_rpc_args(
     args: &mut Value,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     if command == "submit_comfyui_workflow" {
-        let profile = inspect_colab_profile(state).await;
+        let profile = inspect_colab_profile(state, false).await;
         if !profile.reachable {
             let message = profile
                 .error
@@ -208,11 +208,19 @@ pub struct ColabProfileStatus {
     pub workflow_label: String,
     pub diffusion_model_name: String,
     pub allowed_loras: Vec<String>,
+    pub sampler_options: Vec<String>,
     pub error: Option<String>,
 }
 
 fn colab_allowed_loras_vec() -> Vec<String> {
     COLAB_ALLOWED_LORAS
+        .iter()
+        .map(|item| (*item).to_owned())
+        .collect()
+}
+
+fn colab_fallback_samplers_vec() -> Vec<String> {
+    COLAB_FALLBACK_SAMPLERS
         .iter()
         .map(|item| (*item).to_owned())
         .collect()
@@ -230,12 +238,18 @@ fn resolve_colab_profile_status(
     reachable: bool,
     selected_profile: &str,
     detected_spec: Option<ColabProfileSpec>,
+    live_samplers: Vec<String>,
 ) -> ColabProfileStatus {
     let manual_spec = colab_profile_spec(selected_profile);
     let selected = manual_spec
         .map(|spec| spec.id.to_owned())
         .unwrap_or_default();
     let allowed_loras = colab_allowed_loras_vec();
+    let sampler_options = if live_samplers.is_empty() {
+        colab_fallback_samplers_vec()
+    } else {
+        live_samplers
+    };
 
     if !configured {
         return ColabProfileStatus {
@@ -250,6 +264,7 @@ fn resolve_colab_profile_status(
             workflow_label: COLAB_WORKFLOW_LABEL.to_owned(),
             diffusion_model_name: String::new(),
             allowed_loras,
+            sampler_options,
             error: Some("管理员尚未配置 Colab ComfyUI 服务地址".to_owned()),
         };
     }
@@ -277,6 +292,7 @@ fn resolve_colab_profile_status(
             workflow_label: colab_workflow_label_for_spec(fallback_spec),
             diffusion_model_name,
             allowed_loras,
+            sampler_options,
             error: Some("Colab 实例当前未运行或无法连接".to_owned()),
         };
     }
@@ -294,6 +310,7 @@ fn resolve_colab_profile_status(
             workflow_label: colab_workflow_label_for_spec(Some(spec)),
             diffusion_model_name: spec.diffusion_model_name.to_owned(),
             allowed_loras,
+            sampler_options,
             error: None,
         };
     }
@@ -311,6 +328,7 @@ fn resolve_colab_profile_status(
             workflow_label: colab_workflow_label_for_spec(Some(spec)),
             diffusion_model_name: spec.diffusion_model_name.to_owned(),
             allowed_loras,
+            sampler_options,
             error: Some("当前 Colab 未提供自动识别文件，已使用手动档位".to_owned()),
         };
     }
@@ -327,6 +345,7 @@ fn resolve_colab_profile_status(
         workflow_label: COLAB_WORKFLOW_LABEL.to_owned(),
         diffusion_model_name: String::new(),
         allowed_loras,
+        sampler_options,
         error: Some(
             "已连接 Colab，但未能识别档位（请管理员在基础设置中手动选择 DaSiWa V5xs 或 Cobijada）"
                 .to_owned(),
@@ -346,10 +365,27 @@ fn parse_profile_marker(value: &Value) -> Option<ColabProfileSpec> {
         })
 }
 
-async fn probe_live_colab(base_url: &str) -> (bool, Option<ColabProfileSpec>) {
+async fn fetch_colab_sampler_options(client: &reqwest::Client, base_url: &str) -> Vec<String> {
+    let info_url = format!("{base_url}/object_info/KSamplerSelect");
+    let Ok(resp) = client.get(&info_url).send().await else {
+        return Vec::new();
+    };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(info) = resp.json::<Value>().await else {
+        return Vec::new();
+    };
+    crate::workflow_v2::submit::combo_choices(&info, "KSamplerSelect", "sampler_name")
+}
+
+async fn probe_live_colab(
+    base_url: &str,
+    include_samplers: bool,
+) -> (bool, Option<ColabProfileSpec>, Vec<String>) {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
-        return (false, None);
+        return (false, None, Vec::new());
     }
     let Ok(client) = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(3))
@@ -357,7 +393,7 @@ async fn probe_live_colab(base_url: &str) -> (bool, Option<ColabProfileSpec>) {
         .redirect(reqwest::redirect::Policy::none())
         .build()
     else {
-        return (false, None);
+        return (false, None, Vec::new());
     };
 
     let marker_url = format!("{base}/api/userdata/sucanvas_colab_profile.json");
@@ -388,22 +424,40 @@ async fn probe_live_colab(base_url: &str) -> (bool, Option<ColabProfileSpec>) {
         _ => {}
     }
 
-    (reachable, detected)
+    let sampler_options = if reachable && include_samplers {
+        fetch_colab_sampler_options(&client, base).await
+    } else {
+        Vec::new()
+    };
+
+    (reachable, detected, sampler_options)
 }
 
 /// Probes the configured Colab ComfyUI instance for live reachability and active model profile.
-pub async fn inspect_colab_profile(state: &WebState) -> ColabProfileStatus {
+pub async fn inspect_colab_profile(state: &WebState, include_samplers: bool) -> ColabProfileStatus {
     let url = state.config.colab_comfy_url.trim();
     if url.is_empty() {
-        return resolve_colab_profile_status(false, false, &state.config.colab_profile, None);
+        return resolve_colab_profile_status(
+            false,
+            false,
+            &state.config.colab_profile,
+            None,
+            Vec::new(),
+        );
     }
-    let (reachable, detected) = probe_live_colab(url).await;
-    resolve_colab_profile_status(true, reachable, &state.config.colab_profile, detected)
+    let (reachable, detected, sampler_options) = probe_live_colab(url, include_samplers).await;
+    resolve_colab_profile_status(
+        true,
+        reachable,
+        &state.config.colab_profile,
+        detected,
+        sampler_options,
+    )
 }
 
 async fn read_profile(State(state): State<WebState>) -> Json<ColabProfileStatus> {
     let state = state.connection_snapshot();
-    Json(inspect_colab_profile(&state).await)
+    Json(inspect_colab_profile(&state, true).await)
 }
 
 const WATERMARK_SKIP_W_RATIO: f64 = 0.40;
@@ -1091,28 +1145,38 @@ mod tests {
         let dasiwa = colab_profile_spec("dasiwa").unwrap();
         let cobijada = colab_profile_spec("cobijada").unwrap();
 
-        let unconfigured = resolve_colab_profile_status(false, false, "dasiwa", None);
+        let unconfigured = resolve_colab_profile_status(false, false, "dasiwa", None, Vec::new());
         assert!(!unconfigured.configured);
         assert!(!unconfigured.available);
+        assert!(unconfigured.sampler_options.contains(&"euler".to_owned()));
+        assert!(unconfigured.sampler_options.contains(&"lcm".to_owned()));
 
-        let offline = resolve_colab_profile_status(true, false, "dasiwa", Some(dasiwa));
+        let offline = resolve_colab_profile_status(true, false, "dasiwa", Some(dasiwa), Vec::new());
         assert!(offline.configured);
         assert!(!offline.reachable);
         assert!(!offline.available);
 
-        let detected = resolve_colab_profile_status(true, true, "cobijada", Some(dasiwa));
+        let live_samplers = vec!["euler".to_owned(), "lcm".to_owned(), "dpmpp_2m".to_owned()];
+        let detected = resolve_colab_profile_status(
+            true,
+            true,
+            "cobijada",
+            Some(dasiwa),
+            live_samplers.clone(),
+        );
         assert!(detected.available);
         assert_eq!(detected.source, "detected");
         assert_eq!(detected.effective_profile.as_deref(), Some("dasiwa"));
         assert_eq!(detected.diffusion_model_name, dasiwa.diffusion_model_name);
+        assert_eq!(detected.sampler_options, live_samplers);
 
-        let manual = resolve_colab_profile_status(true, true, "cobijada", None);
+        let manual = resolve_colab_profile_status(true, true, "cobijada", None, Vec::new());
         assert!(manual.available);
         assert_eq!(manual.source, "manual");
         assert_eq!(manual.effective_profile.as_deref(), Some("cobijada"));
         assert_eq!(manual.diffusion_model_name, cobijada.diffusion_model_name);
 
-        let unresolved = resolve_colab_profile_status(true, true, "", None);
+        let unresolved = resolve_colab_profile_status(true, true, "", None, Vec::new());
         assert!(unresolved.reachable);
         assert!(!unresolved.available);
         assert!(unresolved.effective_profile.is_none());

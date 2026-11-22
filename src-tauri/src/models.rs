@@ -762,6 +762,9 @@ pub struct ComfySubmitInput {
     #[cfg_attr(not(feature = "colab-channel"), allow(dead_code))]
     pub colab_profile: String,
     #[serde(default)]
+    #[cfg_attr(not(feature = "colab-channel"), allow(dead_code))]
+    pub colab_sampler: Option<String>,
+    #[serde(default)]
     pub ss_password: String,
     #[serde(default)]
     pub ss_compress: Option<u8>,

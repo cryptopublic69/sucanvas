@@ -2142,7 +2142,7 @@ fn configure_h3_steps(
 /// CANVAS-039: the scheme's sampler (manifest `defaults.samplerName`) into every node its
 /// package declares; one sampler serves both passes. Not set, or a package without sampler
 /// nodes: the workflow keeps its own value.
-fn configure_h3_sampler(
+pub(crate) fn configure_h3_sampler(
     workflow: &mut Value,
     sampler_name: Option<&str>,
     bindings: &WorkflowBindings,
@@ -4160,9 +4160,9 @@ async fn submit_comfyui_workflow_inner(
         return Err("提示词不能为空".to_owned());
     }
     let (workflow_path, adapter, sampler_name, mut preloaded_colab_workflow) = if input.colab_mode {
-        let (adapter, workflow) =
+        let (adapter, workflow, sampler_name) =
             crate::colab_channel::workflow::prepare_colab_submission_input(&mut input)?;
-        (String::new(), adapter, None, Some(workflow))
+        (String::new(), adapter, sampler_name, Some(workflow))
     } else if let Some(module_id) = input.workflow_module_id.as_deref() {
         let module = workflow_modules::get(workflow_modules_dir, module_id)?;
         (

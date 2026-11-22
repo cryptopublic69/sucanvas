@@ -4,6 +4,7 @@ import type { VideoRegenerationPresetCollection } from "../video/videoRegenerati
 import { colabProxyServerUrl, readColabProfile } from "./api";
 import {
   COLAB_ALLOWED_LORAS,
+  COLAB_FALLBACK_SAMPLERS,
   emptyColabVideoPresetsByProfile,
   loadColabVideoPresets,
   saveColabVideoPresets,
@@ -34,6 +35,7 @@ export const DISABLED_COLAB_NODE_CONTEXT: ColabNodeContext = {
   presetsByProfile: DISABLED_PRESETS_BY_PROFILE,
   loraOptions: [],
   diffusionModelOptions: [],
+  samplerOptions: [],
 };
 
 function sameAssetList(a: string[], b: string[]): boolean {
@@ -73,6 +75,9 @@ export function useColabChannelState({
   const [loraCatalogLoaded, setLoraCatalogLoaded] = useState(false);
   const [diffusionModelOptions, setDiffusionModelOptions] = useState<string[]>([]);
   const [diffusionModelCatalogLoaded, setDiffusionModelCatalogLoaded] = useState(false);
+  const [samplerOptions, setSamplerOptions] = useState<string[]>(() => (
+    active ? [...COLAB_FALLBACK_SAMPLERS] : []
+  ));
   const [presetsByProfile, setPresetsByProfile] = useState<
     Record<ColabProfileId, VideoRegenerationPresetCollection>
   >(() => (
@@ -90,6 +95,7 @@ export function useColabChannelState({
       setLoraCatalogLoaded(false);
       setDiffusionModelOptions([]);
       setDiffusionModelCatalogLoaded(false);
+      setSamplerOptions(active ? [...COLAB_FALLBACK_SAMPLERS] : []);
       return;
     }
     setProfileLoading(true);
@@ -108,6 +114,14 @@ export function useColabChannelState({
         sameAssetList(current, lockedModels) ? current : lockedModels
       ));
       setDiffusionModelCatalogLoaded(Boolean(status.available && status.diffusionModelName));
+      const nextSamplers = status.samplerOptions?.length
+        ? status.samplerOptions
+        : [...COLAB_FALLBACK_SAMPLERS];
+      setSamplerOptions((current) => (
+        current.length === nextSamplers.length && current.every((item, i) => item === nextSamplers[i])
+          ? current
+          : nextSamplers
+      ));
     } catch {
       setProfileStatus((current) => (
         current ? { ...current, reachable: false, available: false } : null
@@ -125,6 +139,7 @@ export function useColabChannelState({
       setLoraCatalogLoaded(false);
       setDiffusionModelOptions([]);
       setDiffusionModelCatalogLoaded(false);
+      setSamplerOptions(active ? [...COLAB_FALLBACK_SAMPLERS] : []);
       return;
     }
     void refreshProfile();
@@ -216,9 +231,10 @@ export function useColabChannelState({
         presetsByProfile,
         loraOptions,
         diffusionModelOptions,
+        samplerOptions,
       }
       : DISABLED_COLAB_NODE_CONTEXT
-  ), [active, available, configured, diffusionModelOptions, loraOptions, presetsByProfile, profileStatus]);
+  ), [active, available, configured, diffusionModelOptions, loraOptions, presetsByProfile, profileStatus, samplerOptions]);
 
   return {
     enabled: active,
@@ -239,6 +255,7 @@ export function useColabChannelState({
     loraCatalogLoaded: active && loraCatalogLoaded,
     diffusionModelOptions: active ? diffusionModelOptions : [],
     diffusionModelCatalogLoaded: active && diffusionModelCatalogLoaded,
+    samplerOptions: active ? samplerOptions : [],
     presetsByProfile,
     loadProfilePresets,
     saveProfilePresets,

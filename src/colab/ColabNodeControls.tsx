@@ -1,10 +1,25 @@
+import type { ReactElement } from "react";
 import type { H3StyleLora } from "../styleLoras";
 import {
   COLAB_WORKFLOW_DEFAULT_LABEL,
+  COLAB_WORKFLOW_MODULE_ID,
   colabPresetNodePatch,
+  colabSamplerFromValue,
+  colabSamplerSelectOptions,
   colabWorkflowDefaultSettings,
 } from "./presets";
 import type { ColabNodeContext, ColabProfileId } from "./types";
+
+export type ColabSelectProps = {
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+  ariaLabel: string;
+  title?: string;
+};
+
+export type ColabSelectComponent = (props: ColabSelectProps) => ReactElement;
 
 export function ColabChannelToggle({
   colab,
@@ -85,6 +100,81 @@ export function ColabLockedModelField({ colab }: { colab?: ColabNodeContext }) {
   );
 }
 
+export function ColabSamplerRow({
+  colab,
+  value,
+  onChange,
+  Select,
+}: {
+  colab?: ColabNodeContext;
+  value: string;
+  onChange: (nextValue: string) => void;
+  Select: ColabSelectComponent;
+}) {
+  const normalized = colabSamplerFromValue(value);
+  return (
+    <div
+      className="colab-sampler-row"
+      role="group"
+      aria-label="Colab 采样器"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <span>采样器</span>
+      <Select
+        value={normalized}
+        options={colabSamplerSelectOptions(colab?.samplerOptions, normalized)}
+        ariaLabel="Colab 采样器"
+        title="Colab 1采工作流采样器（默认 euler，可随 Colab 专属预设保存）"
+        onChange={onChange}
+      />
+    </div>
+  );
+}
+
+export function ColabRegenerationSamplerField({
+  colabProfile,
+  colab,
+  value,
+  onChange,
+  Select,
+}: {
+  colabProfile?: ColabProfileId;
+  colab?: ColabNodeContext;
+  value?: string;
+  onChange: (nextValue: string) => void;
+  Select: ColabSelectComponent;
+}) {
+  if (!colabProfile) return null;
+  const normalized = colabSamplerFromValue(value);
+  return (
+    <label className="colab-regeneration-sampler-field">
+      采样器
+      <Select
+        value={normalized}
+        options={colabSamplerSelectOptions(colab?.samplerOptions, normalized)}
+        ariaLabel="Colab 预设采样器"
+        onChange={onChange}
+      />
+    </label>
+  );
+}
+
+export function ColabSnapshotMetaItem({
+  snapshot,
+}: {
+  snapshot?: { channel?: unknown; workflowModuleId?: unknown; colabSampler?: unknown } | null;
+}) {
+  if (!snapshot || (snapshot.channel !== "colab" && snapshot.workflowModuleId !== COLAB_WORKFLOW_MODULE_ID)) {
+    return null;
+  }
+  return (
+    <div>
+      <span>采样器</span>
+      <strong>{colabSamplerFromValue(snapshot.colabSampler)}</strong>
+    </div>
+  );
+}
+
 /** Kept unconditional so existing Colab-generated video cards keep their badge even if disabled. */
 export function ColabVideoChannelBadge({ comfyChannel }: { comfyChannel: unknown }) {
   if (comfyChannel !== "colab") return null;
@@ -157,5 +247,6 @@ export function buildLocalChannelRestorePatch(
     validationMessage: "",
   };
   delete nextContent.localChannelBackup;
+  delete nextContent.generationColabSampler;
   return nextContent;
 }

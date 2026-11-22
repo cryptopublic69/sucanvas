@@ -19,10 +19,16 @@ const {
 } = await loadTsModule("../src/video/videoRegenerationPresets.ts");
 const {
   COLAB_ALLOWED_LORAS,
+  COLAB_DEFAULT_SAMPLER,
+  COLAB_FALLBACK_SAMPLERS,
   COLAB_PROFILE_MODELS,
   colabGeneratedVideoWorkflowLabel,
   colabPresetNodePatch,
   colabPresetStorageKey,
+  colabSamplerFromContent,
+  colabSamplerFromValue,
+  colabSamplerSelectOptions,
+  colabSubmitInputExtras,
   colabWorkflowDefaultSettings,
   isAllowedColabLoraName,
   loadColabVideoPresets,
@@ -353,4 +359,73 @@ test("canvas and colab modules have no synchronous const/let TDZ references", as
     hits.push(...findSynchronousTdzReferences(relativePath, source));
   }
   assert.deepEqual(hits, []);
+});
+
+test("colab sampler defaults to euler, persists per profile, backfills legacy presets, and builds submit extras", () => {
+  assert.equal(COLAB_DEFAULT_SAMPLER, "euler");
+  assert.equal(colabSamplerFromValue(undefined), "euler");
+  assert.equal(colabSamplerFromValue("  "), "euler");
+  assert.equal(colabSamplerFromValue(" lcm "), "lcm");
+  assert.equal(colabSamplerFromContent({}), "euler");
+  assert.equal(colabSamplerFromContent({ generationColabSampler: "dpmpp_2m" }), "dpmpp_2m");
+
+  const defaultSettings = colabWorkflowDefaultSettings("dasiwa");
+  assert.equal(defaultSettings.colabSampler, "euler");
+
+  const storage = createMemoryStorage();
+  saveColabVideoPresets(storage, "dasiwa", {
+    defaultPresetId: "p-lcm",
+    presets: [
+      {
+        id: "p-lcm",
+        name: "DaSiWa LCM",
+        settings: { ...colabWorkflowDefaultSettings("dasiwa"), colabSampler: "lcm" },
+      },
+    ],
+  });
+  // Legacy preset stored before colabSampler existed backfills to euler without touching other fields.
+  storage.setItem(colabPresetStorageKey("cobijada"), JSON.stringify({
+    defaultPresetId: "legacy-cbj",
+    presets: [
+      {
+        id: "legacy-cbj",
+        name: "Old Cobijada",
+        settings: {
+          primaryResolutionMegapixels: 0.8,
+          primaryUpscaleFactor: 1.0,
+          primaryVideoSteps: 5,
+          primaryAudioSteps: 5,
+          loraName: COLAB_ALLOWED_LORAS[0],
+          loraStrength: 0.6,
+          loraBypassed: false,
+          primaryBrightness: 1,
+          primaryContrast: 0.8,
+          primarySaturation: 1,
+          styleLoras: [],
+          diffusionModelName: COLAB_PROFILE_MODELS.cobijada,
+        },
+      },
+    ],
+  }));
+
+  const loadedDasiwa = loadColabVideoPresets(storage, "dasiwa", parseSettings);
+  assert.equal(loadedDasiwa.presets[0].settings.colabSampler, "lcm");
+  const loadedCobijada = loadColabVideoPresets(storage, "cobijada", parseSettings);
+  assert.equal(loadedCobijada.presets[0].settings.colabSampler, "euler");
+
+  const patch = colabPresetNodePatch({ ...colabWorkflowDefaultSettings("dasiwa"), colabSampler: "res_multistep" });
+  assert.equal(patch.generationColabSampler, "res_multistep");
+
+  assert.deepEqual(colabSubmitInputExtras("local", { colabSampler: "lcm" }), {});
+  assert.deepEqual(colabSubmitInputExtras("colab", {}), { colabSampler: "euler" });
+  assert.deepEqual(colabSubmitInputExtras("colab", { colabSampler: "lcm" }), { colabSampler: "lcm" });
+
+  const fallbackOpts = colabSamplerSelectOptions([], "custom_sampler");
+  assert.equal(fallbackOpts[0].value, "euler");
+  assert.equal(fallbackOpts[0].label, "euler（默认）");
+  assert.ok(fallbackOpts.some((opt) => opt.value === COLAB_FALLBACK_SAMPLERS[1]));
+  assert.ok(fallbackOpts.some((opt) => opt.value === "custom_sampler"));
+
+  const liveOpts = colabSamplerSelectOptions(["lcm", "euler", "uni_pc"], "euler");
+  assert.deepEqual(liveOpts.map((opt) => opt.value), ["euler", "lcm", "uni_pc"]);
 });

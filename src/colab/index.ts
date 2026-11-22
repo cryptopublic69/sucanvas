@@ -32,6 +32,9 @@ export {
   ColabChannelToggle,
   ColabLockedModelField,
   ColabLockedWorkflowField,
+  ColabRegenerationSamplerField,
+  ColabSamplerRow,
+  ColabSnapshotMetaItem,
   ColabVideoChannelBadge,
   buildColabChannelSwitchPatch,
   buildLocalChannelRestorePatch,
@@ -39,6 +42,8 @@ export {
 export { ColabSettingsSection } from "./ColabSettingsSection";
 export {
   COLAB_ALLOWED_LORAS,
+  COLAB_DEFAULT_SAMPLER,
+  COLAB_FALLBACK_SAMPLERS,
   COLAB_LIVE_PREVIEW_NODE_ID,
   COLAB_PROFILE_LABELS,
   COLAB_PROFILE_MODELS,
@@ -47,6 +52,10 @@ export {
   colabGeneratedVideoWorkflowLabel,
   colabPresetNodePatch,
   colabPresetStorageKey,
+  colabSamplerFromContent,
+  colabSamplerFromValue,
+  colabSamplerSelectOptions,
+  colabSubmitInputExtras,
   colabWorkflowDefaultSettings,
   emptyColabVideoPresetsByProfile,
   isAllowedColabLoraName,
@@ -54,6 +63,8 @@ export {
   normalizeVideoChannel,
   resolveColabProfileForSnapshot,
   saveColabVideoPresets,
+  withColabSamplerSetting,
+  type ColabVideoPresetSettings,
 } from "./presets";
 export type {
   ColabChannelController,

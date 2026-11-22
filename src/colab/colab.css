@@ -10,6 +10,19 @@
 .colab-profile-control-row { display: flex; align-items: center; gap: 8px; }
 .colab-profile-control-row select { flex: 1; min-width: 0; }
 .colab-profile-refresh-button { flex: 0 0 auto; height: 36px; padding: 0 12px; }
+.colab-sampler-row { display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; gap: 8px; min-width: 0; position: relative; color: #9ea5b3; font-size: calc(12px + var(--ui-font-adjust)); }
+.colab-sampler-row > span { color: #9ea5b3; white-space: nowrap; }
+.colab-sampler-row:has(.settings-custom-select-toggle[aria-expanded="true"]) { z-index: 32; }
+.canvas-node.kind-video-generation:has(.colab-sampler-row .settings-custom-select-toggle[aria-expanded="true"]),
+.kind-video-generation .video-node-body:has(.colab-sampler-row .settings-custom-select-toggle[aria-expanded="true"]) { overflow: visible; }
+.colab-sampler-row .settings-custom-select-toggle { height: 33px; gap: 4px; padding: 0 7px 0 8px; color: #d8d3ff; background: #1c1a2c; border-color: #4e477e; border-radius: 7px; font-size: calc(12.5px + var(--ui-font-adjust)); }
+.colab-sampler-row .settings-custom-select-toggle:hover,
+.colab-sampler-row .settings-custom-select-toggle[aria-expanded="true"] { background: #292541; border-color: #655c9e; box-shadow: none; }
+.colab-sampler-row .settings-custom-select-menu { width: 100%; }
+.colab-sampler-row .settings-custom-select-menu > button { font-size: calc(12.5px + var(--ui-font-adjust)); }
+.colab-regeneration-sampler-field { position: relative; }
+.colab-regeneration-sampler-field .settings-custom-select { margin-top: 6px; }
+.colab-regeneration-sampler-field:has(.settings-custom-select-toggle[aria-expanded="true"]) { z-index: 35; }
 .comfy-monitor-source.is-colab { color: #d8d0ff; background: rgba(139, 124, 246, .26); }
 
 :root[data-theme="light"] .generated-video-channel-badge { color: #5447a8; background: #eae6ff; border-color: #bfb5eb; }
@@ -18,4 +31,9 @@
 :root[data-theme="light"] .video-channel-options > button.is-active { color: #433796; background: #ece8ff; border-color: #8f82dd; }
 :root[data-theme="light"] .video-locked-value { color: #4a4096; background: #f2efff; border-color: #b7aee8; }
 :root[data-theme="light"] .video-locked-value.is-offline { color: #9c2b2e; background: #fdecec; border-color: #e49c9e; }
+:root[data-theme="light"] .colab-sampler-row,
+:root[data-theme="light"] .colab-sampler-row > span { color: #5f6777; }
+:root[data-theme="light"] .colab-sampler-row .settings-custom-select-toggle,
+:root[data-theme="light"] .colab-sampler-row .settings-custom-select-toggle:hover,
+:root[data-theme="light"] .colab-sampler-row .settings-custom-select-toggle[aria-expanded="true"] { color: #42378f; background: #ece9ff; border-color: #afa6df; }
 :root[data-theme="light"] .comfy-monitor-source.is-colab { color: #4a3d9c; background: rgba(103, 91, 204, .16); }

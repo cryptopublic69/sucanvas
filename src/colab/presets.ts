@@ -12,6 +12,23 @@ type PresetStorage = Pick<Storage, "getItem" | "setItem">;
 export const COLAB_WORKFLOW_MODULE_ID = "colab:minimax-h3-fla-v3-ss";
 export const COLAB_LIVE_PREVIEW_NODE_ID = "141";
 export const COLAB_WORKFLOW_DEFAULT_LABEL = "Colab 专用 · Fla全能参考 V3.1 (1采 SS)";
+export const COLAB_DEFAULT_SAMPLER = "euler";
+export const COLAB_FALLBACK_SAMPLERS: readonly string[] = [
+  "euler",
+  "lcm",
+  "euler_ancestral",
+  "heun",
+  "dpmpp_2m",
+  "dpmpp_2m_sde",
+  "dpmpp_3m_sde",
+  "res_multistep",
+  "uni_pc",
+  "ddim",
+];
+
+export type ColabVideoPresetSettings = VideoRegenerationSettings & {
+  colabSampler?: string;
+};
 
 export const COLAB_ALLOWED_LORAS: readonly string[] = [
   "MinimaxH3/pika_h3_flex_fl2va_comfy_bf16.safetensors",
@@ -43,16 +60,69 @@ export function isAllowedColabLoraName(name: string): boolean {
   return Boolean(normalized) && COLAB_ALLOWED_LORAS.some((candidate) => candidate.toLowerCase() === normalized);
 }
 
+export function colabSamplerFromValue(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value.trim() : COLAB_DEFAULT_SAMPLER;
+}
+
+export function colabSamplerFromContent(content: Record<string, unknown>): string {
+  return colabSamplerFromValue(content.generationColabSampler);
+}
+
+export function colabSamplerSelectOptions(
+  liveOptions: readonly string[] | undefined,
+  current: string,
+): Array<{ value: string; label: string }> {
+  const source = liveOptions?.length ? liveOptions : COLAB_FALLBACK_SAMPLERS;
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  const pushUnique = (item: string) => {
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    ordered.push(trimmed);
+  };
+  pushUnique(COLAB_DEFAULT_SAMPLER);
+  for (const item of source) pushUnique(item);
+  pushUnique(current);
+  return ordered.map((item) => ({
+    value: item,
+    label: item === COLAB_DEFAULT_SAMPLER ? `${item}（默认）` : item,
+  }));
+}
+
+export function colabSubmitInputExtras(
+  channel: "local" | "colab",
+  snapshot: { colabSampler?: string },
+): Record<string, unknown> {
+  return channel === "colab"
+    ? { colabSampler: colabSamplerFromValue(snapshot.colabSampler) }
+    : {};
+}
+
+export function withColabSamplerSetting(
+  settings: VideoRegenerationSettings | null,
+  colabSampler?: unknown,
+): ColabVideoPresetSettings | null {
+  if (!settings) return null;
+  return {
+    ...settings,
+    colabSampler: colabSamplerFromValue(
+      colabSampler ?? (settings as ColabVideoPresetSettings).colabSampler,
+    ),
+  };
+}
+
 export function colabPresetStorageKey(profile: ColabProfileId): string {
   return `infinite-canvas:colab-video-presets:${profile}:v1`;
 }
 
-export function colabWorkflowDefaultSettings(profile: ColabProfileId): VideoRegenerationSettings {
+export function colabWorkflowDefaultSettings(profile: ColabProfileId): ColabVideoPresetSettings {
   return {
     primaryResolutionMegapixels: 0.8,
     primaryUpscaleFactor: 1.0,
     primaryVideoSteps: 5,
     primaryAudioSteps: 5,
+    colabSampler: COLAB_DEFAULT_SAMPLER,
     loraName: COLAB_ALLOWED_LORAS[0],
     loraStrength: 0.6,
     loraBypassed: false,
@@ -90,8 +160,8 @@ function stripTransientFields(settings: VideoRegenerationSettings): VideoRegener
 
 function sanitizeColabPresetSettings(
   profile: ColabProfileId,
-  settings: VideoRegenerationSettings,
-): VideoRegenerationSettings {
+  settings: ColabVideoPresetSettings,
+): ColabVideoPresetSettings {
   const lockedModel = COLAB_PROFILE_MODELS[profile];
   const primaryAllowed = Boolean(settings.loraName && isAllowedColabLoraName(settings.loraName));
   return {
@@ -99,6 +169,7 @@ function sanitizeColabPresetSettings(
     diffusionModelName: lockedModel,
     primaryUpscaleFactor: 1.0,
     primaryAudioSteps: settings.primaryVideoSteps,
+    colabSampler: colabSamplerFromValue(settings.colabSampler),
     loraName: primaryAllowed ? settings.loraName : COLAB_ALLOWED_LORAS[0],
     loraBypassed: primaryAllowed ? (settings.loraBypassed ?? false) : true,
     styleLoras: settings.styleLoras.map((slot) => (
@@ -144,10 +215,16 @@ export function loadColabVideoPresets(
         || presets.some((preset) => preset.id === entry.id)) continue;
       const settings = parseSettings(entry.settings);
       if (settings) {
+        const rawSampler = entry.settings && typeof entry.settings === "object"
+          ? (entry.settings as Record<string, unknown>).colabSampler
+          : undefined;
         presets.push({
           id: entry.id,
           name: entry.name.trim(),
-          settings: sanitizeColabPresetSettings(profile, settings),
+          settings: sanitizeColabPresetSettings(profile, {
+            ...settings,
+            colabSampler: colabSamplerFromValue(rawSampler),
+          }),
         });
       }
     }
@@ -170,7 +247,7 @@ export function saveColabVideoPresets(
     ...collection,
     presets: collection.presets.map((preset) => ({
       ...preset,
-      settings: sanitizeColabPresetSettings(profile, preset.settings),
+      settings: sanitizeColabPresetSettings(profile, preset.settings as ColabVideoPresetSettings),
     })),
   }));
 }
@@ -180,7 +257,7 @@ function keyForColabProfile(profile: ColabProfileId): string {
 }
 
 /** Node content patch for Colab presets without overwriting local workflow/model bindings. */
-export function colabPresetNodePatch(settings: VideoRegenerationSettings) {
+export function colabPresetNodePatch(settings: ColabVideoPresetSettings) {
   return {
     generationPrimaryResolution: settings.primaryResolutionMegapixels,
     generationLoraStrength: settings.loraStrength,
@@ -188,6 +265,7 @@ export function colabPresetNodePatch(settings: VideoRegenerationSettings) {
     ...(settings.loraBypassed !== undefined ? { generationLoraBypassed: settings.loraBypassed } : {}),
     generationPrimaryVideoSteps: settings.primaryVideoSteps,
     generationPrimaryAudioSteps: settings.primaryVideoSteps,
+    generationColabSampler: colabSamplerFromValue(settings.colabSampler),
     generationPrimaryBrightness: settings.primaryBrightness,
     generationPrimaryContrast: settings.primaryContrast,
     generationPrimarySaturation: settings.primarySaturation,

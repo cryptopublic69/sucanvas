@@ -46,7 +46,7 @@ pub mod workflow {
 
     pub(crate) fn prepare_colab_submission_input(
         _input: &mut ComfySubmitInput,
-    ) -> Result<(WorkflowAdapter, Value), String> {
+    ) -> Result<(WorkflowAdapter, Value, Option<String>), String> {
         Err("当前服务端未启用 Colab 渠道模块".into())
     }
 

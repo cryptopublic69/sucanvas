@@ -52,14 +52,19 @@ import {
   ColabChannelToggle,
   ColabLockedModelField,
   ColabLockedWorkflowField,
+  ColabSamplerRow,
+  ColabSnapshotMetaItem,
   ColabVideoChannelBadge,
   buildColabChannelSwitchPatch,
   buildLocalChannelRestorePatch,
   colabGeneratedVideoWorkflowLabel,
   colabPresetNodePatch,
+  colabSamplerFromContent,
+  colabSamplerFromValue,
   effectiveVideoChannel,
   type ColabNodeContext,
   type ColabProfileId,
+  type ColabVideoPresetSettings,
 } from "./colab";
 import { attachLivePreviewSource, comfyStatusMessage, livePreviewResources } from "./comfyLivePreview";
 import { StyleLoraInfo, LoraNameWithStrength } from "./StyleLoraInfo";
@@ -803,6 +808,7 @@ interface GenerationSnapshot {
   workflowModuleId: string;
   workflowModuleRevision: string;
   channel?: VideoExecutionChannel;
+  colabSampler?: string;
   imageRecovery?: ImageRecoverySnapshot;
 }
 
@@ -864,6 +870,7 @@ interface VideoRegenerationPromptOption {
 
 interface VideoRegenerationDraft {
   colabProfile?: ColabProfileId;
+  colabSampler?: string;
   loraName: string;
   loraBypassed: boolean;
   secondaryResolutionMegapixels: number;
@@ -3005,6 +3012,9 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
       ? snapshot.workflowModuleRevision
       : "",
     channel: snapshot.channel === "colab" ? "colab" : "local",
+    ...(typeof snapshot.colabSampler === "string" && snapshot.colabSampler.trim()
+      ? { colabSampler: snapshot.colabSampler.trim() }
+      : {}),
     ...(imageRecovery ? { imageRecovery } : {}),
     ...(videoUpscaleFromValue(snapshot.videoUpscale) ? { videoUpscale: videoUpscaleFromValue(snapshot.videoUpscale) } : {}),
   };
@@ -5284,6 +5294,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ? (colab?.profileStatus?.diffusionModelName || nodeDiffusionModelName)
     : nodeDiffusionModelName;
   const effectiveSharedPrimarySteps = isColabChannel ? true : sharedPrimarySteps;
+  const colabSampler = colabSamplerFromContent(record.content);
   const matchedVideoPreset = isVideoGeneration ? matchingVideoRegenerationPreset({
     ...activePresetCollection,
     presets: activePresetCollection.presets.map((preset) => ({
@@ -5294,12 +5305,16 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         primaryAudioSteps: effectiveSharedPrimarySteps
           ? preset.settings.primaryVideoSteps
           : preset.settings.primaryAudioSteps,
+        ...(isColabChannel
+          ? { colabSampler: colabSamplerFromValue((preset.settings as ColabVideoPresetSettings).colabSampler) }
+          : {}),
       },
     })),
   }, {
     ...currentPresetSettings,
     primaryAudioSteps: effectiveSharedPrimarySteps ? primaryVideoSteps : currentPresetSettings.primaryAudioSteps,
     diffusionModelName: presetModelName,
+    ...(isColabChannel ? { colabSampler } : {}),
   }) : undefined;
   const selectableH3Loras = activeH3LoraOptions;
   const switchVideoChannel = (nextChannel: VideoExecutionChannel) => {
@@ -8184,6 +8199,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                       <span>参数预设</span>
                       <strong>{generatedVideoSnapshot.presetName ?? "未记录"}</strong>
                     </div>
+                    <ColabSnapshotMetaItem snapshot={generatedVideoSnapshot} />
                   </section>
                   <section className="generated-video-stage-info">
                     <h4>1采</h4>
@@ -8978,6 +8994,20 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </label>
           </div>
               </div>
+              {isColabChannel && (
+                <ColabSamplerRow
+                  colab={colab}
+                  value={colabSampler}
+                  Select={SettingsSelect}
+                  onChange={(nextValue) => onChange(id, {
+                    content: {
+                      ...record.content,
+                      generationColabSampler: nextValue,
+                      ...(activeTaskCount === 0 ? { status: "idle", validationMessage: "" } : {}),
+                    },
+                  })}
+                />
+              )}
               {!isColabChannel && <div className="video-sampling-row" role="group" aria-label="2采尺寸和 LoRA">
             <label className="video-resolution-inline">
               <span>2采</span>

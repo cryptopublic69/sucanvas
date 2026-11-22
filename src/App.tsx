@@ -55,11 +55,16 @@ import {
   COLAB_WORKFLOW_MODULE_ID,
   colabPresetNodePatch,
   colabProxyServerUrl,
+  colabSamplerFromContent,
+  colabSamplerFromValue,
+  colabSubmitInputExtras,
   colabWorkflowDefaultSettings,
   isAllowedColabLoraName,
   resolveColabProfileForSnapshot,
   useColabChannel,
+  withColabSamplerSetting,
   type ColabProfileId,
+  type ColabVideoPresetSettings,
 } from "./colab";
 import { findDuplicateVideoRequest } from "./video/activeVideoSeed";
 import { VideoRegenerationDialogs } from "./video/VideoRegenerationDialogs";
@@ -3801,6 +3806,7 @@ function CanvasWorkspace() {
       workflowModuleId: isColabGenerator ? COLAB_WORKFLOW_MODULE_ID : (workflowModule?.id ?? ""),
       workflowModuleRevision: isColabGenerator ? (colab.profileStatus?.effectiveProfile ?? "") : (workflowModule?.revision ?? ""),
       channel: generatorChannel,
+      ...(isColabGenerator ? { colabSampler: colabSamplerFromContent(generator.content) } : {}),
     };
   }, [colab.profileStatus, h3ModelParameters, workflowModuleDefaults, workflowModules]);
 
@@ -4409,6 +4415,7 @@ function CanvasWorkspace() {
       snapshot = {
         ...snapshot,
         channel: "colab",
+        colabSampler: colabSamplerFromValue(snapshot.colabSampler),
         workflowModuleId: COLAB_WORKFLOW_MODULE_ID,
         workflowModuleRevision: activeColabProfile,
         diffusionModelName: lockedModelName,
@@ -4432,9 +4439,10 @@ function CanvasWorkspace() {
             ...preset.settings,
             diffusionModelName: lockedModelName,
             primaryAudioSteps: preset.settings.primaryVideoSteps,
+            colabSampler: colabSamplerFromValue((preset.settings as ColabVideoPresetSettings).colabSampler),
           },
         })),
-      }, videoRegenerationSettingsFromValue(snapshot));
+      }, withColabSamplerSetting(videoRegenerationSettingsFromValue(snapshot), snapshot.colabSampler));
       snapshot = { ...snapshot, presetName: matchedColabPreset?.name ?? "自定义参数" };
       livePreviewNodeId = COLAB_LIVE_PREVIEW_NODE_ID;
     } else {
@@ -4790,6 +4798,7 @@ function CanvasWorkspace() {
           audioPaths: snapshot.audioPaths,
           videoPaths: snapshot.videoPaths,
           secondarySource: null,
+          ...colabSubmitInputExtras(executionChannel, snapshot),
         },
       });
       if (!result.outputs.length) throw new Error("ComfyUI 没有返回视频输出");
@@ -5471,13 +5480,32 @@ function CanvasWorkspace() {
         diffusionModelName: COLAB_PROFILE_MODELS[colabProfile],
         primaryUpscaleFactor: 1,
         primaryAudioSteps: savedSettings ? savedSettings.primaryVideoSteps : snapshot.primaryVideoSteps,
+        colabSampler: colabSamplerFromValue(
+          (savedSettings as ColabVideoPresetSettings | undefined)?.colabSampler ?? snapshot.colabSampler,
+        ),
       } : {}),
       ...(savedSettings && !colabProfile && workflowUsesSharedPrimarySteps(workflowModule)
         ? { primaryAudioSteps: savedSettings.primaryVideoSteps }
         : {}),
     };
     const selectedPreset = useSnapshotSettings
-      ? matchingVideoRegenerationPreset(presetCollection, videoRegenerationSettingsFromValue(draft))
+      ? matchingVideoRegenerationPreset(
+        colabProfile
+          ? {
+            ...presetCollection,
+            presets: presetCollection.presets.map((preset) => ({
+              ...preset,
+              settings: {
+                ...preset.settings,
+                colabSampler: colabSamplerFromValue((preset.settings as ColabVideoPresetSettings).colabSampler),
+              },
+            })),
+          }
+          : presetCollection,
+        colabProfile
+          ? withColabSamplerSetting(videoRegenerationSettingsFromValue(draft), draft.colabSampler)
+          : videoRegenerationSettingsFromValue(draft),
+      )
       : defaultPreset;
     setSelectedVideoRegenerationPresetId(selectedPreset?.id ?? "");
     setVideoRegenerationPresetName(selectedPreset?.name ?? "");
@@ -5498,6 +5526,7 @@ function CanvasWorkspace() {
       ? undefined
       : workflowModules.find((entry) => entry.id === videoRegenerationDraft.originalSnapshot.workflowModuleId);
     const sharedSteps = Boolean(videoRegenerationDraft.colabProfile) || workflowUsesSharedPrimarySteps(module);
+    const colabProfile = videoRegenerationDraft.colabProfile;
     const matchedPreset = matchingVideoRegenerationPreset({
       ...activeVideoRegenerationPresets,
       presets: [selectedPreset].map((preset) => ({
@@ -5506,9 +5535,14 @@ function CanvasWorkspace() {
           ...preset.settings,
           diffusionModelName: preset.settings.diffusionModelName ?? videoRegenerationDraft.diffusionModelName,
           primaryAudioSteps: sharedSteps ? preset.settings.primaryVideoSteps : preset.settings.primaryAudioSteps,
+          ...(colabProfile
+            ? { colabSampler: colabSamplerFromValue((preset.settings as ColabVideoPresetSettings).colabSampler) }
+            : {}),
         },
       })),
-    }, videoRegenerationSettingsFromValue(videoRegenerationDraft));
+    }, colabProfile
+      ? withColabSamplerSetting(videoRegenerationSettingsFromValue(videoRegenerationDraft), videoRegenerationDraft.colabSampler)
+      : videoRegenerationSettingsFromValue(videoRegenerationDraft));
     return !matchedPreset || videoRegenerationPresetName.trim() !== selectedPreset.name;
   }, [activeVideoRegenerationPresets, videoRegenerationDraft, workflowModules, selectedVideoRegenerationPresetId, videoRegenerationPresetName]);
 
@@ -5564,6 +5598,9 @@ function CanvasWorkspace() {
         )),
         primaryAudioSteps: sharedSteps
           ? preset.settings.primaryVideoSteps : preset.settings.primaryAudioSteps,
+        ...(colabProfile
+          ? { colabSampler: colabSamplerFromValue((preset.settings as ColabVideoPresetSettings).colabSampler) }
+          : {}),
         useSnapshotSettings: false,
       };
     });
@@ -5595,12 +5632,13 @@ function CanvasWorkspace() {
       showGlobalNotice(`无法保存：预设名称“${name}”已存在，请使用其他名称`);
       return;
     }
-    const normalizedSettings: VideoRegenerationSettings = colabProfile
+    const normalizedSettings: ColabVideoPresetSettings = colabProfile
       ? {
         ...settings,
         diffusionModelName: COLAB_PROFILE_MODELS[colabProfile],
         primaryUpscaleFactor: 1,
         primaryAudioSteps: settings.primaryVideoSteps,
+        colabSampler: colabSamplerFromValue(videoRegenerationDraft.colabSampler),
         secondaryLoraBypassed: true,
         styleLoras: settings.styleLoras.map((slot) => ({ ...slot, applyToSecondary: false })),
       }
@@ -5787,6 +5825,7 @@ function CanvasWorkspace() {
       primarySaturation: Math.round(draft.primarySaturation * 100) / 100,
       refImageSize: draft.refImageSize,
       refImageSizeRecorded: true,
+      ...(isColabSubmission ? { colabSampler: colabSamplerFromValue(draft.colabSampler) } : {}),
     };
     setVideoRegenerationDraft(null);
     try {
@@ -12471,6 +12510,7 @@ function CanvasWorkspace() {
         h3LoraOptions={videoRegenerationDraft?.colabProfile
           ? (colab.loraOptions.length ? colab.loraOptions : [...COLAB_ALLOWED_LORAS])
           : h3LoraOptions}
+        colab={colab.nodeContext}
         saveVideoRegenerationSettings={saveVideoRegenerationSettings}
         presetCollection={activeVideoRegenerationPresets}
         selectedPresetId={selectedVideoRegenerationPresetId}
