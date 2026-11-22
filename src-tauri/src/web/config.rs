@@ -16,6 +16,10 @@ pub struct Config {
     pub downloads_directory: String,
     #[serde(default)]
     pub comfy_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub colab_comfy_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub colab_ss_password: String,
     #[serde(default)]
     pub comfy_input_directory: String,
     #[serde(default)]
@@ -83,6 +87,7 @@ impl Config {
             return Err("Public deployment requires an HTTPS publicUrl. Place a TLS reverse proxy in front of the server.".into());
         }
         validate_comfy_url(&config.comfy_url)?;
+        validate_comfy_url(&config.colab_comfy_url)?;
         for origin in &mut config.allowed_origins {
             let url =
                 reqwest::Url::parse(origin).map_err(|e| format!("Invalid allowedOrigins: {e}"))?;
@@ -207,5 +212,18 @@ mod tests {
             serde_json::to_value(&custom).unwrap()["trustedProxies"],
             json!([])
         );
+    }
+
+    #[test]
+    fn colab_config_fields_default_empty_and_validate_urls() {
+        let config = read_config(None).unwrap();
+        assert!(config.colab_comfy_url.is_empty());
+        assert!(config.colab_ss_password.is_empty());
+        let saved = serde_json::to_value(&config).unwrap();
+        assert!(saved.get("colabComfyUrl").is_none());
+        assert!(saved.get("colabSsPassword").is_none());
+
+        assert!(validate_comfy_url("https://demo-tunnel.trycloudflare.com").is_ok());
+        assert!(validate_comfy_url("http://user:pass@demo-tunnel.trycloudflare.com").is_err());
     }
 }

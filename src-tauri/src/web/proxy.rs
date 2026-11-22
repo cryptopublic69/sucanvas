@@ -14,23 +14,26 @@ use tokio::sync::Notify;
 
 use super::ws_handover::{log, RelayTicket};
 
-fn upstream(state: &WebState, suffix: &str) -> Result<String, StatusCode> {
-    if state.config.comfy_url.is_empty() {
+fn upstream(state: &WebState, colab: bool, suffix: &str) -> Result<String, StatusCode> {
+    let base = if colab {
+        &state.config.colab_comfy_url
+    } else {
+        &state.config.comfy_url
+    };
+    if base.is_empty() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
-    Ok(format!(
-        "{}{}",
-        state.config.comfy_url.trim_end_matches('/'),
-        suffix
-    ))
+    Ok(format!("{}{}", base.trim_end_matches('/'), suffix))
 }
-pub async fn http(State(state): State<WebState>, request: Request<Body>) -> Response {
+
+async fn http_for(
+    state: WebState,
+    request: Request<Body>,
+    prefix: &str,
+    colab: bool,
+) -> Response {
     let state = state.connection_snapshot();
-    let tail = request
-        .uri()
-        .path()
-        .strip_prefix("/api/comfy")
-        .unwrap_or("");
+    let tail = request.uri().path().strip_prefix(prefix).unwrap_or("");
     // Only read endpoints used by the canvas are available through the proxy.
     if request.method() != "GET"
         || !matches!(
@@ -72,7 +75,7 @@ pub async fn http(State(state): State<WebState>, request: Request<Body>) -> Resp
             .map(|query| format!("?{query}"))
             .unwrap_or_default()
     );
-    let url = match upstream(&state, &suffix) {
+    let url = match upstream(&state, colab, &suffix) {
         Ok(url) => url,
         Err(status) => return status.into_response(),
     };
@@ -119,6 +122,14 @@ pub async fn http(State(state): State<WebState>, request: Request<Body>) -> Resp
         }
         Err(_) => (StatusCode::BAD_GATEWAY, "无法连接服务器配置的 ComfyUI").into_response(),
     }
+}
+
+pub async fn http(State(state): State<WebState>, request: Request<Body>) -> Response {
+    http_for(state, request, "/api/comfy", false).await
+}
+
+pub async fn http_colab(State(state): State<WebState>, request: Request<Body>) -> Response {
+    http_for(state, request, "/api/comfy-colab", true).await
 }
 const UPSTREAM_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -198,15 +209,17 @@ impl Drop for PendingRelay {
     }
 }
 
-pub async fn websocket(
-    State(state): State<WebState>,
+async fn websocket_for(
+    state: WebState,
     request: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
     uri: axum::http::Uri,
+    colab: bool,
 ) -> Response {
     let state = state.connection_snapshot();
     let url = match upstream(
         &state,
+        colab,
         &format!(
             "/ws{}",
             uri.query().map(|q| format!("?{q}")).unwrap_or_default()
@@ -216,19 +229,24 @@ pub async fn websocket(
         Err(status) => return status.into_response(),
     };
     let client_id = client_id(&uri);
+    let relay_key = if colab && !client_id.is_empty() {
+        format!("colab:{client_id}")
+    } else {
+        client_id.clone()
+    };
     // Only an authenticated request may retire the relay that owns a clientId.
     if !state.auth.authenticated(&request) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     // Do not report an open browser socket until ComfyUI has accepted it.
-    let connected = if client_id.is_empty() {
+    let connected = if relay_key.is_empty() {
         connect_comfy(&url, UPSTREAM_CONNECT_TIMEOUT, &client_id)
             .await
             .map(|comfy| (comfy, None))
     } else {
         state
             .comfy_relays
-            .handover(&client_id, || {
+            .handover(&relay_key, || {
                 connect_comfy(&url, UPSTREAM_CONNECT_TIMEOUT, &client_id)
             })
             .await
@@ -254,6 +272,24 @@ pub async fn websocket(
         };
         relay(state, request, socket, comfy, client_id, ticket).await
     })
+}
+
+pub async fn websocket(
+    State(state): State<WebState>,
+    request: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+    uri: axum::http::Uri,
+) -> Response {
+    websocket_for(state, request, ws, uri, false).await
+}
+
+pub async fn websocket_colab(
+    State(state): State<WebState>,
+    request: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+    uri: axum::http::Uri,
+) -> Response {
+    websocket_for(state, request, ws, uri, true).await
 }
 
 async fn send_browser(browser: &mut WebSocket, message: Message) -> bool {

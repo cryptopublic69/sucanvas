@@ -12,6 +12,9 @@ export function resolveComfyOutputPath(root: string, content: OutputContent): st
 }
 
 export function generatedVideoDeletionPaths(root: string, content: OutputContent): string[] {
+  if (typeof content.assetPath === "string" && content.assetPath.startsWith("sucanvas://colab-outputs/")) {
+    return [content.assetPath];
+  }
   const original = resolveComfyOutputPath(root, { filename: content.filename, subfolder: content.subfolder });
   if (!original) return [];
   const paths = [original];

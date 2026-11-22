@@ -782,8 +782,11 @@ interface GenerationSnapshot {
   referenceCandidateCount?: number;
   workflowModuleId: string;
   workflowModuleRevision: string;
+  channel?: VideoExecutionChannel;
   imageRecovery?: ImageRecoverySnapshot;
 }
+
+type VideoExecutionChannel = "local" | "colab";
 
 interface ImageRecoverySnapshot {
   kind: "generation" | "upscale";
@@ -1687,6 +1690,9 @@ interface CanvasNodeData extends Record<string, unknown> {
   videoRegenerationPresets: VideoRegenerationPresetCollection;
   h3LoraOptions: string[];
   h3DiffusionModelOptions: string[];
+  colabComfyConfigured?: boolean;
+  colabH3LoraOptions?: string[];
+  colabH3DiffusionModelOptions?: string[];
   workflowPackages: Record<string, PackageDescription>;
   workflowChoices: ChoiceStore;
   workflowChoicesVersion: number;
@@ -2521,6 +2527,7 @@ function videoGenerationAutoHeight(
     Math.min(VIDEO_NODE_MAX_VISIBLE_TEXT_INPUTS, textInputCount),
   );
   const contentHeight = (detailsExpanded ? 650 + Math.max(0, styleLoraCount) * 72 : 254)
+    + (import.meta.env.MODE === "web" ? 52 : 0)
     + listMediaRows * 67
     + groupCount * 36
     + textRows * VIDEO_NODE_TEXT_ROW_HEIGHT
@@ -2838,6 +2845,7 @@ function persistedComfyTasksFromStorage(): PersistedComfyTask[] {
         ...h3ModelParametersFromContent(task.snapshot as unknown as JsonObject),
         diffusionModelName: h3DiffusionModelNameFromContent(task.snapshot as unknown as JsonObject),
         loraBypassed: h3LoraBypassedFromContent(task.snapshot as unknown as JsonObject),
+        channel: task.snapshot.channel === "colab" ? "colab" : "local",
       },
     }));
   } catch {
@@ -2977,6 +2985,7 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
     workflowModuleRevision: typeof snapshot.workflowModuleRevision === "string"
       ? snapshot.workflowModuleRevision
       : "",
+    channel: snapshot.channel === "colab" ? "colab" : "local",
     ...(imageRecovery ? { imageRecovery } : {}),
     ...(videoUpscaleFromValue(snapshot.videoUpscale) ? { videoUpscale: videoUpscaleFromValue(snapshot.videoUpscale) } : {}),
   };
@@ -3460,6 +3469,10 @@ function h3LoraPreferenceFromStorage(): H3LoraPreference {
 
 function seedModeFromContent(content: JsonObject): SeedMode {
   return content.seedMode === "fixed" ? "fixed" : "random";
+}
+
+function videoExecutionChannelFromContent(content: JsonObject): VideoExecutionChannel {
+  return content.generationChannel === "colab" ? "colab" : "local";
 }
 
 function fixedSeedFromContent(content: JsonObject): string {
@@ -4648,6 +4661,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     videoRegenerationPresets,
     h3LoraOptions,
     h3DiffusionModelOptions,
+    colabComfyConfigured = false,
+    colabH3LoraOptions = [],
+    colabH3DiffusionModelOptions = [],
     workflowPackages,
     workflowChoices,
     workflowModules,
@@ -5014,7 +5030,16 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const nodeDiffusionModelOverride = typeof record.content.generationDiffusionModelOverride === "string"
     ? record.content.generationDiffusionModelOverride
     : "";
-  const selectedDiffusionModelOption = h3DiffusionModelOptions.find(
+  const videoChannel: VideoExecutionChannel = import.meta.env.MODE === "web"
+    ? videoExecutionChannelFromContent(record.content)
+    : "local";
+  const activeH3DiffusionModelOptions = videoChannel === "colab"
+    ? colabH3DiffusionModelOptions
+    : h3DiffusionModelOptions;
+  const activeH3LoraOptions = videoChannel === "colab"
+    ? colabH3LoraOptions
+    : h3LoraOptions;
+  const selectedDiffusionModelOption = activeH3DiffusionModelOptions.find(
     (model) => sameH3DiffusionModelName(model, nodeDiffusionModelOverride),
   );
   const styleLoraSecondaryTargetLabel = Boolean(selectedNodeWorkflowModule?.adapter.bindings.livePreviewNodeId)
@@ -5184,11 +5209,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const h3LoraName = h3LoraNameFromContent(record.content);
   const h3LoraStrength = h3LoraStrengthFromContent(record.content);
   const h3LoraBypassed = h3LoraBypassedFromContent(record.content);
-  const availableH3LoraName = h3LoraOptions.find((lora) => sameH3LoraName(lora, h3LoraName));
+  const availableH3LoraName = activeH3LoraOptions.find((lora) => sameH3LoraName(lora, h3LoraName));
   const h3SecondaryLoraName = h3SecondaryLoraNameFromContent(record.content);
   const h3SecondaryLoraStrength = h3SecondaryLoraStrengthFromContent(record.content);
   const h3SecondaryLoraBypassed = h3SecondaryLoraBypassedFromContent(record.content);
-  const availableH3SecondaryLoraName = h3LoraOptions.find(
+  const availableH3SecondaryLoraName = activeH3LoraOptions.find(
     (lora) => sameH3LoraName(lora, h3SecondaryLoraName),
   );
   const styleLoras = h3StyleLorasFromContent(record.content);
@@ -5223,7 +5248,41 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       },
     })),
   }, currentPresetSettings) : undefined;
-  const selectableH3Loras = h3LoraOptions;
+  const selectableH3Loras = activeH3LoraOptions;
+  const switchVideoChannel = (nextChannel: VideoExecutionChannel) => {
+    if (nextChannel === videoChannel) return;
+    const nextDiffOptions = nextChannel === "colab" ? colabH3DiffusionModelOptions : h3DiffusionModelOptions;
+    const nextLoraOptions = nextChannel === "colab" ? colabH3LoraOptions : h3LoraOptions;
+    const patch: JsonObject = {
+      generationChannel: nextChannel,
+      status: "idle",
+      validationMessage: "",
+    };
+    if (nextDiffOptions.length) {
+      if (!nextDiffOptions.some((model) => sameH3DiffusionModelName(model, nodeDiffusionModelName))) {
+        const defaultInNext = nextDiffOptions.some((model) => sameH3DiffusionModelName(model, defaultNodeDiffusionModelName));
+        patch.generationDiffusionModelOverride = defaultInNext ? "" : nextDiffOptions[0];
+      }
+    } else if (nextChannel === "local") {
+      if (nodeDiffusionModelOverride && !h3DiffusionModelOptions.some((model) => sameH3DiffusionModelName(model, nodeDiffusionModelOverride))) {
+        patch.generationDiffusionModelOverride = "";
+      }
+    }
+    if (nextLoraOptions.length) {
+      if (!h3LoraBypassed && h3LoraName && !nextLoraOptions.some((lora) => sameH3LoraName(lora, h3LoraName))) {
+        patch.generationLoraName = nextLoraOptions[0];
+      }
+      if (!h3SecondaryLoraBypassed && h3SecondaryLoraName && !nextLoraOptions.some((lora) => sameH3LoraName(lora, h3SecondaryLoraName))) {
+        patch.generationSecondaryLoraName = nextLoraOptions[0];
+      }
+    }
+    onChange(id, {
+      content: {
+        ...record.content,
+        ...patch,
+      },
+    });
+  };
   const seedMode = seedModeFromContent(record.content);
   const fixedSeed = fixedSeedFromContent(record.content);
   const imageInputsComplete = Boolean(imageOperation?.inputs?.every((port) => {
@@ -7869,6 +7928,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         <footer className="generated-video-footer">
           <div className="generated-video-footer-status">
             <span className={`source-dot ${isSecondaryPreview ? "is-secondary" : ""}`} />
+            {record.content.comfyChannel === "colab" && (
+              <span className="generated-video-channel-badge" title="通过 Colab ComfyUI + SS_tools 执行并解码保存">
+                Colab
+              </span>
+            )}
             <span title={generatedVideoFooterStatus}>{generatedVideoFooterStatus}</span>
           </div>
           <span className="generated-video-footer-spacer" />
@@ -8561,6 +8625,33 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       )}
       {isVideoGeneration && (
         <div ref={videoNodeBodyRef} className="nodrag video-node-body has-media">
+          {import.meta.env.MODE === "web" && (
+            <div className="video-workflow-module-select video-channel-select" onPointerDown={(event) => event.stopPropagation()}>
+              <span>执行渠道</span>
+              <div className="video-channel-options" role="radiogroup" aria-label="视频执行渠道">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={videoChannel === "local"}
+                  className={videoChannel === "local" ? "is-active" : ""}
+                  onClick={() => switchVideoChannel("local")}
+                >
+                  本地
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={videoChannel === "colab"}
+                  disabled={!colabComfyConfigured}
+                  title={colabComfyConfigured ? "提交到 Colab ComfyUI 执行并使用 SS_tools 回传" : "请先在设置中配置 Colab ComfyUI 服务地址"}
+                  className={videoChannel === "colab" ? "is-active" : ""}
+                  onClick={() => switchVideoChannel("colab")}
+                >
+                  Colab
+                </button>
+              </div>
+            </div>
+          )}
           <div className="video-workflow-module-select">
             <span>生成方案</span>
             <div ref={workflowModuleControlRef} className={`video-lora-select video-workflow-module-dropdown ${workflowModuleMenuOpen ? "nowheel" : ""}`}>
@@ -8664,7 +8755,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   label: `${h3DiffusionModelDisplayName(nodeDiffusionModelOverride)}（当前目录未找到）`,
                   disabled: true,
                 }] : []),
-                ...h3DiffusionModelOptions.filter((model) => (
+                ...activeH3DiffusionModelOptions.filter((model) => (
                   !sameH3DiffusionModelName(model, defaultNodeDiffusionModelName)
                 )).map((model) => ({
                   value: model,
@@ -11158,6 +11249,7 @@ export {
   videoAspectRatioFromContent,
   videoAspectRatioValue,
   videoDurationFromContent,
+  videoExecutionChannelFromContent,
   videoGenerationAutoHeight,
   videoGenerationDefaultsByWorkflowFromStorage,
   videoGenerationDefaultsFromStorage,
@@ -11221,6 +11313,7 @@ export type {
   ImageDeletionRequest,
   ImageRecoverySnapshot,
   ImageExecutionRequest,
+  VideoExecutionChannel,
   VideoExecutionOptions,
   VideoGenerationMode,
   VideoRegenerationDraft,

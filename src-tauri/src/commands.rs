@@ -4360,7 +4360,15 @@ async fn submit_comfyui_workflow_inner(
         uploaded_audios
             .push(upload_comfy_input(&client, &server_url, path, &task.upload_subfolder).await?);
     }
-    let uploaded_secondary_source = if let Some(source) = input.secondary_source.as_ref() {
+    let uploaded_secondary_source = if let Some(path) = input
+        .secondary_source_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        ensure_comfy_task_active(&task.cancelled)?;
+        Some(upload_comfy_input(&client, &server_url, path, &task.upload_subfolder).await?)
+    } else if let Some(source) = input.secondary_source.as_ref() {
         ensure_comfy_task_active(&task.cancelled)?;
         Some(
             upload_comfy_output_as_input(
@@ -4443,6 +4451,16 @@ async fn submit_comfyui_workflow_inner(
         }
     }
 
+    let colab_ss_output_nodes = if input.colab_mode {
+        adapt_workflow_for_colab_ss(
+            &mut workflow,
+            &input.ss_password,
+            input.ss_compress.unwrap_or(2),
+        )?
+    } else {
+        Vec::new()
+    };
+
     ensure_comfy_task_active(&task.cancelled)?;
     task.submitted.store(true, Ordering::SeqCst);
     let response = client
@@ -4521,28 +4539,14 @@ async fn submit_comfyui_workflow_inner(
         if status_text != "success" {
             continue;
         }
-        let mut raw_files = Vec::new();
-        collect_video_files(entry.get("outputs").unwrap_or(&Value::Null), &mut raw_files);
-        let mut seen = HashSet::new();
-        let mut outputs = Vec::new();
-        for (filename, subfolder, file_type) in raw_files {
-            let identity = format!("{file_type}/{subfolder}/{filename}");
-            if !seen.insert(identity) {
-                continue;
-            }
-            outputs.push(ComfyOutputFile {
-                url: comfy_view_url(
-                    &server_url,
-                    &filename,
-                    &subfolder,
-                    &file_type,
-                    Some(&prompt_id),
-                )?,
-                filename,
-                subfolder,
-                file_type,
-            });
-        }
+        let outputs = collect_comfy_outputs_for_mode(
+            &server_url,
+            entry.get("outputs").unwrap_or(&Value::Null),
+            Some(&prompt_id),
+            false,
+            input.colab_mode,
+            &colab_ss_output_nodes,
+        )?;
         let cleanup_warning = cleanup_comfy_task_inputs(&task).await;
         if outputs.is_empty() {
             return Err(append_cleanup_warning(
@@ -4561,6 +4565,303 @@ async fn submit_comfyui_workflow_inner(
     }
 
     Err(format!("等待 ComfyUI 任务超时：{prompt_id}"))
+}
+
+fn bypass_workflow_node(
+    workflow_object: &mut serde_json::Map<String, Value>,
+    target_id: &str,
+    passthrough_input_key: &str,
+) {
+    let Some(upstream) = workflow_object
+        .get(target_id)
+        .and_then(|node| node.get("inputs"))
+        .and_then(|inputs| inputs.get(passthrough_input_key))
+        .cloned()
+    else {
+        return;
+    };
+    for (node_id, node) in workflow_object.iter_mut() {
+        if node_id == target_id {
+            continue;
+        }
+        let Some(inputs) = node.get_mut("inputs").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for value in inputs.values_mut() {
+            if let Some(link) = value.as_array() {
+                if link.first().and_then(Value::as_str) == Some(target_id) {
+                    *value = upstream.clone();
+                }
+            }
+        }
+    }
+    workflow_object.remove(target_id);
+}
+
+fn workflow_references_node(workflow_object: &serde_json::Map<String, Value>, target_id: &str) -> bool {
+    workflow_object.iter().any(|(node_id, node)| {
+        node_id != target_id
+            && node
+                .get("inputs")
+                .and_then(Value::as_object)
+                .is_some_and(|inputs| {
+                    inputs.values().any(|value| {
+                        value
+                            .as_array()
+                            .is_some_and(|link| link.first().and_then(Value::as_str) == Some(target_id))
+                    })
+                })
+    })
+}
+
+pub(crate) fn adapt_workflow_for_colab_ss(
+    workflow: &mut Value,
+    ss_password: &str,
+    ss_compress: u8,
+) -> Result<Vec<String>, String> {
+    let workflow_object = workflow
+        .as_object_mut()
+        .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
+
+    // Linux ComfyUI rejects Windows backslashes in model/LoRA paths.
+    for node in workflow_object.values_mut() {
+        let Some(inputs) = node.get_mut("inputs").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for (key, value) in inputs.iter_mut() {
+            if matches!(
+                key.as_str(),
+                "unet_name" | "lora_name" | "clip_name" | "vae_name" | "model_name"
+            ) {
+                if let Some(text) = value.as_str() {
+                    if text.contains('\\') {
+                        *value = Value::String(text.replace('\\', "/"));
+                    }
+                }
+            } else if let Some(entry) = value.as_object_mut() {
+                let normalized = entry
+                    .get("lora")
+                    .and_then(Value::as_str)
+                    .filter(|s| s.contains('\\'))
+                    .map(|s| s.replace('\\', "/"));
+                if let Some(normalized) = normalized {
+                    entry.insert("lora".to_owned(), Value::String(normalized));
+                }
+            }
+        }
+    }
+
+    let sage_patch_ids: Vec<String> = workflow_object
+        .iter()
+        .filter(|(_, node)| {
+            node.get("class_type").and_then(Value::as_str)
+                == Some("MiniMaxH3MemoryEfficientSageAttentionPatch")
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in sage_patch_ids {
+        bypass_workflow_node(workflow_object, &id, "model");
+    }
+
+    let upscaler_3d_ids: Vec<String> = workflow_object
+        .iter()
+        .filter(|(_, node)| {
+            matches!(
+                node.get("class_type").and_then(Value::as_str),
+                Some("MinimaxH3LatentUpscalerNode3D" | "MinimaxH3LatentUpscaler3D")
+            )
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in upscaler_3d_ids {
+        bypass_workflow_node(workflow_object, &id, "latent");
+    }
+
+    let existing_duck_ids: Vec<String> = workflow_object
+        .iter()
+        .filter(|(_, node)| node.get("class_type").and_then(Value::as_str) == Some("DuckHideNode"))
+        .map(|(id, _)| id.clone())
+        .collect();
+    if !existing_duck_ids.is_empty() {
+        for duck_id in &existing_duck_ids {
+            if let Some(inputs) = workflow_object
+                .get_mut(duck_id)
+                .and_then(|node| node.get_mut("inputs"))
+                .and_then(Value::as_object_mut)
+            {
+                inputs.insert("password".to_owned(), Value::String(ss_password.to_owned()));
+            }
+        }
+        let duck_set: HashSet<&str> = existing_duck_ids.iter().map(String::as_str).collect();
+        let linked_save_ids: Vec<String> = workflow_object
+            .iter()
+            .filter(|(_, node)| {
+                node.get("class_type").and_then(Value::as_str) == Some("SaveImage")
+                    && node
+                        .pointer("/inputs/images/0")
+                        .and_then(Value::as_str)
+                        .is_some_and(|src| duck_set.contains(src))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !linked_save_ids.is_empty() {
+            return Ok(linked_save_ids);
+        }
+        let any_save_ids: Vec<String> = workflow_object
+            .iter()
+            .filter(|(_, node)| node.get("class_type").and_then(Value::as_str) == Some("SaveImage"))
+            .map(|(id, _)| id.clone())
+            .collect();
+        return Ok(any_save_ids);
+    }
+
+    let save_video_ids: Vec<String> = workflow_object
+        .iter()
+        .filter(|(_, node)| node.get("class_type").and_then(Value::as_str) == Some("SaveVideo"))
+        .map(|(id, _)| id.clone())
+        .collect();
+    if save_video_ids.is_empty() {
+        return Err("Colab SS_tools 工作流缺少 SaveVideo 或 DuckHideNode 节点".to_owned());
+    }
+
+    let compress: u64 = match ss_compress {
+        6 => 6,
+        8 => 8,
+        _ => 2,
+    };
+    let mut ss_save_node_ids = Vec::with_capacity(save_video_ids.len());
+    let mut create_video_candidates = Vec::new();
+    for save_id in save_video_ids {
+        let Some(save_node) = workflow_object.get(&save_id).cloned() else {
+            continue;
+        };
+        let filename_prefix = save_node
+            .pointer("/inputs/filename_prefix")
+            .and_then(Value::as_str)
+            .unwrap_or("%date:yyyy-MM-dd%/Minimax_H3")
+            .to_owned();
+        let create_id = save_node
+            .pointer("/inputs/video/0")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("SaveVideo 节点 {save_id} 缺少 CreateVideo 输入"))?
+            .to_owned();
+        let create_node = workflow_object
+            .get(&create_id)
+            .ok_or_else(|| format!("工作流缺少 CreateVideo 节点 {create_id}"))?
+            .clone();
+        let images = create_node
+            .pointer("/inputs/images")
+            .cloned()
+            .ok_or_else(|| format!("CreateVideo 节点 {create_id} 缺少 images 输入"))?;
+        let audio = create_node.pointer("/inputs/audio").cloned();
+        let fps = create_node
+            .pointer("/inputs/fps")
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_f64().map(|n| n.round().clamp(1.0, 60.0) as u64))
+            })
+            .unwrap_or(24);
+
+        let duck_id = format!("sucanvas_ss_encode_{save_id}");
+        let mut duck_inputs = serde_json::Map::new();
+        duck_inputs.insert("images".to_owned(), images);
+        if let Some(audio_val) = audio.filter(|val| !val.is_null()) {
+            duck_inputs.insert("audio".to_owned(), audio_val);
+        }
+        duck_inputs.insert("password".to_owned(), Value::String(ss_password.to_owned()));
+        duck_inputs.insert("title".to_owned(), Value::String(String::new()));
+        duck_inputs.insert("fps".to_owned(), json!(fps));
+        duck_inputs.insert("compress".to_owned(), json!(compress));
+        duck_inputs.insert("combine_video".to_owned(), json!(true));
+
+        workflow_object.insert(
+            duck_id.clone(),
+            json!({
+                "inputs": Value::Object(duck_inputs),
+                "class_type": "DuckHideNode",
+                "_meta": { "title": "SS_tools Encode" }
+            }),
+        );
+        workflow_object.insert(
+            save_id.clone(),
+            json!({
+                "inputs": {
+                    "images": [duck_id, 0],
+                    "filename_prefix": format!("{filename_prefix}_SS"),
+                },
+                "class_type": "SaveImage",
+                "_meta": { "title": "Save Image (SS)" }
+            }),
+        );
+        create_video_candidates.push(create_id);
+        ss_save_node_ids.push(save_id);
+    }
+
+    for create_id in create_video_candidates {
+        if !workflow_references_node(workflow_object, &create_id) {
+            workflow_object.remove(&create_id);
+        }
+    }
+
+    Ok(ss_save_node_ids)
+}
+
+fn collect_colab_ss_carrier_files(
+    outputs: &Value,
+    preferred_node_ids: &[String],
+) -> Vec<(String, String, String)> {
+    let mut files = Vec::new();
+    if !preferred_node_ids.is_empty() {
+        for node_id in preferred_node_ids {
+            if let Some(node_output) = outputs.get(node_id) {
+                collect_image_files(node_output, &mut files);
+            }
+        }
+    }
+    if files.is_empty() {
+        collect_image_files(outputs, &mut files);
+    }
+    let has_saved = files
+        .iter()
+        .any(|(filename, _, _)| filename != "duck_payload.png");
+    if has_saved {
+        files.retain(|(filename, _, _)| filename != "duck_payload.png");
+    }
+    files
+}
+
+fn collect_comfy_outputs_for_mode(
+    server_url: &str,
+    outputs: &Value,
+    prompt_id: Option<&str>,
+    image_output: bool,
+    colab_ss_output: bool,
+    preferred_node_ids: &[String],
+) -> Result<Vec<ComfyOutputFile>, String> {
+    let mut raw_files = Vec::new();
+    if colab_ss_output {
+        raw_files = collect_colab_ss_carrier_files(outputs, preferred_node_ids);
+    } else if image_output {
+        collect_image_files(outputs, &mut raw_files);
+    } else {
+        collect_video_files(outputs, &mut raw_files);
+    }
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for (filename, subfolder, file_type) in raw_files {
+        let identity = format!("{file_type}/{subfolder}/{filename}");
+        if !seen.insert(identity) {
+            continue;
+        }
+        result.push(ComfyOutputFile {
+            url: comfy_view_url(server_url, &filename, &subfolder, &file_type, prompt_id)?,
+            filename,
+            subfolder,
+            file_type,
+        });
+    }
+    Ok(result)
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
@@ -4646,28 +4947,24 @@ pub(crate) fn comfy_outputs_from_history_entry(
     entry: &Value,
     image_output: bool,
 ) -> Result<Vec<ComfyOutputFile>, String> {
+    comfy_outputs_from_history_entry_with_mode(server_url, entry, image_output, false)
+}
+
+pub(crate) fn comfy_outputs_from_history_entry_with_mode(
+    server_url: &str,
+    entry: &Value,
+    image_output: bool,
+    colab_ss_output: bool,
+) -> Result<Vec<ComfyOutputFile>, String> {
     let prompt_id = entry.pointer("/prompt/1").and_then(Value::as_str);
-    let mut raw_files = Vec::new();
-    if image_output {
-        collect_image_files(entry.get("outputs").unwrap_or(&Value::Null), &mut raw_files);
-    } else {
-        collect_video_files(entry.get("outputs").unwrap_or(&Value::Null), &mut raw_files);
-    }
-    let mut seen = HashSet::new();
-    let mut outputs = Vec::new();
-    for (filename, subfolder, file_type) in raw_files {
-        let identity = format!("{file_type}/{subfolder}/{filename}");
-        if !seen.insert(identity) {
-            continue;
-        }
-        outputs.push(ComfyOutputFile {
-            url: comfy_view_url(server_url, &filename, &subfolder, &file_type, prompt_id)?,
-            filename,
-            subfolder,
-            file_type,
-        });
-    }
-    Ok(outputs)
+    collect_comfy_outputs_for_mode(
+        server_url,
+        entry.get("outputs").unwrap_or(&Value::Null),
+        prompt_id,
+        image_output,
+        colab_ss_output,
+        &[],
+    )
 }
 
 async fn cancel_known_comfy_prompt(
@@ -4845,6 +5142,7 @@ pub async fn get_comfyui_client_task_statuses(
     client_ids: Vec<String>,
     image_client_ids: Option<Vec<String>>,
     video_output_node_ids: Option<BTreeMap<String, String>>,
+    colab_ss_client_ids: Option<Vec<String>>,
 ) -> Result<Vec<ComfyClientTaskStatus>, String> {
     if client_ids.is_empty() {
         return Ok(Vec::new());
@@ -4906,9 +5204,14 @@ pub async fn get_comfyui_client_task_statuses(
         .unwrap_or_default()
         .into_iter()
         .collect::<HashSet<_>>();
+    let colab_ss_client_ids = colab_ss_client_ids
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
     let mut statuses = Vec::with_capacity(client_ids.len());
     for client_id in client_ids {
         let image_output = image_client_ids.contains(&client_id);
+        let colab_ss_output = !image_output && colab_ss_client_ids.contains(&client_id);
         let active = running
             .iter()
             .find(|item| comfy_client_id_from_queue_item(item) == Some(client_id.as_str()))
@@ -4961,7 +5264,12 @@ pub async fn get_comfyui_client_task_statuses(
                 status: status.to_owned(),
                 seed: comfy_seed_from_prompt(entry.get("prompt").unwrap_or(&Value::Null)),
                 outputs: if status == "success" {
-                    comfy_outputs_from_history_entry(&server_url, output_entry, image_output)?
+                    comfy_outputs_from_history_entry_with_mode(
+                        &server_url,
+                        output_entry,
+                        image_output,
+                        colab_ss_output,
+                    )?
                 } else {
                     Vec::new()
                 },
@@ -7092,5 +7400,43 @@ mod tests {
             ensure_image_upscale_module(&moss).unwrap_err(),
             "图片放大仅支持 Krea2 文生图方案"
         );
+    }
+
+    #[test]
+    fn adapt_workflow_for_colab_ss_normalizes_paths_bypasses_patches_and_wraps_save_video() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../workflows/MiniMax+H3+Fla全能参考V3.json");
+        let mut workflow: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let save_ids = super::adapt_workflow_for_colab_ss(&mut workflow, "5555", 2).unwrap();
+        assert_eq!(save_ids, vec!["221".to_owned()]);
+
+        let obj = workflow.as_object().unwrap();
+        assert!(!obj.contains_key("142"));
+        assert!(!obj.contains_key("210"));
+        assert!(!obj.contains_key("220"));
+        assert_eq!(workflow["149"]["inputs"]["model"], json!(["147", 0]));
+        assert_eq!(workflow["212"]["inputs"]["video_latent"], json!(["211", 0]));
+        assert_eq!(
+            workflow["127"]["inputs"]["unet_name"],
+            json!("MinimaxH3/minimax_h3_fl2va_int8_convrot.safetensors")
+        );
+        assert_eq!(
+            workflow["147"]["inputs"]["lora_name"],
+            json!("MinimaxH3/minimax_h3_turbo_4STEPS_comfyui.safetensors")
+        );
+        let duck = &workflow["sucanvas_ss_encode_221"];
+        assert_eq!(duck["class_type"], "DuckHideNode");
+        assert_eq!(duck["inputs"]["images"], json!(["259", 0]));
+        assert_eq!(duck["inputs"]["audio"], json!(["218", 0]));
+        assert_eq!(duck["inputs"]["password"], "5555");
+        assert_eq!(duck["inputs"]["fps"], 24);
+        assert_eq!(duck["inputs"]["compress"], 2);
+        assert_eq!(duck["inputs"]["combine_video"], true);
+
+        let save = &workflow["221"];
+        assert_eq!(save["class_type"], "SaveImage");
+        assert_eq!(save["inputs"]["images"], json!(["sucanvas_ss_encode_221", 0]));
+        assert_eq!(save["inputs"]["filename_prefix"], "%date:yyyy-MM-dd%/Minimax_H3_SS");
     }
 }

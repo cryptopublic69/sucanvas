@@ -168,6 +168,7 @@ import type {
   VideoDeletionChoice,
   VideoDeletionRequest,
   ImageExecutionRequest,
+  VideoExecutionChannel,
   VideoExecutionOptions,
   VideoGenerationMode,
   VideoRegenerationDraft,
@@ -298,6 +299,7 @@ import {
   videoAspectRatioFromContent,
   videoAspectRatioValue,
   videoDurationFromContent,
+  videoExecutionChannelFromContent,
   videoGenerationAutoHeight,
   videoGenerationDefaultsByWorkflowFromStorage,
   videoGenerationDefaultsFromStorage,
@@ -523,6 +525,12 @@ function CanvasWorkspace() {
   const [comfySettingsBusy, setComfySettingsBusy] = useState(false);
   const [comfySettingsError, setComfySettingsError] = useState("");
   const [comfyConnectionRevision, setComfyConnectionRevision] = useState(0);
+  const [colabComfyUrlDraft, setColabComfyUrlDraft] = useState("");
+  const [colabSsPasswordDraft, setColabSsPasswordDraft] = useState("");
+  const [colabComfyConfigured, setColabComfyConfigured] = useState(() => (
+    import.meta.env.MODE === "web"
+    && window.localStorage.getItem("infinite-canvas:colab-comfy-configured") === "true"
+  ));
   const [h3WorkflowPath, setH3WorkflowPath] = useState(() =>
     window.localStorage.getItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY)
     ?? DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
@@ -593,6 +601,10 @@ function CanvasWorkspace() {
   const [h3LoraPreference, setH3LoraPreference] = useState(h3LoraPreferenceFromStorage);
   const [h3DiffusionModelOptions, setH3DiffusionModelOptions] = useState<string[]>([DEFAULT_H3_DIFFUSION_MODEL_NAME]);
   const [h3DiffusionModelCatalogLoaded, setH3DiffusionModelCatalogLoaded] = useState(false);
+  const [colabH3LoraOptions, setColabH3LoraOptions] = useState<string[]>([]);
+  const [colabH3LoraCatalogLoaded, setColabH3LoraCatalogLoaded] = useState(false);
+  const [colabH3DiffusionModelOptions, setColabH3DiffusionModelOptions] = useState<string[]>([]);
+  const [colabH3DiffusionModelCatalogLoaded, setColabH3DiffusionModelCatalogLoaded] = useState(false);
   const [h3DiffusionModelName, setH3DiffusionModelName] = useState(DEFAULT_H3_DIFFUSION_MODEL_NAME);
   const [selectedImageWorkflowModuleId, setSelectedImageWorkflowModuleId] = useState("");
   const [krea2DiffusionModelName, setKrea2DiffusionModelName] = useState("");
@@ -1044,6 +1056,12 @@ function CanvasWorkspace() {
     comfyUiServerUrlRef.current = comfyUiServerUrl;
   }, [comfyUiServerUrl]);
 
+  const comfyServerUrlForChannel = useCallback((channel?: VideoExecutionChannel) => (
+    import.meta.env.MODE === "web" && channel === "colab"
+      ? `${window.location.origin}/api/comfy-colab`
+      : comfyUiServerUrlRef.current
+  ), []);
+
   useEffect(() => {
     h3WorkflowPathRef.current = h3WorkflowPath;
   }, [h3WorkflowPath]);
@@ -1195,6 +1213,63 @@ function CanvasWorkspace() {
       disposed = true;
     };
   }, [comfyUiServerUrl, defaultH3WorkflowModuleId, workflowModulesReady]);
+
+  useEffect(() => {
+    if (import.meta.env.MODE !== "web" || !colabComfyConfigured) {
+      setColabH3LoraOptions([]);
+      setColabH3LoraCatalogLoaded(false);
+      return;
+    }
+    if (!workflowModulesReady) return;
+    let disposed = false;
+    setColabH3LoraCatalogLoaded(false);
+    void invoke<string[]>("get_comfyui_h3_loras", {
+      serverUrl: `${window.location.origin}/api/comfy-colab`,
+    }).then((loras) => {
+      if (disposed) return;
+      setColabH3LoraOptions((current) => (
+        current.length === loras.length
+          && current.every((item, index) => sameH3LoraName(item, loras[index]))
+          ? current
+          : loras
+      ));
+      setColabH3LoraCatalogLoaded(true);
+    }).catch(() => {
+      if (!disposed) setColabH3LoraCatalogLoaded(false);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [colabComfyConfigured, comfyConnectionRevision, workflowModulesReady]);
+
+  useEffect(() => {
+    if (import.meta.env.MODE !== "web" || !colabComfyConfigured) {
+      setColabH3DiffusionModelOptions([]);
+      setColabH3DiffusionModelCatalogLoaded(false);
+      return;
+    }
+    if (!workflowModulesReady) return;
+    let disposed = false;
+    setColabH3DiffusionModelCatalogLoaded(false);
+    void invoke<string[]>("get_comfyui_h3_diffusion_models", {
+      serverUrl: `${window.location.origin}/api/comfy-colab`,
+      workflowModuleId: defaultH3WorkflowModuleId || undefined,
+    }).then((models) => {
+      if (disposed) return;
+      setColabH3DiffusionModelOptions((current) => (
+        current.length === models.length
+          && current.every((item, index) => sameH3DiffusionModelName(item, models[index]))
+          ? current
+          : models
+      ));
+      setColabH3DiffusionModelCatalogLoaded(true);
+    }).catch(() => {
+      if (!disposed) setColabH3DiffusionModelCatalogLoaded(false);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [colabComfyConfigured, comfyConnectionRevision, defaultH3WorkflowModuleId, workflowModulesReady]);
 
   const toggleTheme = () => setTheme((current) => current === "dark" ? "light" : "dark");
 
@@ -2166,6 +2241,9 @@ function CanvasWorkspace() {
     for (const node of nodesSnapshot.current) {
       const record = node.data.record;
       if (record.kind !== "video-generation") continue;
+      if (import.meta.env.MODE === "web" && videoExecutionChannelFromContent(record.content) === "colab") {
+        continue;
+      }
       const currentLoraName = h3LoraNameFromContent(record.content);
       const currentSecondaryLoraName = h3SecondaryLoraNameFromContent(record.content);
       const currentStyleLoraName = h3StyleLoraNameFromContent(record.content);
@@ -2776,7 +2854,9 @@ function CanvasWorkspace() {
   }, [imageDeletionRequest]);
 
   const cancelTasksForDeletedPlaceholders = useCallback(async (records: NodeRecord[]) => {
-    type PlaceholderTask = Pick<PersistedComfyTask, "clientId" | "nodeId" | "kind" | "placeholderNodeId">;
+    type PlaceholderTask = Pick<PersistedComfyTask, "clientId" | "nodeId" | "kind" | "placeholderNodeId"> & {
+      channel?: VideoExecutionChannel;
+    };
     const tasks: PlaceholderTask[] = records
       .filter((record) => record.content.generationPlaceholder === true)
       .flatMap<PlaceholderTask>((record) => {
@@ -2785,7 +2865,7 @@ function CanvasWorkspace() {
           : "";
         if (!clientId) return [];
         const persisted = persistedComfyTasks.current.find((task) => task.clientId === clientId);
-        if (persisted) return [persisted];
+        if (persisted) return [{ ...persisted, channel: persisted.snapshot.channel }];
         const sourceGeneratorId = typeof record.content.sourceGeneratorId === "string"
           ? record.content.sourceGeneratorId
           : "";
@@ -2798,6 +2878,7 @@ function CanvasWorkspace() {
           clientId,
           nodeId,
           placeholderNodeId: record.id,
+          channel: generationSnapshotFromContent(record.content)?.channel,
           kind: record.kind === "generated-image"
             ? sourcePreviewId ? "image-upscale" as const : "image-generation" as const
             : record.content.videoUpscale ? "video-upscale" as const : sourcePreviewId ? "secondary" as const : "generation" as const,
@@ -2811,7 +2892,7 @@ function CanvasWorkspace() {
       cancelledComfyClients.current.add(task.clientId);
       try {
         await invoke<string | null>("cancel_comfyui_workflow", {
-          serverUrl: comfyUiServerUrlRef.current,
+          serverUrl: comfyServerUrlForChannel(task.channel),
           clientId: task.clientId,
         });
       } catch (error) {
@@ -2860,7 +2941,7 @@ function CanvasWorkspace() {
       }
     }
     return uniqueTasks.length;
-  }, [changeNode, forgetComfyTask, unregisterComfyTask]);
+  }, [changeNode, comfyServerUrlForChannel, forgetComfyTask, unregisterComfyTask]);
 
   const deleteCanvasNodes = useCallback(
     async (nodesToDelete: CanvasFlowNode[], requestedFileDeletion = false) => {
@@ -3207,6 +3288,12 @@ function CanvasWorkspace() {
         setComfyUiServerUrlDraft(connection.comfyUrl);
         setComfyInputRootDraft(connection.comfyInputDirectory);
         setComfyOutputRootDraft(connection.comfyOutputDirectory);
+        const nextColabUrl = connection.colabComfyUrl ?? "";
+        const configured = Boolean(nextColabUrl.trim());
+        setColabComfyUrlDraft(nextColabUrl);
+        setColabSsPasswordDraft(connection.colabSsPassword ?? "");
+        setColabComfyConfigured(configured);
+        window.localStorage.setItem("infinite-canvas:colab-comfy-configured", configured ? "true" : "false");
       }).catch((error: unknown) => {
         if (!cancelled) setComfySettingsError(String(error));
       }).finally(() => { if (!cancelled) setComfySettingsBusy(false); });
@@ -3232,6 +3319,22 @@ function CanvasWorkspace() {
       showGlobalNotice("ComfyUI 服务地址无效，请填写 http:// 或 https:// 开头的完整地址");
       return;
     }
+    const colabComfyUrl = colabComfyUrlDraft
+      .trim()
+      .replace(/^"|"$/g, "")
+      .replace(/\/+$/, "");
+    const colabSsPassword = colabSsPasswordDraft.trim();
+    if (colabComfyUrl) {
+      try {
+        const parsed = new URL(colabComfyUrl);
+        if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+          throw new Error();
+        }
+      } catch {
+        showGlobalNotice("Colab ComfyUI 服务地址无效，请填写 http:// 或 https:// 开头的完整地址");
+        return;
+      }
+    }
     let outputRoot = normalizePath(comfyOutputRootDraft);
     let inputRoot = normalizePath(comfyInputRootDraft);
     let connectionUrl = serverUrl;
@@ -3244,12 +3347,20 @@ function CanvasWorkspace() {
           comfyUrl: serverUrl,
           comfyInputDirectory: comfyInputRootDraft.trim().replace(/^"|"$/g, ""),
           comfyOutputDirectory: comfyOutputRootDraft.trim().replace(/^"|"$/g, ""),
+          colabComfyUrl,
+          colabSsPassword,
         });
         outputRoot = saved.comfyOutputDirectory;
         inputRoot = saved.comfyInputDirectory;
         setComfyUiServerUrlDraft(saved.comfyUrl);
         setComfyInputRootDraft(inputRoot);
         setComfyOutputRootDraft(outputRoot);
+        const savedColabUrl = saved.colabComfyUrl ?? "";
+        const nextColabConfigured = Boolean(savedColabUrl.trim());
+        setColabComfyUrlDraft(savedColabUrl);
+        setColabSsPasswordDraft(saved.colabSsPassword ?? "");
+        setColabComfyConfigured(nextColabConfigured);
+        window.localStorage.setItem("infinite-canvas:colab-comfy-configured", nextColabConfigured ? "true" : "false");
         connectionUrl = `${window.location.origin}/api/comfy`;
         setComfyConnectionRevision((current) => current + 1);
       } catch (error) {
@@ -3278,7 +3389,7 @@ function CanvasWorkspace() {
     window.localStorage.setItem(COMFYUI_SERVER_URL_STORAGE_KEY, connectionUrl);
     window.localStorage.setItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY, workflowPath);
     showGlobalNotice("ComfyUI 设置已保存");
-  }, [comfySettingsBusy, comfyInputRootDraft, comfyOutputRootDraft, comfyUiServerUrlDraft, h3WorkflowPathDraft, showGlobalNotice]);
+  }, [colabComfyUrlDraft, colabSsPasswordDraft, comfySettingsBusy, comfyInputRootDraft, comfyOutputRootDraft, comfyUiServerUrlDraft, h3WorkflowPathDraft, showGlobalNotice]);
 
   const saveH3ModelParameters = useCallback(async () => {
     const {
@@ -3729,6 +3840,7 @@ function CanvasWorkspace() {
       } : {}),
       workflowModuleId: workflowModule?.id ?? "",
       workflowModuleRevision: workflowModule?.revision ?? "",
+      channel: import.meta.env.MODE === "web" ? videoExecutionChannelFromContent(generator.content) : "local",
     };
   }, [h3ModelParameters, workflowModuleDefaults, workflowModules]);
 
@@ -3785,10 +3897,13 @@ function CanvasWorkspace() {
       executionProgress: null,
       validationMessage: processing ? "正在准备视频超分…" : secondary
         ? `正在准备二次采样（${snapshot.secondaryResolutionMegapixels.toFixed(1)} MP）…`
-        : "正在上传素材并提交到远程 ComfyUI…",
+        : snapshot.channel === "colab"
+          ? "正在上传素材并提交到 Colab ComfyUI…"
+          : "正在上传素材并提交到远程 ComfyUI…",
       sourceGeneratorId,
       ...(secondary ? { sourcePreviewId: source.id } : {}),
       ...(seed !== undefined ? { seed } : {}),
+      ...(snapshot.channel === "colab" ? { comfyChannel: "colab" } : {}),
       generationSnapshot: snapshot,
       ...(processing ? { videoUpscale: processing } : {}),
     };
@@ -4427,12 +4542,32 @@ function CanvasWorkspace() {
       rejectSubmission(`无法执行：${message}`);
       return;
     }
+    const executionChannel: VideoExecutionChannel = import.meta.env.MODE === "web" && snapshot.channel === "colab"
+      ? "colab"
+      : "local";
+    if (executionChannel === "colab" && !colabComfyConfigured) {
+      const message = "请先在基础设置中配置 Colab ComfyUI 服务地址";
+      changeNode(targetId, {
+        content: { ...target.content, status: "invalid", validationMessage: message },
+      });
+      rejectSubmission(message);
+      return;
+    }
+    const targetServerUrl = comfyServerUrlForChannel(executionChannel);
+    const activeLoraCatalogLoaded = executionChannel === "colab" ? colabH3LoraCatalogLoaded : h3LoraCatalogLoaded;
+    const activeLoraOptions = executionChannel === "colab" ? colabH3LoraOptions : h3LoraOptions;
+    const activeDiffusionCatalogLoaded = executionChannel === "colab"
+      ? colabH3DiffusionModelCatalogLoaded
+      : h3DiffusionModelCatalogLoaded;
+    const activeDiffusionOptions = executionChannel === "colab"
+      ? colabH3DiffusionModelOptions
+      : h3DiffusionModelOptions;
     if (
-      h3LoraCatalogLoaded
+      activeLoraCatalogLoaded
       && !snapshot.loraBypassed
-      && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.loraName))
+      && !activeLoraOptions.some((lora) => sameH3LoraName(lora, snapshot.loraName))
     ) {
-      const message = h3LoraOptions.length
+      const message = activeLoraOptions.length
         ? "所选 LoRA 已不在 MinimaxH3 目录中，请重新选择"
         : "MinimaxH3 目录中没有可用 LoRA，请添加 LoRA 或开启 Bypass";
       changeNode(targetId, {
@@ -4442,11 +4577,11 @@ function CanvasWorkspace() {
       return;
     }
     if (
-      h3LoraCatalogLoaded
+      activeLoraCatalogLoaded
       && !snapshot.secondaryLoraBypassed
-      && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.secondaryLoraName))
+      && !activeLoraOptions.some((lora) => sameH3LoraName(lora, snapshot.secondaryLoraName))
     ) {
-      const message = h3LoraOptions.length
+      const message = activeLoraOptions.length
         ? "所选2采 LoRA 已不在 MinimaxH3 目录中，请重新选择"
         : "MinimaxH3 目录中没有可用2采 LoRA，请添加 LoRA 或开启2采 Bypass";
       changeNode(targetId, {
@@ -4456,10 +4591,10 @@ function CanvasWorkspace() {
       return;
     }
     if (
-      h3LoraCatalogLoaded
-      && snapshot.styleLoras.some((slot) => !slot.bypassed && !h3LoraOptions.some((lora) => sameH3LoraName(lora, slot.name)))
+      activeLoraCatalogLoaded
+      && snapshot.styleLoras.some((slot) => !slot.bypassed && !activeLoraOptions.some((lora) => sameH3LoraName(lora, slot.name)))
     ) {
-      const message = h3LoraOptions.length
+      const message = activeLoraOptions.length
         ? "所选风格化 LoRA 已不在 MinimaxH3 目录中，请重新选择"
         : "MinimaxH3 目录中没有可用风格化 LoRA，请添加 LoRA 或开启 Bypass";
       changeNode(targetId, {
@@ -4469,12 +4604,12 @@ function CanvasWorkspace() {
       return;
     }
     if (
-      h3DiffusionModelCatalogLoaded
-      && !h3DiffusionModelOptions.some((model) => (
+      activeDiffusionCatalogLoaded
+      && !activeDiffusionOptions.some((model) => (
         sameH3DiffusionModelName(model, snapshot.diffusionModelName)
       ))
     ) {
-      const message = h3DiffusionModelOptions.length
+      const message = activeDiffusionOptions.length
         ? "所选 MiniMax H3 基础模型已不在 diffusion_models/MinimaxH3 目录中，请重新选择"
         : "diffusion_models/MinimaxH3 目录中没有可用基础模型";
       changeNode(targetId, {
@@ -4539,17 +4674,21 @@ function CanvasWorkspace() {
         executionProgress: null,
         validationMessage: queuedTaskCount > 1
           ? `已提交第 ${queuedTaskCount} 个任务，正在等待 ComfyUI 执行…`
-          : "正在上传素材并提交到远程 ComfyUI…",
+          : executionChannel === "colab"
+            ? "正在上传素材并提交到 Colab ComfyUI…"
+            : "正在上传素材并提交到远程 ComfyUI…",
       },
     });
     setNotice(queuedTaskCount > 1
       ? `已为当前节点排队 ${queuedTaskCount} 个生成任务`
-      : "正在上传素材并提交到远程 ComfyUI…");
+      : executionChannel === "colab"
+        ? "正在上传素材并提交到 Colab ComfyUI…"
+        : "正在上传素材并提交到远程 ComfyUI…");
 
     let progressSocket: ComfySocket | null = null;
     let preserveComfyTaskRecord = false;
     try {
-      progressSocket = await openComfyProgressSocket(clientId, comfyUiServerUrlRef.current);
+      progressSocket = await openComfyProgressSocket(clientId, targetServerUrl);
       if (cancelledComfyClients.current.has(clientId)) {
         throw new Error("ComfyUI 生成已取消");
       }
@@ -4590,7 +4729,7 @@ function CanvasWorkspace() {
       const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow", {
         onSubmitted,
         input: {
-          serverUrl: comfyUiServerUrlRef.current,
+          serverUrl: targetServerUrl,
           workflowModuleId: snapshot.workflowModuleId,
           workflowPath: h3WorkflowPathRef.current,
           inputRootPath: comfyInputRootRef.current,
@@ -4661,7 +4800,8 @@ function CanvasWorkspace() {
             fileType: output.fileType,
             seed: result.seed,
             comfyPromptId: result.promptId,
-            comfyServerUrl: comfyUiServerUrlRef.current,
+            comfyServerUrl: targetServerUrl,
+            ...(executionChannel === "colab" ? { comfyChannel: "colab" } : {}),
             sourceGeneratorId: targetId,
             outputIndex: index,
             aspectRatio: videoAspectRatioValue(snapshot.aspectRatio),
@@ -4771,7 +4911,7 @@ function CanvasWorkspace() {
             ? `本次生成完成，仍有 ${remainingTaskCount} 个任务正在执行或排队`
             : `生成完成，已创建 ${result.outputs.length} 个独立预览节点`,
           comfyPromptId: result.promptId,
-          comfyServerUrl: comfyUiServerUrlRef.current,
+          comfyServerUrl: targetServerUrl,
           lastGenerationSeed: result.seed,
           generatedSeeds,
           generationCount: (typeof latest.content.generationCount === "number"
@@ -4852,7 +4992,7 @@ function CanvasWorkspace() {
       if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
       unregisterComfyTask(targetId, clientId);
     }
-  }, [changeNode, clearGenerationLivePreview, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, flushNodePatches, flushVideoGenerationInputs, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, showGenerationLivePreview, showGlobalNotice, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
+  }, [changeNode, clearGenerationLivePreview, colabComfyConfigured, colabH3DiffusionModelCatalogLoaded, colabH3DiffusionModelOptions, colabH3LoraCatalogLoaded, colabH3LoraOptions, comfyServerUrlForChannel, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, flushNodePatches, flushVideoGenerationInputs, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, showGenerationLivePreview, showGlobalNotice, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
 
   const executeVideoNodeBatch = useCallback(async (targetId: string) => {
     const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
@@ -4983,7 +5123,7 @@ function CanvasWorkspace() {
         try {
           const [status] = await invoke<ComfyClientTaskStatus[]>(
             "get_comfyui_client_task_statuses",
-            { serverUrl: comfyUiServerUrlRef.current, clientIds: [item.clientId] },
+            { serverUrl: comfyServerUrlForChannel(item.snapshot.channel), clientIds: [item.clientId] },
           );
           if (status && status.status !== "missing") {
             submissionObserved = true;
@@ -5000,7 +5140,7 @@ function CanvasWorkspace() {
     }
     setNotice(`已按文本顺序发起 ${batchItems.length} 个生成任务`);
     void Promise.allSettled(tasks);
-  }, [changeNode, executeVideoNode, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator]);
+  }, [changeNode, comfyServerUrlForChannel, executeVideoNode, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator]);
 
   const regenerateGeneratedVideo = useCallback(async (
     previewId: string,
@@ -5055,6 +5195,7 @@ function CanvasWorkspace() {
         referenceSelectionError: currentGeneratorSnapshot.referenceSelectionError,
         referenceMappings: currentGeneratorSnapshot.referenceMappings,
         referenceCandidateCount: currentGeneratorSnapshot.referenceCandidateCount,
+        channel: currentGeneratorSnapshot.channel,
       }
       : snapshot;
 
@@ -5642,8 +5783,14 @@ function CanvasWorkspace() {
       setNotice(`无法2采：${message}`);
       return;
     }
+    const secondaryChannel: VideoExecutionChannel = import.meta.env.MODE === "web"
+      ? (sourceGenerator?.kind === "video-generation"
+        ? videoExecutionChannelFromContent(sourceGenerator.content)
+        : baseSnapshot.channel === "colab" ? "colab" : "local")
+      : "local";
     const snapshot: GenerationSnapshot = {
       ...baseSnapshot,
+      channel: secondaryChannel,
       diffusionModelName: baseSnapshot.diffusionModelName,
       secondaryResolutionMegapixels: sourceGenerator?.kind === "video-generation"
         ? secondaryVideoResolutionFromContent(sourceGenerator.content)
@@ -5706,12 +5853,29 @@ function CanvasWorkspace() {
       setNotice(`无法2采：${message}`);
       return;
     }
+    if (secondaryChannel === "colab" && !colabComfyConfigured) {
+      const message = "请先在基础设置中配置 Colab ComfyUI 服务地址";
+      changeNode(previewId, {
+        content: { ...preview.content, status: "invalid", validationMessage: message },
+      });
+      setNotice(`无法2采：${message}`);
+      return;
+    }
+    const targetServerUrl = comfyServerUrlForChannel(secondaryChannel);
+    const activeLoraCatalogLoaded = secondaryChannel === "colab" ? colabH3LoraCatalogLoaded : h3LoraCatalogLoaded;
+    const activeLoraOptions = secondaryChannel === "colab" ? colabH3LoraOptions : h3LoraOptions;
+    const activeDiffusionCatalogLoaded = secondaryChannel === "colab"
+      ? colabH3DiffusionModelCatalogLoaded
+      : h3DiffusionModelCatalogLoaded;
+    const activeDiffusionOptions = secondaryChannel === "colab"
+      ? colabH3DiffusionModelOptions
+      : h3DiffusionModelOptions;
     if (
-      h3LoraCatalogLoaded
+      activeLoraCatalogLoaded
       && !snapshot.secondaryLoraBypassed
-      && !h3LoraOptions.some((lora) => sameH3LoraName(lora, snapshot.secondaryLoraName))
+      && !activeLoraOptions.some((lora) => sameH3LoraName(lora, snapshot.secondaryLoraName))
     ) {
-      const message = h3LoraOptions.length
+      const message = activeLoraOptions.length
         ? "2采使用的 LoRA 已不在 MinimaxH3 目录中，请重新选择"
         : "MinimaxH3 目录中没有可用 LoRA，请添加 LoRA 或开启 Bypass";
       changeNode(previewId, {
@@ -5721,10 +5885,10 @@ function CanvasWorkspace() {
       return;
     }
     if (
-      h3LoraCatalogLoaded
-      && snapshot.styleLoras.some((slot) => !slot.bypassed && !h3LoraOptions.some((lora) => sameH3LoraName(lora, slot.name)))
+      activeLoraCatalogLoaded
+      && snapshot.styleLoras.some((slot) => !slot.bypassed && !activeLoraOptions.some((lora) => sameH3LoraName(lora, slot.name)))
     ) {
-      const message = h3LoraOptions.length
+      const message = activeLoraOptions.length
         ? "所选风格化 LoRA 已不在 MinimaxH3 目录中，请重新选择"
         : "MinimaxH3 目录中没有可用风格化 LoRA，请添加 LoRA 或开启 Bypass";
       changeNode(previewId, {
@@ -5734,12 +5898,12 @@ function CanvasWorkspace() {
       return;
     }
     if (
-      h3DiffusionModelCatalogLoaded
-      && !h3DiffusionModelOptions.some((model) => (
+      activeDiffusionCatalogLoaded
+      && !activeDiffusionOptions.some((model) => (
         sameH3DiffusionModelName(model, snapshot.diffusionModelName)
       ))
     ) {
-      const message = h3DiffusionModelOptions.length
+      const message = activeDiffusionOptions.length
         ? "2采使用的基础模型已不在 diffusion_models/MinimaxH3 目录中，请重新选择"
         : "diffusion_models/MinimaxH3 目录中没有可用基础模型";
       changeNode(previewId, {
@@ -5790,7 +5954,7 @@ function CanvasWorkspace() {
     let progressSocket: ComfySocket | null = null;
     let preserveComfyTaskRecord = false;
     try {
-      progressSocket = await openComfyProgressSocket(clientId, comfyUiServerUrlRef.current);
+      progressSocket = await openComfyProgressSocket(clientId, targetServerUrl);
       if (cancelledComfyClients.current.has(clientId)) {
         throw new Error("ComfyUI 2采已取消");
       }
@@ -5865,7 +6029,7 @@ function CanvasWorkspace() {
       const result = await invoke<ComfySubmitResult>("submit_comfyui_workflow", {
         onSubmitted: new Channel<null>(),
         input: {
-          serverUrl: comfyUiServerUrlRef.current,
+          serverUrl: targetServerUrl,
           workflowModuleId: snapshot.workflowModuleId,
           workflowPath: h3WorkflowPathRef.current,
           inputRootPath: comfyInputRootRef.current,
@@ -5907,6 +6071,15 @@ function CanvasWorkspace() {
           audioPaths: snapshot.audioPaths,
           videoPaths: snapshot.videoPaths,
           secondarySource,
+          ...(typeof preview.content.assetPath === "string"
+            && preview.content.assetPath.trim()
+            && (
+              preview.content.assetPath.startsWith("sucanvas://colab-outputs/")
+              || secondaryChannel === "colab"
+              || preview.content.comfyChannel === "colab"
+            )
+            ? { secondarySourcePath: preview.content.assetPath.trim() }
+            : {}),
         },
       });
       if (!result.outputs.length) throw new Error("ComfyUI 2采没有返回视频输出");
@@ -5929,7 +6102,8 @@ function CanvasWorkspace() {
           fileType: output.fileType,
           seed: result.seed,
           comfyPromptId: result.promptId,
-          comfyServerUrl: comfyUiServerUrlRef.current,
+          comfyServerUrl: targetServerUrl,
+          ...(secondaryChannel === "colab" ? { comfyChannel: "colab" } : {}),
           sourceGeneratorId,
           sourcePreviewId: previewId,
           outputIndex: index,
@@ -6059,7 +6233,7 @@ function CanvasWorkspace() {
       if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
       unregisterComfyTask(previewId, clientId);
     }
-  }, [changeNode, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModules]);
+  }, [changeNode, colabComfyConfigured, colabH3DiffusionModelCatalogLoaded, colabH3DiffusionModelOptions, colabH3LoraCatalogLoaded, colabH3LoraOptions, comfyServerUrlForChannel, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModules]);
 
   const submitConfiguredSecondarySample = useCallback(async () => {
     const draft = secondarySampleDraft;
@@ -6140,6 +6314,10 @@ function CanvasWorkspace() {
     const persistedTask = persistedComfyTasks.current.find(
       (task) => task.clientId === clientId,
     );
+    const cancelChannel: VideoExecutionChannel = persistedTask?.snapshot.channel
+      ?? (target.kind === "video-generation"
+        ? videoExecutionChannelFromContent(target.content)
+        : generationSnapshotFromContent(target.content)?.channel ?? "local");
     const taskLabel = persistedTask && isImageComfyTask(persistedTask)
       ? persistedTask.kind === "image-upscale" ? "图片放大" : "图片生成"
       : persistedTask?.kind === "video-upscale" ? "视频超分" : persistedTask && isSecondaryComfyTask(persistedTask) ? "2采" : "生成";
@@ -6163,7 +6341,7 @@ function CanvasWorkspace() {
 
     try {
       const cleanupWarning = await invoke<string | null>("cancel_comfyui_workflow", {
-        serverUrl: comfyUiServerUrlRef.current,
+        serverUrl: comfyServerUrlForChannel(cancelChannel),
         clientId,
       });
       forgetComfyTask(clientId);
@@ -6224,7 +6402,7 @@ function CanvasWorkspace() {
       });
       reportError(error);
     }
-  }, [changeNode, forgetComfyTask, removeGenerationPlaceholder, reportError, unregisterComfyTask, updateGenerationPlaceholder]);
+  }, [changeNode, comfyServerUrlForChannel, forgetComfyTask, removeGenerationPlaceholder, reportError, unregisterComfyTask, updateGenerationPlaceholder]);
 
   const disconnectEdge = useCallback(async (
     edgeId: string,
@@ -6622,6 +6800,9 @@ function CanvasWorkspace() {
           videoRegenerationPresets,
           h3LoraOptions,
           h3DiffusionModelOptions,
+          colabComfyConfigured,
+          colabH3LoraOptions,
+          colabH3DiffusionModelOptions,
           workflowPackages,
           workflowChoices,
           workflowChoicesVersion,
@@ -6673,7 +6854,7 @@ function CanvasWorkspace() {
         },
       };
     },
-    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, downloadGeneratedImage, downloadGeneratedVideo, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
+    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, colabComfyConfigured, colabH3DiffusionModelOptions, colabH3LoraOptions, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, downloadGeneratedImage, downloadGeneratedVideo, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -6951,6 +7132,8 @@ function CanvasWorkspace() {
 
     const processing = task.kind === "video-upscale" ? task.snapshot.videoUpscale : undefined;
     const secondaryTask = isSecondaryComfyTask(task) || Boolean(processing);
+    const taskChannel: VideoExecutionChannel = task.snapshot.channel === "colab" ? "colab" : "local";
+    const taskServerUrl = comfyServerUrlForChannel(taskChannel);
     const source = recordAtCurrentFlowPosition(sourceNode);
     const sourceGeneratorId = secondaryTask
       ? task.sourceGeneratorId
@@ -6985,7 +7168,8 @@ function CanvasWorkspace() {
           fileType: output.fileType,
           seed: recovered.seed ?? "",
           comfyPromptId: recovered.promptId,
-          comfyServerUrl: comfyUiServerUrlRef.current,
+          comfyServerUrl: taskServerUrl,
+          ...(taskChannel === "colab" ? { comfyChannel: "colab" } : {}),
           sourceGeneratorId,
           ...(secondaryTask ? { sourcePreviewId: task.nodeId } : {}),
           outputIndex: index,
@@ -7114,7 +7298,7 @@ function CanvasWorkspace() {
         ? `已恢复一个完成任务，仍有 ${remainingTaskCount} 个任务正在执行或排队`
         : `已恢复完成任务并创建 ${recovered.outputs.length} 个视频预览`,
       comfyPromptId: recovered.promptId,
-      comfyServerUrl: comfyUiServerUrlRef.current,
+      comfyServerUrl: taskServerUrl,
       lastGenerationSeed: recovered.seed ?? "",
       generatedSeeds,
       generationCount: (typeof latest.content.generationCount === "number"
@@ -7123,7 +7307,7 @@ function CanvasWorkspace() {
     };
     changeNode(task.nodeId, { content: restoredContent });
     return restoredContent;
-  }, [changeNode, completeGenerationPlaceholder, flushNodePatches, generatedPreviewHeightForAspectRatio, restoreCompletedImageComfyTask, setEdges, setNodes]);
+  }, [changeNode, comfyServerUrlForChannel, completeGenerationPlaceholder, flushNodePatches, generatedPreviewHeightForAspectRatio, restoreCompletedImageComfyTask, setEdges, setNodes]);
 
   useEffect(() => {
     if (!activeProjectId) return;
@@ -7141,7 +7325,7 @@ function CanvasWorkspace() {
         || connectingRecoveredComfyClients.current.has(task.clientId)
       ) return;
       connectingRecoveredComfyClients.current.add(task.clientId);
-      void openComfyProgressSocket(task.clientId, comfyUiServerUrlRef.current).then((socket) => {
+      void openComfyProgressSocket(task.clientId, comfyServerUrlForChannel(task.snapshot.channel)).then((socket) => {
         connectingRecoveredComfyClients.current.delete(task.clientId);
         if (
           !socket
@@ -7215,18 +7399,46 @@ function CanvasWorkspace() {
           if (!clients?.has(task.clientId)) registerComfyTask(task.nodeId, task.clientId);
         });
         try {
-          const statuses = await invoke<ComfyClientTaskStatus[]>(
-            "get_comfyui_client_task_statuses",
-            {
-              serverUrl: comfyUiServerUrlRef.current,
-              clientIds: tasks.map((task) => task.clientId),
-              videoOutputNodeIds: Object.fromEntries(tasks.filter((task) => task.kind === "video-upscale" && task.snapshot.videoUpscale)
-                .map((task) => [task.clientId, task.snapshot.videoUpscale!.outputNodeId])),
-              imageClientIds: tasks
-                .filter(isImageComfyTask)
-                .map((task) => task.clientId),
-            },
+          const tasksByServerUrl = new Map<string, PersistedComfyTask[]>();
+          for (const task of tasks) {
+            const url = comfyServerUrlForChannel(task.snapshot.channel);
+            const bucket = tasksByServerUrl.get(url);
+            if (bucket) bucket.push(task);
+            else tasksByServerUrl.set(url, [task]);
+          }
+          const settled = await Promise.allSettled(
+            [...tasksByServerUrl.entries()].map(([serverUrl, group]) =>
+              invoke<ComfyClientTaskStatus[]>(
+                "get_comfyui_client_task_statuses",
+                {
+                  serverUrl,
+                  clientIds: group.map((task) => task.clientId),
+                  videoOutputNodeIds: Object.fromEntries(
+                    group
+                      .filter((task) => task.kind === "video-upscale" && task.snapshot.videoUpscale)
+                      .map((task) => [task.clientId, task.snapshot.videoUpscale!.outputNodeId]),
+                  ),
+                  imageClientIds: group
+                    .filter(isImageComfyTask)
+                    .map((task) => task.clientId),
+                },
+              ),
+            ),
           );
+          const statuses: ComfyClientTaskStatus[] = [];
+          let firstError: unknown = null;
+          let fulfilledCount = 0;
+          for (const result of settled) {
+            if (result.status === "fulfilled") {
+              fulfilledCount += 1;
+              statuses.push(...result.value);
+            } else if (firstError === null) {
+              firstError = result.reason;
+            }
+          }
+          if (!fulfilledCount && firstError !== null) {
+            throw firstError;
+          }
           const updatedNodeContents = new Map<string, JsonObject>();
           for (const recovered of statuses) {
             if (disposed) return;
@@ -7393,7 +7605,7 @@ function CanvasWorkspace() {
         .filter((task) => task.canvasId === activeProjectId)
         .forEach((task) => closeRecoveredProgressSocket(task.clientId));
     };
-  }, [activeProjectId, changeNode, clearGenerationLivePreview, forgetComfyTask, registerComfyTask, reportError, restoreCompletedComfyTask, showGenerationLivePreview, unregisterComfyTask, updateGenerationPlaceholder, workflowModules]);
+  }, [activeProjectId, changeNode, clearGenerationLivePreview, comfyServerUrlForChannel, forgetComfyTask, registerComfyTask, reportError, restoreCompletedComfyTask, showGenerationLivePreview, unregisterComfyTask, updateGenerationPlaceholder, workflowModules]);
 
   const pasteCopiedNodes = useCallback(async (placeAtViewportCenter = true) => {
     const clipboard = nodeClipboard.current;
@@ -10691,6 +10903,9 @@ function CanvasWorkspace() {
           && previousData.h3DiffusionModelOptions === h3DiffusionModelOptions
           && previousData.videoRegenerationPresets === videoRegenerationPresets
           && previousData.h3LoraOptions === h3LoraOptions
+          && previousData.colabComfyConfigured === colabComfyConfigured
+          && previousData.colabH3LoraOptions === colabH3LoraOptions
+          && previousData.colabH3DiffusionModelOptions === colabH3DiffusionModelOptions
           && previousData.workflowPackages === workflowPackages
           && previousData.workflowChoicesVersion === workflowChoicesVersion
           && previousData.workflowModules === workflowModules
@@ -10716,6 +10931,9 @@ function CanvasWorkspace() {
             videoRegenerationPresets,
             h3LoraOptions,
             h3DiffusionModelOptions,
+            colabComfyConfigured,
+            colabH3LoraOptions,
+            colabH3DiffusionModelOptions,
             workflowPackages,
             workflowChoices,
             workflowChoicesVersion,
@@ -10732,7 +10950,7 @@ function CanvasWorkspace() {
       visibleNodeCache.current = nextCache;
       return results;
     },
-    [activeComfyTaskCounts, contentNodes, edges, relations, queuePositions, h3DiffusionModelOptions, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
+    [activeComfyTaskCounts, contentNodes, edges, relations, queuePositions, colabComfyConfigured, colabH3DiffusionModelOptions, colabH3LoraOptions, h3DiffusionModelOptions, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
   );
 
   const updateGuideOverlays = useCallback((nextAlignment: AlignmentGuide[], nextSpacing: SpacingGuide[]) => {
@@ -11227,6 +11445,10 @@ function CanvasWorkspace() {
                   setComfyInputRootDraft={setComfyInputRootDraft}
                   comfyOutputRootDraft={comfyOutputRootDraft}
                   setComfyOutputRootDraft={setComfyOutputRootDraft}
+                  colabComfyUrlDraft={colabComfyUrlDraft}
+                  setColabComfyUrlDraft={setColabComfyUrlDraft}
+                  colabSsPasswordDraft={colabSsPasswordDraft}
+                  setColabSsPasswordDraft={setColabSsPasswordDraft}
                   showComfySettings={globalAdmin}
                 />
               )}

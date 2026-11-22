@@ -6,7 +6,12 @@ let writing = Promise.resolve();
 let installed = false;
 let switching = false;
 // Values the server derives from its own configuration; never kept from the browser.
-const SERVER_KEYS = new Set(["infinite-canvas:comfy-server-url", "infinite-canvas:comfy-input-root", "infinite-canvas:comfy-output-root"]);
+const SERVER_KEYS = new Set([
+  "infinite-canvas:comfy-server-url",
+  "infinite-canvas:comfy-input-root",
+  "infinite-canvas:comfy-output-root",
+  "infinite-canvas:colab-comfy-configured",
+]);
 // web-settings.json is shared by everyone; only admins write it. Other users
 // keep their changes in this browser (su item 4, CANVAS-012b-2 decision 1).
 function writesToServer() {

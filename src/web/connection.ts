@@ -4,6 +4,8 @@ export type ComfyConnection = {
   comfyUrl: string;
   comfyInputDirectory: string;
   comfyOutputDirectory: string;
+  colabComfyUrl?: string;
+  colabSsPassword?: string;
 };
 
 export function readComfyConnection(): Promise<ComfyConnection> {
@@ -11,7 +13,14 @@ export function readComfyConnection(): Promise<ComfyConnection> {
 }
 
 export function saveComfyConnection(connection: ComfyConnection): Promise<ComfyConnection> {
-  if (connection.comfyUrl.replace(/\/+$/, "") === `${window.location.origin}/api/comfy`) {
+  const normalizedUrl = connection.comfyUrl.replace(/\/+$/, "");
+  const normalizedColabUrl = (connection.colabComfyUrl ?? "").replace(/\/+$/, "");
+  if (
+    normalizedUrl === `${window.location.origin}/api/comfy`
+    || normalizedUrl === `${window.location.origin}/api/comfy-colab`
+    || normalizedColabUrl === `${window.location.origin}/api/comfy`
+    || normalizedColabUrl === `${window.location.origin}/api/comfy-colab`
+  ) {
     throw new Error("请填写实际的 ComfyUI 服务地址，不能填写画布代理地址");
   }
   return request("/api/comfy-config", {

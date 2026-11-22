@@ -1115,6 +1115,7 @@ pub async fn dispatch(
                 argument(args, "clientIds")?,
                 argument(args, "imageClientIds")?,
                 argument(args, "videoOutputNodeIds")?,
+                argument(args, "colabSsClientIds").ok(),
             )
             .await?,
         )

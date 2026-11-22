@@ -3,6 +3,7 @@ mod auth;
 mod authz;
 mod backup;
 mod canvases;
+mod colab;
 mod config;
 mod connection;
 mod dispatch;
@@ -200,6 +201,7 @@ pub async fn run() -> Result<(), String> {
         "temp/image-resize",
         "workflow-modules",
         "workflow-module-exports",
+        colab::COLAB_OUTPUTS_DIR,
     ] {
         std::fs::create_dir_all(data.join(directory)).map_err(|e| e.to_string())?;
     }
@@ -340,6 +342,8 @@ pub async fn run() -> Result<(), String> {
         )
         .route("/api/comfy/ws", get(proxy::websocket))
         .route("/api/comfy/{*path}", get(proxy::http))
+        .route("/api/comfy-colab/ws", get(proxy::websocket_colab))
+        .route("/api/comfy-colab/{*path}", get(proxy::http_colab))
         .route("/api/auth/edit-mode", post(auth::edit_mode))
         .route(
             "/api/admin/users",
@@ -618,6 +622,14 @@ async fn read_settings(State(state): State<WebState>) -> impl IntoResponse {
     settings.insert(
         "infinite-canvas:comfy-output-root".to_owned(),
         connection::display_directory(&state.config.comfy_output_directory),
+    );
+    settings.insert(
+        "infinite-canvas:colab-comfy-configured".to_owned(),
+        if state.config.colab_comfy_url.is_empty() {
+            "false".to_owned()
+        } else {
+            "true".to_owned()
+        },
     );
     Json(settings)
 }

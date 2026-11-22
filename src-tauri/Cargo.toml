@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = ["server"]
 desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog"]
-server = ["axum/ws", "axum/multipart", "tower-http/fs", "dep:tokio-tungstenite", "dep:futures-util", "dep:fs2", "dep:tower"]
+server = ["axum/ws", "axum/multipart", "tower-http/fs", "dep:tokio-tungstenite", "dep:futures-util", "dep:fs2", "dep:tower", "dep:sha2"]
 
 [[bin]]
 name = "SuCanvasServer"
@@ -54,3 +54,4 @@ fs2 = { version = "0.4", optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 zip = { version = "6.0.0", default-features = false, features = ["deflate"] }
 image = { version = "0.25.8", default-features = false, features = ["avif", "bmp", "gif", "jpeg", "png", "webp"] }
+sha2 = { version = "0.10", optional = true }

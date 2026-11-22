@@ -18,6 +18,10 @@ use std::{
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Connection {
     comfy_url: String,
+    #[serde(default)]
+    colab_comfy_url: String,
+    #[serde(default)]
+    colab_ss_password: String,
     comfy_input_directory: String,
     comfy_output_directory: String,
 }
@@ -41,12 +45,16 @@ impl Connection {
     fn from_config(config: &Config) -> Self {
         Self {
             comfy_url: config.comfy_url.clone(),
+            colab_comfy_url: config.colab_comfy_url.clone(),
+            colab_ss_password: config.colab_ss_password.clone(),
             comfy_input_directory: display_directory(&config.comfy_input_directory),
             comfy_output_directory: display_directory(&config.comfy_output_directory),
         }
     }
     fn apply(&self, config: &mut Config) {
         config.comfy_url = self.comfy_url.clone();
+        config.colab_comfy_url = self.colab_comfy_url.clone();
+        config.colab_ss_password = self.colab_ss_password.clone();
         config.comfy_input_directory = self.comfy_input_directory.clone();
         config.comfy_output_directory = self.comfy_output_directory.clone();
     }
@@ -97,6 +105,13 @@ impl Store {
             .trim_matches('"')
             .trim_end_matches('/')
             .to_owned();
+        input.colab_comfy_url = input
+            .colab_comfy_url
+            .trim()
+            .trim_matches('"')
+            .trim_end_matches('/')
+            .to_owned();
+        input.colab_ss_password = input.colab_ss_password.trim().to_owned();
         for directory in [
             &mut input.comfy_input_directory,
             &mut input.comfy_output_directory,
@@ -104,12 +119,16 @@ impl Store {
             *directory = directory.trim().trim_matches('"').to_owned();
         }
         super::config::validate_comfy_url(&input.comfy_url)?;
+        super::config::validate_comfy_url(&input.colab_comfy_url)?;
         let mut current = self.current.write().map_err(|_| "无法锁定 ComfyUI 配置")?;
-        if let Ok(url) = reqwest::Url::parse(&input.comfy_url) {
-            if current.allows_origin(&url.origin().ascii_serialization())
-                && url.path().starts_with("/api/comfy")
-            {
-                return Err("请填写实际的 ComfyUI 服务地址，不能填写画布代理地址".into());
+        for candidate in [&input.comfy_url, &input.colab_comfy_url] {
+            if let Ok(url) = reqwest::Url::parse(candidate) {
+                if current.allows_origin(&url.origin().ascii_serialization())
+                    && (url.path().starts_with("/api/comfy")
+                        || url.path().starts_with("/api/comfy-colab"))
+                {
+                    return Err("请填写实际的 ComfyUI 服务地址，不能填写画布代理地址".into());
+                }
             }
         }
         let root = self.path.parent().ok_or("配置文件目录不存在")?;
@@ -210,6 +229,8 @@ mod tests {
             downloads_directory: "downloads".into(),
             max_upload_bytes: 12345,
             comfy_url: "http://127.0.0.1:8188".into(),
+            colab_comfy_url: String::new(),
+            colab_ss_password: String::new(),
             comfy_input_directory: String::new(),
             comfy_output_directory: String::new(),
             trusted_proxies: super::super::config::default_trusted_proxies(),
@@ -227,13 +248,19 @@ mod tests {
         let saved = store
             .save(Connection {
                 comfy_url: " http://192.168.5.108:8188/comfy/// ".into(),
+                colab_comfy_url: " https://demo.trycloudflare.com/// ".into(),
+                colab_ss_password: " 5555 ".into(),
                 comfy_input_directory: "input".into(),
                 comfy_output_directory: "output".into(),
             })
             .unwrap();
         assert_eq!(saved.comfy_url, "http://192.168.5.108:8188/comfy");
+        assert_eq!(saved.colab_comfy_url, "https://demo.trycloudflare.com");
+        assert_eq!(saved.colab_ss_password, "5555");
         assert_eq!(old.comfy_url, "http://127.0.0.1:8188");
         assert_eq!(store.snapshot().comfy_url, saved.comfy_url);
+        assert_eq!(store.snapshot().colab_comfy_url, saved.colab_comfy_url);
+        assert_eq!(store.snapshot().colab_ss_password, saved.colab_ss_password);
         assert_eq!(
             saved.comfy_input_directory,
             display_directory(&root.join("input").canonicalize().unwrap().to_string_lossy())
@@ -265,11 +292,15 @@ mod tests {
         let saved = store
             .save(Connection {
                 comfy_url: saved.comfy_url,
+                colab_comfy_url: String::new(),
+                colab_ss_password: String::new(),
                 comfy_input_directory: String::new(),
                 comfy_output_directory: String::new(),
             })
             .unwrap();
         assert!(saved.comfy_input_directory.is_empty());
+        assert!(saved.colab_comfy_url.is_empty());
+        assert!(saved.colab_ss_password.is_empty());
         assert!(store.snapshot().comfy_output_directory.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
@@ -285,10 +316,14 @@ mod tests {
             "http://host#x",
             "http://127.0.0.1:18742/api/comfy",
             "https://192.168.5.108:18741/api/comfy",
+            "https://192.168.5.108:18741/api/comfy-colab",
         ] {
             let mut input = Connection::from_config(&store.snapshot());
             input.comfy_url = url.into();
             assert!(store.save(input).is_err());
+            let mut colab_input = Connection::from_config(&store.snapshot());
+            colab_input.colab_comfy_url = url.into();
+            assert!(store.save(colab_input).is_err());
         }
         for directory in ["missing", "config.json"] {
             let mut input = Connection::from_config(&store.snapshot());

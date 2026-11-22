@@ -754,6 +754,14 @@ pub struct ComfySubmitInput {
     pub video_paths: Vec<String>,
     #[serde(default)]
     pub secondary_source: Option<ComfyOutputFile>,
+    #[serde(default)]
+    pub secondary_source_path: Option<String>,
+    #[serde(default)]
+    pub colab_mode: bool,
+    #[serde(default)]
+    pub ss_password: String,
+    #[serde(default)]
+    pub ss_compress: Option<u8>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

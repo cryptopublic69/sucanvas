@@ -14,7 +14,7 @@ export function webApiUrl(value: string, from: string, to: string): string {
   const source = from.replace(/\/$/, "");
   const destination = to.replace(/\/$/, "");
   const tail = value.startsWith(source) ? value.slice(source.length) : "";
-  if (!/^\/api\/(comfy|resource)(?:[/?]|$)/.test(tail)) return value;
+  if (!/^\/api\/(comfy(?:-colab)?|resource)(?:[/?]|$)/.test(tail)) return value;
   return destination + tail;
 }
 

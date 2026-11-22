@@ -14,6 +14,10 @@ type GeneralSettingsPanelProps = {
   setComfyInputRootDraft: React.Dispatch<React.SetStateAction<string>>;
   comfyOutputRootDraft: string;
   setComfyOutputRootDraft: React.Dispatch<React.SetStateAction<string>>;
+  colabComfyUrlDraft?: string;
+  setColabComfyUrlDraft?: React.Dispatch<React.SetStateAction<string>>;
+  colabSsPasswordDraft?: string;
+  setColabSsPasswordDraft?: React.Dispatch<React.SetStateAction<string>>;
   // The ComfyUI connection is a server-wide setting (Web: admins only).
   showComfySettings?: boolean;
 };
@@ -30,6 +34,10 @@ export function GeneralSettingsPanel({
   setComfyInputRootDraft,
   comfyOutputRootDraft,
   setComfyOutputRootDraft,
+  colabComfyUrlDraft,
+  setColabComfyUrlDraft,
+  colabSsPasswordDraft,
+  setColabSsPasswordDraft,
   showComfySettings = true,
 }: GeneralSettingsPanelProps) {
   return (
@@ -127,6 +135,36 @@ export function GeneralSettingsPanel({
               {import.meta.env.MODE === "web" ? "填写 Web 服务器本机的 ComfyUI output 根目录，使用服务器本机盘符，不要包含任务子文件夹或文件名。生成图片和视频只关联此目录中的文件；同时删除文件会删除对应原件。旧副本会迁入对应目录，并在备份后更新项目引用。" : "请选择或填写远端 ComfyUI 的 output 根目录，不要包含生成任务的子文件夹和文件名。"}
             </small>
           </label>
+          {import.meta.env.MODE === "web" && (
+            <>
+              <label className="settings-field">
+                <span>Colab ComfyUI 服务地址</span>
+                <input
+                  type="url"
+                  disabled={comfySettingsBusy}
+                  placeholder="https://xxxx.trycloudflare.com（可选）"
+                  value={colabComfyUrlDraft ?? ""}
+                  onChange={(event) => setColabComfyUrlDraft?.(event.target.value)}
+                />
+                <small>
+                  填写 Colab 上运行中的 Cloudflare Tunnel 地址；Web 版仅通过服务器代理连接，并在节点选择 Colab 渠道时启用。留空则禁用 Colab 渠道。
+                </small>
+              </label>
+              <label className="settings-field">
+                <span>Colab SS 解码密码</span>
+                <input
+                  type="text"
+                  disabled={comfySettingsBusy}
+                  placeholder="5555（与 Colab SS_tools 节点一致，可留空）"
+                  value={colabSsPasswordDraft ?? ""}
+                  onChange={(event) => setColabSsPasswordDraft?.(event.target.value)}
+                />
+                <small>
+                  用于提交给 Colab SS_tools 隐藏节点编码及服务端纯 Rust 自动提取 MP4。
+                </small>
+              </label>
+            </>
+          )}
         </div>
       </section>}
     </section>

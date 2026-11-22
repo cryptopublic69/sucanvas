@@ -114,6 +114,13 @@ pub fn normalize_settings(state: &WebState, settings: &mut BTreeMap<String, Stri
 }
 
 pub fn output_reference(output: &mut Value) -> Result<(), String> {
+    if output
+        .get("assetPath")
+        .and_then(Value::as_str)
+        .is_some_and(|path| !path.is_empty())
+    {
+        return Ok(());
+    }
     let filename = output
         .get("filename")
         .and_then(Value::as_str)
