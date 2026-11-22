@@ -172,75 +172,22 @@ fn path_key(key: &str) -> bool {
             | "secondarySourcePath"
     )
 }
-fn comfy_source_url(
-    value: &str,
-    public_origin: &str,
-    comfy_url: &str,
-    colab_comfy_url: &str,
-) -> Option<String> {
-    for (route, upstream) in [
-        ("/api/comfy-colab", colab_comfy_url),
-        ("/api/comfy", comfy_url),
-    ] {
-        let absolute_prefix = format!("{public_origin}{route}");
-        if let Some(tail) = value
-            .strip_prefix(&absolute_prefix)
-            .or_else(|| value.strip_prefix(route))
-        {
-            if tail.starts_with('/') && !upstream.is_empty() {
-                return Some(format!("{}{tail}", upstream.trim_end_matches('/')));
-            }
-            return None;
-        }
+fn comfy_source_url(value: &str, public_origin: &str, comfy_url: &str) -> Option<String> {
+    let route = "/api/comfy";
+    let absolute_prefix = format!("{public_origin}{route}");
+    let tail = value
+        .strip_prefix(&absolute_prefix)
+        .or_else(|| value.strip_prefix(route))?;
+    if tail.starts_with('/') && !comfy_url.is_empty() {
+        return Some(format!("{}{tail}", comfy_url.trim_end_matches('/')));
     }
     None
 }
 
-fn is_colab_comfy_url(config: &super::config::Config, value: &str) -> bool {
-    let trimmed = value.trim().trim_end_matches('/');
-    if trimmed == "/api/comfy-colab" || trimmed.starts_with("/api/comfy-colab/") {
-        return true;
-    }
-    reqwest::Url::parse(trimmed).ok().is_some_and(|url| {
-        config.allows_origin(&url.origin().ascii_serialization())
-            && (url.path() == "/api/comfy-colab" || url.path().starts_with("/api/comfy-colab/"))
-    })
-}
-
-fn targets_colab_channel(state: &WebState, args: &Value) -> bool {
-    [args.get("serverUrl"), args.pointer("/input/serverUrl")]
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(|url| is_colab_comfy_url(&state.config, url))
-}
-
-fn is_colab_result_url(config: &super::config::Config, value: &str) -> bool {
-    if is_colab_comfy_url(config, value) {
-        return true;
-    }
-    let trimmed = value.trim().trim_end_matches('/');
-    let colab_prefix = config.colab_comfy_url.trim().trim_end_matches('/');
-    !colab_prefix.is_empty()
-        && (trimmed == colab_prefix
-            || trimmed
-                .strip_prefix(colab_prefix)
-                .is_some_and(|tail| tail.starts_with('/')))
-}
-
-fn resolve_server_url_arg(config: &super::config::Config, value: &str) -> Result<String, String> {
-    if is_colab_comfy_url(config, value) {
-        if config.colab_comfy_url.is_empty() {
-            return Err("请先在基础设置中配置 Colab ComfyUI 服务地址".into());
-        }
-        Ok(config.colab_comfy_url.clone())
-    } else {
-        Ok(config.comfy_url.clone())
-    }
-}
-
 fn rewrite_server_url_result(config: &super::config::Config, key: &str, value: &str) -> String {
-    let route = if key != "infinite-canvas:comfy-server-url" && is_colab_result_url(config, value) {
+    let route = if key != "infinite-canvas:comfy-server-url"
+        && crate::colab_channel::web::is_colab_result_url(config, value)
+    {
         "/api/comfy-colab"
     } else {
         "/api/comfy"
@@ -267,7 +214,13 @@ pub fn normalize_args(state: &WebState, value: &mut Value, key: &str) -> Result<
                 *text = resource;
             }
             if matches!(key, "serverUrl" | "sourceServerUrl" | "comfyServerUrl") {
-                *text = resolve_server_url_arg(&state.config, text)?;
+                *text = if let Some(resolved) =
+                    crate::colab_channel::web::resolve_server_url_arg(&state.config, text)
+                {
+                    resolved?
+                } else {
+                    state.config.comfy_url.clone()
+                };
                 return Ok(());
             }
             if key == "inputRootPath" {
@@ -284,12 +237,13 @@ pub fn normalize_args(state: &WebState, value: &mut Value, key: &str) -> Result<
             } else if text.starts_with("sucanvas-export://") {
                 *text = export_path(state, text)?.to_string_lossy().into_owned();
             }
-            if let Some(url) = comfy_source_url(
+            if let Some(url) = crate::colab_channel::web::comfy_source_url(
                 text,
                 &state.config.origin(),
-                &state.config.comfy_url,
                 &state.config.colab_comfy_url,
-            ) {
+            )
+            .or_else(|| comfy_source_url(text, &state.config.origin(), &state.config.comfy_url))
+            {
                 *text = url;
             }
             if path_key(key)
@@ -307,7 +261,7 @@ pub fn normalize_args(state: &WebState, value: &mut Value, key: &str) -> Result<
                     state.core.workflow_modules_dir.clone(),
                     state.core.workflow_module_exports_dir.clone(),
                     state.downloads.clone(),
-                    state.core.data_dir.join(super::colab::COLAB_OUTPUTS_DIR),
+                    state.core.data_dir.join(crate::colab_channel::COLAB_OUTPUTS_DIR),
                 ];
                 if !state.config.comfy_output_directory.is_empty() {
                     roots.push(PathBuf::from(&state.config.comfy_output_directory));
@@ -344,18 +298,11 @@ pub fn normalize_result(state: &WebState, value: &mut Value) {
                     relative.to_string_lossy().replace('\\', "/")
                 );
             }
-            let colab_prefix = state.config.colab_comfy_url.trim_end_matches('/');
             let local_prefix = state.config.comfy_url.trim_end_matches('/');
-            if !colab_prefix.is_empty()
-                && text
-                    .strip_prefix(colab_prefix)
-                    .is_some_and(|tail| tail.starts_with('/'))
+            if let Some(rewritten) =
+                crate::colab_channel::web::rewrite_result_url(&state.config, text)
             {
-                *text = format!(
-                    "{}/api/comfy-colab{}",
-                    state.config.origin(),
-                    &text[colab_prefix.len()..]
-                );
+                *text = rewritten;
             } else if !local_prefix.is_empty()
                 && text
                     .strip_prefix(local_prefix)
@@ -499,74 +446,15 @@ pub async fn invoke(
             }
         }
     }
-    let colab_channel = targets_colab_channel(&state, &input.args);
+    let colab_channel = crate::colab_channel::web::targets_colab_channel(&state, &input.args);
     if let Err(error) = normalize_args(&state, &mut input.args, "") {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response();
     }
     if colab_channel {
-        if command == "submit_comfyui_workflow" {
-            let profile = super::colab::inspect_colab_profile(&state).await;
-            if !profile.reachable {
-                let message = profile
-                    .error
-                    .unwrap_or_else(|| "Colab 实例当前未运行或无法连接".to_owned());
-                return (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
-                    .into_response();
-            }
-            let Some(effective_profile) = profile.effective_profile else {
-                let message = profile.error.unwrap_or_else(|| {
-                    "未能识别当前 Colab 档位（请管理员在基础设置中选择 DaSiWa V5xs 或 Cobijada）"
-                        .to_owned()
-                });
-                return (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
-                    .into_response();
-            };
-            if let Some(obj) = input.args.get_mut("input").and_then(Value::as_object_mut) {
-                obj.insert("colabMode".to_owned(), Value::Bool(true));
-                obj.insert(
-                    "colabProfile".to_owned(),
-                    Value::String(effective_profile),
-                );
-                obj.insert(
-                    "diffusionModelName".to_owned(),
-                    Value::String(profile.diffusion_model_name),
-                );
-                obj.insert("workflowModuleId".to_owned(), Value::Null);
-                obj.insert("workflowPath".to_owned(), Value::String(String::new()));
-                obj.insert("secondarySamplingEnabled".to_owned(), Value::Bool(false));
-                obj.insert("secondaryLoraName".to_owned(), Value::String(String::new()));
-                obj.insert("secondaryLoraBypassed".to_owned(), Value::Bool(true));
-                obj.insert("secondarySource".to_owned(), Value::Null);
-                obj.insert("secondarySourcePath".to_owned(), Value::Null);
-                obj.insert(
-                    "ssPassword".to_owned(),
-                    Value::String(state.config.colab_ss_password.clone()),
-                );
-                obj.insert("inputRootPath".to_owned(), Value::String(String::new()));
-            }
-        } else if command == "get_comfyui_client_task_statuses" {
-            let image_ids: std::collections::HashSet<String> = input
-                .args
-                .get("imageClientIds")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect();
-            let ss_ids: Vec<Value> = input
-                .args
-                .get("clientIds")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .filter(|id| !image_ids.contains(*id))
-                .map(|id| Value::String(id.to_owned()))
-                .collect();
-            if let Some(obj) = input.args.as_object_mut() {
-                obj.insert("colabSsClientIds".to_owned(), Value::Array(ss_ids));
-            }
+        if let Err(response) =
+            crate::colab_channel::web::prepare_rpc_args(&state, command, &mut input.args).await
+        {
+            return response.into_response();
         }
     }
     if let Some(id) = input.web_task_id.as_deref() {
@@ -600,7 +488,8 @@ pub async fn invoke(
                 && (command == "submit_comfyui_workflow"
                     || command == "get_comfyui_client_task_statuses")
             {
-                super::colab::materialize_ss_outputs(&worker_state, &mut result).await?;
+                crate::colab_channel::web::materialize_ss_outputs(&worker_state, &mut result)
+                    .await?;
             }
             super::media::reference_outputs(&mut result)?;
             // Registered on return so a node deleted before any refresh still
@@ -710,38 +599,19 @@ mod tests {
         let upstream = "http://127.0.0.1:8188/";
         let expected = Some(format!("http://127.0.0.1:8188{tail}"));
         assert_eq!(
-            comfy_source_url(&format!("/api/comfy{tail}"), origin, upstream, ""),
+            comfy_source_url(&format!("/api/comfy{tail}"), origin, upstream),
             expected
         );
         assert_eq!(
-            comfy_source_url(&format!("{origin}/api/comfy{tail}"), origin, upstream, ""),
+            comfy_source_url(&format!("{origin}/api/comfy{tail}"), origin, upstream),
             expected
-        );
-        let colab_upstream = "https://demo.trycloudflare.com/";
-        assert_eq!(
-            comfy_source_url(
-                &format!("/api/comfy-colab{tail}"),
-                origin,
-                upstream,
-                colab_upstream
-            ),
-            Some(format!("https://demo.trycloudflare.com{tail}"))
-        );
-        assert_eq!(
-            comfy_source_url(
-                &format!("{origin}/api/comfy-colab{tail}"),
-                origin,
-                upstream,
-                colab_upstream
-            ),
-            Some(format!("https://demo.trycloudflare.com{tail}"))
         );
         for value in [
             "/api/comfy-other/view",
             "https://other.example/api/comfy/view",
             "sucanvas-input://sucanvas-imports/a.png",
         ] {
-            assert!(comfy_source_url(value, origin, upstream, colab_upstream).is_none());
+            assert!(comfy_source_url(value, origin, upstream).is_none());
         }
     }
     #[test]
@@ -791,62 +661,5 @@ mod tests {
         assert!(ensure_contained(&assets.join("new.png"), &[canonical.clone()]).is_ok());
         assert!(ensure_contained(&root.join("outside.png"), &[canonical]).is_err());
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn colab_server_urls_normalize_and_rewrite_without_touching_local() {
-        let mut config = super::super::config::Config {
-            listen: "127.0.0.1:18742".parse().unwrap(),
-            public_url: "https://canvas.example.com".into(),
-            allowed_origins: vec![],
-            data_directory: "data".into(),
-            web_directory: "web".into(),
-            downloads_directory: "downloads".into(),
-            comfy_url: "http://127.0.0.1:8188".into(),
-            colab_comfy_url: String::new(),
-            colab_ss_password: String::new(),
-            colab_profile: String::new(),
-            comfy_input_directory: String::new(),
-            comfy_output_directory: String::new(),
-            max_upload_bytes: 12345,
-            trusted_proxies: vec![],
-        };
-        assert_eq!(
-            resolve_server_url_arg(&config, "https://canvas.example.com/api/comfy").unwrap(),
-            "http://127.0.0.1:8188"
-        );
-        let err = resolve_server_url_arg(&config, "https://canvas.example.com/api/comfy-colab")
-            .unwrap_err();
-        assert!(err.contains("Colab ComfyUI"), "{err}");
-
-        config.colab_comfy_url = "https://demo.trycloudflare.com".into();
-        assert_eq!(
-            resolve_server_url_arg(&config, "https://canvas.example.com/api/comfy-colab").unwrap(),
-            "https://demo.trycloudflare.com"
-        );
-        assert_eq!(
-            resolve_server_url_arg(&config, "/api/comfy-colab").unwrap(),
-            "https://demo.trycloudflare.com"
-        );
-        assert_eq!(
-            rewrite_server_url_result(&config, "comfyServerUrl", "https://demo.trycloudflare.com"),
-            "https://canvas.example.com/api/comfy-colab"
-        );
-        assert_eq!(
-            rewrite_server_url_result(
-                &config,
-                "comfyServerUrl",
-                "https://canvas.example.com/api/comfy-colab"
-            ),
-            "https://canvas.example.com/api/comfy-colab"
-        );
-        assert_eq!(
-            rewrite_server_url_result(
-                &config,
-                "infinite-canvas:comfy-server-url",
-                "https://demo.trycloudflare.com"
-            ),
-            "https://canvas.example.com/api/comfy"
-        );
     }
 }

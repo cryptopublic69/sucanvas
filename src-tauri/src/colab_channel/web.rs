@@ -1,11 +1,20 @@
-use super::WebState;
-use crate::workflow_modules::{
+use super::workflow::{
     colab_profile_for_model, colab_profile_spec, ColabProfileSpec, COLAB_ALLOWED_LORAS,
     COLAB_WORKFLOW_LABEL,
 };
-use axum::{extract::State, Json};
+use super::COLAB_OUTPUTS_DIR;
+use crate::{
+    platform::AppHandle,
+    web::{config::Config, proxy, rpc::ensure_contained, WebState},
+};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    routing::get,
+    Json, Router,
+};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -15,7 +24,175 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const COLAB_OUTPUTS_DIR: &str = "colab-outputs";
+pub const COLAB_CONFIG_CHANGED_EVENT: &str = "canvas://colab-config-changed";
+
+pub(crate) fn mount_routes(router: Router<WebState>) -> Router<WebState> {
+    router
+        .route("/api/colab-profile", get(read_profile))
+        .route("/api/comfy-colab/ws", get(proxy::websocket_colab))
+        .route("/api/comfy-colab/{*path}", get(proxy::http_colab))
+}
+
+pub(crate) fn extra_frontend_settings(state: &WebState) -> Option<(String, String)> {
+    Some((
+        "infinite-canvas:colab-comfy-configured".to_owned(),
+        if state.config.colab_comfy_url.is_empty() {
+            "false".to_owned()
+        } else {
+            "true".to_owned()
+        },
+    ))
+}
+
+pub(crate) fn is_colab_event(event: &str) -> bool {
+    event == COLAB_CONFIG_CHANGED_EVENT
+}
+
+pub(crate) fn emit_config_changed(handle: &AppHandle) {
+    let _ = handle.emit(COLAB_CONFIG_CHANGED_EVENT, json!({}));
+}
+
+pub(crate) fn comfy_source_url(
+    value: &str,
+    public_origin: &str,
+    colab_comfy_url: &str,
+) -> Option<String> {
+    let route = "/api/comfy-colab";
+    let absolute_prefix = format!("{public_origin}{route}");
+    let tail = value
+        .strip_prefix(&absolute_prefix)
+        .or_else(|| value.strip_prefix(route))?;
+    if tail.starts_with('/') && !colab_comfy_url.is_empty() {
+        Some(format!(
+            "{}{tail}",
+            colab_comfy_url.trim_end_matches('/')
+        ))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn is_colab_comfy_url(config: &Config, value: &str) -> bool {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed == "/api/comfy-colab" || trimmed.starts_with("/api/comfy-colab/") {
+        return true;
+    }
+    reqwest::Url::parse(trimmed).ok().is_some_and(|url| {
+        config.allows_origin(&url.origin().ascii_serialization())
+            && (url.path() == "/api/comfy-colab" || url.path().starts_with("/api/comfy-colab/"))
+    })
+}
+
+pub(crate) fn targets_colab_channel(state: &WebState, args: &Value) -> bool {
+    [args.get("serverUrl"), args.pointer("/input/serverUrl")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|url| is_colab_comfy_url(&state.config, url))
+}
+
+pub(crate) fn is_colab_result_url(config: &Config, value: &str) -> bool {
+    if is_colab_comfy_url(config, value) {
+        return true;
+    }
+    let trimmed = value.trim().trim_end_matches('/');
+    let colab_prefix = config.colab_comfy_url.trim().trim_end_matches('/');
+    !colab_prefix.is_empty()
+        && (trimmed == colab_prefix
+            || trimmed
+                .strip_prefix(colab_prefix)
+                .is_some_and(|tail| tail.starts_with('/')))
+}
+
+pub(crate) fn resolve_server_url_arg(
+    config: &Config,
+    value: &str,
+) -> Option<Result<String, String>> {
+    if !is_colab_comfy_url(config, value) {
+        return None;
+    }
+    if config.colab_comfy_url.is_empty() {
+        Some(Err("请先在基础设置中配置 Colab ComfyUI 服务地址".into()))
+    } else {
+        Some(Ok(config.colab_comfy_url.clone()))
+    }
+}
+
+pub(crate) fn rewrite_result_url(config: &Config, text: &str) -> Option<String> {
+    let colab_prefix = config.colab_comfy_url.trim_end_matches('/');
+    (!colab_prefix.is_empty())
+        .then(|| {
+            text.strip_prefix(colab_prefix)
+                .filter(|tail| tail.starts_with('/'))
+                .map(|tail| format!("{}/api/comfy-colab{tail}", config.origin()))
+        })
+        .flatten()
+}
+
+pub(crate) async fn prepare_rpc_args(
+    state: &WebState,
+    command: &str,
+    args: &mut Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if command == "submit_comfyui_workflow" {
+        let profile = inspect_colab_profile(state).await;
+        if !profile.reachable {
+            let message = profile
+                .error
+                .unwrap_or_else(|| "Colab 实例当前未运行或无法连接".to_owned());
+            return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": message }))));
+        }
+        let Some(effective_profile) = profile.effective_profile else {
+            let message = profile.error.unwrap_or_else(|| {
+                "未能识别当前 Colab 档位（请管理员在基础设置中选择 DaSiWa V5xs 或 Cobijada）"
+                    .to_owned()
+            });
+            return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": message }))));
+        };
+        if let Some(obj) = args.get_mut("input").and_then(Value::as_object_mut) {
+            obj.insert("colabMode".to_owned(), Value::Bool(true));
+            obj.insert("colabProfile".to_owned(), Value::String(effective_profile));
+            obj.insert(
+                "diffusionModelName".to_owned(),
+                Value::String(profile.diffusion_model_name),
+            );
+            obj.insert("workflowModuleId".to_owned(), Value::Null);
+            obj.insert("workflowPath".to_owned(), Value::String(String::new()));
+            obj.insert("secondarySamplingEnabled".to_owned(), Value::Bool(false));
+            obj.insert("secondaryLoraName".to_owned(), Value::String(String::new()));
+            obj.insert("secondaryLoraBypassed".to_owned(), Value::Bool(true));
+            obj.insert("secondarySource".to_owned(), Value::Null);
+            obj.insert("secondarySourcePath".to_owned(), Value::Null);
+            obj.insert(
+                "ssPassword".to_owned(),
+                Value::String(state.config.colab_ss_password.clone()),
+            );
+            obj.insert("inputRootPath".to_owned(), Value::String(String::new()));
+        }
+    } else if command == "get_comfyui_client_task_statuses" {
+        let image_ids: std::collections::HashSet<String> = args
+            .get("imageClientIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        let ss_ids: Vec<Value> = args
+            .get("clientIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|id| !image_ids.contains(*id))
+            .map(|id| Value::String(id.to_owned()))
+            .collect();
+        if let Some(obj) = args.as_object_mut() {
+            obj.insert("colabSsClientIds".to_owned(), Value::Array(ss_ids));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -211,12 +388,8 @@ async fn probe_live_colab(base_url: &str) -> (bool, Option<ColabProfileSpec>) {
         _ => {}
     }
 
-    let _ = detected_id_unused(detected);
     (reachable, detected)
 }
-
-#[inline]
-fn detected_id_unused(_spec: Option<ColabProfileSpec>) {}
 
 /// Probes the configured Colab ComfyUI instance for live reachability and active model profile.
 pub async fn inspect_colab_profile(state: &WebState) -> ColabProfileStatus {
@@ -228,7 +401,7 @@ pub async fn inspect_colab_profile(state: &WebState) -> ColabProfileStatus {
     resolve_colab_profile_status(true, reachable, &state.config.colab_profile, detected)
 }
 
-pub(super) async fn read_profile(State(state): State<WebState>) -> Json<ColabProfileStatus> {
+async fn read_profile(State(state): State<WebState>) -> Json<ColabProfileStatus> {
     let state = state.connection_snapshot();
     Json(inspect_colab_profile(&state).await)
 }
@@ -257,7 +430,9 @@ fn extract_payload_with_k(raw_rgb: &[u8], width: usize, height: usize, k: usize)
         0
     };
     let usable_pixels = width.saturating_mul(height).saturating_sub(excluded_pixels);
-    let usable_bits = (usable_pixels as u64).saturating_mul(3).saturating_mul(k as u64);
+    let usable_bits = (usable_pixels as u64)
+        .saturating_mul(3)
+        .saturating_mul(k as u64);
     if usable_bits < 32 {
         return None;
     }
@@ -278,7 +453,14 @@ fn extract_payload_with_k(raw_rgb: &[u8], width: usize, height: usize, k: usize)
     }
 
     impl<'a> BitReader<'a> {
-        fn new(raw_rgb: &'a [u8], width: usize, height: usize, skip_w: usize, skip_h: usize, k: usize) -> Self {
+        fn new(
+            raw_rgb: &'a [u8],
+            width: usize,
+            height: usize,
+            skip_w: usize,
+            skip_h: usize,
+            k: usize,
+        ) -> Self {
             Self {
                 raw_rgb,
                 width,
@@ -592,7 +774,7 @@ fn build_resource_url(asset_path: &str) -> String {
 fn write_atomic_file(target: &Path, root: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = target.parent().ok_or("Colab 输出目录无效")?;
     fs::create_dir_all(parent).map_err(|error| format!("创建 Colab 输出目录失败：{error}"))?;
-    super::rpc::ensure_contained(target, &[root.to_owned()])?;
+    ensure_contained(target, &[root.to_owned()])?;
     let temporary = target.with_extension(format!("{}.part", Uuid::new_v4()));
     let write_result = (|| -> Result<(), String> {
         let mut file = fs::OpenOptions::new()
@@ -681,7 +863,10 @@ async fn materialize_entry_outputs(state: &WebState, entry: &mut Value) -> Resul
             .iter()
             .fold(colab_root.clone(), |dir, segment| dir.join(segment));
         let stem = sanitize_filename_stem(&source_filename);
-        let tag = short_prompt_tag(&prompt_id, &format!("{source_subfolder}/{source_filename}/{url}"));
+        let tag = short_prompt_tag(
+            &prompt_id,
+            &format!("{source_subfolder}/{source_filename}/{url}"),
+        );
         let base_name = format!("{stem}_{tag}");
 
         let (decoded_filename, ext) =
@@ -751,6 +936,7 @@ pub async fn materialize_ss_outputs(state: &WebState, result: &mut Value) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::config::Config;
     use image::{ImageFormat, RgbImage};
     use std::io::Cursor;
 
@@ -813,7 +999,6 @@ mod tests {
         for y in 0..side {
             for x in 0..side {
                 if y < sh && x < sw {
-                    // Put noise into watermark zone to ensure decoder actually skips it.
                     let pos = (y * side + x) * 3;
                     raw_buf[pos] ^= 0x55;
                     continue;
@@ -931,5 +1116,72 @@ mod tests {
         assert!(unresolved.reachable);
         assert!(!unresolved.available);
         assert!(unresolved.effective_profile.is_none());
+    }
+
+    #[test]
+    fn colab_server_urls_normalize_and_rewrite_without_touching_local() {
+        let origin = "https://canvas.example.com";
+        let tail = "/view?filename=out.png&type=output";
+        let colab_upstream = "https://demo.trycloudflare.com/";
+        assert_eq!(
+            comfy_source_url(&format!("/api/comfy-colab{tail}"), origin, colab_upstream),
+            Some(format!("https://demo.trycloudflare.com{tail}"))
+        );
+        assert_eq!(
+            comfy_source_url(
+                &format!("{origin}/api/comfy-colab{tail}"),
+                origin,
+                colab_upstream
+            ),
+            Some(format!("https://demo.trycloudflare.com{tail}"))
+        );
+        assert!(comfy_source_url("/api/comfy/view?a=1", origin, colab_upstream).is_none());
+
+        let mut config = Config {
+            listen: "127.0.0.1:18742".parse().unwrap(),
+            public_url: origin.into(),
+            allowed_origins: vec![],
+            data_directory: "data".into(),
+            web_directory: "web".into(),
+            downloads_directory: "downloads".into(),
+            comfy_url: "http://127.0.0.1:8188".into(),
+            colab_comfy_url: String::new(),
+            colab_ss_password: String::new(),
+            colab_profile: String::new(),
+            comfy_input_directory: String::new(),
+            comfy_output_directory: String::new(),
+            max_upload_bytes: 12345,
+            trusted_proxies: vec![],
+        };
+        assert!(resolve_server_url_arg(&config, "https://canvas.example.com/api/comfy").is_none());
+        let err = resolve_server_url_arg(&config, "https://canvas.example.com/api/comfy-colab")
+            .unwrap()
+            .unwrap_err();
+        assert!(err.contains("Colab ComfyUI"), "{err}");
+
+        config.colab_comfy_url = "https://demo.trycloudflare.com".into();
+        assert_eq!(
+            resolve_server_url_arg(&config, "https://canvas.example.com/api/comfy-colab")
+                .unwrap()
+                .unwrap(),
+            "https://demo.trycloudflare.com"
+        );
+        assert_eq!(
+            resolve_server_url_arg(&config, "/api/comfy-colab")
+                .unwrap()
+                .unwrap(),
+            "https://demo.trycloudflare.com"
+        );
+        assert!(is_colab_result_url(&config, "https://demo.trycloudflare.com"));
+        assert!(is_colab_result_url(
+            &config,
+            "https://canvas.example.com/api/comfy-colab"
+        ));
+        assert!(!is_colab_result_url(&config, "http://127.0.0.1:8188"));
+        assert_eq!(
+            rewrite_result_url(&config, "https://demo.trycloudflare.com/view?filename=a.png")
+                .as_deref(),
+            Some("https://canvas.example.com/api/comfy-colab/view?filename=a.png")
+        );
     }
 }

@@ -14,17 +14,22 @@ async function loadTsModule(relativePath) {
 const { webApiUrl } = await loadTsModule("../src/web/urls.ts");
 const { generatedVideoDeletionPaths } = await loadTsModule("../src/web/outputFiles.ts");
 const {
+  loadVideoRegenerationPresets,
+  saveVideoRegenerationPresets,
+} = await loadTsModule("../src/video/videoRegenerationPresets.ts");
+const {
   COLAB_ALLOWED_LORAS,
   COLAB_PROFILE_MODELS,
+  colabGeneratedVideoWorkflowLabel,
   colabPresetNodePatch,
   colabPresetStorageKey,
   colabWorkflowDefaultSettings,
   isAllowedColabLoraName,
   loadColabVideoPresets,
-  loadVideoRegenerationPresets,
+  normalizeVideoChannel,
+  resolveColabProfileForSnapshot,
   saveColabVideoPresets,
-  saveVideoRegenerationPresets,
-} = await loadTsModule("../src/video/videoRegenerationPresets.ts");
+} = await loadTsModule("../src/colab/presets.ts");
 
 function createMemoryStorage() {
   const store = new Map();
@@ -208,4 +213,23 @@ test("isAllowedColabLoraName and colabPresetNodePatch keep local workflow and se
   assert.deepEqual(nodeContent.generationStyleLoras, [
     { name: COLAB_ALLOWED_LORAS[1], strength: 0.45, bypassed: false, applyToSecondary: false, applyToSecondPass: false },
   ]);
+});
+
+test("disabling colab module cleanly falls back legacy colab nodes to local while keeping labels", () => {
+  assert.equal(normalizeVideoChannel("colab", false, true), "local");
+  assert.equal(normalizeVideoChannel("colab", true, true), "colab");
+  assert.equal(normalizeVideoChannel("colab", true, false), "local");
+  assert.equal(normalizeVideoChannel("local", true, true), "local");
+  assert.equal(
+    resolveColabProfileForSnapshot("cobijada", undefined, null, ""),
+    "cobijada",
+  );
+  assert.equal(
+    resolveColabProfileForSnapshot("", COLAB_PROFILE_MODELS.dasiwa, null, "cobijada"),
+    "dasiwa",
+  );
+  assert.equal(
+    colabGeneratedVideoWorkflowLabel("colab:minimax-h3-fla-v3-ss", "cobijada"),
+    "Colab 专用 · Cobijada (Fla V3.1 1采 SS)",
+  );
 });

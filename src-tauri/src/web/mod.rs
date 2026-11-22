@@ -3,8 +3,7 @@ mod auth;
 mod authz;
 mod backup;
 mod canvases;
-mod colab;
-mod config;
+pub(crate) mod config;
 mod connection;
 mod dispatch;
 mod files;
@@ -13,8 +12,8 @@ mod media_cleanup;
 mod ownership;
 mod posters;
 mod presence;
-mod proxy;
-mod rpc;
+pub(crate) mod proxy;
+pub(crate) mod rpc;
 mod settings;
 mod storage;
 mod tasks;
@@ -56,8 +55,8 @@ use tower_http::services::{ServeDir, ServeFile};
 
 #[derive(Clone)]
 pub(crate) struct WebState {
-    core: Arc<ApplicationState>,
-    config: Arc<config::Config>,
+    pub(crate) core: Arc<ApplicationState>,
+    pub(crate) config: Arc<config::Config>,
     connection: Arc<connection::Store>,
     auth: Arc<auth::Auth>,
     handle: AppHandle,
@@ -73,7 +72,7 @@ pub(crate) struct WebState {
 }
 
 impl WebState {
-    fn connection_snapshot(mut self) -> Self {
+    pub(crate) fn connection_snapshot(mut self) -> Self {
         self.config = self.connection.snapshot();
         let mut core = (*self.core).clone();
         core.assets_dir =
@@ -202,7 +201,7 @@ pub async fn run() -> Result<(), String> {
         "temp/image-resize",
         "workflow-modules",
         "workflow-module-exports",
-        colab::COLAB_OUTPUTS_DIR,
+        crate::colab_channel::COLAB_OUTPUTS_DIR,
     ] {
         std::fs::create_dir_all(data.join(directory)).map_err(|e| e.to_string())?;
     }
@@ -341,11 +340,9 @@ pub async fn run() -> Result<(), String> {
             "/api/comfy-config",
             get(connection::read).put(connection::write),
         )
-        .route("/api/colab-profile", get(colab::read_profile))
         .route("/api/comfy/ws", get(proxy::websocket))
-        .route("/api/comfy/{*path}", get(proxy::http))
-        .route("/api/comfy-colab/ws", get(proxy::websocket_colab))
-        .route("/api/comfy-colab/{*path}", get(proxy::http_colab))
+        .route("/api/comfy/{*path}", get(proxy::http));
+    let protected = crate::colab_channel::web::mount_routes(protected)
         .route("/api/auth/edit-mode", post(auth::edit_mode))
         .route(
             "/api/admin/users",
@@ -554,10 +551,10 @@ fn deliverable_with(
     if let Some(canvas_id) = message.get("canvasId").and_then(Value::as_str) {
         return authz::may_read(ownership, session, canvas_id);
     }
-    matches!(
-        message.get("event").and_then(Value::as_str),
-        Some("canvas://resync" | "canvas://colab-config-changed")
-    ) || session.role == users::Role::Admin
+    let event_name = message.get("event").and_then(Value::as_str);
+    event_name == Some("canvas://resync")
+        || event_name.is_some_and(crate::colab_channel::web::is_colab_event)
+        || session.role == users::Role::Admin
 }
 async fn events(State(state): State<WebState>, headers: HeaderMap) -> impl IntoResponse {
     let receiver = state.handle.events.subscribe();
@@ -627,14 +624,9 @@ async fn read_settings(State(state): State<WebState>) -> impl IntoResponse {
         "infinite-canvas:comfy-output-root".to_owned(),
         connection::display_directory(&state.config.comfy_output_directory),
     );
-    settings.insert(
-        "infinite-canvas:colab-comfy-configured".to_owned(),
-        if state.config.colab_comfy_url.is_empty() {
-            "false".to_owned()
-        } else {
-            "true".to_owned()
-        },
-    );
+    if let Some((key, value)) = crate::colab_channel::web::extra_frontend_settings(&state) {
+        settings.insert(key, value);
+    }
     Json(settings)
 }
 async fn write_settings(

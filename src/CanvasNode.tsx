@@ -40,10 +40,6 @@ import { useDropdownWheel } from "./useDropdownWheel";
 import { CanvasNodePresentation } from "./canvas/CanvasNodePresentation";
 import { useBatchedNodeInternals } from "./canvas/useBatchedNodeInternals";
 import {
-  COLAB_ALLOWED_LORAS,
-  COLAB_PROFILE_LABELS,
-  colabPresetNodePatch,
-  colabWorkflowDefaultSettings,
   matchingVideoRegenerationPreset,
   orderedVideoRegenerationPresets,
   videoPresetNodePatch,
@@ -51,7 +47,20 @@ import {
   videoNodeSecondaryColors,
 } from "./video/videoRegenerationPresets";
 import type { VideoRegenerationPresetCollection } from "./video/videoRegenerationPresets";
-import type { ColabProfileId, ColabProfileStatus } from "./web/connection";
+import {
+  COLAB_ALLOWED_LORAS,
+  ColabChannelToggle,
+  ColabLockedModelField,
+  ColabLockedWorkflowField,
+  ColabVideoChannelBadge,
+  buildColabChannelSwitchPatch,
+  buildLocalChannelRestorePatch,
+  colabGeneratedVideoWorkflowLabel,
+  colabPresetNodePatch,
+  effectiveVideoChannel,
+  type ColabNodeContext,
+  type ColabProfileId,
+} from "./colab";
 import { attachLivePreviewSource, comfyStatusMessage, livePreviewResources } from "./comfyLivePreview";
 import { StyleLoraInfo, LoraNameWithStrength } from "./StyleLoraInfo";
 import { H3StyleLora, h3StyleLorasFromContent, recordedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
@@ -1702,12 +1711,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   videoRegenerationPresets: VideoRegenerationPresetCollection;
   h3LoraOptions: string[];
   h3DiffusionModelOptions: string[];
-  colabComfyConfigured?: boolean;
-  colabAvailable?: boolean;
-  colabProfileStatus?: ColabProfileStatus | null;
-  colabVideoPresetsByProfile?: Record<ColabProfileId, VideoRegenerationPresetCollection>;
-  colabH3LoraOptions?: string[];
-  colabH3DiffusionModelOptions?: string[];
+  colab?: ColabNodeContext;
   workflowPackages: Record<string, PackageDescription>;
   workflowChoices: ChoiceStore;
   workflowChoicesVersion: number;
@@ -3487,7 +3491,7 @@ function seedModeFromContent(content: JsonObject): SeedMode {
 }
 
 function videoExecutionChannelFromContent(content: JsonObject): VideoExecutionChannel {
-  return content.generationChannel === "colab" ? "colab" : "local";
+  return effectiveVideoChannel(content);
 }
 
 function fixedSeedFromContent(content: JsonObject): string {
@@ -4684,12 +4688,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     videoRegenerationPresets,
     h3LoraOptions,
     h3DiffusionModelOptions,
-    colabComfyConfigured = false,
-    colabAvailable = false,
-    colabProfileStatus = null,
-    colabVideoPresetsByProfile,
-    colabH3LoraOptions = [],
-    colabH3DiffusionModelOptions = [],
+    colab,
     workflowPackages,
     workflowChoices,
     workflowModules,
@@ -5066,13 +5065,17 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     : "";
   const videoGenerationMode = videoGenerationModeFromContent(record.content);
   const activeColabProfile: ColabProfileId | null = isColabChannel
-    ? (colabProfileStatus?.effectiveProfile ?? null)
+    ? (colab?.profileStatus?.effectiveProfile ?? null)
     : null;
   const activeH3DiffusionModelOptions = isColabChannel
-    ? (colabProfileStatus?.diffusionModelName ? [colabProfileStatus.diffusionModelName] : colabH3DiffusionModelOptions)
+    ? (colab?.profileStatus?.diffusionModelName
+      ? [colab.profileStatus.diffusionModelName]
+      : (colab?.diffusionModelOptions ?? []))
     : h3DiffusionModelOptions;
   const activeH3LoraOptions = isColabChannel
-    ? (colabProfileStatus?.allowedLoras?.length ? colabProfileStatus.allowedLoras : (colabH3LoraOptions.length ? colabH3LoraOptions : [...COLAB_ALLOWED_LORAS]))
+    ? (colab?.profileStatus?.allowedLoras?.length
+      ? colab.profileStatus.allowedLoras
+      : (colab?.loraOptions.length ? colab.loraOptions : [...COLAB_ALLOWED_LORAS]))
     : h3LoraOptions;
   const selectedDiffusionModelOption = activeH3DiffusionModelOptions.find(
     (model) => sameH3DiffusionModelName(model, nodeDiffusionModelOverride),
@@ -5273,12 +5276,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     diffusionModelName: nodeDiffusionModelName,
   };
   const activePresetCollection: VideoRegenerationPresetCollection = isColabChannel
-    ? (activeColabProfile && colabVideoPresetsByProfile?.[activeColabProfile]
-      ? colabVideoPresetsByProfile[activeColabProfile]
+    ? (activeColabProfile && colab?.presetsByProfile[activeColabProfile]
+      ? colab.presetsByProfile[activeColabProfile]
       : { presets: [], defaultPresetId: "" })
     : videoRegenerationPresets;
   const presetModelName = isColabChannel
-    ? (colabProfileStatus?.diffusionModelName || nodeDiffusionModelName)
+    ? (colab?.profileStatus?.diffusionModelName || nodeDiffusionModelName)
     : nodeDiffusionModelName;
   const effectiveSharedPrimarySteps = isColabChannel ? true : sharedPrimarySteps;
   const matchedVideoPreset = isVideoGeneration ? matchingVideoRegenerationPreset({
@@ -5302,49 +5305,22 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const switchVideoChannel = (nextChannel: VideoExecutionChannel) => {
     if (nextChannel === videoChannel) return;
     if (nextChannel === "colab") {
-      const localBackup = {
-        generationPrimaryResolution: primaryVideoResolution,
-        generationPrimaryVideoSteps: primaryVideoSteps,
-        generationLoraName: h3LoraName,
-        generationLoraStrength: h3LoraStrength,
-        generationLoraBypassed: h3LoraBypassed,
-        generationPrimaryBrightness: currentPresetSettings.primaryBrightness,
-        generationPrimaryContrast: currentPresetSettings.primaryContrast,
-        generationPrimarySaturation: currentPresetSettings.primarySaturation,
-        generationStyleLoras: styleLoras.map((slot) => ({ ...slot })),
-      };
-      const targetProfile: ColabProfileId = colabProfileStatus?.effectiveProfile ?? "dasiwa";
-      const profileCollection = colabVideoPresetsByProfile?.[targetProfile];
-      const defaultColabPreset = profileCollection?.presets.find(
-        (preset) => preset.id === profileCollection.defaultPresetId,
-      ) ?? profileCollection?.presets[0];
-      const colabSettings = defaultColabPreset?.settings ?? colabWorkflowDefaultSettings(targetProfile);
       onChange(id, {
-        content: {
-          ...record.content,
-          localChannelBackup: localBackup,
-          generationChannel: "colab",
-          ...colabPresetNodePatch(colabSettings),
-          status: "idle",
-          validationMessage: "",
-        },
+        content: buildColabChannelSwitchPatch(record.content, colab, {
+          primaryVideoResolution,
+          primaryVideoSteps,
+          h3LoraName,
+          h3LoraStrength,
+          h3LoraBypassed,
+          primaryBrightness: currentPresetSettings.primaryBrightness,
+          primaryContrast: currentPresetSettings.primaryContrast,
+          primarySaturation: currentPresetSettings.primarySaturation,
+          styleLoras,
+        }),
       });
       return;
     }
-
-    const backup = record.content.localChannelBackup;
-    const restored: JsonObject = backup && typeof backup === "object" && !Array.isArray(backup)
-      ? (backup as JsonObject)
-      : {};
-    const nextContent: JsonObject = {
-      ...record.content,
-      ...restored,
-      generationChannel: "local",
-      status: "idle",
-      validationMessage: "",
-    };
-    delete nextContent.localChannelBackup;
-    onChange(id, { content: nextContent });
+    onChange(id, { content: buildLocalChannelRestorePatch(record.content) });
   };
   const seedMode = seedModeFromContent(record.content);
   const fixedSeed = fixedSeedFromContent(record.content);
@@ -5424,15 +5400,16 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ? styleLoraUsageFromSnapshot({ ...generatedVideoSnapshot }, isSecondaryPreview && !isVideoUpscalePreview)
     : { primary: null, secondary: null };
   const generatedVideoUsesReferenceImageSize = generatedVideoWorkflowModule?.variant === "reference-to-video";
-  const generatedVideoWorkflowLabel = generatedVideoSnapshot?.workflowModuleId === "colab:minimax-h3-fla-v3-ss"
-    ? (generatedVideoSnapshot.workflowModuleRevision === "dasiwa" || generatedVideoSnapshot.workflowModuleRevision === "cobijada"
-      ? `Colab 专用 · ${COLAB_PROFILE_LABELS[generatedVideoSnapshot.workflowModuleRevision]} (Fla V3.1 1采 SS)`
-      : "Colab 专用 · Fla全能参考 V3.1 (1采 SS)")
-    : generatedVideoWorkflowModule
+  const colabWorkflowLabel = colabGeneratedVideoWorkflowLabel(
+    generatedVideoSnapshot?.workflowModuleId,
+    generatedVideoSnapshot?.workflowModuleRevision,
+  );
+  const generatedVideoWorkflowLabel = colabWorkflowLabel
+    ?? (generatedVideoWorkflowModule
       ? `${generatedVideoWorkflowModule.name} · ${generatedVideoSnapshot?.workflowModuleRevision || generatedVideoWorkflowModule.revision}`
       : generatedVideoSnapshot?.workflowModuleId
         ? `方案已缺失 · ${generatedVideoSnapshot.workflowModuleRevision || "未记录版本"}`
-        : "未记录";
+        : "未记录");
   const generatedVideoPrompt = generatedVideoSnapshot?.prompt ?? "";
   const generatedVideoPromptInformation = generatedVideoSnapshot?.promptInformation ?? "";
   const generatedVideoPromptBaseTitle = promptNodeTitle
@@ -7995,11 +7972,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
         <footer className="generated-video-footer">
           <div className="generated-video-footer-status">
             <span className={`source-dot ${isSecondaryPreview ? "is-secondary" : ""}`} />
-            {record.content.comfyChannel === "colab" && (
-              <span className="generated-video-channel-badge" title="通过 Colab ComfyUI + SS_tools 执行并解码保存">
-                Colab
-              </span>
-            )}
+            <ColabVideoChannelBadge comfyChannel={record.content.comfyChannel} />
             <span title={generatedVideoFooterStatus}>{generatedVideoFooterStatus}</span>
           </div>
           <span className="generated-video-footer-spacer" />
@@ -8692,48 +8665,11 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       )}
       {isVideoGeneration && (
         <div ref={videoNodeBodyRef} className="nodrag video-node-body has-media">
-          {import.meta.env.MODE === "web" && (
-            <div className="video-workflow-module-select video-channel-select" onPointerDown={(event) => event.stopPropagation()}>
-              <span>执行渠道</span>
-              <div className="video-channel-options" role="radiogroup" aria-label="视频执行渠道">
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={videoChannel === "local"}
-                  className={videoChannel === "local" ? "is-active" : ""}
-                  onClick={() => switchVideoChannel("local")}
-                >
-                  本地
-                </button>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={videoChannel === "colab"}
-                  disabled={!colabAvailable}
-                  title={colabAvailable
-                    ? `提交到 Colab ComfyUI（${colabProfileStatus?.label ?? "已就绪"}）执行并使用 SS_tools 回传`
-                    : (colabProfileStatus?.error ?? (colabComfyConfigured ? "Colab 实例当前不可用" : "管理员尚未配置 Colab ComfyUI 服务地址"))}
-                  className={videoChannel === "colab" ? "is-active" : ""}
-                  onClick={() => switchVideoChannel("colab")}
-                >
-                  Colab
-                </button>
-              </div>
-            </div>
-          )}
+          <ColabChannelToggle colab={colab} channel={videoChannel} onSelect={switchVideoChannel} />
           <div className="video-workflow-module-select">
             <span>生成方案</span>
             {isColabChannel ? (
-              <div
-                className={`video-locked-value ${colabAvailable ? "" : "is-offline"}`}
-                title={colabAvailable
-                  ? (colabProfileStatus?.workflowLabel ?? "Colab 专用 · Fla全能参考 V3.1 (1采 SS)")
-                  : (colabProfileStatus?.error ?? "Colab 实例当前未运行或无法连接")}
-              >
-                {colabAvailable
-                  ? (colabProfileStatus?.workflowLabel ?? "Colab 专用 · Fla全能参考 V3.1 (1采 SS)")
-                  : "Colab 实例未连接（请切回本地）"}
-              </div>
+              <ColabLockedWorkflowField colab={colab} />
             ) : (
             <div ref={workflowModuleControlRef} className={`video-lora-select video-workflow-module-dropdown ${workflowModuleMenuOpen ? "nowheel" : ""}`}>
               <button
@@ -8811,16 +8747,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           <div className="video-workflow-module-select video-h3-model-select" onPointerDown={(event) => event.stopPropagation()}>
             <span>选择模型</span>
             {isColabChannel ? (
-              <div
-                className={`video-locked-value ${colabAvailable ? "" : "is-offline"}`}
-                title={colabAvailable
-                  ? (colabProfileStatus?.diffusionModelName ?? "")
-                  : (colabProfileStatus?.error ?? "Colab 实例当前未运行")}
-              >
-                {colabAvailable && colabProfileStatus?.effectiveProfile
-                  ? `${colabProfileStatus.label} · ${colabProfileStatus.source === "detected" ? "自动识别锁定" : "手动锁定"}`
-                  : (colabProfileStatus?.error ?? "Colab 实例未连接")}
-              </div>
+              <ColabLockedModelField colab={colab} />
             ) : (
             <SettingsSelect
               value={sameH3DiffusionModelName(nodeDiffusionModelName, defaultNodeDiffusionModelName)

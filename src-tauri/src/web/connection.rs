@@ -198,7 +198,7 @@ pub(super) async fn write(
                     if report["migrated"] == true {
                         let _ = handle.emit("canvas://resync", json!({}));
                     } else {
-                        let _ = handle.emit("canvas://colab-config-changed", json!({}));
+                        crate::colab_channel::web::emit_config_changed(&handle);
                     }
                     let mut value = serde_json::to_value(saved).unwrap();
                     value["storageMigration"] = report;
@@ -344,9 +344,12 @@ mod tests {
             input.comfy_input_directory = directory.into();
             assert!(store.save(input).is_err());
         }
-        let mut bad_profile = Connection::from_config(&store.snapshot());
-        bad_profile.colab_profile = "invalid".into();
-        assert!(store.save(bad_profile).is_err());
+        #[cfg(feature = "colab-channel")]
+        {
+            let mut bad_profile = Connection::from_config(&store.snapshot());
+            bad_profile.colab_profile = "invalid".into();
+            assert!(store.save(bad_profile).is_err());
+        }
         assert_eq!(fs::read(root.join("config.json")).unwrap(), original);
         assert_eq!(store.snapshot().comfy_url, "http://127.0.0.1:8188");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 3);

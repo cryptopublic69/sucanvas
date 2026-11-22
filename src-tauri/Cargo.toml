@@ -16,9 +16,17 @@ name = "infinite_canvas_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["server"]
+default = ["web-server"]
 desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog"]
 server = ["axum/ws", "axum/multipart", "tower-http/fs", "dep:tokio-tungstenite", "dep:futures-util", "dep:fs2", "dep:tower", "dep:sha2", "dep:rustls"]
+# Hot-pluggable Colab ComfyUI channel. Comment out `"colab-channel",` below (and set
+# `COLAB_CHANNEL_ENABLED = false` in `src/colab/index.ts`) to cleanly disable Colab
+# at compile time while retaining historical `sucanvas://colab-outputs/` media access.
+colab-channel = []
+web-server = [
+  "server",
+  "colab-channel",
+]
 
 [[bin]]
 name = "SuCanvasServer"

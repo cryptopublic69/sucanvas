@@ -73,13 +73,7 @@ pub(super) fn normalize_colab_profile(value: &str) -> String {
 }
 pub(super) fn validate_colab_profile(value: &str) -> Result<(), String> {
     let normalized = normalize_colab_profile(value);
-    if normalized.is_empty()
-        || crate::workflow_modules::colab_profile_spec(&normalized).is_some()
-    {
-        Ok(())
-    } else {
-        Err("Colab 档位只能为空（自动识别）、dasiwa 或 cobijada".into())
-    }
+    crate::colab_channel::validate_profile(&normalized)
 }
 impl Config {
     pub fn read(path: &Path) -> Result<Self, String> {
@@ -247,6 +241,7 @@ mod tests {
         assert!(validate_colab_profile("").is_ok());
         assert!(validate_colab_profile("DaSiWa").is_ok());
         assert!(validate_colab_profile("cobijada").is_ok());
+        #[cfg(feature = "colab-channel")]
         assert!(validate_colab_profile("unknown").is_err());
     }
 }

@@ -1,23 +1,6 @@
 import { request } from "./bridge";
-
-export type ColabProfileId = "dasiwa" | "cobijada";
-
-export type ColabProfileOption = "" | ColabProfileId;
-
-export type ColabProfileStatus = {
-  configured: boolean;
-  reachable: boolean;
-  available: boolean;
-  selectedProfile: ColabProfileOption;
-  detectedProfile: ColabProfileId | null;
-  effectiveProfile: ColabProfileId | null;
-  source: "detected" | "manual" | "none";
-  label: string;
-  workflowLabel: string;
-  diffusionModelName: string;
-  allowedLoras: string[];
-  error: string | null;
-};
+import { isColabProxyUrl } from "../colab/api";
+import type { ColabProfileOption } from "../colab/types";
 
 export type ComfyConnection = {
   comfyUrl: string;
@@ -32,18 +15,14 @@ export function readComfyConnection(): Promise<ComfyConnection> {
   return request("/api/comfy-config");
 }
 
-export function readColabProfile(): Promise<ColabProfileStatus> {
-  return request("/api/colab-profile");
-}
-
 export function saveComfyConnection(connection: ComfyConnection): Promise<ComfyConnection> {
   const normalizedUrl = connection.comfyUrl.replace(/\/+$/, "");
   const normalizedColabUrl = (connection.colabComfyUrl ?? "").replace(/\/+$/, "");
   if (
     normalizedUrl === `${window.location.origin}/api/comfy`
-    || normalizedUrl === `${window.location.origin}/api/comfy-colab`
+    || isColabProxyUrl(normalizedUrl)
     || normalizedColabUrl === `${window.location.origin}/api/comfy`
-    || normalizedColabUrl === `${window.location.origin}/api/comfy-colab`
+    || isColabProxyUrl(normalizedColabUrl)
   ) {
     throw new Error("请填写实际的 ComfyUI 服务地址，不能填写画布代理地址");
   }

@@ -25,7 +25,7 @@ try {
     if ($LASTEXITCODE) { throw 'Web build failed' }
     # Bundle the C runtime into the server executable for Windows portability.
     $env:RUSTFLAGS = "$previousRustFlags -C target-feature=+crt-static".Trim()
-    & $cargoPath build --manifest-path src-tauri/Cargo.toml --no-default-features --features server --bin SuCanvasServer --release --locked
+    & $cargoPath build --manifest-path src-tauri/Cargo.toml --no-default-features --features web-server --bin SuCanvasServer --release --locked
     if ($LASTEXITCODE) { throw 'Server build failed' }
     foreach ($directory in @($OutputDirectory, (Join-Path $OutputDirectory 'web'), (Join-Path $OutputDirectory 'scripts'), (Join-Path $OutputDirectory 'tools'))) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null

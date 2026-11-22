@@ -137,7 +137,8 @@ pub async fn http(State(state): State<WebState>, request: Request<Body>) -> Resp
     http_for(state, request, "/api/comfy", false).await
 }
 
-pub async fn http_colab(State(state): State<WebState>, request: Request<Body>) -> Response {
+#[cfg(feature = "colab-channel")]
+pub(crate) async fn http_colab(State(state): State<WebState>, request: Request<Body>) -> Response {
     http_for(state, request, "/api/comfy-colab", true).await
 }
 const UPSTREAM_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -293,7 +294,8 @@ pub async fn websocket(
     websocket_for(state, request, ws, uri, false).await
 }
 
-pub async fn websocket_colab(
+#[cfg(feature = "colab-channel")]
+pub(crate) async fn websocket_colab(
     State(state): State<WebState>,
     request: axum::http::HeaderMap,
     ws: WebSocketUpgrade,

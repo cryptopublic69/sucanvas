@@ -38,25 +38,29 @@ import type { SetStateAction } from "react";
 import { ComfyStatusIndicators } from "./ComfyStatusIndicators";
 import { comfyStatusMessage, createComfyPreviewReceiver, livePreviewResources } from "./comfyLivePreview";
 import {
-  COLAB_ALLOWED_LORAS,
-  COLAB_PROFILE_LABELS,
-  COLAB_PROFILE_MODELS,
-  colabPresetNodePatch,
-  colabWorkflowDefaultSettings,
-  emptyColabVideoPresetsByProfile,
-  isAllowedColabLoraName,
-  loadColabVideoPresets,
   loadVideoRegenerationPresets,
   matchingVideoRegenerationPreset,
   reorderVideoRegenerationPresets,
-  saveColabVideoPresets,
   saveVideoRegenerationPresets,
   videoPresetNodePatch,
   videoNodeExtraParameters,
   videoNodeSecondaryColors,
 } from "./video/videoRegenerationPresets";
 import type { VideoRegenerationPresetCollection, VideoRegenerationSettings } from "./video/videoRegenerationPresets";
-import type { ColabProfileId, ColabProfileOption, ColabProfileStatus } from "./web/connection";
+import {
+  COLAB_ALLOWED_LORAS,
+  COLAB_LIVE_PREVIEW_NODE_ID,
+  COLAB_PROFILE_LABELS,
+  COLAB_PROFILE_MODELS,
+  COLAB_WORKFLOW_MODULE_ID,
+  colabPresetNodePatch,
+  colabProxyServerUrl,
+  colabWorkflowDefaultSettings,
+  isAllowedColabLoraName,
+  resolveColabProfileForSnapshot,
+  useColabChannel,
+  type ColabProfileId,
+} from "./colab";
 import { findDuplicateVideoRequest } from "./video/activeVideoSeed";
 import { VideoRegenerationDialogs } from "./video/VideoRegenerationDialogs";
 import { useVideoUpscale } from "./video/useVideoUpscale";
@@ -543,17 +547,6 @@ function CanvasWorkspace() {
   const [comfySettingsBusy, setComfySettingsBusy] = useState(false);
   const [comfySettingsError, setComfySettingsError] = useState("");
   const [comfyConnectionRevision, setComfyConnectionRevision] = useState(0);
-  const [colabComfyUrlDraft, setColabComfyUrlDraft] = useState("");
-  const [colabSsPasswordDraft, setColabSsPasswordDraft] = useState("");
-  const [colabProfileDraft, setColabProfileDraft] = useState<ColabProfileOption>("");
-  const [colabProfileStatus, setColabProfileStatus] = useState<ColabProfileStatus | null>(null);
-  const [colabProfileLoading, setColabProfileLoading] = useState(false);
-  const [colabComfyConfigured, setColabComfyConfigured] = useState(() => (
-    import.meta.env.MODE === "web"
-    && window.localStorage.getItem("infinite-canvas:colab-comfy-configured") === "true"
-  ));
-  const colabAvailable = import.meta.env.MODE === "web"
-    && Boolean(colabProfileStatus?.available && colabProfileStatus.effectiveProfile);
   const [h3WorkflowPath, setH3WorkflowPath] = useState(() =>
     window.localStorage.getItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY)
     ?? DEFAULT_H3_REFERENCE_WORKFLOW_PATH,
@@ -572,6 +565,11 @@ function CanvasWorkspace() {
   const [copyingProjectId, setCopyingProjectId] = useState<string | null>(null);
   // Web accounts: role, edit mode and the open canvas's owner decide what the UI offers.
   const { user: accessUser, editModeActive } = useAccess();
+  const colab = useColabChannel({
+    accessUser,
+    comfyConnectionRevision,
+    parseSettings: videoRegenerationSettingsFromValue,
+  });
   // CANVAS-012c3: who else is on the canvas on screen (Web accounts only).
   const presentUsers = useCanvasPresence(
     canvasPath.length ? canvasPath[canvasPath.length - 1].id : null,
@@ -624,10 +622,6 @@ function CanvasWorkspace() {
   const [h3LoraPreference, setH3LoraPreference] = useState(h3LoraPreferenceFromStorage);
   const [h3DiffusionModelOptions, setH3DiffusionModelOptions] = useState<string[]>([DEFAULT_H3_DIFFUSION_MODEL_NAME]);
   const [h3DiffusionModelCatalogLoaded, setH3DiffusionModelCatalogLoaded] = useState(false);
-  const [colabH3LoraOptions, setColabH3LoraOptions] = useState<string[]>([]);
-  const [colabH3LoraCatalogLoaded, setColabH3LoraCatalogLoaded] = useState(false);
-  const [colabH3DiffusionModelOptions, setColabH3DiffusionModelOptions] = useState<string[]>([]);
-  const [colabH3DiffusionModelCatalogLoaded, setColabH3DiffusionModelCatalogLoaded] = useState(false);
   const [h3DiffusionModelName, setH3DiffusionModelName] = useState(DEFAULT_H3_DIFFUSION_MODEL_NAME);
   const [selectedImageWorkflowModuleId, setSelectedImageWorkflowModuleId] = useState("");
   const [krea2DiffusionModelName, setKrea2DiffusionModelName] = useState("");
@@ -698,9 +692,6 @@ function CanvasWorkspace() {
   const [videoRegenerationPresets, setVideoRegenerationPresets] = useState<VideoRegenerationPresetCollection>(
     () => loadVideoRegenerationPresets(window.localStorage, videoRegenerationSettingsFromValue),
   );
-  const [colabVideoPresetsByProfile, setColabVideoPresetsByProfile] = useState<
-    Record<ColabProfileId, VideoRegenerationPresetCollection>
-  >(() => emptyColabVideoPresetsByProfile(window.localStorage, videoRegenerationSettingsFromValue));
   const [selectedVideoRegenerationPresetId, setSelectedVideoRegenerationPresetId] = useState("");
   const [videoRegenerationPresetName, setVideoRegenerationPresetName] = useState("");
   const [secondarySampleDraft, setSecondarySampleDraft] = useState<SecondarySampleDraft | null>(null);
@@ -1084,7 +1075,7 @@ function CanvasWorkspace() {
 
   const comfyServerUrlForChannel = useCallback((channel?: VideoExecutionChannel) => (
     import.meta.env.MODE === "web" && channel === "colab"
-      ? `${window.location.origin}/api/comfy-colab`
+      ? colabProxyServerUrl()
       : comfyUiServerUrlRef.current
   ), []);
 
@@ -1239,78 +1230,6 @@ function CanvasWorkspace() {
       disposed = true;
     };
   }, [comfyUiServerUrl, defaultH3WorkflowModuleId, workflowModulesReady]);
-
-  const refreshColabProfile = useCallback(async () => {
-    if (import.meta.env.MODE !== "web" || !accessUser) {
-      setColabProfileStatus(null);
-      setColabH3LoraOptions([]);
-      setColabH3LoraCatalogLoaded(false);
-      setColabH3DiffusionModelOptions([]);
-      setColabH3DiffusionModelCatalogLoaded(false);
-      return;
-    }
-    setColabProfileLoading(true);
-    try {
-      const { readColabProfile } = await import("./web/connection");
-      const status = await readColabProfile();
-      setColabProfileStatus(status);
-      setColabComfyConfigured(status.configured);
-      window.localStorage.setItem("infinite-canvas:colab-comfy-configured", status.configured ? "true" : "false");
-      const allowedLoras = status.allowedLoras?.length ? status.allowedLoras : [...COLAB_ALLOWED_LORAS];
-      setColabH3LoraOptions((current) => (
-        current.length === allowedLoras.length
-          && current.every((item, index) => sameH3LoraName(item, allowedLoras[index]))
-          ? current
-          : allowedLoras
-      ));
-      setColabH3LoraCatalogLoaded(true);
-      const lockedModels = status.diffusionModelName ? [status.diffusionModelName] : [];
-      setColabH3DiffusionModelOptions((current) => (
-        current.length === lockedModels.length
-          && current.every((item, index) => sameH3DiffusionModelName(item, lockedModels[index]))
-          ? current
-          : lockedModels
-      ));
-      setColabH3DiffusionModelCatalogLoaded(Boolean(status.available && status.diffusionModelName));
-    } catch {
-      setColabProfileStatus((current) => current ? { ...current, reachable: false, available: false } : null);
-      setColabH3DiffusionModelCatalogLoaded(false);
-    } finally {
-      setColabProfileLoading(false);
-    }
-  }, [accessUser]);
-
-  useEffect(() => {
-    if (import.meta.env.MODE !== "web" || !accessUser) {
-      setColabProfileStatus(null);
-      setColabH3LoraOptions([]);
-      setColabH3LoraCatalogLoaded(false);
-      setColabH3DiffusionModelOptions([]);
-      setColabH3DiffusionModelCatalogLoaded(false);
-      return;
-    }
-    void refreshColabProfile();
-    const onFocus = () => {
-      if (document.visibilityState === "visible") void refreshColabProfile();
-    };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onFocus);
-    const interval = window.setInterval(() => {
-      if (document.visibilityState === "visible") void refreshColabProfile();
-    }, 15_000);
-    let unlistenConfigChanged: (() => void) | undefined;
-    void listen("canvas://colab-config-changed", () => {
-      void refreshColabProfile();
-    }).then((unlisten) => {
-      unlistenConfigChanged = unlisten;
-    }).catch(() => {});
-    return () => {
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onFocus);
-      window.clearInterval(interval);
-      unlistenConfigChanged?.();
-    };
-  }, [accessUser, comfyConnectionRevision, refreshColabProfile]);
 
   const toggleTheme = () => setTheme((current) => current === "dark" ? "light" : "dark");
 
@@ -3320,7 +3239,7 @@ function CanvasWorkspace() {
 
   useEffect(() => {
     if (!settingsOpen || import.meta.env.MODE !== "web") return;
-    void refreshColabProfile();
+    if (colab.enabled) void colab.refreshProfile();
     if (!globalAdmin) return;
     let cancelled = false;
     setComfySettingsBusy(true);
@@ -3331,18 +3250,12 @@ function CanvasWorkspace() {
         setComfyUiServerUrlDraft(connection.comfyUrl);
         setComfyInputRootDraft(connection.comfyInputDirectory);
         setComfyOutputRootDraft(connection.comfyOutputDirectory);
-        const nextColabUrl = connection.colabComfyUrl ?? "";
-        const configured = Boolean(nextColabUrl.trim());
-        setColabComfyUrlDraft(nextColabUrl);
-        setColabSsPasswordDraft(connection.colabSsPassword ?? "");
-        setColabProfileDraft((connection.colabProfile ?? "") as ColabProfileOption);
-        setColabComfyConfigured(configured);
-        window.localStorage.setItem("infinite-canvas:colab-comfy-configured", configured ? "true" : "false");
+        colab.syncFromConnection(connection);
       }).catch((error: unknown) => {
         if (!cancelled) setComfySettingsError(String(error));
       }).finally(() => { if (!cancelled) setComfySettingsBusy(false); });
     return () => { cancelled = true; };
-  }, [globalAdmin, refreshColabProfile, settingsOpen]);
+  }, [colab.enabled, colab.refreshProfile, colab.syncFromConnection, globalAdmin, settingsOpen]);
 
   const saveComfySettings = useCallback(async () => {
     if (comfySettingsBusy) return;
@@ -3363,21 +3276,12 @@ function CanvasWorkspace() {
       showGlobalNotice("ComfyUI 服务地址无效，请填写 http:// 或 https:// 开头的完整地址");
       return;
     }
-    const colabComfyUrl = colabComfyUrlDraft
-      .trim()
-      .replace(/^"|"$/g, "")
-      .replace(/\/+$/, "");
-    const colabSsPassword = colabSsPasswordDraft.trim();
-    if (colabComfyUrl) {
-      try {
-        const parsed = new URL(colabComfyUrl);
-        if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
-          throw new Error();
-        }
-      } catch {
-        showGlobalNotice("Colab ComfyUI 服务地址无效，请填写 http:// 或 https:// 开头的完整地址");
-        return;
-      }
+    let colabPatch: ReturnType<typeof colab.buildConnectionPatch>;
+    try {
+      colabPatch = colab.buildConnectionPatch();
+    } catch (error) {
+      showGlobalNotice(error instanceof Error ? error.message : String(error));
+      return;
     }
     let outputRoot = normalizePath(comfyOutputRootDraft);
     let inputRoot = normalizePath(comfyInputRootDraft);
@@ -3391,22 +3295,14 @@ function CanvasWorkspace() {
           comfyUrl: serverUrl,
           comfyInputDirectory: comfyInputRootDraft.trim().replace(/^"|"$/g, ""),
           comfyOutputDirectory: comfyOutputRootDraft.trim().replace(/^"|"$/g, ""),
-          colabComfyUrl,
-          colabSsPassword,
-          colabProfile: colabProfileDraft,
+          ...colabPatch,
         });
         outputRoot = saved.comfyOutputDirectory;
         inputRoot = saved.comfyInputDirectory;
         setComfyUiServerUrlDraft(saved.comfyUrl);
         setComfyInputRootDraft(inputRoot);
         setComfyOutputRootDraft(outputRoot);
-        const savedColabUrl = saved.colabComfyUrl ?? "";
-        const nextColabConfigured = Boolean(savedColabUrl.trim());
-        setColabComfyUrlDraft(savedColabUrl);
-        setColabSsPasswordDraft(saved.colabSsPassword ?? "");
-        setColabProfileDraft((saved.colabProfile ?? "") as ColabProfileOption);
-        setColabComfyConfigured(nextColabConfigured);
-        window.localStorage.setItem("infinite-canvas:colab-comfy-configured", nextColabConfigured ? "true" : "false");
+        colab.syncFromConnection(saved);
         connectionUrl = `${window.location.origin}/api/comfy`;
         setComfyConnectionRevision((current) => current + 1);
       } catch (error) {
@@ -3435,7 +3331,7 @@ function CanvasWorkspace() {
     window.localStorage.setItem(COMFYUI_SERVER_URL_STORAGE_KEY, connectionUrl);
     window.localStorage.setItem(H3_REFERENCE_WORKFLOW_STORAGE_KEY, workflowPath);
     showGlobalNotice("ComfyUI 设置已保存");
-  }, [colabComfyUrlDraft, colabProfileDraft, colabSsPasswordDraft, comfySettingsBusy, comfyInputRootDraft, comfyOutputRootDraft, comfyUiServerUrlDraft, h3WorkflowPathDraft, showGlobalNotice]);
+  }, [colab.buildConnectionPatch, colab.syncFromConnection, comfySettingsBusy, comfyInputRootDraft, comfyOutputRootDraft, comfyUiServerUrlDraft, h3WorkflowPathDraft, showGlobalNotice]);
 
   const saveH3ModelParameters = useCallback(async () => {
     const {
@@ -3762,7 +3658,7 @@ function CanvasWorkspace() {
     const moduleParameters = workflowModule?.defaults ?? {
       ...h3ModelParameters,
       diffusionModelName: isColabGenerator
-        ? (colabProfileStatus?.diffusionModelName || h3DiffusionModelNameFromContent(generator.content))
+        ? (colab.profileStatus?.diffusionModelName || h3DiffusionModelNameFromContent(generator.content))
         : h3DiffusionModelNameFromContent(generator.content),
       loraName: h3LoraNameFromContent(generator.content),
       loraStrength: h3LoraStrengthFromContent(generator.content),
@@ -3870,7 +3766,7 @@ function CanvasWorkspace() {
       primarySaturation: extraParameters.primarySaturation,
       ...videoNodeSecondaryColors(generator.content, moduleParameters),
       diffusionModelName: isColabGenerator
-        ? (colabProfileStatus?.diffusionModelName || nodeH3DiffusionModelName(generator.content, moduleParameters.diffusionModelName))
+        ? (colab.profileStatus?.diffusionModelName || nodeH3DiffusionModelName(generator.content, moduleParameters.diffusionModelName))
         : nodeH3DiffusionModelName(generator.content, moduleParameters.diffusionModelName),
       loraName: h3LoraNameFromContent(generator.content),
       loraStrength: h3LoraStrengthFromContent(generator.content),
@@ -3902,11 +3798,11 @@ function CanvasWorkspace() {
         referenceMappings: referenceSelection?.mappings ?? [],
         referenceCandidateCount: orderedMedia.length,
       } : {}),
-      workflowModuleId: isColabGenerator ? "colab:minimax-h3-fla-v3-ss" : (workflowModule?.id ?? ""),
-      workflowModuleRevision: isColabGenerator ? (colabProfileStatus?.effectiveProfile ?? "") : (workflowModule?.revision ?? ""),
+      workflowModuleId: isColabGenerator ? COLAB_WORKFLOW_MODULE_ID : (workflowModule?.id ?? ""),
+      workflowModuleRevision: isColabGenerator ? (colab.profileStatus?.effectiveProfile ?? "") : (workflowModule?.revision ?? ""),
       channel: generatorChannel,
     };
-  }, [colabProfileStatus, h3ModelParameters, workflowModuleDefaults, workflowModules]);
+  }, [colab.profileStatus, h3ModelParameters, workflowModuleDefaults, workflowModules]);
 
   const generatedPreviewHeightForAspectRatio = useCallback((aspectRatio: VideoAspectRatio) => {
     const previewWidth = generatedVideoPreviewWidthForRatio(videoAspectRatioValue(aspectRatio));
@@ -4494,26 +4390,26 @@ function CanvasWorkspace() {
         return;
       }
     }
-    const executionChannel: VideoExecutionChannel = import.meta.env.MODE === "web" && snapshot.channel === "colab"
+    const executionChannel: VideoExecutionChannel = import.meta.env.MODE === "web" && colab.enabled && snapshot.channel === "colab"
       ? "colab"
       : "local";
     let livePreviewNodeId = "";
     if (executionChannel === "colab") {
-      if (!colabAvailable || !colabProfileStatus?.effectiveProfile || !colabProfileStatus.diffusionModelName) {
-        const message = colabProfileStatus?.error
-          || (colabComfyConfigured ? "Colab 实例当前未运行或无法连接，请启动 Colab 或切回本地渠道" : "管理员尚未配置 Colab ComfyUI 服务地址");
+      if (!colab.available || !colab.profileStatus?.effectiveProfile || !colab.profileStatus.diffusionModelName) {
+        const message = colab.profileStatus?.error
+          || (colab.configured ? "Colab 实例当前未运行或无法连接，请启动 Colab 或切回本地渠道" : "管理员尚未配置 Colab ComfyUI 服务地址");
         changeNode(targetId, {
           content: { ...target.content, status: "invalid", validationMessage: message },
         });
         rejectSubmission(message);
         return;
       }
-      const activeColabProfile = colabProfileStatus.effectiveProfile;
-      const lockedModelName = colabProfileStatus.diffusionModelName;
+      const activeColabProfile = colab.profileStatus.effectiveProfile;
+      const lockedModelName = colab.profileStatus.diffusionModelName;
       snapshot = {
         ...snapshot,
         channel: "colab",
-        workflowModuleId: "colab:minimax-h3-fla-v3-ss",
+        workflowModuleId: COLAB_WORKFLOW_MODULE_ID,
         workflowModuleRevision: activeColabProfile,
         diffusionModelName: lockedModelName,
         primaryAudioSteps: snapshot.primaryVideoSteps,
@@ -4527,8 +4423,7 @@ function CanvasWorkspace() {
         secondaryStyleLoras: undefined,
         styleLoraHasSecondStage: false,
       };
-      const colabPresets = colabVideoPresetsByProfile[activeColabProfile]
-        ?? loadColabVideoPresets(window.localStorage, activeColabProfile, videoRegenerationSettingsFromValue);
+      const colabPresets = colab.presetsByProfile[activeColabProfile];
       const matchedColabPreset = matchingVideoRegenerationPreset({
         ...colabPresets,
         presets: colabPresets.presets.map((preset) => ({
@@ -4541,7 +4436,7 @@ function CanvasWorkspace() {
         })),
       }, videoRegenerationSettingsFromValue(snapshot));
       snapshot = { ...snapshot, presetName: matchedColabPreset?.name ?? "自定义参数" };
-      livePreviewNodeId = "141";
+      livePreviewNodeId = COLAB_LIVE_PREVIEW_NODE_ID;
     } else {
       const mode = videoGenerationModeFromContent(target.content);
       const capability = workflowCapabilityForVideoMode(mode);
@@ -4664,15 +4559,15 @@ function CanvasWorkspace() {
       return;
     }
     const targetServerUrl = comfyServerUrlForChannel(executionChannel);
-    const activeLoraCatalogLoaded = executionChannel === "colab" ? colabH3LoraCatalogLoaded : h3LoraCatalogLoaded;
+    const activeLoraCatalogLoaded = executionChannel === "colab" ? colab.loraCatalogLoaded : h3LoraCatalogLoaded;
     const activeLoraOptions = executionChannel === "colab"
-      ? (colabProfileStatus?.allowedLoras?.length ? colabProfileStatus.allowedLoras : [...COLAB_ALLOWED_LORAS])
+      ? (colab.profileStatus?.allowedLoras?.length ? colab.profileStatus.allowedLoras : [...COLAB_ALLOWED_LORAS])
       : h3LoraOptions;
     const activeDiffusionCatalogLoaded = executionChannel === "colab"
-      ? colabH3DiffusionModelCatalogLoaded
+      ? colab.diffusionModelCatalogLoaded
       : h3DiffusionModelCatalogLoaded;
     const activeDiffusionOptions = executionChannel === "colab"
-      ? colabH3DiffusionModelOptions
+      ? colab.diffusionModelOptions
       : h3DiffusionModelOptions;
     if (
       (executionChannel === "colab" || activeLoraCatalogLoaded)
@@ -5116,7 +5011,7 @@ function CanvasWorkspace() {
       if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
       unregisterComfyTask(targetId, clientId);
     }
-  }, [changeNode, clearGenerationLivePreview, colabAvailable, colabComfyConfigured, colabH3DiffusionModelCatalogLoaded, colabH3DiffusionModelOptions, colabH3LoraCatalogLoaded, colabProfileStatus, colabVideoPresetsByProfile, comfyServerUrlForChannel, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, flushNodePatches, flushVideoGenerationInputs, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, showGenerationLivePreview, showGlobalNotice, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
+  }, [changeNode, clearGenerationLivePreview, colab.available, colab.configured, colab.diffusionModelCatalogLoaded, colab.diffusionModelOptions, colab.enabled, colab.loraCatalogLoaded, colab.presetsByProfile, colab.profileStatus, comfyServerUrlForChannel, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, flushNodePatches, flushVideoGenerationInputs, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, showGenerationLivePreview, showGlobalNotice, unregisterComfyTask, updateGenerationPlaceholder, workflowModuleDefaults, workflowModules]);
 
   const executeVideoNodeBatch = useCallback(async (targetId: string) => {
     const targetNode = nodesSnapshot.current.find((node) => node.id === targetId);
@@ -5364,18 +5259,18 @@ function CanvasWorkspace() {
     }
     const isColabGenerator = fromGenerator && videoExecutionChannelFromContent(preview.content) === "colab";
     const isColabGeneratedVideo = !fromGenerator && (
-      snapshot.channel === "colab" || snapshot.workflowModuleId === "colab:minimax-h3-fla-v3-ss"
+      snapshot.channel === "colab" || snapshot.workflowModuleId === COLAB_WORKFLOW_MODULE_ID
     );
-    const isColabTarget = isColabGenerator || isColabGeneratedVideo;
-    const snapshotColabProfile: ColabProfileId | undefined = (
-      (["dasiwa", "cobijada"] as const).includes(snapshot.workflowModuleRevision as ColabProfileId)
-        ? snapshot.workflowModuleRevision as ColabProfileId
-        : (Object.entries(COLAB_PROFILE_MODELS).find(([, model]) => (
-            sameH3DiffusionModelName(model, snapshot.diffusionModelName)
-          ))?.[0] as ColabProfileId | undefined)
+    const isColabTarget = colab.enabled && (
+      isColabGenerator || (isColabGeneratedVideo && import.meta.env.MODE === "web")
     );
     const colabProfile: ColabProfileId | undefined = isColabTarget
-      ? (colabProfileStatus?.effectiveProfile ?? snapshotColabProfile ?? (colabProfileDraft === "cobijada" ? "cobijada" : "dasiwa"))
+      ? resolveColabProfileForSnapshot(
+        snapshot.workflowModuleRevision,
+        snapshot.diffusionModelName,
+        colab.profileStatus?.effectiveProfile,
+        colab.profileDraft,
+      )
       : undefined;
     const workflowModule = colabProfile
       ? undefined
@@ -5514,15 +5409,13 @@ function CanvasWorkspace() {
     promptOptions = deduplicatedPrompts.options;
     selectedPromptKey = deduplicatedPrompts.selectedKey;
     const presetCollection = colabProfile
-      ? loadColabVideoPresets(window.localStorage, colabProfile, videoRegenerationSettingsFromValue)
+      ? colab.loadProfilePresets(colabProfile)
       : loadVideoRegenerationPresets(window.localStorage, videoRegenerationSettingsFromValue);
     const defaultPreset = useSnapshotSettings ? undefined : presetCollection.presets.find(
       (preset) => preset.id === presetCollection.defaultPresetId,
     );
     const savedSettings = defaultPreset?.settings;
-    if (colabProfile) {
-      setColabVideoPresetsByProfile((current) => ({ ...current, [colabProfile]: presetCollection }));
-    } else {
+    if (!colabProfile) {
       setVideoRegenerationPresets(presetCollection);
     }
     setVideoRegenerationInformationOpen(false);
@@ -5589,10 +5482,10 @@ function CanvasWorkspace() {
     setSelectedVideoRegenerationPresetId(selectedPreset?.id ?? "");
     setVideoRegenerationPresetName(selectedPreset?.name ?? "");
     setVideoRegenerationDraft(draft);
-  }, [colabProfileDraft, colabProfileStatus, workflowModules, generationSnapshotForGenerator, flushVideoGenerationInputs, reportError]);
+  }, [colab.enabled, colab.loadProfilePresets, colab.profileDraft, colab.profileStatus, workflowModules, generationSnapshotForGenerator, flushVideoGenerationInputs, reportError]);
 
   const activeVideoRegenerationPresets = videoRegenerationDraft?.colabProfile
-    ? colabVideoPresetsByProfile[videoRegenerationDraft.colabProfile]
+    ? colab.presetsByProfile[videoRegenerationDraft.colabProfile]
     : videoRegenerationPresets;
 
   const selectedVideoRegenerationPresetModified = useMemo(() => {
@@ -5625,9 +5518,7 @@ function CanvasWorkspace() {
   ) => {
     try {
       if (colabProfile) {
-        saveColabVideoPresets(window.localStorage, colabProfile, collection);
-        const synced = loadColabVideoPresets(window.localStorage, colabProfile, videoRegenerationSettingsFromValue);
-        setColabVideoPresetsByProfile((current) => ({ ...current, [colabProfile]: synced }));
+        colab.saveProfilePresets(colabProfile, collection);
       } else {
         saveVideoRegenerationPresets(window.localStorage, collection);
         setVideoRegenerationPresets(collection);
@@ -5637,7 +5528,7 @@ function CanvasWorkspace() {
       setNotice("预设保存失败，请重试");
       return false;
     }
-  }, []);
+  }, [colab.saveProfilePresets]);
 
   const selectVideoRegenerationPreset = useCallback((id: string) => {
     const preset = activeVideoRegenerationPresets.presets.find((entry) => entry.id === id);
@@ -5696,7 +5587,7 @@ function CanvasWorkspace() {
         return;
       }
     }
-    const targetCollection = colabProfile ? colabVideoPresetsByProfile[colabProfile] : videoRegenerationPresets;
+    const targetCollection = colabProfile ? colab.presetsByProfile[colabProfile] : videoRegenerationPresets;
     const id = asNew || !selectedVideoRegenerationPresetId
       ? crypto.randomUUID() : selectedVideoRegenerationPresetId;
     const name = videoRegenerationPresetName.trim() || `预设 ${targetCollection.presets.length + 1}`;
@@ -5729,22 +5620,22 @@ function CanvasWorkspace() {
     showGlobalNotice(
       `保存成功：${colabProfile ? `Colab（${COLAB_PROFILE_LABELS[colabProfile]}）` : ""}预设“${name}”已保存${next.defaultPresetId === id ? (colabProfile ? "，下次使用该 Colab 模型时自动套用" : "，下次 Alt＋重新生成自动套用") : ""}`,
     );
-  }, [colabVideoPresetsByProfile, videoRegenerationDraft, selectedVideoRegenerationPresetId, videoRegenerationPresetName, videoRegenerationPresets, persistVideoRegenerationPresets, showGlobalNotice]);
+  }, [colab.presetsByProfile, videoRegenerationDraft, selectedVideoRegenerationPresetId, videoRegenerationPresetName, videoRegenerationPresets, persistVideoRegenerationPresets, showGlobalNotice]);
 
   const setDefaultVideoRegenerationPreset = useCallback(() => {
     const colabProfile = videoRegenerationDraft?.colabProfile;
-    const targetCollection = colabProfile ? colabVideoPresetsByProfile[colabProfile] : videoRegenerationPresets;
+    const targetCollection = colabProfile ? colab.presetsByProfile[colabProfile] : videoRegenerationPresets;
     if (!targetCollection.presets.some((preset) => preset.id === selectedVideoRegenerationPresetId)) return;
     const defaultPresetId = targetCollection.defaultPresetId === selectedVideoRegenerationPresetId ? "" : selectedVideoRegenerationPresetId;
     if (persistVideoRegenerationPresets({ ...targetCollection, defaultPresetId }, colabProfile)) {
       setNotice(defaultPresetId ? "已设为默认预设，下次 Alt＋重新生成自动套用其已保存参数" : "已取消默认预设，恢复原有排序");
     }
-  }, [colabVideoPresetsByProfile, videoRegenerationDraft?.colabProfile, videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
+  }, [colab.presetsByProfile, videoRegenerationDraft?.colabProfile, videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
 
   const deleteVideoRegenerationPreset = useCallback(() => {
     if (!selectedVideoRegenerationPresetId) return;
     const colabProfile = videoRegenerationDraft?.colabProfile;
-    const targetCollection = colabProfile ? colabVideoPresetsByProfile[colabProfile] : videoRegenerationPresets;
+    const targetCollection = colabProfile ? colab.presetsByProfile[colabProfile] : videoRegenerationPresets;
     const wasDefault = targetCollection.defaultPresetId === selectedVideoRegenerationPresetId;
     const next = {
       presets: targetCollection.presets.filter((preset) => preset.id !== selectedVideoRegenerationPresetId),
@@ -5754,17 +5645,17 @@ function CanvasWorkspace() {
     setSelectedVideoRegenerationPresetId("");
     setVideoRegenerationPresetName("");
     setNotice(wasDefault ? "默认预设已删除，下次打开使用视频生成快照；可重新指定默认预设" : "预设已删除，当前编辑参数保留");
-  }, [colabVideoPresetsByProfile, videoRegenerationDraft?.colabProfile, videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
+  }, [colab.presetsByProfile, videoRegenerationDraft?.colabProfile, videoRegenerationPresets, selectedVideoRegenerationPresetId, persistVideoRegenerationPresets]);
 
   const moveVideoRegenerationPreset = useCallback((id: string, destination: number) => {
     const colabProfile = videoRegenerationDraft?.colabProfile;
-    const targetCollection = colabProfile ? colabVideoPresetsByProfile[colabProfile] : videoRegenerationPresets;
+    const targetCollection = colabProfile ? colab.presetsByProfile[colabProfile] : videoRegenerationPresets;
     const presets = reorderVideoRegenerationPresets(targetCollection, id, destination);
     if (presets.every((preset, index) => preset.id === targetCollection.presets[index]?.id)) return;
     if (persistVideoRegenerationPresets({ ...targetCollection, presets }, colabProfile)) {
       setNotice("预设顺序已保存");
     }
-  }, [colabVideoPresetsByProfile, videoRegenerationDraft?.colabProfile, videoRegenerationPresets, persistVideoRegenerationPresets]);
+  }, [colab.presetsByProfile, videoRegenerationDraft?.colabProfile, videoRegenerationPresets, persistVideoRegenerationPresets]);
 
   useEffect(() => {
     // Blur number inputs before the browser can step them, without blocking page scrolling.
@@ -5840,7 +5731,7 @@ function CanvasWorkspace() {
       setNotice(styleLoraError);
       return;
     }
-    const isColabSubmission = Boolean(draft.colabProfile || draft.originalSnapshot.channel === "colab");
+    const isColabSubmission = colab.enabled && Boolean(draft.colabProfile || draft.originalSnapshot.channel === "colab");
     if (isColabSubmission) {
       if (draft.loraName.trim() && !isAllowedColabLoraName(draft.loraName)) {
         setNotice("Colab 渠道 1采主 LoRA 仅允许选择预热 LoRA");
@@ -5853,7 +5744,7 @@ function CanvasWorkspace() {
     }
     const resolvedColabModel = draft.colabProfile
       ? COLAB_PROFILE_MODELS[draft.colabProfile]
-      : (colabProfileStatus?.diffusionModelName || draft.diffusionModelName);
+      : (colab.profileStatus?.diffusionModelName || draft.diffusionModelName);
     const snapshot: GenerationSnapshot = {
       ...draft.originalSnapshot,
       secondaryResolutionMegapixels: draft.secondaryResolutionMegapixels,
@@ -5910,7 +5801,7 @@ function CanvasWorkspace() {
     } catch (error) {
       reportError(error);
     }
-  }, [colabProfileStatus, executeVideoNode, regenerateGeneratedVideo, reportError, showGlobalNotice, videoRegenerationDraft, workflowModules]);
+  }, [colab.enabled, colab.profileStatus, executeVideoNode, regenerateGeneratedVideo, reportError, showGlobalNotice, videoRegenerationDraft, workflowModules]);
 
   const configureSecondarySample = useCallback((previewId: string) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
@@ -6472,7 +6363,7 @@ function CanvasWorkspace() {
       if (!preserveComfyTaskRecord) forgetComfyTask(clientId);
       unregisterComfyTask(previewId, clientId);
     }
-  }, [changeNode, colabComfyConfigured, colabH3DiffusionModelCatalogLoaded, colabH3DiffusionModelOptions, colabH3LoraCatalogLoaded, colabH3LoraOptions, comfyServerUrlForChannel, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModules]);
+  }, [changeNode, comfyServerUrlForChannel, completeGenerationPlaceholder, createGenerationPlaceholder, finalizeGenerationPlaceholder, forgetComfyTask, generatedPreviewHeightForAspectRatio, generationSnapshotForGenerator, h3DiffusionModelCatalogLoaded, h3DiffusionModelOptions, h3LoraCatalogLoaded, h3LoraOptions, registerComfyTask, rememberComfyTask, reportError, setEdges, setNodes, unregisterComfyTask, updateGenerationPlaceholder, workflowModules]);
 
   const submitConfiguredSecondarySample = useCallback(async () => {
     const draft = secondarySampleDraft;
@@ -7039,12 +6930,7 @@ function CanvasWorkspace() {
           videoRegenerationPresets,
           h3LoraOptions,
           h3DiffusionModelOptions,
-          colabComfyConfigured,
-          colabAvailable,
-          colabProfileStatus,
-          colabH3LoraOptions,
-          colabH3DiffusionModelOptions,
-          colabVideoPresetsByProfile,
+          colab: colab.nodeContext,
           workflowPackages,
           workflowChoices,
           workflowChoicesVersion,
@@ -7096,7 +6982,7 @@ function CanvasWorkspace() {
         },
       };
     },
-    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, colabAvailable, colabComfyConfigured, colabH3DiffusionModelOptions, colabH3LoraOptions, colabProfileStatus, colabVideoPresetsByProfile, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, downloadGeneratedImage, downloadGeneratedVideo, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
+    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, colab.nodeContext, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, downloadGeneratedImage, downloadGeneratedVideo, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -7582,7 +7468,7 @@ function CanvasWorkspace() {
           !module.deletedAt && module.id === task.snapshot.workflowModuleId
         ));
         const livePreviewNodeId = !isImageComfyTask(task) && !isSecondaryComfyTask(task) && task.kind !== "video-upscale"
-          ? (task.snapshot.channel === "colab" ? "141" : livePreviewNodeIdForBindings(workflowModule?.bindings))
+          ? (task.snapshot.channel === "colab" ? COLAB_LIVE_PREVIEW_NODE_ID : livePreviewNodeIdForBindings(workflowModule?.bindings))
           : "";
         const receivePreview = createComfyPreviewReceiver(
           livePreviewNodeId,
@@ -11145,12 +11031,7 @@ function CanvasWorkspace() {
           && previousData.h3DiffusionModelOptions === h3DiffusionModelOptions
           && previousData.videoRegenerationPresets === videoRegenerationPresets
           && previousData.h3LoraOptions === h3LoraOptions
-          && previousData.colabComfyConfigured === colabComfyConfigured
-          && previousData.colabAvailable === colabAvailable
-          && previousData.colabProfileStatus === colabProfileStatus
-          && previousData.colabH3LoraOptions === colabH3LoraOptions
-          && previousData.colabH3DiffusionModelOptions === colabH3DiffusionModelOptions
-          && previousData.colabVideoPresetsByProfile === colabVideoPresetsByProfile
+          && previousData.colab === colab.nodeContext
           && previousData.workflowPackages === workflowPackages
           && previousData.workflowChoicesVersion === workflowChoicesVersion
           && previousData.workflowModules === workflowModules
@@ -11176,12 +11057,7 @@ function CanvasWorkspace() {
             videoRegenerationPresets,
             h3LoraOptions,
             h3DiffusionModelOptions,
-            colabComfyConfigured,
-            colabAvailable,
-            colabProfileStatus,
-            colabH3LoraOptions,
-            colabH3DiffusionModelOptions,
-            colabVideoPresetsByProfile,
+            colab: colab.nodeContext,
             workflowPackages,
             workflowChoices,
             workflowChoicesVersion,
@@ -11198,7 +11074,7 @@ function CanvasWorkspace() {
       visibleNodeCache.current = nextCache;
       return results;
     },
-    [activeComfyTaskCounts, contentNodes, edges, relations, queuePositions, colabAvailable, colabComfyConfigured, colabH3DiffusionModelOptions, colabH3LoraOptions, colabProfileStatus, colabVideoPresetsByProfile, h3DiffusionModelOptions, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
+    [activeComfyTaskCounts, contentNodes, edges, relations, queuePositions, colab.nodeContext, h3DiffusionModelOptions, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
   );
 
   const updateGuideOverlays = useCallback((nextAlignment: AlignmentGuide[], nextSpacing: SpacingGuide[]) => {
@@ -11419,15 +11295,12 @@ function CanvasWorkspace() {
     setSettingsOpen(true);
   };
 
-  const comfyMonitorColabUrl = import.meta.env.MODE === "web" && colabAvailable
-    ? comfyServerUrlForChannel("colab")
-    : undefined;
   const comfyQueueIndicator = (
     <ComfyStatusIndicators
       key={comfyConnectionRevision}
       serverUrl={comfyUiServerUrl}
-      colabServerUrl={comfyMonitorColabUrl}
-      colabLabel={colabProfileStatus?.label ? `Colab · ${colabProfileStatus.label}` : "Colab"}
+      colabServerUrl={colab.monitorServerUrl}
+      colabLabel={colab.monitorLabel}
       showGpu={Boolean(activeProjectId)}
     />
   );
@@ -11705,19 +11578,7 @@ function CanvasWorkspace() {
                   setComfyInputRootDraft={setComfyInputRootDraft}
                   comfyOutputRootDraft={comfyOutputRootDraft}
                   setComfyOutputRootDraft={setComfyOutputRootDraft}
-                  colabComfyUrlDraft={colabComfyUrlDraft}
-                  setColabComfyUrlDraft={setColabComfyUrlDraft}
-                  colabSsPasswordDraft={colabSsPasswordDraft}
-                  setColabSsPasswordDraft={setColabSsPasswordDraft}
-                  colabProfileDraft={colabProfileDraft}
-                  setColabProfileDraft={(next) => setColabProfileDraft((current) => (
-                    (typeof next === "function" ? next(current) : next) as ColabProfileOption
-                  ))}
-                  colabProfileStatus={colabProfileStatus}
-                  colabProfileLoading={colabProfileLoading}
-                  onRefreshColabProfile={() => {
-                    void refreshColabProfile();
-                  }}
+                  colab={colab}
                   showComfySettings={globalAdmin}
                 />
               )}
@@ -12608,7 +12469,7 @@ function CanvasWorkspace() {
           ? [COLAB_PROFILE_MODELS[videoRegenerationDraft.colabProfile]]
           : h3DiffusionModelOptions}
         h3LoraOptions={videoRegenerationDraft?.colabProfile
-          ? (colabH3LoraOptions.length ? colabH3LoraOptions : [...COLAB_ALLOWED_LORAS])
+          ? (colab.loraOptions.length ? colab.loraOptions : [...COLAB_ALLOWED_LORAS])
           : h3LoraOptions}
         saveVideoRegenerationSettings={saveVideoRegenerationSettings}
         presetCollection={activeVideoRegenerationPresets}

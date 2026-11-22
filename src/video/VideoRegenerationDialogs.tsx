@@ -1,5 +1,6 @@
 import type { VideoRegenerationPresetCollection } from "./videoRegenerationPresets";
-import { COLAB_PROFILE_LABELS, orderedVideoRegenerationPresets } from "./videoRegenerationPresets";
+import { orderedVideoRegenerationPresets } from "./videoRegenerationPresets";
+import { COLAB_PROFILE_LABELS } from "../colab";
 import { useEffect, useRef, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { createPortal } from "react-dom";

@@ -144,7 +144,7 @@ impl MediaRoots {
         let mut roots = vec![
             self.data.join("uploads"),
             self.data.join("temp").join("image-resize"),
-            self.data.join(super::colab::COLAB_OUTPUTS_DIR),
+            self.data.join(crate::colab_channel::COLAB_OUTPUTS_DIR),
         ];
         roots.extend(self.input.clone());
         roots.extend(self.output.clone());

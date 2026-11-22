@@ -4,6 +4,7 @@ compile_error!(
     "desktop and server features are mutually exclusive. The default build is server; build desktop with --no-default-features --features desktop (npm run tauri dev/build does this)."
 );
 mod app_backup;
+mod colab_channel;
 mod commands;
 mod db;
 #[cfg(feature = "desktop")]
