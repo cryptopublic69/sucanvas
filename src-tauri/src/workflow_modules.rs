@@ -43,6 +43,64 @@ fn is_package_v2(bytes: &[u8]) -> bool {
 /// Applies to packages without adapter.json and to submissions without a module.
 pub const LEGACY_REFERENCE_AUDIO_MAX: usize = 2;
 
+#[cfg(feature = "server")]
+pub const COLAB_WORKFLOW_LABEL: &str = "Colab 专用 · Fla全能参考 V3.1 (1采 SS)";
+pub const COLAB_DASIWA_PROFILE: &str = "dasiwa";
+pub const COLAB_COBIJADA_PROFILE: &str = "cobijada";
+pub const COLAB_DASIWA_MODEL: &str =
+    "MinimaxH3/dasiwa_minimax_h3_ref2va_v5xs_pruned_graviton_int8_row-wise_convrot_runtime_mixed.safetensors";
+pub const COLAB_COBIJADA_MODEL: &str =
+    "MinimaxH3/Cobijada_H3_Hybrid_Uncensored_pruned_hybrid_int8_convrot_pruned.safetensors";
+pub const COLAB_ALLOWED_LORAS: [&str; 2] = [
+    "MinimaxH3/pika_h3_flex_fl2va_comfy_bf16.safetensors",
+    "MinimaxH3/MysticXXX_MMH3-V1.safetensors",
+];
+pub const COLAB_FLA_V3_WORKFLOW_JSON: &str =
+    include_str!("../../workflows/MiniMax+H3+Fla全能参考V3.json");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColabProfileSpec {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub diffusion_model_name: &'static str,
+}
+
+/// Resolves one of the two locked Colab notebook profiles (`dasiwa` / `cobijada`).
+pub fn colab_profile_spec(id: &str) -> Option<ColabProfileSpec> {
+    match id.trim().to_ascii_lowercase().as_str() {
+        COLAB_DASIWA_PROFILE => Some(ColabProfileSpec {
+            id: COLAB_DASIWA_PROFILE,
+            label: "DaSiWa V5xs",
+            diffusion_model_name: COLAB_DASIWA_MODEL,
+        }),
+        COLAB_COBIJADA_PROFILE => Some(ColabProfileSpec {
+            id: COLAB_COBIJADA_PROFILE,
+            label: "Cobijada",
+            diffusion_model_name: COLAB_COBIJADA_MODEL,
+        }),
+        _ => None,
+    }
+}
+
+/// Infers a Colab profile from a locked base UNet model name.
+#[cfg(feature = "server")]
+pub fn colab_profile_for_model(model_name: &str) -> Option<ColabProfileSpec> {
+    let normalized = model_name.trim().replace('\\', "/");
+    [COLAB_DASIWA_PROFILE, COLAB_COBIJADA_PROFILE]
+        .into_iter()
+        .filter_map(colab_profile_spec)
+        .find(|spec| normalized.eq_ignore_ascii_case(spec.diffusion_model_name))
+}
+
+/// Checks whether a LoRA path is one of the pre-warmed Colab NVMe LoRAs.
+pub fn is_allowed_colab_lora(name: &str) -> bool {
+    let normalized = name.trim().replace('\\', "/");
+    !normalized.is_empty()
+        && COLAB_ALLOWED_LORAS
+            .iter()
+            .any(|allowed| normalized.eq_ignore_ascii_case(allowed))
+}
+
 fn default_diffusion_model_node_id() -> String {
     "358".to_owned()
 }
@@ -445,6 +503,70 @@ impl WorkflowBindings {
         bindings.audio_node_ids.truncate(LEGACY_REFERENCE_AUDIO_MAX);
         bindings
     }
+
+    /// Locked bindings for the bundled Colab `MiniMax+H3+Fla全能参考V3.json` workflow.
+    pub fn colab_fla_reference_v3() -> Self {
+        Self {
+            prompt_node_id: "138".to_owned(),
+            seed_node_id: "129".to_owned(),
+            duration_node_id: "132".to_owned(),
+            primary_resolution_node_id: "115".to_owned(),
+            secondary_resolution_node_id: "398".to_owned(),
+            primary_lora_node_id: "147".to_owned(),
+            secondary_lora_node_id: "401".to_owned(),
+            primary_style_lora_node_id: default_primary_style_lora_node_id(),
+            secondary_style_lora_node_id: default_secondary_style_lora_node_id(),
+            primary_style_lora_node_ids: ["9200", "9500", "9502", "9504", "9506", "9508"]
+                .map(str::to_owned)
+                .to_vec(),
+            secondary_style_lora_node_ids: ["9201", "9501", "9503", "9505", "9507", "9509"]
+                .map(str::to_owned)
+                .to_vec(),
+            primary_sol_attn_node_id: String::new(),
+            secondary_sol_attn_node_id: "9202".to_owned(),
+            primary_sampler_node_id: "125".to_owned(),
+            primary_model_target_node_id: "142".to_owned(),
+            primary_steps_node_id: "124".to_owned(),
+            primary_video_steps_input_name: "steps".to_owned(),
+            primary_audio_steps_input_name: String::new(),
+            primary_upscale_node_id: "210".to_owned(),
+            live_preview_node_id: "141".to_owned(),
+            secondary_scheduler_node_id: "391".to_owned(),
+            secondary_guider_node_id: "393".to_owned(),
+            primary_output_node_id: "221".to_owned(),
+            secondary_output_node_id: "397".to_owned(),
+            primary_color_node_id: "259".to_owned(),
+            secondary_color_node_id: "403".to_owned(),
+            clean_video_node_id: "9000".to_owned(),
+            clean_save_node_id: "9001".to_owned(),
+            secondary_video_input_node_id: "9002".to_owned(),
+            conditioning_node_id: "136".to_owned(),
+            audio_node_ids: ["268", "270", "9607"].map(str::to_owned).to_vec(),
+            image_node_ids: [
+                "139", "258", "263", "264", "266", "262", "261", "265", "267",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            primary_audio_output_node_id: "218".to_owned(),
+            primary_audio_output_index: 0,
+            secondary_audio_output_node_id: "218".to_owned(),
+            secondary_audio_output_index: 0,
+            secondary_resize_node_id: "383".to_owned(),
+            secondary_audio_encode_node_id: "388".to_owned(),
+            diffusion_model_node_id: "127".to_owned(),
+            diffusion_model_class_type: default_diffusion_model_class_type(),
+            diffusion_model_directory: default_diffusion_model_directory(),
+            secondary_diffusion_model_node_id: "358".to_owned(),
+            lora_class_type: "LoraLoaderModelOnly".to_owned(),
+            lora_directory: "MinimaxH3".to_owned(),
+            secondary_prompt_node_id: String::new(),
+            secondary_conditioning_node_id: String::new(),
+            single_image_input_node_id: String::new(),
+            secondary_image_input_node_id: String::new(),
+            sampler_select_node_ids: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -671,6 +793,28 @@ impl WorkflowAdapter {
         let mut adapter = Self::current_h3(WorkflowBindings::default());
         adapter.input_contract.audio_max = LEGACY_REFERENCE_AUDIO_MAX;
         adapter
+    }
+
+    /// Adapter locked for the Google Colab channel using bundled `MiniMax+H3+Fla全能参考V3.json`.
+    pub fn colab_fla_reference_v3() -> Self {
+        Self {
+            schema_version: WORKFLOW_PACKAGE_SCHEMA_VERSION,
+            engine_api_version: WORKFLOW_ENGINE_API_VERSION.to_owned(),
+            adapter_id: H3_MULTI_REFERENCE_ADAPTER.to_owned(),
+            capability: "video-generation".to_owned(),
+            variant: "reference-to-video".to_owned(),
+            input_contract: WorkflowInputContract {
+                prompt_required: true,
+                image_min: 0,
+                image_max: 9,
+                audio_min: 0,
+                audio_max: 3,
+                video_min: 0,
+                video_max: 0,
+            },
+            bindings: WorkflowBindings::colab_fla_reference_v3(),
+            video_processing: None,
+        }
     }
 }
 

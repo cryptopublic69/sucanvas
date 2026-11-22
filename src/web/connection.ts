@@ -1,15 +1,39 @@
 import { request } from "./bridge";
 
+export type ColabProfileId = "dasiwa" | "cobijada";
+
+export type ColabProfileOption = "" | ColabProfileId;
+
+export type ColabProfileStatus = {
+  configured: boolean;
+  reachable: boolean;
+  available: boolean;
+  selectedProfile: ColabProfileOption;
+  detectedProfile: ColabProfileId | null;
+  effectiveProfile: ColabProfileId | null;
+  source: "detected" | "manual" | "none";
+  label: string;
+  workflowLabel: string;
+  diffusionModelName: string;
+  allowedLoras: string[];
+  error: string | null;
+};
+
 export type ComfyConnection = {
   comfyUrl: string;
   comfyInputDirectory: string;
   comfyOutputDirectory: string;
   colabComfyUrl?: string;
   colabSsPassword?: string;
+  colabProfile?: ColabProfileOption;
 };
 
 export function readComfyConnection(): Promise<ComfyConnection> {
   return request("/api/comfy-config");
+}
+
+export function readColabProfile(): Promise<ColabProfileStatus> {
+  return request("/api/colab-profile");
 }
 
 export function saveComfyConnection(connection: ComfyConnection): Promise<ComfyConnection> {

@@ -9,10 +9,19 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use tokio::sync::Notify;
 
 use super::ws_handover::{log, RelayTicket};
+
+static RUSTLS_PROVIDER_INIT: Once = Once::new();
+
+/// Ensures `rustls` has a process-wide crypto provider before any `wss://` upstream handshake.
+pub(super) fn ensure_rustls_provider() {
+    RUSTLS_PROVIDER_INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 fn upstream(state: &WebState, colab: bool, suffix: &str) -> Result<String, StatusCode> {
     let base = if colab {
@@ -144,6 +153,7 @@ async fn connect_comfy(
     deadline: std::time::Duration,
     client_id: &str,
 ) -> Result<ComfyWebSocket, StatusCode> {
+    ensure_rustls_provider();
     match tokio::time::timeout(deadline, tokio_tungstenite::connect_async(url)).await {
         Ok(Ok((socket, _))) => Ok(socket),
         Ok(Err(error)) => {
@@ -607,5 +617,11 @@ mod tests {
         assert_eq!(client_id(&uri), "abc-def");
         let uri: axum::http::Uri = "/api/comfy/ws".parse().unwrap();
         assert_eq!(client_id(&uri), "");
+    }
+
+    #[test]
+    fn ensure_rustls_provider_installs_default_crypto_provider() {
+        ensure_rustls_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
 }

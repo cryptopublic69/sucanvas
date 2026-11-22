@@ -20,6 +20,8 @@ pub struct Config {
     pub colab_comfy_url: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub colab_ss_password: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub colab_profile: String,
     #[serde(default)]
     pub comfy_input_directory: String,
     #[serde(default)]
@@ -66,6 +68,19 @@ pub(super) fn validate_comfy_url(value: &str) -> Result<(), String> {
     }
     Ok(())
 }
+pub(super) fn normalize_colab_profile(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+pub(super) fn validate_colab_profile(value: &str) -> Result<(), String> {
+    let normalized = normalize_colab_profile(value);
+    if normalized.is_empty()
+        || crate::workflow_modules::colab_profile_spec(&normalized).is_some()
+    {
+        Ok(())
+    } else {
+        Err("Colab 档位只能为空（自动识别）、dasiwa 或 cobijada".into())
+    }
+}
 impl Config {
     pub fn read(path: &Path) -> Result<Self, String> {
         let mut config: Self =
@@ -88,6 +103,8 @@ impl Config {
         }
         validate_comfy_url(&config.comfy_url)?;
         validate_comfy_url(&config.colab_comfy_url)?;
+        config.colab_profile = normalize_colab_profile(&config.colab_profile);
+        validate_colab_profile(&config.colab_profile)?;
         for origin in &mut config.allowed_origins {
             let url =
                 reqwest::Url::parse(origin).map_err(|e| format!("Invalid allowedOrigins: {e}"))?;
@@ -219,11 +236,17 @@ mod tests {
         let config = read_config(None).unwrap();
         assert!(config.colab_comfy_url.is_empty());
         assert!(config.colab_ss_password.is_empty());
+        assert!(config.colab_profile.is_empty());
         let saved = serde_json::to_value(&config).unwrap();
         assert!(saved.get("colabComfyUrl").is_none());
         assert!(saved.get("colabSsPassword").is_none());
+        assert!(saved.get("colabProfile").is_none());
 
         assert!(validate_comfy_url("https://demo-tunnel.trycloudflare.com").is_ok());
         assert!(validate_comfy_url("http://user:pass@demo-tunnel.trycloudflare.com").is_err());
+        assert!(validate_colab_profile("").is_ok());
+        assert!(validate_colab_profile("DaSiWa").is_ok());
+        assert!(validate_colab_profile("cobijada").is_ok());
+        assert!(validate_colab_profile("unknown").is_err());
     }
 }

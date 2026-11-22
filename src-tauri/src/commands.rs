@@ -4140,6 +4140,37 @@ fn validate_workflow_media_counts(
     Ok(())
 }
 
+fn validate_colab_lora_allowlist(
+    lora_name: &str,
+    lora_bypassed: bool,
+    style_loras: Option<&[H3StyleLora]>,
+    style_lora_name: &str,
+    style_lora_bypassed: bool,
+) -> Result<(), String> {
+    let allowed_hint = "pika_h3_flex_fl2va_comfy_bf16.safetensors / MysticXXX_MMH3-V1.safetensors";
+    if !lora_bypassed && !workflow_modules::is_allowed_colab_lora(lora_name) {
+        return Err(format!(
+            "Colab 渠道 1采 LoRA 仅允许选择本地预热 LoRA（{allowed_hint}）"
+        ));
+    }
+    if let Some(styles) = style_loras {
+        for (index, slot) in styles.iter().enumerate() {
+            if !slot.bypassed && !workflow_modules::is_allowed_colab_lora(slot.name.trim()) {
+                return Err(format!(
+                    "Colab 渠道风格 LoRA {} 仅允许选择本地预热 LoRA（{allowed_hint}）或开启 Bypass",
+                    index + 1
+                ));
+            }
+        }
+    }
+    if !style_lora_bypassed && !workflow_modules::is_allowed_colab_lora(style_lora_name) {
+        return Err(format!(
+            "Colab 渠道风格化 LoRA 仅允许选择本地预热 LoRA（{allowed_hint}）或开启 Bypass"
+        ));
+    }
+    Ok(())
+}
+
 async fn submit_comfyui_workflow_inner(
     input: ComfySubmitInput,
     task: Arc<RunningComfyTask>,
@@ -4159,21 +4190,45 @@ async fn submit_comfyui_workflow_inner(
     if input.prompt.trim().is_empty() {
         return Err("提示词不能为空".to_owned());
     }
-    let (workflow_path, adapter, sampler_name) =
-        if let Some(module_id) = input.workflow_module_id.as_deref() {
-            let module = workflow_modules::get(workflow_modules_dir, module_id)?;
-            (
-                module.workflow_path,
-                module.adapter,
-                module.manifest.defaults.sampler_name,
-            )
-        } else {
-            (
-                input.workflow_path.clone(),
-                workflow_modules::WorkflowAdapter::without_module(),
-                None,
-            )
-        };
+    let colab_spec = if input.colab_mode {
+        if input.secondary_sampling_enabled
+            || input.secondary_source.is_some()
+            || input
+                .secondary_source_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+        {
+            return Err("Colab 渠道仅锁定 1采专用工作流，不支持 2采".to_owned());
+        }
+        Some(
+            workflow_modules::colab_profile_spec(&input.colab_profile).ok_or_else(|| {
+                "未识别有效的 Colab 档位（请检查自动识别或手动选择 DaSiWa V5xs / Cobijada）"
+                    .to_owned()
+            })?,
+        )
+    } else {
+        None
+    };
+    let (workflow_path, adapter, sampler_name) = if input.colab_mode {
+        (
+            String::new(),
+            workflow_modules::WorkflowAdapter::colab_fla_reference_v3(),
+            None,
+        )
+    } else if let Some(module_id) = input.workflow_module_id.as_deref() {
+        let module = workflow_modules::get(workflow_modules_dir, module_id)?;
+        (
+            module.workflow_path,
+            module.adapter,
+            module.manifest.defaults.sampler_name,
+        )
+    } else {
+        (
+            input.workflow_path.clone(),
+            workflow_modules::WorkflowAdapter::without_module(),
+            None,
+        )
+    };
     let adapter_variant = adapter.variant.clone();
     let contract = &adapter.input_contract;
     let bindings = &adapter.bindings;
@@ -4260,9 +4315,16 @@ async fn submit_comfyui_workflow_inner(
     if !input.lora_strength.is_finite() || input.lora_strength < 0.0 || input.lora_strength > 10.0 {
         return Err("LoRA 权重必须在0.0到10.0之间".to_owned());
     }
-    let secondary_lora_name = input.secondary_lora_name.as_deref().unwrap_or("").trim();
-    let secondary_lora_bypassed =
-        secondary_lora_name.is_empty() || input.secondary_lora_bypassed.unwrap_or(false);
+    let secondary_lora_name = if input.colab_mode {
+        ""
+    } else {
+        input.secondary_lora_name.as_deref().unwrap_or("").trim()
+    };
+    let secondary_lora_bypassed = if input.colab_mode {
+        true
+    } else {
+        secondary_lora_name.is_empty() || input.secondary_lora_bypassed.unwrap_or(false)
+    };
     let secondary_lora_strength = input.secondary_lora_strength.unwrap_or(1.0);
     if !secondary_lora_bypassed
         && !is_model_name_in_directory(secondary_lora_name, &bindings.lora_directory)
@@ -4312,7 +4374,20 @@ async fn submit_comfyui_workflow_inner(
     if !style_lora_strength.is_finite() || style_lora_strength < 0.0 || style_lora_strength > 10.0 {
         return Err("风格化 LoRA 权重必须在0.0到10.0之间".to_owned());
     }
-    let diffusion_model_name = input.diffusion_model_name.trim();
+    if input.colab_mode {
+        validate_colab_lora_allowlist(
+            lora_name,
+            lora_bypassed,
+            input.style_loras.as_deref(),
+            style_lora_name,
+            style_lora_bypassed,
+        )?;
+    }
+    let diffusion_model_name = if let Some(spec) = colab_spec {
+        spec.diffusion_model_name
+    } else {
+        input.diffusion_model_name.trim()
+    };
     if !is_model_name_in_directory(diffusion_model_name, &bindings.diffusion_model_directory) {
         return Err(format!(
             "基础模型只能选择 diffusion_models/{} 目录中的模型",
@@ -4320,19 +4395,25 @@ async fn submit_comfyui_workflow_inner(
         ));
     }
 
-    let workflow_bytes = tokio::fs::read(&workflow_path).await.map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            format!(
-                "H3 API 工作流文件不存在：{}。请在应用设置中更新工作流路径",
-                workflow_path
-            )
-        } else {
-            format!("读取 H3 API 工作流失败（{}）：{error}", workflow_path)
-        }
-    })?;
     ensure_comfy_task_active(&task.cancelled)?;
-    let mut workflow: Value = serde_json::from_slice(&workflow_bytes)
-        .map_err(|error| format!("解析 API 工作流失败：{error}"))?;
+    let mut workflow: Value = if input.colab_mode {
+        serde_json::from_str(workflow_modules::COLAB_FLA_V3_WORKFLOW_JSON)
+            .map_err(|error| format!("解析内置 Colab 工作流失败：{error}"))?
+    } else {
+        let workflow_bytes = tokio::fs::read(&workflow_path).await.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "H3 API 工作流文件不存在：{}。请在应用设置中更新工作流路径",
+                    workflow_path
+                )
+            } else {
+                format!("读取 H3 API 工作流失败（{}）：{error}", workflow_path)
+            }
+        })?;
+        ensure_comfy_task_active(&task.cancelled)?;
+        serde_json::from_slice(&workflow_bytes)
+            .map_err(|error| format!("解析 API 工作流失败：{error}"))?
+    };
     let workflow_object = workflow
         .as_object()
         .ok_or_else(|| "API 工作流顶层必须是 JSON 对象".to_owned())?;
@@ -7438,5 +7519,118 @@ mod tests {
         assert_eq!(save["class_type"], "SaveImage");
         assert_eq!(save["inputs"]["images"], json!(["sucanvas_ss_encode_221", 0]));
         assert_eq!(save["inputs"]["filename_prefix"], "%date:yyyy-MM-dd%/Minimax_H3_SS");
+    }
+
+    #[test]
+    fn colab_locked_profile_and_allowlist_enforce_nvme_models_and_preserve_preview_node() {
+        let dasiwa = crate::workflow_modules::colab_profile_spec("DaSiWa").unwrap();
+        assert_eq!(dasiwa.id, "dasiwa");
+        assert!(dasiwa.diffusion_model_name.contains("dasiwa_minimax_h3"));
+        let cobijada = crate::workflow_modules::colab_profile_spec("cobijada").unwrap();
+        assert_eq!(cobijada.id, "cobijada");
+        assert!(cobijada.diffusion_model_name.contains("Cobijada"));
+        assert!(crate::workflow_modules::colab_profile_spec("unknown").is_none());
+
+        assert!(crate::workflow_modules::is_allowed_colab_lora(
+            r"MinimaxH3\pika_h3_flex_fl2va_comfy_bf16.safetensors"
+        ));
+        assert!(crate::workflow_modules::is_allowed_colab_lora(
+            "MinimaxH3/MysticXXX_MMH3-V1.safetensors"
+        ));
+        assert!(!crate::workflow_modules::is_allowed_colab_lora(
+            "MinimaxH3/some_drive_only_lora.safetensors"
+        ));
+
+        let styles = vec![crate::models::H3StyleLora {
+            name: r"MinimaxH3\MysticXXX_MMH3-V1.safetensors".to_owned(),
+            strength: 0.35,
+            bypassed: false,
+            apply_to_secondary: false,
+            apply_to_second_pass: None,
+        }];
+        assert!(super::validate_colab_lora_allowlist(
+            "MinimaxH3/pika_h3_flex_fl2va_comfy_bf16.safetensors",
+            false,
+            Some(&styles),
+            "",
+            true,
+        )
+        .is_ok());
+
+        let foreign = vec![crate::models::H3StyleLora {
+            name: "MinimaxH3/drive_only.safetensors".to_owned(),
+            strength: 0.5,
+            bypassed: false,
+            apply_to_secondary: false,
+            apply_to_second_pass: None,
+        }];
+        assert!(super::validate_colab_lora_allowlist(
+            "MinimaxH3/pika_h3_flex_fl2va_comfy_bf16.safetensors",
+            false,
+            Some(&foreign),
+            "",
+            true,
+        )
+        .is_err());
+
+        let bindings = WorkflowBindings::colab_fla_reference_v3();
+        let mut workflow: serde_json::Value =
+            serde_json::from_str(crate::workflow_modules::COLAB_FLA_V3_WORKFLOW_JSON).unwrap();
+        super::configure_h3_diffusion_model(&mut workflow, dasiwa.diffusion_model_name, &bindings)
+            .unwrap();
+        super::configure_h3_generation(
+            &mut workflow,
+            "test prompt",
+            42,
+            10.0,
+            "16:9 (Widescreen)",
+            0.8,
+            0.5,
+            5,
+            5,
+            4,
+            1.0,
+            1.0,
+            0.8,
+            1.0,
+            1.0,
+            0.9,
+            1.0,
+            false,
+            "MinimaxH3/pika_h3_flex_fl2va_comfy_bf16.safetensors",
+            0.6,
+            false,
+            "",
+            1.0,
+            true,
+            "",
+            1.0,
+            true,
+            false,
+            &bindings,
+            Some(&styles),
+        )
+        .unwrap();
+        super::configure_h3_uploaded_media(
+            &mut workflow,
+            "reference-to-video",
+            &["ref0.png".to_owned(), "ref1.png".to_owned()],
+            &[],
+            &["aud0.mp3".to_owned(), "aud1.mp3".to_owned(), "aud2.mp3".to_owned()],
+            &bindings,
+        )
+        .unwrap();
+        let save_ids = super::adapt_workflow_for_colab_ss(&mut workflow, "5555", 2).unwrap();
+        assert_eq!(save_ids, vec!["9001".to_owned()]);
+        assert_eq!(workflow["127"]["inputs"]["unet_name"], json!(dasiwa.diffusion_model_name));
+        assert_eq!(workflow["141"]["class_type"], "ModelPreviewOverrideKJ");
+        assert_eq!(workflow["124"]["inputs"]["model"], json!(["141", 0]));
+        assert_eq!(workflow["9200"]["inputs"]["model"], json!(["141", 0]));
+        assert_eq!(workflow["9200"]["inputs"]["lora_name"], json!("MinimaxH3/MysticXXX_MMH3-V1.safetensors"));
+        assert_eq!(workflow["139"]["inputs"]["image"], json!("ref0.png"));
+        assert_eq!(workflow["258"]["inputs"]["image"], json!("ref1.png"));
+        assert_eq!(workflow["9607"]["inputs"]["audio"], json!("aud2.mp3"));
+        assert!(workflow.get("sucanvas_ss_encode_9001").is_some());
+        assert_eq!(workflow["9001"]["class_type"], "SaveImage");
     }
 }

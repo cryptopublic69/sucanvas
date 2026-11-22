@@ -22,6 +22,8 @@ pub(super) struct Connection {
     colab_comfy_url: String,
     #[serde(default)]
     colab_ss_password: String,
+    #[serde(default)]
+    colab_profile: String,
     comfy_input_directory: String,
     comfy_output_directory: String,
 }
@@ -47,6 +49,7 @@ impl Connection {
             comfy_url: config.comfy_url.clone(),
             colab_comfy_url: config.colab_comfy_url.clone(),
             colab_ss_password: config.colab_ss_password.clone(),
+            colab_profile: config.colab_profile.clone(),
             comfy_input_directory: display_directory(&config.comfy_input_directory),
             comfy_output_directory: display_directory(&config.comfy_output_directory),
         }
@@ -55,6 +58,7 @@ impl Connection {
         config.comfy_url = self.comfy_url.clone();
         config.colab_comfy_url = self.colab_comfy_url.clone();
         config.colab_ss_password = self.colab_ss_password.clone();
+        config.colab_profile = self.colab_profile.clone();
         config.comfy_input_directory = self.comfy_input_directory.clone();
         config.comfy_output_directory = self.comfy_output_directory.clone();
     }
@@ -112,6 +116,7 @@ impl Store {
             .trim_end_matches('/')
             .to_owned();
         input.colab_ss_password = input.colab_ss_password.trim().to_owned();
+        input.colab_profile = super::config::normalize_colab_profile(&input.colab_profile);
         for directory in [
             &mut input.comfy_input_directory,
             &mut input.comfy_output_directory,
@@ -120,6 +125,7 @@ impl Store {
         }
         super::config::validate_comfy_url(&input.comfy_url)?;
         super::config::validate_comfy_url(&input.colab_comfy_url)?;
+        super::config::validate_colab_profile(&input.colab_profile)?;
         let mut current = self.current.write().map_err(|_| "无法锁定 ComfyUI 配置")?;
         for candidate in [&input.comfy_url, &input.colab_comfy_url] {
             if let Ok(url) = reqwest::Url::parse(candidate) {
@@ -191,6 +197,8 @@ pub(super) async fn write(
                 Ok(Ok(report)) => {
                     if report["migrated"] == true {
                         let _ = handle.emit("canvas://resync", json!({}));
+                    } else {
+                        let _ = handle.emit("canvas://colab-config-changed", json!({}));
                     }
                     let mut value = serde_json::to_value(saved).unwrap();
                     value["storageMigration"] = report;
@@ -231,6 +239,7 @@ mod tests {
             comfy_url: "http://127.0.0.1:8188".into(),
             colab_comfy_url: String::new(),
             colab_ss_password: String::new(),
+            colab_profile: String::new(),
             comfy_input_directory: String::new(),
             comfy_output_directory: String::new(),
             trusted_proxies: super::super::config::default_trusted_proxies(),
@@ -250,6 +259,7 @@ mod tests {
                 comfy_url: " http://192.168.5.108:8188/comfy/// ".into(),
                 colab_comfy_url: " https://demo.trycloudflare.com/// ".into(),
                 colab_ss_password: " 5555 ".into(),
+                colab_profile: " DaSiWa ".into(),
                 comfy_input_directory: "input".into(),
                 comfy_output_directory: "output".into(),
             })
@@ -257,10 +267,12 @@ mod tests {
         assert_eq!(saved.comfy_url, "http://192.168.5.108:8188/comfy");
         assert_eq!(saved.colab_comfy_url, "https://demo.trycloudflare.com");
         assert_eq!(saved.colab_ss_password, "5555");
+        assert_eq!(saved.colab_profile, "dasiwa");
         assert_eq!(old.comfy_url, "http://127.0.0.1:8188");
         assert_eq!(store.snapshot().comfy_url, saved.comfy_url);
         assert_eq!(store.snapshot().colab_comfy_url, saved.colab_comfy_url);
         assert_eq!(store.snapshot().colab_ss_password, saved.colab_ss_password);
+        assert_eq!(store.snapshot().colab_profile, "dasiwa");
         assert_eq!(
             saved.comfy_input_directory,
             display_directory(&root.join("input").canonicalize().unwrap().to_string_lossy())
@@ -294,6 +306,7 @@ mod tests {
                 comfy_url: saved.comfy_url,
                 colab_comfy_url: String::new(),
                 colab_ss_password: String::new(),
+                colab_profile: String::new(),
                 comfy_input_directory: String::new(),
                 comfy_output_directory: String::new(),
             })
@@ -301,6 +314,7 @@ mod tests {
         assert!(saved.comfy_input_directory.is_empty());
         assert!(saved.colab_comfy_url.is_empty());
         assert!(saved.colab_ss_password.is_empty());
+        assert!(saved.colab_profile.is_empty());
         assert!(store.snapshot().comfy_output_directory.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
@@ -330,6 +344,9 @@ mod tests {
             input.comfy_input_directory = directory.into();
             assert!(store.save(input).is_err());
         }
+        let mut bad_profile = Connection::from_config(&store.snapshot());
+        bad_profile.colab_profile = "invalid".into();
+        assert!(store.save(bad_profile).is_err());
         assert_eq!(fs::read(root.join("config.json")).unwrap(), original);
         assert_eq!(store.snapshot().comfy_url, "http://127.0.0.1:8188");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 3);

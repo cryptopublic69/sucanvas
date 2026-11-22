@@ -108,6 +108,7 @@ impl WebState {
 }
 
 pub async fn run() -> Result<(), String> {
+    proxy::ensure_rustls_provider();
     let mut args = std::env::args().skip(1);
     let executable_root = std::env::current_exe()
         .map_err(|e| e.to_string())?
@@ -340,6 +341,7 @@ pub async fn run() -> Result<(), String> {
             "/api/comfy-config",
             get(connection::read).put(connection::write),
         )
+        .route("/api/colab-profile", get(colab::read_profile))
         .route("/api/comfy/ws", get(proxy::websocket))
         .route("/api/comfy/{*path}", get(proxy::http))
         .route("/api/comfy-colab/ws", get(proxy::websocket_colab))
@@ -552,8 +554,10 @@ fn deliverable_with(
     if let Some(canvas_id) = message.get("canvasId").and_then(Value::as_str) {
         return authz::may_read(ownership, session, canvas_id);
     }
-    message.get("event").and_then(Value::as_str) == Some("canvas://resync")
-        || session.role == users::Role::Admin
+    matches!(
+        message.get("event").and_then(Value::as_str),
+        Some("canvas://resync" | "canvas://colab-config-changed")
+    ) || session.role == users::Role::Admin
 }
 async fn events(State(state): State<WebState>, headers: HeaderMap) -> impl IntoResponse {
     let receiver = state.handle.events.subscribe();

@@ -505,8 +505,39 @@ pub async fn invoke(
     }
     if colab_channel {
         if command == "submit_comfyui_workflow" {
+            let profile = super::colab::inspect_colab_profile(&state).await;
+            if !profile.reachable {
+                let message = profile
+                    .error
+                    .unwrap_or_else(|| "Colab 实例当前未运行或无法连接".to_owned());
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
+                    .into_response();
+            }
+            let Some(effective_profile) = profile.effective_profile else {
+                let message = profile.error.unwrap_or_else(|| {
+                    "未能识别当前 Colab 档位（请管理员在基础设置中选择 DaSiWa V5xs 或 Cobijada）"
+                        .to_owned()
+                });
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
+                    .into_response();
+            };
             if let Some(obj) = input.args.get_mut("input").and_then(Value::as_object_mut) {
                 obj.insert("colabMode".to_owned(), Value::Bool(true));
+                obj.insert(
+                    "colabProfile".to_owned(),
+                    Value::String(effective_profile),
+                );
+                obj.insert(
+                    "diffusionModelName".to_owned(),
+                    Value::String(profile.diffusion_model_name),
+                );
+                obj.insert("workflowModuleId".to_owned(), Value::Null);
+                obj.insert("workflowPath".to_owned(), Value::String(String::new()));
+                obj.insert("secondarySamplingEnabled".to_owned(), Value::Bool(false));
+                obj.insert("secondaryLoraName".to_owned(), Value::String(String::new()));
+                obj.insert("secondaryLoraBypassed".to_owned(), Value::Bool(true));
+                obj.insert("secondarySource".to_owned(), Value::Null);
+                obj.insert("secondarySourcePath".to_owned(), Value::Null);
                 obj.insert(
                     "ssPassword".to_owned(),
                     Value::String(state.config.colab_ss_password.clone()),
@@ -774,6 +805,7 @@ mod tests {
             comfy_url: "http://127.0.0.1:8188".into(),
             colab_comfy_url: String::new(),
             colab_ss_password: String::new(),
+            colab_profile: String::new(),
             comfy_input_directory: String::new(),
             comfy_output_directory: String::new(),
             max_upload_bytes: 12345,

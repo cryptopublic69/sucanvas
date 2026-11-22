@@ -759,6 +759,8 @@ pub struct ComfySubmitInput {
     #[serde(default)]
     pub colab_mode: bool,
     #[serde(default)]
+    pub colab_profile: String,
+    #[serde(default)]
     pub ss_password: String,
     #[serde(default)]
     pub ss_compress: Option<u8>,

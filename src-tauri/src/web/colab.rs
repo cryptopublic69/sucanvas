@@ -1,4 +1,10 @@
 use super::WebState;
+use crate::workflow_modules::{
+    colab_profile_for_model, colab_profile_spec, ColabProfileSpec, COLAB_ALLOWED_LORAS,
+    COLAB_WORKFLOW_LABEL,
+};
+use axum::{extract::State, Json};
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -10,6 +16,222 @@ use std::{
 use uuid::Uuid;
 
 pub const COLAB_OUTPUTS_DIR: &str = "colab-outputs";
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ColabProfileStatus {
+    pub configured: bool,
+    pub reachable: bool,
+    pub available: bool,
+    pub selected_profile: String,
+    pub detected_profile: Option<String>,
+    pub effective_profile: Option<String>,
+    pub source: String,
+    pub label: String,
+    pub workflow_label: String,
+    pub diffusion_model_name: String,
+    pub allowed_loras: Vec<String>,
+    pub error: Option<String>,
+}
+
+fn colab_allowed_loras_vec() -> Vec<String> {
+    COLAB_ALLOWED_LORAS
+        .iter()
+        .map(|item| (*item).to_owned())
+        .collect()
+}
+
+fn colab_workflow_label_for_spec(spec: Option<ColabProfileSpec>) -> String {
+    match spec {
+        Some(spec) => format!("Colab 专用 · {} (Fla V3.1 1采 SS)", spec.label),
+        None => COLAB_WORKFLOW_LABEL.to_owned(),
+    }
+}
+
+fn resolve_colab_profile_status(
+    configured: bool,
+    reachable: bool,
+    selected_profile: &str,
+    detected_spec: Option<ColabProfileSpec>,
+) -> ColabProfileStatus {
+    let manual_spec = colab_profile_spec(selected_profile);
+    let selected = manual_spec
+        .map(|spec| spec.id.to_owned())
+        .unwrap_or_default();
+    let allowed_loras = colab_allowed_loras_vec();
+
+    if !configured {
+        return ColabProfileStatus {
+            configured: false,
+            reachable: false,
+            available: false,
+            selected_profile: selected,
+            detected_profile: None,
+            effective_profile: None,
+            source: "none".to_owned(),
+            label: String::new(),
+            workflow_label: COLAB_WORKFLOW_LABEL.to_owned(),
+            diffusion_model_name: String::new(),
+            allowed_loras,
+            error: Some("管理员尚未配置 Colab ComfyUI 服务地址".to_owned()),
+        };
+    }
+
+    if !reachable {
+        let fallback_spec = manual_spec;
+        let (source, label, diffusion_model_name, effective_profile) = match fallback_spec {
+            Some(spec) => (
+                "manual".to_owned(),
+                spec.label.to_owned(),
+                spec.diffusion_model_name.to_owned(),
+                Some(spec.id.to_owned()),
+            ),
+            None => ("none".to_owned(), String::new(), String::new(), None),
+        };
+        return ColabProfileStatus {
+            configured: true,
+            reachable: false,
+            available: false,
+            selected_profile: selected,
+            detected_profile: None,
+            effective_profile,
+            source,
+            label,
+            workflow_label: colab_workflow_label_for_spec(fallback_spec),
+            diffusion_model_name,
+            allowed_loras,
+            error: Some("Colab 实例当前未运行或无法连接".to_owned()),
+        };
+    }
+
+    if let Some(spec) = detected_spec {
+        return ColabProfileStatus {
+            configured: true,
+            reachable: true,
+            available: true,
+            selected_profile: selected,
+            detected_profile: Some(spec.id.to_owned()),
+            effective_profile: Some(spec.id.to_owned()),
+            source: "detected".to_owned(),
+            label: spec.label.to_owned(),
+            workflow_label: colab_workflow_label_for_spec(Some(spec)),
+            diffusion_model_name: spec.diffusion_model_name.to_owned(),
+            allowed_loras,
+            error: None,
+        };
+    }
+
+    if let Some(spec) = manual_spec {
+        return ColabProfileStatus {
+            configured: true,
+            reachable: true,
+            available: true,
+            selected_profile: selected,
+            detected_profile: None,
+            effective_profile: Some(spec.id.to_owned()),
+            source: "manual".to_owned(),
+            label: spec.label.to_owned(),
+            workflow_label: colab_workflow_label_for_spec(Some(spec)),
+            diffusion_model_name: spec.diffusion_model_name.to_owned(),
+            allowed_loras,
+            error: Some("当前 Colab 未提供自动识别文件，已使用手动档位".to_owned()),
+        };
+    }
+
+    ColabProfileStatus {
+        configured: true,
+        reachable: true,
+        available: false,
+        selected_profile: selected,
+        detected_profile: None,
+        effective_profile: None,
+        source: "none".to_owned(),
+        label: String::new(),
+        workflow_label: COLAB_WORKFLOW_LABEL.to_owned(),
+        diffusion_model_name: String::new(),
+        allowed_loras,
+        error: Some(
+            "已连接 Colab，但未能识别档位（请管理员在基础设置中手动选择 DaSiWa V5xs 或 Cobijada）"
+                .to_owned(),
+        ),
+    }
+}
+
+fn parse_profile_marker(value: &Value) -> Option<ColabProfileSpec> {
+    let obj = value.as_object()?;
+    obj.get("profile")
+        .and_then(Value::as_str)
+        .and_then(colab_profile_spec)
+        .or_else(|| {
+            obj.get("diffusionModel")
+                .and_then(Value::as_str)
+                .and_then(colab_profile_for_model)
+        })
+}
+
+async fn probe_live_colab(base_url: &str) -> (bool, Option<ColabProfileSpec>) {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return (false, None);
+    }
+    let Ok(client) = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(4))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        return (false, None);
+    };
+
+    let marker_url = format!("{base}/api/userdata/sucanvas_colab_profile.json");
+    let mut reachable = false;
+    let mut detected = None;
+
+    match client.get(&marker_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(json) = resp.json::<Value>().await {
+                if json.is_object() {
+                    reachable = true;
+                    detected = parse_profile_marker(&json);
+                }
+            }
+        }
+        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+            let stats_url = format!("{base}/system_stats");
+            if let Ok(stats_resp) = client.get(&stats_url).send().await {
+                if stats_resp.status().is_success() {
+                    if let Ok(stats) = stats_resp.json::<Value>().await {
+                        if stats.get("system").is_some() || stats.get("devices").is_some() {
+                            reachable = true;
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let _ = detected_id_unused(detected);
+    (reachable, detected)
+}
+
+#[inline]
+fn detected_id_unused(_spec: Option<ColabProfileSpec>) {}
+
+/// Probes the configured Colab ComfyUI instance for live reachability and active model profile.
+pub async fn inspect_colab_profile(state: &WebState) -> ColabProfileStatus {
+    let url = state.config.colab_comfy_url.trim();
+    if url.is_empty() {
+        return resolve_colab_profile_status(false, false, &state.config.colab_profile, None);
+    }
+    let (reachable, detected) = probe_live_colab(url).await;
+    resolve_colab_profile_status(true, reachable, &state.config.colab_profile, detected)
+}
+
+pub(super) async fn read_profile(State(state): State<WebState>) -> Json<ColabProfileStatus> {
+    let state = state.connection_snapshot();
+    Json(inspect_colab_profile(&state).await)
+}
 
 const WATERMARK_SKIP_W_RATIO: f64 = 0.40;
 const WATERMARK_SKIP_H_RATIO: f64 = 0.08;
@@ -677,5 +899,37 @@ mod tests {
             .unwrap();
         let err_plain = decode_duck_png(&plain_png, "5555").unwrap_err();
         assert!(err_plain.contains("无法解析"), "{err_plain}");
+    }
+
+    #[test]
+    fn colab_profile_resolution_prefers_detected_then_manual_and_gates_on_reachability() {
+        let dasiwa = colab_profile_spec("dasiwa").unwrap();
+        let cobijada = colab_profile_spec("cobijada").unwrap();
+
+        let unconfigured = resolve_colab_profile_status(false, false, "dasiwa", None);
+        assert!(!unconfigured.configured);
+        assert!(!unconfigured.available);
+
+        let offline = resolve_colab_profile_status(true, false, "dasiwa", Some(dasiwa));
+        assert!(offline.configured);
+        assert!(!offline.reachable);
+        assert!(!offline.available);
+
+        let detected = resolve_colab_profile_status(true, true, "cobijada", Some(dasiwa));
+        assert!(detected.available);
+        assert_eq!(detected.source, "detected");
+        assert_eq!(detected.effective_profile.as_deref(), Some("dasiwa"));
+        assert_eq!(detected.diffusion_model_name, dasiwa.diffusion_model_name);
+
+        let manual = resolve_colab_profile_status(true, true, "cobijada", None);
+        assert!(manual.available);
+        assert_eq!(manual.source, "manual");
+        assert_eq!(manual.effective_profile.as_deref(), Some("cobijada"));
+        assert_eq!(manual.diffusion_model_name, cobijada.diffusion_model_name);
+
+        let unresolved = resolve_colab_profile_status(true, true, "", None);
+        assert!(unresolved.reachable);
+        assert!(!unresolved.available);
+        assert!(unresolved.effective_profile.is_none());
     }
 }

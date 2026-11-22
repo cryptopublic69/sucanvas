@@ -1,5 +1,5 @@
 import type { VideoRegenerationPresetCollection } from "./videoRegenerationPresets";
-import { orderedVideoRegenerationPresets } from "./videoRegenerationPresets";
+import { COLAB_PROFILE_LABELS, orderedVideoRegenerationPresets } from "./videoRegenerationPresets";
 import { useEffect, useRef, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { createPortal } from "react-dom";
@@ -136,6 +136,7 @@ export function VideoRegenerationDialogs({
     window.addEventListener("keydown", closeOnEscape, true);
     return () => window.removeEventListener("keydown", closeOnEscape, true);
   }, [dialogOpen, videoRegenerationInformationOpen, videoRegenerationDialogRef, setVideoRegenerationInformationOpen, setVideoRegenerationDraft]);
+  const colabProfile = videoRegenerationDraft?.colabProfile;
   const selectedModel = videoRegenerationDraft?.diffusionModelName ?? "";
   const catalogModel = h3DiffusionModelOptions.find((model) => sameH3DiffusionModelName(model, selectedModel));
   const selectedPrimaryLora = videoRegenerationDraft?.loraName ?? "";
@@ -161,7 +162,9 @@ export function VideoRegenerationDialogs({
             <div className="project-dialog-icon">{videoRegenerationDraft.presetEditor ? <Settings size={21} /> : <RotateCcw size={21} />}</div>
             <div>
               <div className="video-preset-editor-title">
-                <h2>{videoRegenerationDraft.presetEditor ? "预设编辑" : "视频生成"}</h2>
+                <h2>{videoRegenerationDraft.presetEditor
+                  ? (colabProfile ? `Colab 方案编辑 · ${COLAB_PROFILE_LABELS[colabProfile]}` : "预设编辑")
+                  : "视频生成"}</h2>
                 {!videoRegenerationDraft.presetEditor && <>
                   <button type="button" className="video-regeneration-header-notes"
                     onClick={() => setVideoRegenerationInformationOpen(true)} title="修改本次生成使用的提示词">
@@ -171,7 +174,11 @@ export function VideoRegenerationDialogs({
                 </>}
                 {videoRegenerationDraft.presetEditor && <button type="button" className="video-details-toggle" aria-label="关闭预设编辑" title="关闭" onClick={() => setVideoRegenerationDraft(null)}><X size={18} /></button>}
               </div>
-              <p>{videoRegenerationDraft.presetEditor ? "编辑并保存共用参数预设，供视频生成节点和 Alt＋重新生成使用。" : videoRegenerationDraft.generatorId ? "使用当前节点的提示词与参数，调整后点击生成。" : videoRegenerationDraft.useSnapshotSettings
+              <p>{videoRegenerationDraft.presetEditor
+                ? (colabProfile
+                  ? `编辑并保存 Colab（${COLAB_PROFILE_LABELS[colabProfile]}）专属生成方案，与本地预设完全隔离。`
+                  : "编辑并保存共用参数预设，供视频生成节点和 Alt＋重新生成使用。")
+                : videoRegenerationDraft.generatorId ? "使用当前节点的提示词与参数，调整后点击生成。" : videoRegenerationDraft.useSnapshotSettings
                 ? `正在使用“${videoRegenerationDraft.previewTitle}”生成时记录的参数、提示词与 Seed，不套用已保存设置。`
                 : `提示词与 Seed 来自“${videoRegenerationDraft.previewTitle}”；参数优先套用默认预设，未设默认时使用生成快照。`}</p>
             </div>
@@ -228,26 +235,32 @@ export function VideoRegenerationDialogs({
               <h3>基础参数</h3>
               <label className="video-regeneration-model-field">
                 H3 模型
-                <SettingsSelect
-                  value={catalogModel ?? selectedModel}
-                  options={[
-                    ...(selectedModel && !catalogModel ? [{
-                      value: selectedModel,
-                      label: `${h3DiffusionModelDisplayName(selectedModel)}（当前目录未找到）`,
-                      title: selectedModel,
-                    }] : []),
-                    ...h3DiffusionModelOptions.map((model) => ({
-                      value: model,
-                      label: h3DiffusionModelDisplayName(model),
-                      title: model,
-                    })),
-                  ]}
-                  onChange={(diffusionModelName) => setVideoRegenerationDraft((current) => current && ({
-                    ...current,
-                    diffusionModelName,
-                  }))}
-                  ariaLabel="重新生成 H3 模型"
-                />
+                {colabProfile ? (
+                  <div className="video-locked-value" title={selectedModel}>
+                    {`${COLAB_PROFILE_LABELS[colabProfile]} · 已锁定 Colab 底模`}
+                  </div>
+                ) : (
+                  <SettingsSelect
+                    value={catalogModel ?? selectedModel}
+                    options={[
+                      ...(selectedModel && !catalogModel ? [{
+                        value: selectedModel,
+                        label: `${h3DiffusionModelDisplayName(selectedModel)}（当前目录未找到）`,
+                        title: selectedModel,
+                      }] : []),
+                      ...h3DiffusionModelOptions.map((model) => ({
+                        value: model,
+                        label: h3DiffusionModelDisplayName(model),
+                        title: model,
+                      })),
+                    ]}
+                    onChange={(diffusionModelName) => setVideoRegenerationDraft((current) => current && ({
+                      ...current,
+                      diffusionModelName,
+                    }))}
+                    ariaLabel="重新生成 H3 模型"
+                  />
+                )}
               </label>
               {!videoRegenerationDraft.presetEditor && <>
               <label>
@@ -347,7 +360,7 @@ export function VideoRegenerationDialogs({
                   }))}
                 />
               </label>
-              {videoRegenerationWorkflowModule?.bindings.primaryUpscaleNodeId?.trim() && <label>
+              {!colabProfile && videoRegenerationWorkflowModule?.bindings.primaryUpscaleNodeId?.trim() && <label>
                 放大倍率（×）
                 <ModelParameterNumberInput
                   regenerationField="primaryUpscaleFactor"
@@ -436,7 +449,7 @@ export function VideoRegenerationDialogs({
               </label>
                 </div>
               </section>
-              <section className="video-regeneration-group" aria-label="2采参数">
+              {!colabProfile && <section className="video-regeneration-group" aria-label="2采参数">
                 <header className="video-regeneration-group-header video-regeneration-secondary-header">
                   <h3>2采参数</h3>
                   <button type="button" className="video-regeneration-group-toggle" aria-expanded={secondaryExpanded}
@@ -497,7 +510,7 @@ export function VideoRegenerationDialogs({
                 </label>
               ))}
                 </div>}
-              </section>
+              </section>}
               <section className="video-regeneration-group video-regeneration-shared-group" aria-label="共用设置">
                 <h3>共用设置</h3>
                 <div className="video-regeneration-fields video-regeneration-group-fields">
@@ -524,7 +537,7 @@ export function VideoRegenerationDialogs({
                 renderStrengthInput={(props) => <ModelParameterNumberInput {...props} min={0} max={10} step={0.01} />}
                 slots={videoRegenerationDraft.styleLoras}
                 options={h3LoraOptions}
-                hasSecondStage={Boolean(videoRegenerationWorkflowModule?.adapter.bindings.livePreviewNodeId)}
+                hasSecondStage={!colabProfile && Boolean(videoRegenerationWorkflowModule?.adapter.bindings.livePreviewNodeId)}
                 onChange={(styleLoras) => setVideoRegenerationDraft((current) => current && ({ ...current, styleLoras }))}
               />
             </div>

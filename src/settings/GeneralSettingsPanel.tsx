@@ -1,6 +1,7 @@
 import type {
   UiFontSize
 } from "../CanvasNode";
+import type { ColabProfileStatus } from "../web/connection";
 
 type GeneralSettingsPanelProps = {
   comfySettingsBusy?: boolean;
@@ -18,6 +19,11 @@ type GeneralSettingsPanelProps = {
   setColabComfyUrlDraft?: React.Dispatch<React.SetStateAction<string>>;
   colabSsPasswordDraft?: string;
   setColabSsPasswordDraft?: React.Dispatch<React.SetStateAction<string>>;
+  colabProfileDraft?: string;
+  setColabProfileDraft?: React.Dispatch<React.SetStateAction<string>>;
+  colabProfileStatus?: ColabProfileStatus | null;
+  colabProfileLoading?: boolean;
+  onRefreshColabProfile?: () => void;
   // The ComfyUI connection is a server-wide setting (Web: admins only).
   showComfySettings?: boolean;
 };
@@ -38,6 +44,11 @@ export function GeneralSettingsPanel({
   setColabComfyUrlDraft,
   colabSsPasswordDraft,
   setColabSsPasswordDraft,
+  colabProfileDraft = "",
+  setColabProfileDraft,
+  colabProfileStatus = null,
+  colabProfileLoading = false,
+  onRefreshColabProfile,
   showComfySettings = true,
 }: GeneralSettingsPanelProps) {
   return (
@@ -161,6 +172,38 @@ export function GeneralSettingsPanel({
                 />
                 <small>
                   用于提交给 Colab SS_tools 隐藏节点编码及服务端纯 Rust 自动提取 MP4。
+                </small>
+              </label>
+              <label className="settings-field">
+                <span>Colab 档位（兜底选择）</span>
+                <div className="colab-profile-control-row">
+                  <select
+                    disabled={comfySettingsBusy}
+                    value={colabProfileDraft}
+                    onChange={(event) => setColabProfileDraft?.(event.currentTarget.value)}
+                    aria-label="Colab 档位兜底选择"
+                  >
+                    <option value="">自动识别（推荐）</option>
+                    <option value="dasiwa">DaSiWa V5xs</option>
+                    <option value="cobijada">Cobijada</option>
+                  </select>
+                  {onRefreshColabProfile && (
+                    <button
+                      type="button"
+                      className="dialog-cancel colab-profile-refresh-button"
+                      disabled={comfySettingsBusy || colabProfileLoading}
+                      onClick={onRefreshColabProfile}
+                    >
+                      {colabProfileLoading ? "检测中…" : "重新检测"}
+                    </button>
+                  )}
+                </div>
+                <small>
+                  {colabProfileStatus?.configured
+                    ? colabProfileStatus.available
+                      ? `当前实例在线：${colabProfileStatus.label}（${colabProfileStatus.source === "detected" ? "已自动识别" : "使用手动兜底"} · ${colabProfileStatus.diffusionModelName.split("/").pop()}）`
+                      : `状态：${colabProfileStatus.error ?? "当前实例不可用"}`
+                    : "默认自动读取 Colab 笔记本写入的身份文件；旧版实例可手动指定 DaSiWa V5xs 或 Cobijada。仅管理员可配置 Colab 地址，所有成员在实例在线时可使用。"}
                 </small>
               </label>
             </>
