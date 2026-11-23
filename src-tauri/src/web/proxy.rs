@@ -35,6 +35,70 @@ fn upstream(state: &WebState, colab: bool, suffix: &str) -> Result<String, Statu
     Ok(format!("{}{}", base.trim_end_matches('/'), suffix))
 }
 
+fn resolve_local_view_path(
+    data_dir: &std::path::Path,
+    input_dir: &str,
+    output_dir: &str,
+    query: &reqwest::Url,
+    suffix: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    if query
+        .query_pairs()
+        .any(|(key, value)| matches!(key.as_ref(), "preview" | "channel") && !value.is_empty())
+    {
+        return Ok(None);
+    }
+    let direct_key = format!("/api/comfy{suffix}");
+    let mut mapped = super::posters::migration_replacement(data_dir, &direct_key)?;
+    if mapped.is_none()
+        && query
+            .query_pairs()
+            .any(|(key, _)| key == "infinite_canvas_prompt")
+    {
+        let mut normalized = query.clone();
+        normalized.query_pairs_mut().clear().extend_pairs(
+            query.query_pairs().filter(|(key, _)| {
+                !matches!(
+                    key.as_ref(),
+                    "download" | "downloadName" | "infinite_canvas_prompt"
+                )
+            }),
+        );
+        if let Some(clean_query) = normalized.query().filter(|value| !value.is_empty()) {
+            let clean_key = format!("/api/comfy/view?{clean_query}");
+            mapped = super::posters::migration_replacement(data_dir, &clean_key)?;
+        }
+    }
+    if let Some(replacement) = mapped {
+        if replacement.starts_with("/api/comfy/view?") {
+            if let Ok(mapped_url) = reqwest::Url::parse(&format!("http://localhost{replacement}")) {
+                return super::posters::resolve_view_query_path(
+                    &mapped_url,
+                    input_dir,
+                    output_dir,
+                );
+            }
+        }
+    }
+    super::posters::resolve_view_query_path(query, input_dir, output_dir)
+}
+
+async fn serve_local_view(
+    path: &std::path::Path,
+    request: Request<Body>,
+    download: bool,
+    filename: &str,
+) -> Response {
+    let mut response = super::files::serve(path, request).await;
+    if download && response.status().is_success() {
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            super::files::download_disposition(std::path::Path::new(filename)),
+        );
+    }
+    response
+}
+
 async fn http_for(
     state: WebState,
     request: Request<Body>,
@@ -84,6 +148,30 @@ async fn http_for(
             .map(|query| format!("?{query}"))
             .unwrap_or_default()
     );
+    if !colab && tail == "/view" {
+        let data_dir = state.core.data_dir.clone();
+        let input_dir = state.config.comfy_input_directory.clone();
+        let output_dir = state.config.comfy_output_directory.clone();
+        let query_for_local = query.clone();
+        let suffix_for_local = suffix.clone();
+        match tokio::task::spawn_blocking(move || {
+            resolve_local_view_path(
+                &data_dir,
+                &input_dir,
+                &output_dir,
+                &query_for_local,
+                &suffix_for_local,
+            )
+        })
+        .await
+        {
+            Ok(Ok(Some(path))) => {
+                return serve_local_view(&path, request, download, &filename).await;
+            }
+            Ok(Err(_)) => return StatusCode::BAD_REQUEST.into_response(),
+            Ok(Ok(None)) | Err(_) => {}
+        }
+    }
     let url = match upstream(&state, colab, &suffix) {
         Ok(url) => url,
         Err(status) => return status.into_response(),
@@ -625,5 +713,219 @@ mod tests {
     fn ensure_rustls_provider_installs_default_crypto_provider() {
         ensure_rustls_provider();
         assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
+
+    #[test]
+    fn local_view_resolves_mapped_files_migration_and_fallbacks() {
+        let root = std::env::temp_dir().join(format!(
+            "web-proxy-local-view-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let data_dir = root.join("data");
+        let input_dir = root.join("input");
+        let output_dir = root.join("output");
+        std::fs::create_dir_all(output_dir.join("H3")).unwrap();
+        std::fs::create_dir_all(output_dir.join("sucanvas-migrated")).unwrap();
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(output_dir.join("H3/video.mp4"), b"output").unwrap();
+        std::fs::write(
+            output_dir.join("sucanvas-migrated/old-video.mp4"),
+            b"migrated",
+        )
+        .unwrap();
+        std::fs::write(input_dir.join("ref.png"), b"input").unwrap();
+        std::fs::write(root.join("secret.mp4"), b"outside").unwrap();
+
+        let in_str = input_dir.to_string_lossy().into_owned();
+        let out_str = output_dir.to_string_lossy().into_owned();
+        let resolve = |raw_uri: &str, in_dir: &str, out_dir: &str| {
+            let query = reqwest::Url::parse(&format!("http://localhost{raw_uri}")).unwrap();
+            let mut upstream_query = query.clone();
+            upstream_query.query_pairs_mut().clear().extend_pairs(
+                query
+                    .query_pairs()
+                    .filter(|(key, _)| key != "downloadName" && key != "download"),
+            );
+            let suffix = format!(
+                "/view{}",
+                upstream_query
+                    .query()
+                    .filter(|value| !value.is_empty())
+                    .map(|value| format!("?{value}"))
+                    .unwrap_or_default()
+            );
+            resolve_local_view_path(&data_dir, in_dir, out_dir, &query, &suffix)
+        };
+
+        assert_eq!(
+            resolve(
+                "/api/comfy/view?filename=video.mp4&subfolder=H3&type=output&infinite_canvas_prompt=p1",
+                &in_str,
+                &out_str
+            )
+            .unwrap(),
+            Some(output_dir.join("H3/video.mp4"))
+        );
+        assert_eq!(
+            resolve("/api/comfy/view?filename=video.mp4&subfolder=H3", &in_str, &out_str).unwrap(),
+            Some(output_dir.join("H3/video.mp4"))
+        );
+        assert_eq!(
+            resolve("/api/comfy/view?filename=ref.png&type=input", &in_str, &out_str).unwrap(),
+            Some(input_dir.join("ref.png"))
+        );
+        assert_eq!(
+            resolve("/api/comfy/view?filename=video.mp4&type=temp", &in_str, &out_str).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve(
+                "/api/comfy/view?filename=video.mp4&subfolder=H3&type=output&preview=webp;90",
+                &in_str,
+                &out_str
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve(
+                "/api/comfy/view?filename=video.mp4&subfolder=H3&type=output&channel=rgba",
+                &in_str,
+                &out_str
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve("/api/comfy/view?filename=video.mp4&subfolder=H3&type=output", "", "").unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve(
+                "/api/comfy/view?filename=missing.mp4&type=output",
+                &in_str,
+                &out_str
+            )
+            .unwrap(),
+            None
+        );
+
+        for invalid in [
+            "/api/comfy/view?filename=secret.mp4&subfolder=..&type=output",
+            "/api/comfy/view?filename=../secret.mp4&type=output",
+            "/api/comfy/view?filename=a/b.mp4&type=output",
+            "/api/comfy/view?type=output",
+        ] {
+            assert!(resolve(invalid, &in_str, &out_str).is_err(), "{invalid}");
+        }
+
+        std::fs::write(
+            data_dir.join("storage-migration-map.json"),
+            serde_json::json!({
+                "/api/comfy/view?filename=legacy.mp4&subfolder=&type=output":
+                    "/api/comfy/view?filename=old-video.mp4&subfolder=sucanvas-migrated&type=output"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(
+                "/api/comfy/view?filename=legacy.mp4&subfolder=&type=output",
+                &in_str,
+                &out_str
+            )
+            .unwrap(),
+            Some(output_dir.join("sucanvas-migrated/old-video.mp4"))
+        );
+        assert_eq!(
+            resolve(
+                "/api/comfy/view?filename=legacy.mp4&subfolder=&type=output&infinite_canvas_prompt=p2",
+                &in_str,
+                &out_str
+            )
+            .unwrap(),
+            Some(output_dir.join("sucanvas-migrated/old-video.mp4"))
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn serve_local_view_supports_range_requests_and_download_header() {
+        let root = std::env::temp_dir().join(format!(
+            "web-proxy-serve-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("clip.mp4");
+        std::fs::write(&file, b"0123456789abcdef").unwrap();
+
+        let full_req = Request::builder()
+            .method("GET")
+            .uri("/api/comfy/view?filename=clip.mp4")
+            .body(Body::empty())
+            .unwrap();
+        let full_resp = serve_local_view(&file, full_req, false, "clip.mp4").await;
+        assert_eq!(full_resp.status(), StatusCode::OK);
+        assert!(full_resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("video/mp4")));
+        assert_eq!(
+            full_resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private, max-age=3600"
+        );
+        assert_eq!(
+            full_resp
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
+            "nosniff"
+        );
+        assert!(full_resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .is_none());
+        let full_body = axum::body::to_bytes(full_resp.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&full_body[..], b"0123456789abcdef");
+
+        let range_req = Request::builder()
+            .method("GET")
+            .uri("/api/comfy/view?filename=clip.mp4")
+            .header(header::RANGE, "bytes=0-3")
+            .body(Body::empty())
+            .unwrap();
+        let range_resp = serve_local_view(&file, range_req, false, "clip.mp4").await;
+        assert_eq!(range_resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            range_resp.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 0-3/16"
+        );
+        let range_body = axum::body::to_bytes(range_resp.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&range_body[..], b"0123");
+
+        let download_req = Request::builder()
+            .method("GET")
+            .uri("/api/comfy/view?filename=clip.mp4&download=true")
+            .body(Body::empty())
+            .unwrap();
+        let download_resp = serve_local_view(&file, download_req, true, "我的视频.mp4").await;
+        assert_eq!(download_resp.status(), StatusCode::OK);
+        assert!(download_resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("attachment;")));
+        let _ = axum::body::to_bytes(download_resp.into_body(), 1024)
+            .await
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

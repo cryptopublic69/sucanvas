@@ -42,6 +42,56 @@ impl MigrationLookup {
 }
 static MIGRATION_LOOKUP: OnceLock<Mutex<MigrationLookup>> = OnceLock::new();
 
+pub(super) fn migration_replacement(
+    data_dir: &Path,
+    source: &str,
+) -> Result<Option<String>, String> {
+    Ok(MIGRATION_LOOKUP
+        .get_or_init(|| Mutex::new(MigrationLookup::default()))
+        .lock()
+        .map_err(|e| e.to_string())?
+        .replacement(&data_dir.join("storage-migration-map.json"), source))
+}
+
+pub(super) fn resolve_view_query_path(
+    url: &reqwest::Url,
+    input: &str,
+    output: &str,
+) -> Result<Option<PathBuf>, String> {
+    let query = url
+        .query_pairs()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let root = match query.get("type").map(|s| s.as_ref()).unwrap_or("output") {
+        "output" => output,
+        "input" => input,
+        _ => return Ok(None),
+    };
+    if root.trim().is_empty() {
+        return Ok(None);
+    }
+    let filename = query.get("filename").ok_or("缺少文件名")?.as_ref();
+    if filename.is_empty()
+        || filename == "."
+        || filename == ".."
+        || filename.contains(['/', '\\', '\0'])
+    {
+        return Err("无效的文件名".into());
+    }
+    let folder = query
+        .get("subfolder")
+        .map(|s| s.as_ref())
+        .unwrap_or("")
+        .replace('\\', "/");
+    let relative = if folder.is_empty() {
+        filename.to_owned()
+    } else {
+        format!("{folder}/{filename}")
+    };
+    let path = crate::portable::resource_path(Path::new(root), &format!("sucanvas://{relative}"))?;
+    rpc::ensure_contained(&path, &[PathBuf::from(root)])?;
+    Ok(path.is_file().then_some(path))
+}
+
 fn mapped_view_source(
     source: &str,
     comfy_url: &str,
@@ -62,34 +112,7 @@ fn mapped_view_source(
     if url.origin() != expected.origin() || url.path() != expected.path() {
         return Ok(None);
     }
-    let query = url
-        .query_pairs()
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let root = match query.get("type").map(|s| s.as_ref()).unwrap_or("output") {
-        "output" => output,
-        "input" => input,
-        _ => return Ok(None),
-    };
-    if root.is_empty() {
-        return Ok(None);
-    }
-    let filename = query.get("filename").ok_or("缺少视频文件名")?.as_ref();
-    if filename.is_empty() || filename.contains(['/', '\\']) {
-        return Err("无效的视频文件名".into());
-    }
-    let folder = query
-        .get("subfolder")
-        .map(|s| s.as_ref())
-        .unwrap_or("")
-        .replace('\\', "/");
-    let relative = if folder.is_empty() {
-        filename.to_owned()
-    } else {
-        format!("{folder}/{filename}")
-    };
-    let path = crate::portable::resource_path(Path::new(root), &format!("sucanvas://{relative}"))?;
-    rpc::ensure_contained(&path, &[PathBuf::from(root)])?;
-    Ok(path.is_file().then_some(path))
+    resolve_view_query_path(&url, input, output)
 }
 
 pub async fn capture(state: &WebState, source: String) -> Result<Vec<u8>, String> {
@@ -109,14 +132,7 @@ pub async fn capture(state: &WebState, source: String) -> Result<Vec<u8>, String
     }
     // Reuse parsed legacy references until the map changes. Old URLs can name
     // an existing, different file, so migration replacements must still win.
-    let current_source = MIGRATION_LOOKUP
-        .get_or_init(|| Mutex::new(MigrationLookup::default()))
-        .lock()
-        .map_err(|e| e.to_string())?
-        .replacement(
-            &state.core.data_dir.join("storage-migration-map.json"),
-            &source,
-        )
+    let current_source = migration_replacement(&state.core.data_dir, &source)?
         .unwrap_or_else(|| source.clone());
     if let Some(path) = mapped_view_source(
         &current_source,
