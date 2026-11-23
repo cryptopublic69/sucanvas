@@ -98,10 +98,12 @@ fn mapped_view_source(
     input: &str,
     output: &str,
 ) -> Result<Option<PathBuf>, String> {
-    let proxy_source = source
-        .strip_prefix("/api/comfy/view?")
-        .map(|query| format!("{}/view?{query}", comfy_url.trim_end_matches('/')));
-    let source = proxy_source.as_deref().unwrap_or(source);
+    if source.starts_with("/api/comfy/view?") {
+        let Ok(url) = reqwest::Url::parse(&format!("http://localhost{source}")) else {
+            return Ok(None);
+        };
+        return resolve_view_query_path(&url, input, output);
+    }
     let Ok(url) = reqwest::Url::parse(source) else {
         return Ok(None);
     };
@@ -117,7 +119,9 @@ fn mapped_view_source(
 
 pub async fn capture(state: &WebState, source: String) -> Result<Vec<u8>, String> {
     let mut source = source;
-    if let Ok(url) = reqwest::Url::parse(&source) {
+    if let Some(relative) = rpc::normalize_local_media_url(&source) {
+        source = relative;
+    } else if let Ok(url) = reqwest::Url::parse(&source) {
         if state
             .config
             .allows_origin(&url.origin().ascii_serialization())
@@ -274,6 +278,16 @@ mod tests {
             mapped_view_source(
                 "/api/comfy/view?filename=video.mp4&subfolder=H3&type=output",
                 comfy,
+                "",
+                &mapped
+            )
+            .unwrap(),
+            Some(root.join("H3/video.mp4"))
+        );
+        assert_eq!(
+            mapped_view_source(
+                "/api/comfy/view?filename=video.mp4&subfolder=H3&type=output",
+                "",
                 "",
                 &mapped
             )

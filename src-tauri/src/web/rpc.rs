@@ -287,6 +287,32 @@ pub fn normalize_args(state: &WebState, value: &mut Value, key: &str) -> Result<
     }
     Ok(())
 }
+pub(super) fn normalize_local_media_url(text: &str) -> Option<String> {
+    let url = reqwest::Url::parse(text).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let query = url.query().filter(|value| !value.is_empty())?;
+    if url.path() == "/api/comfy/view"
+        && url
+            .query_pairs()
+            .any(|(key, value)| key == "filename" && !value.trim().is_empty())
+    {
+        return Some(format!("/api/comfy/view?{query}"));
+    }
+    if url.path() == "/api/resource"
+        && url.query_pairs().any(|(key, value)| {
+            key == "resource"
+                && (value.starts_with("sucanvas://")
+                    || value.starts_with("sucanvas-input://")
+                    || value.starts_with("sucanvas-output://")
+                    || value.starts_with("sucanvas-export://"))
+        })
+    {
+        return Some(format!("/api/resource?{query}"));
+    }
+    None
+}
 pub fn normalize_result(state: &WebState, value: &mut Value) {
     crate::portable::transform(value, &state.core.data_dir, false);
     match value {
@@ -308,11 +334,14 @@ pub fn normalize_result(state: &WebState, value: &mut Value) {
                     .strip_prefix(local_prefix)
                     .is_some_and(|tail| tail.starts_with('/'))
             {
-                *text = format!(
-                    "{}/api/comfy{}",
-                    state.config.origin(),
-                    &text[local_prefix.len()..]
-                );
+                let tail = &text[local_prefix.len()..];
+                if tail == "/view" || tail.starts_with("/view?") {
+                    *text = format!("/api/comfy{tail}");
+                } else {
+                    *text = format!("{}/api/comfy{tail}", state.config.origin());
+                }
+            } else if let Some(relative) = normalize_local_media_url(text) {
+                *text = relative;
             }
         }
         Value::Array(values) => values
@@ -661,5 +690,31 @@ mod tests {
         assert!(ensure_contained(&assets.join("new.png"), &[canonical.clone()]).is_ok());
         assert!(ensure_contained(&root.join("outside.png"), &[canonical]).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn normalize_local_media_url_strips_legacy_origins_only_for_sucanvas_media() {
+        assert_eq!(
+            normalize_local_media_url(
+                "https://sucanvas.geeksbar.com:8888/api/comfy/view?filename=clip.mp4&subfolder=2026-11-13&type=output"
+            ),
+            Some("/api/comfy/view?filename=clip.mp4&subfolder=2026-11-13&type=output".into())
+        );
+        assert_eq!(
+            normalize_local_media_url(
+                "https://old.example:8888/api/resource?resource=sucanvas%3A%2F%2Fcolab-outputs%2Fclip.mp4"
+            ),
+            Some("/api/resource?resource=sucanvas%3A%2F%2Fcolab-outputs%2Fclip.mp4".into())
+        );
+        for ignored in [
+            "https://other.example/video.mp4",
+            "https://other.example/api/comfy/view",
+            "https://other.example/api/comfy/view?type=output",
+            "https://other.example/api/comfy/view?filename=   &type=output",
+            "https://other.example/api/resource?resource=http%3A%2F%2Fevil",
+            "/api/comfy/view?filename=clip.mp4",
+        ] {
+            assert_eq!(normalize_local_media_url(ignored), None, "{ignored}");
+        }
     }
 }
