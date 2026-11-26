@@ -49,6 +49,7 @@ import {
 import type { VideoRegenerationPresetCollection, VideoRegenerationSettings } from "./video/videoRegenerationPresets";
 import {
   COLAB_ALLOWED_LORAS,
+  COLAB_CHANNEL_ENABLED,
   COLAB_LIVE_PREVIEW_NODE_ID,
   COLAB_PROFILE_LABELS,
   COLAB_PROFILE_MODELS,
@@ -66,6 +67,13 @@ import {
   type ColabProfileId,
   type ColabVideoPresetSettings,
 } from "./colab";
+import {
+  EXTERNAL_PROVIDER_LABELS,
+  isExternalVideoChannel,
+  normalizeVideoExecutionChannel,
+  resolveExternalModelSpec,
+  useExternalProviders,
+} from "./providers";
 import { findDuplicateVideoRequest } from "./video/activeVideoSeed";
 import { VideoRegenerationDialogs } from "./video/VideoRegenerationDialogs";
 import { useVideoUpscale } from "./video/useVideoUpscale";
@@ -575,6 +583,10 @@ function CanvasWorkspace() {
     accessUser,
     comfyConnectionRevision,
     parseSettings: videoRegenerationSettingsFromValue,
+  });
+  const externalProviders = useExternalProviders({
+    enabled: import.meta.env.MODE === "web",
+    authenticated: Boolean(accessUser),
   });
   // CANVAS-012c3: who else is on the canvas on screen (Web accounts only).
   const presentUsers = useCanvasPresence(
@@ -3647,13 +3659,23 @@ function CanvasWorkspace() {
       ? videoExecutionChannelFromContent(generator.content)
       : "local";
     const isColabGenerator = generatorChannel === "colab";
-    const mode = isColabGenerator ? "reference-to-video" : videoGenerationModeFromContent(generator.content);
+    const isExternalGenerator = isExternalVideoChannel(generatorChannel);
+    const externalModelSpec = isExternalGenerator
+      ? resolveExternalModelSpec(
+        generatorChannel,
+        generator.content.externalModelId,
+        externalProviders.providersById[generatorChannel],
+      )
+      : undefined;
+    const mode = isColabGenerator || isExternalGenerator
+      ? "reference-to-video"
+      : videoGenerationModeFromContent(generator.content);
     const capability = workflowCapabilityForVideoMode(mode);
     const slot = workflowSlotForVideoMode(mode);
     const configuredModuleId = typeof generator.content.workflowModuleId === "string"
       ? generator.content.workflowModuleId
       : workflowModuleDefaults[slot] ?? "";
-    const workflowModule = isColabGenerator
+    const workflowModule = isColabGenerator || isExternalGenerator
       ? undefined
       : workflowModules.find((module) => (
         !module.deletedAt
@@ -3669,7 +3691,9 @@ function CanvasWorkspace() {
       loraName: h3LoraNameFromContent(generator.content),
       loraStrength: h3LoraStrengthFromContent(generator.content),
     };
-    const generatorReferenceLimits = isColabGenerator
+    const generatorReferenceLimits = externalModelSpec
+      ? { images: externalModelSpec.maxImages, audios: externalModelSpec.maxAudios }
+      : isColabGenerator
       ? { images: 9, audios: 3 }
       : referenceLimits(workflowModule);
     const orderedTextInputs = orderedNodeRecordsFromContent(
@@ -3808,8 +3832,21 @@ function CanvasWorkspace() {
       workflowModuleRevision: isColabGenerator ? (colab.profileStatus?.effectiveProfile ?? "") : (workflowModule?.revision ?? ""),
       channel: generatorChannel,
       ...(isColabGenerator ? { colabSampler: colabSamplerFromContent(generator.content) } : {}),
+      ...(isExternalGenerator && externalModelSpec ? {
+        externalProvider: generatorChannel,
+        externalProviderLabel: EXTERNAL_PROVIDER_LABELS[generatorChannel],
+        externalModelId: externalModelSpec.id,
+        externalModelLabel: externalModelSpec.label,
+        externalResolution: typeof generator.content.externalResolution === "string"
+          ? generator.content.externalResolution
+          : externalModelSpec.defaultResolution,
+        externalMode: typeof generator.content.externalMode === "string"
+          ? generator.content.externalMode
+          : (externalModelSpec.modes[0] ?? "auto"),
+        externalEnableSound: generator.content.externalEnableSound !== false,
+      } : {}),
     };
-  }, [colab.profileStatus, h3ModelParameters, workflowModuleDefaults, workflowModules]);
+  }, [colab.profileStatus, externalProviders.providersById, h3ModelParameters, workflowModuleDefaults, workflowModules]);
 
   const generatedPreviewHeightForAspectRatio = useCallback((aspectRatio: VideoAspectRatio) => {
     const previewWidth = generatedVideoPreviewWidthForRatio(videoAspectRatioValue(aspectRatio));
@@ -4342,7 +4379,12 @@ function CanvasWorkspace() {
     }
     const referenceCompilerMode = target.content.storyboardReferenceCompiler === true
       || snapshot.referenceCompilerMode === true;
-    if (referenceCompilerMode) {
+    const executionChannel: VideoExecutionChannel = normalizeVideoExecutionChannel(
+      snapshot.channel ?? target.content.generationChannel,
+      COLAB_CHANNEL_ENABLED && colab.enabled,
+      import.meta.env.MODE === "web",
+    );
+    if (referenceCompilerMode && !isExternalVideoChannel(executionChannel)) {
       if (!Number.isInteger(snapshot.durationSeconds) || snapshot.durationSeconds < 2 || snapshot.durationSeconds > 15) {
         const message = "当前分镜提示词尚未设置时长，请在生成提示词节点中填写 2–15 秒";
         changeNode(targetId, {
@@ -4397,9 +4439,111 @@ function CanvasWorkspace() {
         return;
       }
     }
-    const executionChannel: VideoExecutionChannel = import.meta.env.MODE === "web" && colab.enabled && snapshot.channel === "colab"
-      ? "colab"
-      : "local";
+    if (isExternalVideoChannel(executionChannel)) {
+      const extSpec = resolveExternalModelSpec(
+        executionChannel,
+        snapshot.externalModelId ?? target.content.externalModelId,
+        externalProviders.providersById[executionChannel],
+      );
+      if (snapshot.imagePaths.length > extSpec.maxImages
+        || snapshot.videoPaths.length > extSpec.maxVideos
+        || snapshot.audioPaths.length > extSpec.maxAudios) {
+        const message = `${extSpec.label} 参考数量超出上限（图≤${extSpec.maxImages}、视频≤${extSpec.maxVideos}、音频≤${extSpec.maxAudios}）`;
+        changeNode(targetId, {
+          content: { ...target.content, status: "invalid", validationMessage: message },
+        });
+        rejectSubmission(message);
+        return;
+      }
+      const clientId = options?.clientId ?? crypto.randomUUID();
+      const placementSourceNode = options?.placementSourceNodeId
+        ? nodesSnapshot.current.find((node) => node.id === options.placementSourceNodeId)
+        : undefined;
+      const placementSource = placementSourceNode
+        ? recordAtCurrentFlowPosition(placementSourceNode)
+        : regeneration?.sourcePreview;
+      let placeholder: NodeRecord;
+      try {
+        placeholder = await createGenerationPlaceholder({
+          source: placementSource ?? target,
+          clientId,
+          snapshot,
+          seed: undefined,
+          secondary: false,
+          sourceGeneratorId: targetId,
+          edgeSourceId: targetId,
+          placeBelowSource: Boolean(placementSource),
+          positionOverride: options?.placeholderPosition,
+        });
+      } catch (error) {
+        reportError(error);
+        return;
+      }
+      const statusMsg = `正在提交到 ${EXTERNAL_PROVIDER_LABELS[executionChannel]} · ${extSpec.label}…`;
+      changeNode(targetId, {
+        content: {
+          ...target.content,
+          status: "running",
+          executionProgress: null,
+          validationMessage: statusMsg,
+          externalJobStatus: "queued",
+          externalStageMessage: statusMsg,
+        },
+      });
+      setNotice(statusMsg);
+      try {
+        const job = await externalProviders.submitVideo({
+          canvasId: target.canvasId,
+          provider: executionChannel,
+          modelId: extSpec.id,
+          prompt: snapshot.prompt,
+          durationSeconds: Math.max(
+            extSpec.minDuration,
+            Math.min(extSpec.maxDuration, Math.round(snapshot.durationSeconds || extSpec.defaultDuration)),
+          ),
+          aspectRatio: snapshot.aspectRatio,
+          resolution: snapshot.externalResolution ?? extSpec.defaultResolution,
+          mode: snapshot.externalMode ?? "auto",
+          enableSound: snapshot.externalEnableSound !== false,
+          generatorNodeId: targetId,
+          placeholderNodeId: placeholder.id,
+          imagePaths: snapshot.imagePaths,
+          videoPaths: snapshot.videoPaths,
+          audioPaths: snapshot.audioPaths,
+          promptVersionLabel: snapshot.promptVersionLabel || undefined,
+          promptSourceNodeId: snapshot.promptNodeId || undefined,
+          promptSourceTitle: snapshot.promptNodeTitle || undefined,
+          title: target.title,
+        });
+        changeNode(targetId, {
+          content: {
+            ...target.content,
+            status: "running",
+            externalJobId: job.id,
+            externalJobStatus: job.status,
+            externalStageMessage: job.stageMessage,
+            validationMessage: job.stageMessage,
+          },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        changeNode(targetId, {
+          content: {
+            ...target.content,
+            status: "invalid",
+            validationMessage: message,
+            externalJobStatus: "failed",
+            externalStageMessage: message,
+          },
+        });
+        updateGenerationPlaceholder(placeholder.id, {
+          status: "invalid",
+          validationMessage: message,
+        });
+        rejectSubmission(message);
+      }
+      return;
+    }
     let livePreviewNodeId = "";
     if (executionChannel === "colab") {
       if (!colab.available || !colab.profileStatus?.effectiveProfile || !colab.profileStatus.diffusionModelName) {
@@ -6477,6 +6621,15 @@ function CanvasWorkspace() {
       (candidate) => !cancelledComfyClients.current.has(candidate),
     );
     const target = nodesSnapshot.current.find((node) => node.id === targetId)?.data.record;
+    if (!clientId && target && typeof target.content.externalJobId === "string" && target.content.externalJobId) {
+      try {
+        await externalProviders.cancelVideo(target.content.externalJobId);
+        setNotice("已请求取消外部平台视频任务");
+      } catch (error) {
+        reportError(error);
+      }
+      return;
+    }
     if (!clientId || !target) {
       setNotice("当前没有可取消的 ComfyUI 任务");
       return;
@@ -6971,6 +7124,7 @@ function CanvasWorkspace() {
           h3LoraOptions,
           h3DiffusionModelOptions,
           colab: colab.nodeContext,
+          externalProviders: externalProviders.nodeContext,
           workflowPackages,
           workflowChoices,
           workflowChoicesVersion,
@@ -7022,7 +7176,7 @@ function CanvasWorkspace() {
         },
       };
     },
-    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, colab.nodeContext, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, downloadGeneratedImage, downloadGeneratedVideo, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, h3DiffusionModelOptions, h3LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
+    [videoUpscale.execute, videoUpscale.configure, activeComfyTaskCounts, activateTextInput, cancelVideoExecution, changeNode, colab.nodeContext, configureGeneratedVideoRegeneration, configureSecondarySample, copyText, deleteNode, deletePromptVersionFromNode, downloadGeneratedImage, downloadGeneratedVideo, executeSecondarySample, executeVideoNode, executeVideoNodeBatch, externalProviders.nodeContext, h3DiffusionModelOptions, h3LoraOptions, locateGeneratedImageOrigin, locateGeneratedVideoPrompt, markGeneratedVideoFullyPlayed, regenerateGeneratedVideo, rememberH3LoraPreference, removeInputFromVideoNode, reportExecutionCheck, resizeImageNode, revealGeneratedImage, revealGeneratedVideo, saveTextNodeImmediately, showGlobalNotice, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
   );
   makeFlowNodeRef.current = makeFlowNode;
 
@@ -11107,6 +11261,7 @@ function CanvasWorkspace() {
             h3LoraOptions,
             h3DiffusionModelOptions,
             colab: colab.nodeContext,
+            externalProviders: externalProviders.nodeContext,
             workflowPackages,
             workflowChoices,
             workflowChoicesVersion,
@@ -11123,7 +11278,7 @@ function CanvasWorkspace() {
       visibleNodeCache.current = nextCache;
       return results;
     },
-    [activeComfyTaskCounts, contentNodes, edges, relations, queuePositions, colab.nodeContext, h3DiffusionModelOptions, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
+    [activeComfyTaskCounts, contentNodes, edges, relations, queuePositions, colab.nodeContext, externalProviders.nodeContext, h3DiffusionModelOptions, h3LoraOptions, matchedIds, nodes, relationHighlightedIds, relationPromptVersionLabels, videoRegenerationPresets, workflowChoices, workflowChoicesVersion, workflowModuleDefaults, workflowModuleVisibleIds, workflowModules, workflowPackages],
   );
 
   const updateGuideOverlays = useCallback((nextAlignment: AlignmentGuide[], nextSpacing: SpacingGuide[]) => {
@@ -11628,6 +11783,7 @@ function CanvasWorkspace() {
                   comfyOutputRootDraft={comfyOutputRootDraft}
                   setComfyOutputRootDraft={setComfyOutputRootDraft}
                   colab={colab}
+                  externalProviders={externalProviders}
                   showComfySettings={globalAdmin}
                 />
               )}

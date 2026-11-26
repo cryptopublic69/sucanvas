@@ -4132,6 +4132,9 @@ mod tests {
         let auth_store = Arc::new(auth::Auth::open(&db_path).unwrap());
         let media = Arc::new(media_cleanup::MediaRegistry::open(&db_path).unwrap());
         let agent_jobs = Arc::new(AgentJobStore::open(&db_path).unwrap());
+        let external_jobs = Arc::new(
+            crate::external_providers::runner::ExternalJobStore::open(&db_path).unwrap(),
+        );
         let (event_sender, _) = tokio::sync::broadcast::channel(64);
         let handle = AppHandle {
             root: root.clone(),
@@ -4261,6 +4264,8 @@ mod tests {
             media_guard: Arc::new(tokio::sync::Mutex::new(())),
             tasks: Arc::new(tasks::Tasks::default()),
             agent_jobs,
+            external_jobs,
+            executable_root: root.clone(),
             comfy_relays: Arc::default(),
             presence: Arc::new(presence::Presence::new(AppHandle {
                 root: root.clone(),

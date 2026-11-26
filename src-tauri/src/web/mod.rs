@@ -1,7 +1,7 @@
 mod accounts;
 mod agent_api;
-mod auth;
-mod authz;
+pub(crate) mod auth;
+pub(crate) mod authz;
 mod backup;
 mod canvases;
 pub(crate) mod config;
@@ -9,14 +9,14 @@ mod connection;
 mod dispatch;
 mod files;
 mod media;
-mod media_cleanup;
+pub(crate) mod media_cleanup;
 mod ownership;
 mod posters;
 mod presence;
 pub(crate) mod proxy;
 pub(crate) mod rpc;
 mod settings;
-mod storage;
+pub(crate) mod storage;
 mod tasks;
 mod thumbnails;
 mod users;
@@ -59,18 +59,20 @@ pub(crate) struct WebState {
     pub(crate) core: Arc<ApplicationState>,
     pub(crate) config: Arc<config::Config>,
     connection: Arc<connection::Store>,
-    auth: Arc<auth::Auth>,
-    handle: AppHandle,
-    downloads: PathBuf,
+    pub(crate) auth: Arc<auth::Auth>,
+    pub(crate) handle: AppHandle,
+    pub(crate) downloads: PathBuf,
     token: String,
     client: reqwest::Client,
     settings_guard: Arc<tokio::sync::Mutex<()>>,
     media_guard: Arc<tokio::sync::Mutex<()>>,
     tasks: Arc<tasks::Tasks>,
     agent_jobs: Arc<agent_api::AgentJobStore>,
+    pub(crate) external_jobs: Arc<crate::external_providers::runner::ExternalJobStore>,
+    pub(crate) executable_root: PathBuf,
     comfy_relays: Arc<ws_handover::Registry>,
     presence: Arc<presence::Presence>,
-    media: Arc<media_cleanup::MediaRegistry>,
+    pub(crate) media: Arc<media_cleanup::MediaRegistry>,
     asset_version: Option<String>,
 }
 
@@ -122,7 +124,7 @@ impl WebState {
 
     // Media folders of the current configuration (a ComfyUI folder that is
     // not configured is simply not managed).
-    fn media_roots(&self) -> media_cleanup::MediaRoots {
+    pub(crate) fn media_roots(&self) -> media_cleanup::MediaRoots {
         let configured =
             |directory: &str| (!directory.trim().is_empty()).then(|| PathBuf::from(directory));
         media_cleanup::MediaRoots {
@@ -241,6 +243,7 @@ pub async fn run() -> Result<(), String> {
         "workflow-modules",
         "workflow-module-exports",
         crate::colab_channel::COLAB_OUTPUTS_DIR,
+        crate::external_providers::PROVIDER_OUTPUTS_DIR,
     ] {
         std::fs::create_dir_all(data.join(directory)).map_err(|e| e.to_string())?;
     }
@@ -263,6 +266,9 @@ pub async fn run() -> Result<(), String> {
     let auth = Arc::new(auth::Auth::open(&database_path)?);
     let media = Arc::new(media_cleanup::MediaRegistry::open(&database_path)?);
     let agent_jobs = Arc::new(agent_api::AgentJobStore::open(&database_path)?);
+    let external_jobs = Arc::new(crate::external_providers::runner::ExternalJobStore::open(
+        &database_path,
+    )?);
     let active_canvas_id = Arc::new(RwLock::new(DEFAULT_CANVAS_ID.to_owned()));
     let selection = Arc::new(RwLock::new(CanvasSelectionState::default()));
     let (event_sender, _) = tokio::sync::broadcast::channel(512);
@@ -338,6 +344,8 @@ pub async fn run() -> Result<(), String> {
         media_guard: Arc::new(tokio::sync::Mutex::new(())),
         tasks: Arc::new(tasks::Tasks::default()),
         agent_jobs,
+        external_jobs,
+        executable_root: executable_root.clone(),
         comfy_relays: Arc::default(),
         asset_version: read_asset_version(&executable_root),
     };
@@ -384,7 +392,8 @@ pub async fn run() -> Result<(), String> {
         )
         .route("/api/comfy/ws", get(proxy::websocket))
         .route("/api/comfy/{*path}", get(proxy::http));
-    let protected = crate::colab_channel::web::mount_routes(protected)
+    let protected = crate::colab_channel::web::mount_routes(protected);
+    let protected = crate::external_providers::web::mount_routes(protected)
         .route("/api/auth/edit-mode", post(auth::edit_mode))
         .route(
             "/api/admin/users",

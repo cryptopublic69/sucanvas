@@ -2,6 +2,10 @@ import type {
   UiFontSize
 } from "../CanvasNode";
 import { ColabSettingsSection, type ColabChannelController } from "../colab";
+import {
+  ExternalProviderSettingsSection,
+  type ExternalProvidersController,
+} from "../providers";
 
 type GeneralSettingsPanelProps = {
   comfySettingsBusy?: boolean;
@@ -16,6 +20,7 @@ type GeneralSettingsPanelProps = {
   comfyOutputRootDraft: string;
   setComfyOutputRootDraft: React.Dispatch<React.SetStateAction<string>>;
   colab?: ColabChannelController;
+  externalProviders?: ExternalProvidersController;
   // The ComfyUI connection is a server-wide setting (Web: admins only).
   showComfySettings?: boolean;
 };
@@ -33,6 +38,7 @@ export function GeneralSettingsPanel({
   comfyOutputRootDraft,
   setComfyOutputRootDraft,
   colab,
+  externalProviders,
   showComfySettings = true,
 }: GeneralSettingsPanelProps) {
   return (
@@ -135,6 +141,9 @@ export function GeneralSettingsPanel({
           )}
         </div>
       </section>}
+      {import.meta.env.MODE === "web" && externalProviders && (
+        <ExternalProviderSettingsSection providers={externalProviders} />
+      )}
     </section>
   );
 }

@@ -49,7 +49,7 @@ import {
 import type { VideoRegenerationPresetCollection } from "./video/videoRegenerationPresets";
 import {
   COLAB_ALLOWED_LORAS,
-  ColabChannelToggle,
+  COLAB_CHANNEL_ENABLED,
   ColabLockedModelField,
   ColabLockedWorkflowField,
   ColabSamplerRow,
@@ -61,11 +61,25 @@ import {
   colabPresetNodePatch,
   colabSamplerFromContent,
   colabSamplerFromValue,
-  effectiveVideoChannel,
   type ColabNodeContext,
   type ColabProfileId,
   type ColabVideoPresetSettings,
 } from "./colab";
+import {
+  ExternalProviderPlaceholderActions,
+  ExternalProviderSnapshotInfo,
+  ExternalProviderVideoFields,
+  VideoChannelSelect,
+  clampExternalDuration,
+  externalChannelDefaultPatch,
+  isExternalVideoChannel,
+  normalizeVideoExecutionChannel,
+  resolveExternalModelSpec,
+  type ExternalProvidersNodeContext,
+  type ExternalVideoModelSpec,
+  type ExternalVideoProviderId,
+  type VideoExecutionChannel,
+} from "./providers";
 import { attachLivePreviewSource, comfyStatusMessage, livePreviewResources } from "./comfyLivePreview";
 import { StyleLoraInfo, LoraNameWithStrength } from "./StyleLoraInfo";
 import { H3StyleLora, h3StyleLorasFromContent, recordedStyleLoras, styleLoraUsageFromSnapshot } from "./styleLoras";
@@ -809,10 +823,16 @@ interface GenerationSnapshot {
   workflowModuleRevision: string;
   channel?: VideoExecutionChannel;
   colabSampler?: string;
+  externalProvider?: ExternalVideoProviderId;
+  externalProviderLabel?: string;
+  externalModelId?: string;
+  externalModelLabel?: string;
+  externalResolution?: string;
+  externalMode?: string;
+  externalQuotedCredits?: number;
+  externalEnableSound?: boolean;
   imageRecovery?: ImageRecoverySnapshot;
 }
-
-type VideoExecutionChannel = "local" | "colab";
 
 interface ImageRecoverySnapshot {
   kind: "generation" | "upscale";
@@ -1719,6 +1739,7 @@ interface CanvasNodeData extends Record<string, unknown> {
   h3LoraOptions: string[];
   h3DiffusionModelOptions: string[];
   colab?: ColabNodeContext;
+  externalProviders?: ExternalProvidersNodeContext;
   workflowPackages: Record<string, PackageDescription>;
   workflowChoices: ChoiceStore;
   workflowChoicesVersion: number;
@@ -3517,7 +3538,11 @@ function seedModeFromContent(content: JsonObject): SeedMode {
 }
 
 function videoExecutionChannelFromContent(content: JsonObject): VideoExecutionChannel {
-  return effectiveVideoChannel(content);
+  return normalizeVideoExecutionChannel(
+    content.generationChannel,
+    COLAB_CHANNEL_ENABLED,
+    import.meta.env.MODE === "web",
+  );
 }
 
 function fixedSeedFromContent(content: JsonObject): string {
@@ -4317,11 +4342,41 @@ function validateVideoExecution(
   mediaInputs: NodeRecord[],
   textInputs: NodeRecord[],
   limits: ReferenceLimits,
+  externalSpec?: ExternalVideoModelSpec,
 ): { valid: boolean; message: string } {
   const images = mediaInputs.filter((input) => videoInputMediaKind(input) === "image");
   const audios = mediaInputs.filter((input) => videoInputMediaKind(input) === "audio");
   const videos = mediaInputs.filter((input) => videoInputMediaKind(input) === "video");
   const activeTextInput = activeTextInputFromContent(content, textInputs);
+
+  if (externalSpec) {
+    if (!textInputs.length || !activeTextInput || !textFromContent(activeTextInput.content).trim()) {
+      return { valid: false, message: "请先连接并填写文字提示词节点" };
+    }
+    if (images.length > externalSpec.maxImages) {
+      return { valid: false, message: `当前模型最多支持 ${externalSpec.maxImages} 张参考图（当前 ${images.length} 张）` };
+    }
+    if (videos.length > externalSpec.maxVideos) {
+      return {
+        valid: false,
+        message: externalSpec.maxVideos === 0
+          ? `当前平台/模型（${externalSpec.label}）暂不支持视频参考输入`
+          : `当前模型最多支持 ${externalSpec.maxVideos} 个参考视频（当前 ${videos.length} 个）`,
+      };
+    }
+    if (audios.length > externalSpec.maxAudios) {
+      return {
+        valid: false,
+        message: externalSpec.maxAudios === 0
+          ? `当前平台/模型（${externalSpec.label}）暂不支持音频参考输入`
+          : `当前模型最多支持 ${externalSpec.maxAudios} 个参考音频（当前 ${audios.length} 个）`,
+      };
+    }
+    return {
+      valid: true,
+      message: `${externalSpec.label} 条件检查通过：${images.length} 图 · ${audios.length} 音频 · ${videos.length} 视频`,
+    };
+  }
 
   if (content.storyboardReferenceCompiler === true) {
     if (mode !== "reference-to-video") {
@@ -4660,15 +4715,25 @@ const edgeTypes = { canvasEdge: CanvasEdge };
 const submittingVideoBatches = new Set<string>();
 
 async function checkAndExecuteVideo(data: CanvasNodeData, options?: VideoExecutionOptions) {
-  const { record, mediaInputs, textInputs, onChange, onExecutionCheck, onExecute } = data;
+  const { record, mediaInputs, textInputs, onChange, onExecutionCheck, onExecute, externalProviders } = data;
   const id = record.id;
   const videoChannel: VideoExecutionChannel = import.meta.env.MODE === "web"
     ? videoExecutionChannelFromContent(record.content)
     : "local";
-  const videoGenerationMode = videoChannel === "colab"
+  const isExternalChannel = isExternalVideoChannel(videoChannel);
+  const externalModelSpec = isExternalChannel
+    ? resolveExternalModelSpec(
+      videoChannel,
+      record.content.externalModelId,
+      externalProviders?.providersById[videoChannel],
+    )
+    : undefined;
+  const videoGenerationMode = videoChannel === "colab" || isExternalChannel
     ? "reference-to-video"
     : videoGenerationModeFromContent(record.content);
-  const limits = videoChannel === "colab"
+  const limits = externalModelSpec
+    ? { images: externalModelSpec.maxImages, audios: externalModelSpec.maxAudios }
+    : videoChannel === "colab"
     ? { images: 9, audios: 3 }
     : referenceLimits(referenceModuleFor(record.content, data.workflowModules, data.workflowModuleDefaults));
   if (submittingVideoBatches.has(id) || record.content.status === "cancelling") {
@@ -4681,6 +4746,7 @@ async function checkAndExecuteVideo(data: CanvasNodeData, options?: VideoExecuti
     mediaInputs,
     textInputs,
     limits,
+    externalModelSpec,
   );
   onChange(id, {
     content: {
@@ -4715,6 +4781,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     h3LoraOptions,
     h3DiffusionModelOptions,
     colab,
+    externalProviders,
     workflowPackages,
     workflowChoices,
     workflowModules,
@@ -5047,11 +5114,21 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ? videoExecutionChannelFromContent(record.content)
     : "local";
   const isColabChannel = videoChannel === "colab";
+  const isExternalChannel = isExternalVideoChannel(videoChannel);
+  const externalModelSpec = isExternalChannel
+    ? resolveExternalModelSpec(
+      videoChannel,
+      record.content.externalModelId,
+      externalProviders?.providersById[videoChannel],
+    )
+    : undefined;
   const videoGenerationMode = videoGenerationModeFromContent(record.content);
-  const effectiveVideoGenerationMode: VideoGenerationMode = isColabChannel
+  const effectiveVideoGenerationMode: VideoGenerationMode = isColabChannel || isExternalChannel
     ? "reference-to-video"
     : videoGenerationMode;
-  const referenceInputLimits = isColabChannel
+  const referenceInputLimits = externalModelSpec
+    ? { images: externalModelSpec.maxImages, audios: externalModelSpec.maxAudios }
+    : isColabChannel
     ? { images: 9, audios: 3 }
     : referenceLimits(
         referenceModuleFor(record.content, workflowModules, workflowModuleDefaults),
@@ -5351,6 +5428,19 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       });
       return;
     }
+    if (isExternalVideoChannel(nextChannel)) {
+      onChange(id, {
+        content: {
+          ...buildLocalChannelRestorePatch(record.content),
+          ...externalChannelDefaultPatch(
+            nextChannel,
+            externalProviders?.providersById[nextChannel],
+            record.content,
+          ),
+        },
+      });
+      return;
+    }
     onChange(id, { content: buildLocalChannelRestorePatch(record.content) });
   };
   const seedMode = seedModeFromContent(record.content);
@@ -5373,9 +5463,12 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ? "valid"
     : record.content.status === "succeeded"
       ? "valid"
-      : record.content.status === "warning"
+      : record.content.status === "warning" || record.content.status === "awaiting_confirmation"
         ? "warning"
-      : record.content.status === "running" || record.content.status === "cancelling"
+      : record.content.status === "running"
+          || record.content.status === "confirming"
+          || record.content.status === "queued"
+          || record.content.status === "cancelling"
         ? "running"
     : record.content.status === "invalid"
       ? "invalid"
@@ -5417,6 +5510,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const isGenerationPlaceholder = (isGeneratedVideo || isGeneratedImage)
     && record.content.generationPlaceholder === true;
   const placeholderActive = record.content.status === "running"
+    || record.content.status === "confirming"
+    || record.content.status === "queued"
     || record.content.status === "cancelling";
   const generatedVideoSeed = typeof record.content.seed === "string"
     ? record.content.seed
@@ -5489,7 +5584,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const isUnplayedGeneratedVideo = isGeneratedVideo
     && Boolean(generatedVideoUrl)
     && record.content.hasBeenPlayed === false;
-  const executionRunning = activeTaskCount > 0;
+  const isExternalJobActive = isExternalChannel
+    && ["queued", "running", "confirming", "cancelling"].includes(String(record.content.status ?? ""));
+  const executionRunning = activeTaskCount > 0 || isExternalJobActive;
   // A fixed seed can't be queued twice: while it runs the image ▶ only takes Alt (CANVAS-038b).
   const fixedSeedRunning = seedMode === "fixed" && executionRunning;
   const executionCancelling = record.content.status === "cancelling";
@@ -5498,7 +5595,9 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ? Math.max(0, Math.min(100, record.content.executionProgress))
     : null;
   const generatedVideoFooterStatus = isGenerationPlaceholder
-    ? placeholderActive ? "处理中" : "未完成"
+    ? record.content.status === "awaiting_confirmation"
+      ? "待确认积分"
+      : placeholderActive ? "处理中" : "未完成"
     : videoElapsedWithDuration(formattedGenerationElapsed(record.content), generatedVideoSnapshot?.durationSeconds);
   // Uploaded videos show the upscale button after the file name in their node footer on the Web only.
   const showVideoAssetUpscale = isVideoAsset && import.meta.env.MODE === "web";
@@ -6918,6 +7017,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       mediaInputs,
       textInputs,
       referenceInputLimits,
+      externalModelSpec,
     );
     const emptyTextIndex = textInputs.findIndex(
       (input) => !storyboardPromptFields(input).prompt.trim(),
@@ -7856,8 +7956,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               )}
               <div className="generated-video-placeholder-status">
                 <span className="generated-video-placeholder-message" title={validationMessage}>
-                  {validationMessage || (placeholderActive
-                    ? `正在等待 ComfyUI 返回${isGeneratedImage ? "图片" : "视频"}…`
+                  {validationMessage || (record.content.status === "awaiting_confirmation"
+                    ? "等待确认积分消耗"
+                    : placeholderActive
+                    ? `正在等待${record.content.externalProviderLabel ? ` ${String(record.content.externalProviderLabel)} ` : " ComfyUI "}返回${isGeneratedImage ? "图片" : "视频"}…`
                     : "生成任务未完成")}
                 </span>
                 {placeholderActive && (
@@ -7866,6 +7968,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   </output>
                 )}
               </div>
+              <ExternalProviderPlaceholderActions
+                content={record.content}
+                providersContext={externalProviders}
+              />
               <div
                 className={`video-execution-progress ${placeholderActive && executionProgress === null ? "is-indeterminate" : ""} ${placeholderActive ? "" : "is-stopped"}`}
                 role="progressbar"
@@ -8202,22 +8308,36 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                     </div>
                     <div>
                       <span>模型</span>
-                      <strong title={generatedVideoSnapshot.diffusionModelName}>
-                        {h3DiffusionModelDisplayName(generatedVideoSnapshot.diffusionModelName)}
+                      <strong title={generatedVideoSnapshot.externalModelId ?? generatedVideoSnapshot.diffusionModelName}>
+                        {generatedVideoSnapshot.externalModelLabel
+                          ?? h3DiffusionModelDisplayName(generatedVideoSnapshot.diffusionModelName)}
                       </strong>
                     </div>
-                    <div>
-                      <span>生成方案</span>
-                      <strong title={generatedVideoWorkflowModule?.id ?? generatedVideoSnapshot.workflowModuleId ?? "未记录"}>
-                        {generatedVideoWorkflowLabel}
-                      </strong>
-                    </div>
-                    <div>
-                      <span>参数预设</span>
-                      <strong>{generatedVideoSnapshot.presetName ?? "未记录"}</strong>
-                    </div>
-                    <ColabSnapshotMetaItem snapshot={generatedVideoSnapshot} />
+                    {!generatedVideoSnapshot.externalProvider ? (
+                      <>
+                        <div>
+                          <span>生成方案</span>
+                          <strong title={generatedVideoWorkflowModule?.id ?? generatedVideoSnapshot.workflowModuleId ?? "未记录"}>
+                            {generatedVideoWorkflowLabel}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>参数预设</span>
+                          <strong>{generatedVideoSnapshot.presetName ?? "未记录"}</strong>
+                        </div>
+                        <ColabSnapshotMetaItem snapshot={generatedVideoSnapshot} />
+                      </>
+                    ) : (
+                      <div>
+                        <span>执行渠道</span>
+                        <strong>{generatedVideoSnapshot.externalProviderLabel ?? generatedVideoSnapshot.externalProvider}</strong>
+                      </div>
+                    )}
                   </section>
+                  {generatedVideoSnapshot.externalProvider ? (
+                    <ExternalProviderSnapshotInfo snapshot={generatedVideoSnapshot as unknown as Record<string, unknown>} />
+                  ) : (
+                  <>
                   <section className="generated-video-stage-info">
                     <h4>1采</h4>
                     <dl>
@@ -8279,6 +8399,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                         <dd>{generatedVideoSnapshot.secondaryBrightness.toFixed(2)} / {generatedVideoSnapshot.secondaryContrast.toFixed(2)} / {generatedVideoSnapshot.secondarySaturation.toFixed(2)}</dd>
                       </dl>
                     </section>
+                  )}
+                  </>
                   )}
                   <section className="generated-video-prompt-info">
                     <div>
@@ -8698,7 +8820,27 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       )}
       {isVideoGeneration && (
         <div ref={videoNodeBodyRef} className="nodrag video-node-body has-media">
-          <ColabChannelToggle colab={colab} channel={videoChannel} onSelect={switchVideoChannel} />
+          <VideoChannelSelect
+            colab={colab}
+            channel={videoChannel}
+            onSelect={switchVideoChannel}
+            Select={SettingsSelect}
+          />
+          {isExternalChannel && isExternalVideoChannel(videoChannel) ? (
+            <ExternalProviderVideoFields
+              provider={videoChannel}
+              content={record.content}
+              providersContext={externalProviders}
+              Select={SettingsSelect}
+              onUpdateContent={(patch) => onChange(id, {
+                content: {
+                  ...record.content,
+                  ...patch,
+                },
+              })}
+            />
+          ) : (
+          <>
           <div className="video-workflow-module-select">
             <span>生成方案</span>
             {isColabChannel ? (
@@ -9221,16 +9363,20 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </div>
           </section>}
           </div>
+          </>
+          )}
           <div className="video-duration-control">
             <label className="video-duration-inline">
               <span>时长</span>
               <input
                 className="video-parameter-range"
                 type="range"
-                min="2"
-                max="15"
+                min={externalModelSpec?.minDuration ?? 2}
+                max={externalModelSpec?.maxDuration ?? 15}
                 step="1"
-                value={displayedVideoDuration ?? 2}
+                value={externalModelSpec
+                  ? clampExternalDuration(displayedVideoDuration, externalModelSpec)
+                  : (displayedVideoDuration ?? 2)}
                 disabled={isStoryboardReferenceCompiler}
                 onChange={(event) => {
                   if (isStoryboardReferenceCompiler) return;
@@ -9298,6 +9444,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
             </div>
           </div>
 
+          {!isExternalChannel && (
           <div className="video-seed-control">
             <span>生成种子</span>
             <div className="video-seed-mode" aria-label="种子模式">
@@ -9363,6 +9510,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
               <span className="video-seed-hint">每次生成自动更换</span>
             )}
           </div>
+          )}
           <section className="video-input-group is-text video-text-input-group">
             <div className={`video-input-group-heading ${textInputs.length ? "has-text-clear" : ""}`}>
               <FileText size={13} />
@@ -10032,17 +10180,21 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                 <button
                   type="button"
                   className="video-cancel-button"
-                  disabled={executionCancelling || activeTaskCount === 0}
+                  disabled={executionCancelling || (activeTaskCount === 0 && !isExternalJobActive)}
                   onClick={() => void onCancelExecution(id)}
-                  title={activeTaskCount === 0
+                  title={isExternalJobActive
+                    ? "取消当前外部平台生成任务"
+                    : activeTaskCount === 0
                     ? "正在提交首个任务，暂时无法取消"
                     : `取消最早提交的任务；当前共有 ${activeTaskCount} 个任务`}
-                  aria-label={activeTaskCount === 0
+                  aria-label={isExternalJobActive
+                    ? "取消当前外部平台生成任务"
+                    : activeTaskCount === 0
                     ? "正在提交首个任务，暂时无法取消"
                     : `取消最早提交的任务；当前共有 ${activeTaskCount} 个任务`}
                 >
                   <X size={13} />
-                  {activeTaskCount || null}
+                  {(isExternalJobActive ? 1 : activeTaskCount) || null}
                 </button>
               ) : (
                 <button

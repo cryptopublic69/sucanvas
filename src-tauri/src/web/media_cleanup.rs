@@ -145,6 +145,7 @@ impl MediaRoots {
             self.data.join("uploads"),
             self.data.join("temp").join("image-resize"),
             self.data.join(crate::colab_channel::COLAB_OUTPUTS_DIR),
+            self.data.join(crate::external_providers::PROVIDER_OUTPUTS_DIR),
         ];
         roots.extend(self.input.clone());
         roots.extend(self.output.clone());
@@ -521,6 +522,7 @@ impl MediaRegistry {
         for (reference_key, found) in &references {
             if !reference_key.starts_with("sucanvas-output://")
                 && !reference_key.starts_with("sucanvas://colab-outputs/")
+                && !reference_key.starts_with("sucanvas://provider-outputs/")
             {
                 continue;
             }
@@ -697,6 +699,7 @@ impl MediaRegistry {
         for text in texts {
             if !text.starts_with("sucanvas-output://")
                 && !text.starts_with("sucanvas://colab-outputs/")
+                && !text.starts_with("sucanvas://provider-outputs/")
             {
                 continue;
             }
@@ -984,7 +987,10 @@ impl MediaRegistry {
 
 // The output reference as written in content (or derived from a /view URL).
 fn canonical_reference(roots: &MediaRoots, text: &str) -> Option<String> {
-    if text.starts_with("sucanvas-output://") || text.starts_with("sucanvas://colab-outputs/") {
+    if text.starts_with("sucanvas-output://")
+        || text.starts_with("sucanvas://colab-outputs/")
+        || text.starts_with("sucanvas://provider-outputs/")
+    {
         return Some(text.to_owned());
     }
     let reference_key = roots.reference_key(text)?;

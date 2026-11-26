@@ -19,6 +19,8 @@ mod workflow_v2;
 #[cfg(feature = "desktop")]
 pub use desktop::run;
 #[cfg(feature = "server")]
+pub mod external_providers;
+#[cfg(feature = "server")]
 pub mod web;
 
 use db::Database;

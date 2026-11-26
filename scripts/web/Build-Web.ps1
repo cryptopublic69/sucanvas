@@ -27,7 +27,7 @@ try {
     $env:RUSTFLAGS = "$previousRustFlags -C target-feature=+crt-static".Trim()
     & $cargoPath build --manifest-path src-tauri/Cargo.toml --no-default-features --features web-server --bin SuCanvasServer --release --locked
     if ($LASTEXITCODE) { throw 'Server build failed' }
-    foreach ($directory in @($OutputDirectory, (Join-Path $OutputDirectory 'web'), (Join-Path $OutputDirectory 'scripts'), (Join-Path $OutputDirectory 'tools'))) {
+    foreach ($directory in @($OutputDirectory, (Join-Path $OutputDirectory 'web'), (Join-Path $OutputDirectory 'scripts'), (Join-Path $OutputDirectory 'scripts/providers'), (Join-Path $OutputDirectory 'tools'), (Join-Path $OutputDirectory 'tools/lovart'))) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
     Copy-Item -LiteralPath 'src-tauri/target/release/SuCanvasServer.exe' -Destination $OutputDirectory -Force
@@ -36,6 +36,11 @@ try {
     Copy-Item -LiteralPath 'workflows' -Destination $OutputDirectory -Recurse -Force
     foreach ($script in @('Start-Web.ps1', 'Stop-Web.ps1', 'Set-Password.ps1', 'Reset-AdminPassword.ps1', 'Backup-Web.ps1', 'Restore-Web.ps1', 'Install-Autostart.ps1', 'Test-WebDeployment.ps1', 'Update-WebFiles.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $OutputDirectory 'scripts') -Force
+    }
+    $lovartSkillScript = Join-Path $repoRoot 'scripts/providers/lovart_agent_skill.py'
+    if (Test-Path -LiteralPath $lovartSkillScript -PathType Leaf) {
+        Copy-Item -LiteralPath $lovartSkillScript -Destination (Join-Path $OutputDirectory 'scripts/providers/lovart_agent_skill.py') -Force
+        Copy-Item -LiteralPath $lovartSkillScript -Destination (Join-Path $OutputDirectory 'tools/lovart/agent_skill.py') -Force
     }
     foreach ($launcher in @('Update-OnServer.ps1','Update-OnServer.bat')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $launcher) -Destination $OutputDirectory -Force

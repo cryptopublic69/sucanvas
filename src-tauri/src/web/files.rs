@@ -188,6 +188,7 @@ pub(super) fn resolve(state: &WebState, resource: &str) -> Result<std::path::Pat
         state.core.workflow_module_exports_dir.clone(),
         state.downloads.clone(),
         state.core.data_dir.join(crate::colab_channel::COLAB_OUTPUTS_DIR),
+        state.core.data_dir.join(crate::external_providers::PROVIDER_OUTPUTS_DIR),
     ];
     if !state.config.comfy_output_directory.is_empty() {
         roots.push(std::path::PathBuf::from(
