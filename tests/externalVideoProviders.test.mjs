@@ -90,3 +90,10 @@ test("providers.css keeps channel and external provider dropdown menus above low
   assert.match(css, /\.external-provider-fields\s*>\s*\.video-workflow-module-select:has\(\.settings-custom-select-toggle\[aria-expanded="true"\]\)\s*\{[\s\S]*z-index:\s*50;/);
   assert.match(css, /\.kind-video-generation\s+\.video-node-body:has\([^\n]+\)\s*\{[\s\S]*overflow:\s*visible;/);
 });
+
+test("SettingsSelect closes other open dropdowns even inside stopPropagation containers", async () => {
+  const source = await readFile(new URL("../src/CanvasNode.tsx", import.meta.url), "utf8");
+  assert.match(source, /window\.addEventListener\("pointerdown",\s*closeOnOutsidePointer,\s*true\)/);
+  assert.match(source, /window\.dispatchEvent\(new CustomEvent\("sucanvas:settings-select-open"/);
+  assert.match(source, /window\.addEventListener\("sucanvas:settings-select-open",\s*closeOnOtherSelectOpen\)/);
+});

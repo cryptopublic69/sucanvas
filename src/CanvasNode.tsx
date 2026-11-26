@@ -1596,18 +1596,26 @@ function SettingsSelect({
 
   useEffect(() => {
     if (!open) return;
+    window.dispatchEvent(new CustomEvent("sucanvas:settings-select-open", { detail: controlRef.current }));
     const closeOnOutsidePointer = (event: PointerEvent) => {
       const target = event.target;
       if (target instanceof globalThis.Node && controlRef.current?.contains(target)) return;
       setOpen(false);
     };
+    const closeOnOtherSelectOpen = (event: Event) => {
+      if ((event as CustomEvent).detail !== controlRef.current) {
+        setOpen(false);
+      }
+    };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
     };
-    window.addEventListener("pointerdown", closeOnOutsidePointer);
+    window.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    window.addEventListener("sucanvas:settings-select-open", closeOnOtherSelectOpen);
     window.addEventListener("keydown", closeOnEscape);
     return () => {
-      window.removeEventListener("pointerdown", closeOnOutsidePointer);
+      window.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+      window.removeEventListener("sucanvas:settings-select-open", closeOnOtherSelectOpen);
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, [open]);
