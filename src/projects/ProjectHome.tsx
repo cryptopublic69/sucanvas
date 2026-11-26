@@ -30,6 +30,7 @@ import {
   type AccessUser,
   type AssignableUser
 } from "../account/access";
+import { CanvasIdBadge } from "../canvas/CanvasIdBadge";
 import { coverThumbnailSrc } from "./coverSrc";
 
 // Web accounts: the home page groups canvases by owner; admins manage owner
@@ -123,7 +124,7 @@ function nodePreviewColor(kind: string): string {
 
 // `suspendCover`: another card is opening; covers drop their unfinished requests so
 // load_workspace does not queue behind them. `opening`: this card is the one.
-function ProjectThumbnail({ project, suspendCover, opening }: { project: WorkspaceSnapshot; suspendCover: boolean; opening: boolean }) {
+function ProjectThumbnail({ project, suspendCover, opening, onCopied }: { project: WorkspaceSnapshot; suspendCover: boolean; opening: boolean; onCopied?: (canvasId: string) => void }) {
   const preview = useMemo(() => {
     if (!project.nodes.length) return null;
     const minX = Math.min(...project.nodes.map((node) => node.x));
@@ -210,6 +211,7 @@ function ProjectThumbnail({ project, suspendCover, opening }: { project: Workspa
           <span>空白画布</span>
         </div>
       )}
+      <CanvasIdBadge canvasId={project.canvas.id} variant="card" onCopied={onCopied} />
       <span className="preview-node-count">{project.nodes.length} 个节点</span>
       {opening && (
         <div className="project-opening-overlay" role="status">
@@ -245,6 +247,7 @@ type ProjectHomeProps = {
   appSettingsDialog: React.ReactNode;
   privateProjectVisibilityUnlockDialog: React.ReactNode;
   globalNoticeToast: React.ReactNode;
+  onNotify?: (message: string) => void;
   access?: ProjectHomeAccess;
 };
 
@@ -272,6 +275,7 @@ export function ProjectHome({
   appSettingsDialog,
   privateProjectVisibilityUnlockDialog,
   globalNoticeToast,
+  onNotify,
   access,
 }: ProjectHomeProps) {
   const groups = useMemo(
@@ -332,7 +336,12 @@ export function ProjectHome({
           open(project.canvas.id);
         }}
       >
-        <ProjectThumbnail project={project} suspendCover={openingProjectId !== null} opening={opening} />
+        <ProjectThumbnail
+          project={project}
+          suspendCover={openingProjectId !== null}
+          opening={opening}
+          onCopied={(id) => onNotify?.(`已复制画布 ID：${id}`)}
+        />
         <div className="project-card-info">
           <div>
             <strong>

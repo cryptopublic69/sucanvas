@@ -1,4 +1,5 @@
 mod accounts;
+mod agent_api;
 mod auth;
 mod authz;
 mod backup;
@@ -66,6 +67,7 @@ pub(crate) struct WebState {
     settings_guard: Arc<tokio::sync::Mutex<()>>,
     media_guard: Arc<tokio::sync::Mutex<()>>,
     tasks: Arc<tasks::Tasks>,
+    agent_jobs: Arc<agent_api::AgentJobStore>,
     comfy_relays: Arc<ws_handover::Registry>,
     presence: Arc<presence::Presence>,
     media: Arc<media_cleanup::MediaRegistry>,
@@ -223,6 +225,7 @@ pub async fn run() -> Result<(), String> {
     users::migrate(&database_path, &auth_path)?;
     let auth = Arc::new(auth::Auth::open(&database_path)?);
     let media = Arc::new(media_cleanup::MediaRegistry::open(&database_path)?);
+    let agent_jobs = Arc::new(agent_api::AgentJobStore::open(&database_path)?);
     let active_canvas_id = Arc::new(RwLock::new(DEFAULT_CANVAS_ID.to_owned()));
     let selection = Arc::new(RwLock::new(CanvasSelectionState::default()));
     let (event_sender, _) = tokio::sync::broadcast::channel(512);
@@ -297,6 +300,7 @@ pub async fn run() -> Result<(), String> {
         settings_guard: Arc::new(tokio::sync::Mutex::new(())),
         media_guard: Arc::new(tokio::sync::Mutex::new(())),
         tasks: Arc::new(tasks::Tasks::default()),
+        agent_jobs,
         comfy_relays: Arc::default(),
     };
     // Presence: tabs without a heartbeat for presence::TIMEOUT_SECONDS leave.
@@ -381,6 +385,7 @@ pub async fn run() -> Result<(), String> {
         )
         .with_state(state.clone())
         .merge(legacy)
+        .merge(agent_api::router(state.clone()))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), check_origin));
     let listener = tokio::net::TcpListener::bind(state.config.listen)
@@ -436,13 +441,18 @@ async fn check_origin(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
     );
+    let is_agent_api = request.uri().path().starts_with("/v1/agent/");
     let integration = request.uri().path().starts_with("/v1/")
         && request
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v == format!("Bearer {}", state.token));
-    if (mutation || websocket) && !integration && !same_origin(&state, request.headers()) {
+    if (mutation || websocket)
+        && !is_agent_api
+        && !integration
+        && !same_origin(&state, request.headers())
+    {
         return StatusCode::FORBIDDEN.into_response();
     }
     let mut response = next.run(request).await;

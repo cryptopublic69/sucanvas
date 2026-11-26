@@ -1,0 +1,105 @@
+---
+name: sucanvas-h3-video
+description: Submit, monitor, download, and clean up MiniMax H3 video generation jobs on a remote or local SuCanvas Web server via its Bearer-authenticated /v1/agent/* API. Use when the user wants to generate H3 videos into an existing or newly created SuCanvas canvas (either from a prompt + reference assets or by triggering an existing prompt/generator node), pull completed MP4s locally, or clean up cached local videos.
+---
+
+# SuCanvas H3 Video Generation
+
+Drive H3 video generation through the bundled zero-dependency CLI (`scripts/sucanvas_h3.py`) so generated videos land directly as playable nodes inside SuCanvas Web canvases and can also be downloaded locally.
+
+Read [references/api-contract.md](references/api-contract.md) for full endpoint and field semantics.
+
+## Configuration
+
+Never hardcode URLs or Bearer tokens inside prompts, scripts, or replies. The CLI resolves configuration in this order:
+1. Explicit CLI flags (`--base-url`, `--token`, `--download-dir`, `--insecure`)
+2. Environment variables (`SUCANVAS_BASE_URL`, `SUCANVAS_TOKEN`, `SUCANVAS_DOWNLOAD_DIR`, `SUCANVAS_INSECURE`)
+3. Local config file (`~/.config/sucanvas-h3/config.json`, or `SUCANVAS_CONFIG`)
+
+Initialize once if not yet configured:
+
+```bash
+python3 scripts/sucanvas_h3.py config init --base-url "https://your-sucanvas-host" --token "<bearer-token>"
+```
+
+Verify active config (token is masked):
+
+```bash
+python3 scripts/sucanvas_h3.py config show
+```
+
+## Standard Workflow
+
+### 1. Discover channels, workflows, and exact preset names
+Always query capabilities before submitting if the exact preset name or Colab readiness is uncertain:
+
+```bash
+python3 scripts/sucanvas_h3.py capabilities
+```
+
+Do not guess or invent preset names. Pass the exact `name` or `id` returned under `presets.local.items` or `presets.colab.<profile>.items`.
+
+### 2. Locate the target canvas
+- If the user provides a `canvasId` (copied from the `i` icon on a SuCanvas project card or canvas header), use `--canvas-id "<id>"`.
+- Otherwise, search existing canvases or create a new one:
+  - List: `python3 scripts/sucanvas_h3.py canvases --query "关键词"`
+  - Or pass `--new-canvas "新画布名称"` directly to `submit`.
+
+### 3. Choose the entry mode
+- **Standalone (prompt + optional assets)**:
+  Write long or multilingual prompts to a UTF-8 file first (avoid inline shell escaping issues). Upload local reference files first if needed:
+  ```bash
+  python3 scripts/sucanvas_h3.py upload --file /path/to/ref.png --canvas-id "<canvasId>" --create-node
+  python3 scripts/sucanvas_h3.py submit \
+    --canvas-id "<canvasId>" \
+    --prompt-file /path/to/prompt.txt \
+    --preset "<exact-preset-name>" \
+    --duration 6 \
+    --aspect-ratio 16:9 \
+    --image "<assetRef-or-nodeId>" \
+    --request-id "stable-unique-id"
+  ```
+- **Existing node (`--source-node-id`)**:
+  Inspect nodes in the canvas first, then trigger generation directly from an existing `text` prompt node or `video-generation` node:
+  ```bash
+  python3 scripts/sucanvas_h3.py nodes --canvas-id "<canvasId>"
+  python3 scripts/sucanvas_h3.py submit \
+    --canvas-id "<canvasId>" \
+    --source-node-id "<nodeId>" \
+    --preset "<exact-preset-name>" \
+    --request-id "stable-unique-id"
+  ```
+
+### 4. Wait safely without duplicate submissions
+`submit` returns `202 Accepted` immediately with `jobId` and `requestId`. Poll with `wait` or `status`:
+
+```bash
+python3 scripts/sucanvas_h3.py wait --job-id "<jobId>" --timeout 900 --poll 5
+```
+
+- **Never resubmit `submit` after a `wait` timeout** (exit code `2`). Keep polling `status` / `wait` with the same `jobId`.
+- If you must retry an uncertain `submit` network failure, reuse the **exact same `--request-id`** so the server deduplicates it.
+
+### 5. Download completed videos locally
+```bash
+python3 scripts/sucanvas_h3.py download --job-id "<jobId>"
+```
+
+Optionally pass `--auto-cleanup-mb 2048` or `--auto-cleanup-keep 20` (or configure defaults in `config init`) to automatically cap local disk usage after downloading.
+
+### 6. Clean up cached local videos
+Downloaded files are tracked in `<downloadDir>/manifest.json`. `cleanup` only deletes manifest-tracked files strictly inside `<downloadDir>` (never files outside or symlinks). Always preview with `--dry-run` when deleting broadly:
+
+```bash
+python3 scripts/sucanvas_h3.py cleanup --dry-run --older-than-days 7
+python3 scripts/sucanvas_h3.py cleanup --older-than-days 7
+python3 scripts/sucanvas_h3.py cleanup --max-total-mb 2048
+python3 scripts/sucanvas_h3.py cleanup --keep-latest 10
+python3 scripts/sucanvas_h3.py cleanup --job-id "<jobId>"
+```
+
+## Safety Rules
+
+- Never print, log, or embed the raw Bearer token in responses or files inside a shared repo.
+- Always pass `--prompt-file` and `--info-file` as UTF-8 files for non-ASCII or multi-line text.
+- Report the `canvasId`, `jobId`, `presetName`, canvas `outputNodeIds`, and local `filePath` (if downloaded) after completion.

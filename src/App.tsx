@@ -350,6 +350,7 @@ import {
   useAccess
 } from "./account/access";
 import { CanvasAccessChip, CanvasPresenceAvatars } from "./canvas/CanvasAccessIndicators";
+import { CanvasIdBadge } from "./canvas/CanvasIdBadge";
 import { CanvasReadOnlyContext } from "./canvas/readOnly";
 import {
   ACCESS_EVENT,
@@ -11970,6 +11971,7 @@ function CanvasWorkspace() {
         appSettingsDialog={appSettingsDialog}
         privateProjectVisibilityUnlockDialog={privateProjectVisibilityUnlockDialog}
         globalNoticeToast={globalNoticeToast}
+        onNotify={showGlobalNotice}
       />
     );
   }
@@ -12226,10 +12228,19 @@ function CanvasWorkspace() {
                 aria-label="项目名称"
               />
             ) : (
-              <button className="project-name-button" onClick={beginProjectNameEdit} title="修改项目名称">
-                <strong className="active-project-title">{canvasName}</strong>
-                <Pencil size={12} />
-              </button>
+              <div className="project-name-row">
+                <button className="project-name-button" onClick={beginProjectNameEdit} title="修改项目名称">
+                  <strong className="active-project-title">{canvasName}</strong>
+                  <Pencil size={12} />
+                </button>
+                {activeProjectId && (
+                  <CanvasIdBadge
+                    canvasId={activeProjectId}
+                    variant="header"
+                    onCopied={(id) => showGlobalNotice(`已复制画布 ID：${id}`)}
+                  />
+                )}
+              </div>
             )}
             {canvasPath.length > 1 ? (
               <nav className="canvas-breadcrumbs" aria-label="画布路径">

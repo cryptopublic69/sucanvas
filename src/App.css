@@ -90,9 +90,9 @@ button { color: inherit; }
 .project-opening-overlay { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; gap: 9px; color: #e9e7ff; background: rgba(9, 11, 17, .62); font-size: calc(12px + var(--ui-font-adjust)); font-weight: 600; backdrop-filter: blur(2px); }
 .project-opening-spinner { width: 15px; height: 15px; border: 2px solid rgba(233, 231, 255, .25); border-top-color: #8b7cf6; border-radius: 50%; animation: project-opening-spin .8s linear infinite; }
 @keyframes project-opening-spin { to { transform: rotate(360deg); } }
-.project-thumbnail svg { position: absolute; inset: 13px; width: calc(100% - 26px); height: calc(100% - 26px); overflow: visible; filter: drop-shadow(0 5px 8px rgba(0,0,0,.45)); }
-.project-thumbnail svg line { stroke: #687188; stroke-width: 1.5; vector-effect: non-scaling-stroke; opacity: .7; }
-.project-thumbnail svg rect { stroke: rgba(255,255,255,.26); stroke-width: 2; vector-effect: non-scaling-stroke; opacity: .92; }
+.project-thumbnail > svg { position: absolute; inset: 13px; width: calc(100% - 26px); height: calc(100% - 26px); overflow: visible; filter: drop-shadow(0 5px 8px rgba(0,0,0,.45)); }
+.project-thumbnail > svg line { stroke: #687188; stroke-width: 1.5; vector-effect: non-scaling-stroke; opacity: .7; }
+.project-thumbnail > svg rect { stroke: rgba(255,255,255,.26); stroke-width: 2; vector-effect: non-scaling-stroke; opacity: .92; }
 .empty-project-preview { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: #555d70; font-size: calc(11px + var(--ui-font-adjust)); }
 .preview-node-count { position: absolute; right: 10px; bottom: 9px; padding: 4px 7px; color: #9299aa; background: rgba(10,12,18,.78); border: 1px solid rgba(62,68,82,.76); border-radius: 999px; font-size: calc(9.5px + var(--ui-font-adjust)); backdrop-filter: blur(8px); }
 .project-card-info { display: flex; height: var(--project-card-info-height); align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px 12px 15px; }
@@ -1502,7 +1502,34 @@ button { color: inherit; }
 .canvas-breadcrumbs button { min-width: 0; padding: 0; overflow: hidden; color: #777f91; text-overflow: ellipsis; white-space: nowrap; background: transparent; border: 0; cursor: pointer; font: inherit; line-height: inherit; }
 .canvas-breadcrumbs button:hover { color: #b8aff5; }
 .canvas-breadcrumbs .canvas-breadcrumb-current { min-width: 0; overflow: hidden; color: #9a91d8; font: inherit; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.project-name-row { display: flex; min-width: 0; max-width: 100%; align-items: center; gap: 6px; }
 .project-name-button { display: flex; width: max-content; max-width: 100%; min-width: 0; align-items: center; gap: 6px; padding: 0; color: #f4f5f8; text-align: left; background: transparent; border: 0; cursor: pointer; }
+.canvas-id-badge { position: relative; display: inline-flex; flex: 0 0 auto; align-items: center; z-index: 4; }
+.canvas-id-badge.is-card { position: absolute; top: 9px; right: 10px; }
+.canvas-id-info-button { display: grid; place-items: center; width: 22px; height: 22px; padding: 0; color: #b7becd; background: rgba(10, 12, 18, .78); border: 1px solid rgba(62, 68, 82, .76); border-radius: 999px; cursor: pointer; backdrop-filter: blur(8px); transition: color 140ms ease, border-color 140ms ease, background 140ms ease; }
+.canvas-id-badge.is-header .canvas-id-info-button { width: 20px; height: 20px; color: #8c94a6; background: rgba(34, 38, 49, .78); border-color: rgba(68, 74, 90, .72); }
+.canvas-id-info-button:hover,
+.canvas-id-info-button:focus-visible { color: #f0edff; background: rgba(98, 88, 162, .35); border-color: #8b7cf6; outline: none; }
+.canvas-id-badge.is-copied .canvas-id-info-button { color: #7ae2a8; background: rgba(30, 86, 57, .55); border-color: #46b479; }
+.canvas-id-info-button svg { position: static; width: 13px; height: 13px; flex: 0 0 auto; filter: none; }
+.canvas-id-badge.is-header .canvas-id-info-button svg { width: 12px; height: 12px; }
+.canvas-id-tooltip { position: absolute; top: calc(100% + 6px); z-index: 20; display: flex; min-width: 196px; max-width: 260px; flex-direction: column; gap: 3px; padding: 7px 9px; color: #eef0f6; background: rgba(14, 17, 24, .96); border: 1px solid #3c4354; border-radius: 9px; box-shadow: 0 12px 28px rgba(0, 0, 0, .42); backdrop-filter: blur(12px); pointer-events: auto; }
+.canvas-id-badge.is-card .canvas-id-tooltip { right: 0; max-width: 230px; }
+.canvas-id-badge.is-header .canvas-id-tooltip { left: 0; }
+.canvas-id-tooltip code { display: block; overflow: hidden; color: #d6cffc; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-id-tooltip small { color: #8e96a8; font-size: 10px; line-height: 1.2; }
+.canvas-id-badge.is-copied .canvas-id-tooltip small { color: #7ae2a8; }
+.canvas-id-manual-input { width: 100%; padding: 3px 6px; color: #eef0f6; background: #0a0c12; border: 1px solid #596075; border-radius: 5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; outline: none; }
+:root[data-theme="light"] .canvas-id-info-button { color: #596173; background: rgba(255, 255, 255, .86); border-color: #d3d7e0; }
+:root[data-theme="light"] .canvas-id-badge.is-header .canvas-id-info-button { color: #666e7f; background: #f2f3f7; border-color: #d3d7e0; }
+:root[data-theme="light"] .canvas-id-info-button:hover,
+:root[data-theme="light"] .canvas-id-info-button:focus-visible { color: #4b3fb0; background: #ece9ff; border-color: #8f84d7; }
+:root[data-theme="light"] .canvas-id-badge.is-copied .canvas-id-info-button { color: #207045; background: #e8f8ef; border-color: #54b982; }
+:root[data-theme="light"] .canvas-id-tooltip { color: #262b38; background: rgba(255, 255, 255, .98); border-color: #cfd5e0; box-shadow: 0 12px 26px rgba(42, 49, 67, .16); }
+:root[data-theme="light"] .canvas-id-tooltip code { color: #5145a8; }
+:root[data-theme="light"] .canvas-id-tooltip small { color: #6e7687; }
+:root[data-theme="light"] .canvas-id-badge.is-copied .canvas-id-tooltip small { color: #207045; }
+:root[data-theme="light"] .canvas-id-manual-input { color: #262b38; background: #f5f6fa; border-color: #bfc6d4; }
 .project-name-button .active-project-title { display: block; min-width: 0; overflow: hidden; color: #f4f5f8; font-size: calc(13px + var(--ui-font-adjust)); font-weight: 700; letter-spacing: -0.01em; line-height: 17px; text-overflow: ellipsis; white-space: nowrap; }
 .project-name-button svg { flex: 0 0 auto; color: #777f91; opacity: .72; }
 .project-name-button:hover svg { color: #b7adff; opacity: 1; }
