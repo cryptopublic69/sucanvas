@@ -47,7 +47,7 @@ Do not guess or invent preset names. Pass the exact `name` or `id` returned unde
 
 ### 3. Choose the entry mode
 - **New scene / standalone (`mode=standalone`)**:
-  Use when starting a brand-new scene or segment (e.g., Segment 2 after Segment 1). Creates aligned `text` + `video-generation` + output nodes in columns below any existing ones.
+  Use when starting a brand-new scene or segment (e.g., Segment 2 after Segment 1). Top-aligns `text`, `video-generation`, and the first video output in a clean horizontal row below any existing scenes.
   Write long or multilingual prompts to a UTF-8 file first (avoid inline shell escaping issues). Upload local reference files first if needed:
   ```bash
   python3 scripts/sucanvas_h3.py upload --file /path/to/ref.png --canvas-id "<canvasId>" --create-node
@@ -62,7 +62,7 @@ Do not guess or invent preset names. Pass the exact `name` or `id` returned unde
   ```
 - **Iterate / revise existing scene (`--source-node-id`)**:
   **Default rule when revising the same scene/shot (v2, v3...)**: pass `--source-node-id "<textNodeId-or-generatorNodeId>"` instead of creating a duplicate standalone set.
-  - When `--prompt` / `--prompt-file` or `--info` / `--info-file` differs from the active version, the server automatically appends `v2` / `v3` inside that `text` node's prompt iterator (`--prompt-version-action append`, default), switches `activePromptVersionId` to it, reuses the connected `video-generation` node & reference edges, and stacks the new output video neatly in the same output column.
+  - When `--prompt` / `--prompt-file` or `--info` / `--info-file` differs from the active version, the server automatically appends `v2` / `v3` inside that `text` node's prompt iterator (`--prompt-version-action append`, default), switches `activePromptVersionId` to it, reuses the connected `video-generation` node & reference edges, and places the new output video neatly to the right of the latest output video from that generator.
   - Pass `--prompt-version-action none` to run a one-off prompt override without adding a version, or `overwrite` to update the active version in place.
   - Without `--prompt-file`, it directly triggers generation from the active version:
   ```bash

@@ -1197,6 +1197,32 @@ fn place_aligned_in_column(
     place_non_overlapping(existing, fixed_x + width + 48.0, start_y, width, height)
 }
 
+fn place_aligned_in_row(
+    existing: &[NodeRecord],
+    start_x: f64,
+    fixed_y: f64,
+    width: f64,
+    height: f64,
+    horizontal_gap: f64,
+) -> (f64, f64) {
+    let gap = horizontal_gap.max(16.0);
+    let mut x = start_x;
+    let y = fixed_y;
+    for _ in 0..200 {
+        let blocker = existing.iter().find(|other| {
+            x < other.x + other.width + gap
+                && x + width + gap > other.x
+                && y < other.y + other.height + 16.0
+                && y + height + 16.0 > other.y
+        });
+        let Some(other) = blocker else {
+            return (x, y);
+        };
+        x = (other.x + other.width + gap).max(x + 32.0);
+    }
+    place_non_overlapping(existing, start_x, fixed_y + height + 36.0, width, height)
+}
+
 async fn upload_asset(State(state): State<WebState>, mut multipart: Multipart) -> Response {
     let state = state.connection_snapshot();
     let actor = resolve_actor(&state);
@@ -2292,10 +2318,18 @@ fn finalize_placeholder_to_outputs(
                     .iter()
                     .find(|n| n.id == generator_id)
             });
-        let (ax, ay) = anchor
-            .map(|n| (n.x, n.y + n.height + 36.0))
-            .unwrap_or((80.0, 80.0));
-        let (x, y) = place_non_overlapping(&existing_nodes, ax, ay, width, height);
+        let (x, y) = if let Some(a) = anchor {
+            place_aligned_in_row(
+                &existing_nodes,
+                a.x + a.width + 24.0,
+                a.y,
+                width,
+                height,
+                24.0,
+            )
+        } else {
+            place_non_overlapping(&existing_nodes, 80.0, 80.0, width, height)
+        };
         let created = state
             .core
             .database
@@ -3234,20 +3268,12 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         .max_by(|a, b| (a.y + a.height).total_cmp(&(b.y + b.height)))
         .cloned();
 
-    // 1) Create prompt node if standalone and requested.
+    // Synchronize row top-edge Y across text and video-generation nodes when creating a new row.
     let create_prompt_node = entry_mode == "standalone" && input.create_prompt_node.unwrap_or(true);
-    if create_prompt_node {
-        let title = input
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("H3 生成提示词")
-            .to_owned();
-        let version_id = format!("version:{}", Uuid::new_v4());
-        let created_at = now_rfc3339();
-        let (px, py) = if let Some(ref pg) = existing_bottom_generator {
-            let row_y = pg.y + pg.height + 60.0;
+    let (synced_text_pos, synced_gen_pos): (Option<(f64, f64)>, Option<(f64, f64)>) =
+        if let Some(ref pg) = existing_bottom_generator {
+            let base_y = pg.y + pg.height + 60.0;
+            let gen_x = pg.x;
             let connected_text = canvas_snapshot
                 .edges
                 .iter()
@@ -3259,11 +3285,60 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
                 .iter()
                 .filter(|n| n.kind == "text")
                 .max_by(|a, b| (a.y + a.height).total_cmp(&(b.y + b.height)));
-            let col_x = connected_text
+            let text_x = connected_text
                 .or(fallback_text)
                 .map(|t| t.x)
                 .unwrap_or_else(|| (pg.x - 460.0 - 48.0).max(80.0));
-            place_aligned_in_column(&canvas_snapshot.nodes, col_x, row_y, 460.0, 320.0, 48.0)
+
+            let mut row_y = base_y;
+            for _ in 0..10 {
+                if create_prompt_node {
+                    let (_, ty) = place_aligned_in_column(
+                        &canvas_snapshot.nodes,
+                        text_x,
+                        row_y,
+                        460.0,
+                        320.0,
+                        48.0,
+                    );
+                    row_y = ty;
+                }
+                if generator_node_id.is_empty() {
+                    let (_, gy) = place_aligned_in_column(
+                        &canvas_snapshot.nodes,
+                        gen_x,
+                        row_y,
+                        VIDEO_GENERATION_NODE_WIDTH,
+                        VIDEO_GENERATION_NODE_HEIGHT,
+                        60.0,
+                    );
+                    if (gy - row_y).abs() < 0.5 || !create_prompt_node {
+                        row_y = gy;
+                        break;
+                    }
+                    row_y = gy;
+                } else {
+                    break;
+                }
+            }
+            (Some((text_x, row_y)), Some((gen_x, row_y)))
+        } else {
+            (None, None)
+        };
+
+    // 1) Create prompt node if standalone and requested.
+    if create_prompt_node {
+        let title = input
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("H3 生成提示词")
+            .to_owned();
+        let version_id = format!("version:{}", Uuid::new_v4());
+        let created_at = now_rfc3339();
+        let (px, py) = if let Some(pos) = synced_text_pos {
+            pos
         } else if let Some(prev_text) = canvas_snapshot
             .nodes
             .iter()
@@ -3293,7 +3368,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
                     .iter()
                     .map(|n| n.y)
                     .fold(f64::INFINITY, f64::min);
-                place_aligned_in_column(
+                place_aligned_in_row(
                     &canvas_snapshot.nodes,
                     max_right + 48.0,
                     min_y,
@@ -3362,28 +3437,19 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         } else {
             source_node_record.as_ref()
         };
-        let (gx, gy) = if let Some(ref pg) = existing_bottom_generator {
-            let min_y = pg.y + pg.height + 60.0;
-            let start_y = prompt_anchor.map(|n| n.y.max(min_y)).unwrap_or(min_y);
-            place_aligned_in_column(
-                &canvas_snapshot.nodes,
-                pg.x,
-                start_y,
-                VIDEO_GENERATION_NODE_WIDTH,
-                VIDEO_GENERATION_NODE_HEIGHT,
-                60.0,
-            )
+        let (gx, gy) = if let Some(pos) = synced_gen_pos {
+            pos
         } else {
             let (gx_anchor, gy_anchor) = prompt_anchor
                 .map(|n| (n.x + n.width + 48.0, n.y))
                 .unwrap_or((80.0, 80.0));
-            place_aligned_in_column(
+            place_aligned_in_row(
                 &canvas_snapshot.nodes,
                 gx_anchor,
                 gy_anchor,
                 VIDEO_GENERATION_NODE_WIDTH,
                 VIDEO_GENERATION_NODE_HEIGHT,
-                60.0,
+                48.0,
             )
         };
         let gen_content = build_generator_content(
@@ -3467,7 +3533,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         }
     }
 
-    // 3) Create generated-video placeholder node + output edge (column-aligned to generator outputs).
+    // 3) Create generated-video placeholder node + output edge (top-aligned first video, subsequent videos placed to the right).
     let generation_snapshot = build_video_generation_snapshot(
         &prompt_text,
         &prompt_info,
@@ -3484,7 +3550,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         &video_refs,
     );
     let (preview_w, preview_h) = preview_dimensions_for_aspect_ratio(&submit_input.aspect_ratio);
-    let prev_generator_output = canvas_snapshot
+    let latest_generator_output = canvas_snapshot
         .nodes
         .iter()
         .filter(|n| {
@@ -3495,13 +3561,17 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
                         e.source_node_id == generator_node_id && e.target_node_id == n.id
                     }))
         })
-        .max_by(|a, b| (a.y + a.height).total_cmp(&(b.y + b.height)))
+        .max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| (a.x + a.width).total_cmp(&(b.x + b.width)))
+        })
         .cloned();
-    let (ph_x, ph_y) = if let Some(ref prev_out) = prev_generator_output {
-        place_aligned_in_column(
+    let (ph_x, ph_y) = if let Some(ref latest_out) = latest_generator_output {
+        place_aligned_in_row(
             &canvas_snapshot.nodes,
-            prev_out.x,
-            prev_out.y + prev_out.height + 24.0,
+            latest_out.x + latest_out.width + 24.0,
+            latest_out.y,
             preview_w,
             preview_h,
             24.0,
@@ -3514,7 +3584,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         let (ph_anchor_x, ph_anchor_y) = gen_node
             .map(|n| (n.x + n.width + 48.0, n.y))
             .unwrap_or((80.0, 80.0));
-        place_aligned_in_column(
+        place_aligned_in_row(
             &canvas_snapshot.nodes,
             ph_anchor_x,
             ph_anchor_y,
@@ -4709,6 +4779,7 @@ mod tests {
         assert_eq!(s4_status, StatusCode::ACCEPTED);
         let text2_id = s4_body["job"]["promptNodeId"].as_str().unwrap().to_owned();
         let gen2_id = s4_body["job"]["generatorNodeId"].as_str().unwrap().to_owned();
+        let out_row2_id = s4_body["job"]["placeholderNodeId"].as_str().unwrap().to_owned();
 
         let loaded = state.core.database.load_project(&canvas_id).unwrap();
         let text1 = loaded.nodes.iter().find(|n| n.id == text_id).unwrap();
@@ -4717,6 +4788,7 @@ mod tests {
         let gen2 = loaded.nodes.iter().find(|n| n.id == gen2_id).unwrap();
         let out1 = loaded.nodes.iter().find(|n| n.id == out1_id).unwrap();
         let out2 = loaded.nodes.iter().find(|n| n.id == out2_id).unwrap();
+        let out_row2 = loaded.nodes.iter().find(|n| n.id == out_row2_id).unwrap();
 
         let versions = text1.content["promptVersions"].as_array().unwrap();
         assert_eq!(versions.len(), 2);
@@ -4729,12 +4801,17 @@ mod tests {
         );
         assert_eq!(text1.content["text"], "Scene 1 prompt v2 Hollywood camera");
 
-        // Same video-generation column & stacked output column checks.
-        assert_eq!(out2.x, out1.x);
-        assert!(out2.y > out1.y + out1.height);
+        // Top-edge alignment on each row, horizontal right continuation for iterated outputs,
+        // and vertical column alignment across scenes.
+        assert_eq!(text1.y, gen1.y);
+        assert_eq!(out1.y, gen1.y);
+        assert_eq!(out2.y, out1.y);
+        assert!(out2.x >= out1.x + out1.width);
+        assert_eq!(text2.x, text1.x);
         assert_eq!(gen2.x, gen1.x);
         assert!(gen2.y > gen1.y + gen1.height);
-        assert_eq!(text2.x, text1.x);
+        assert_eq!(text2.y, gen2.y);
+        assert_eq!(out_row2.y, gen2.y);
 
         let _ = std::fs::remove_dir_all(root);
     }

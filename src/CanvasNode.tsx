@@ -2750,7 +2750,7 @@ function generatedPreviewPosition(
   width: number,
   height: number,
   previewKind: "generated-video" | "generated-image" = "generated-video",
-  continuationDirection: "below" | "right" = "below",
+  continuationDirection: "below" | "right" = "right",
 ): { x: number; y: number } {
   const horizontalGap = CANVAS_GRID_SIZE * 2;
   const verticalGap = CANVAS_GRID_SIZE / 2;
@@ -2770,12 +2770,28 @@ function generatedPreviewPosition(
     }
     return y;
   };
+  const availableXRight = (startingX: number, fixedY: number): number => {
+    let x = startingX;
+    for (let attempt = 0; attempt <= existingNodes.length; attempt += 1) {
+      const blockers = existingNodes.filter((node) => (
+        x < node.x + node.width + verticalGap
+        && x + width + verticalGap > node.x
+        && fixedY < node.y + node.height + verticalGap
+        && fixedY + height + verticalGap > node.y
+      ));
+      if (!blockers.length) return x;
+      const nextX = snapCanvasCoordinate(Math.max(...blockers.map((node) => node.x + node.width)) + verticalGap);
+      if (nextX <= x) break;
+      x = nextX;
+    }
+    return x;
+  };
   const previousPreviews = existingNodes.filter((node) => isGeneratorResult(node, generator.id, previewKind));
   const latestPreview = latestByCreation(previousPreviews);
   if (latestPreview) {
     if (continuationDirection === "right") {
-      const x = snapCanvasCoordinate(latestPreview.x + latestPreview.width + horizontalGap);
-      return { x, y: availableYBelow(x, latestPreview.y) };
+      const startX = snapCanvasCoordinate(latestPreview.x + latestPreview.width + horizontalGap);
+      return { x: availableXRight(startX, latestPreview.y), y: latestPreview.y };
     }
     const x = latestPreview.x;
     return {
@@ -2784,8 +2800,8 @@ function generatedPreviewPosition(
     };
   }
 
-  const x = snapCanvasCoordinate(generator.x + generator.width + horizontalGap);
-  return { x, y: availableYBelow(x, generator.y) };
+  const startX = snapCanvasCoordinate(generator.x + generator.width + horizontalGap);
+  return { x: availableXRight(startX, generator.y), y: generator.y };
 }
 
 function generatedPreviewPositionBelow(
