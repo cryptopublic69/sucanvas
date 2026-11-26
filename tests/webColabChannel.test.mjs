@@ -429,3 +429,15 @@ test("colab sampler defaults to euler, persists per profile, backfills legacy pr
   const liveOpts = colabSamplerSelectOptions(["lcm", "euler", "uni_pc"], "euler");
   assert.deepEqual(liveOpts.map((opt) => opt.value), ["euler", "lcm", "uni_pc"]);
 });
+
+test("video regeneration dialog exposes local/colab channel switch and preserves switched channel on submit", async () => {
+  const dialogSource = await readFile(new URL("../src/video/VideoRegenerationDialogs.tsx", import.meta.url), "utf8");
+  assert.match(dialogSource, /video-regeneration-channel-switch/);
+  assert.match(dialogSource, /selectChannel\("colab"\)/);
+  assert.match(dialogSource, /selectChannel\("local"\)/);
+
+  const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(appSource, /channel:\s*snapshotOverride\?\.channel\s*\?\?\s*currentGeneratorSnapshot\.channel/);
+  assert.match(appSource, /const isColabSubmission = colab\.enabled && Boolean\(draft\.colabProfile\);/);
+  assert.match(appSource, /channel:\s*isColabSubmission\s*\?\s*"colab"\s*:\s*"local"/);
+});

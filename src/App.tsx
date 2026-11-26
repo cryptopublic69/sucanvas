@@ -4389,6 +4389,9 @@ function CanvasWorkspace() {
           ...(parameters.channel === "colab"
             ? colabPresetNodePatch(parameters)
             : videoPresetNodePatch(parameters, false)),
+          ...(parameters.channel === "colab" || parameters.channel === "local"
+            ? { generationChannel: parameters.channel }
+            : {}),
           generationDuration: parameters.durationSeconds,
           generationRefImageSize: parameters.refImageSize,
           generationSeed: options.seed ?? fixedSeedFromContent(target.content),
@@ -5425,7 +5428,7 @@ function CanvasWorkspace() {
         referenceSelectionError: currentGeneratorSnapshot.referenceSelectionError,
         referenceMappings: currentGeneratorSnapshot.referenceMappings,
         referenceCandidateCount: currentGeneratorSnapshot.referenceCandidateCount,
-        channel: currentGeneratorSnapshot.channel,
+        channel: snapshotOverride?.channel ?? currentGeneratorSnapshot.channel,
       }
       : snapshot;
 
@@ -5808,6 +5811,98 @@ function CanvasWorkspace() {
     });
   }, [activeVideoRegenerationPresets, workflowModules]);
 
+  const selectVideoRegenerationChannel = useCallback((channel: "local" | "colab") => {
+    if (!videoRegenerationDraft || videoRegenerationDraft.presetEditor) return;
+    if (channel === "colab") {
+      if (!colab.enabled || !colab.available) {
+        showGlobalNotice(colab.profileStatus?.error || "Colab 渠道当前未连接或未配置");
+        return;
+      }
+      const targetProfile: ColabProfileId = colab.profileStatus?.effectiveProfile ?? (colab.profileDraft || "dasiwa");
+      const collection = colab.loadProfilePresets(targetProfile);
+      const chosenPreset = collection.presets.find((preset) => preset.id === collection.defaultPresetId)
+        ?? collection.presets[0];
+      const nextSettings = chosenPreset?.settings ?? colabWorkflowDefaultSettings(targetProfile);
+      const allowedStyleLoras = nextSettings.styleLoras
+        .filter((slot) => isAllowedColabLoraName(slot.name))
+        .map((slot) => ({ ...slot, applyToSecondary: false }));
+      const rawLora = nextSettings.loraName ?? "";
+      const nextLoraName = isAllowedColabLoraName(rawLora) ? rawLora : (colabWorkflowDefaultSettings(targetProfile).loraName ?? "");
+      const nextLoraBypassed = nextSettings.loraBypassed ?? !nextLoraName.trim();
+      setSelectedVideoRegenerationPresetId(chosenPreset?.id ?? "");
+      setVideoRegenerationPresetName(chosenPreset?.name ?? "");
+      setVideoRegenerationDraft((current) => current && ({
+        ...current,
+        ...nextSettings,
+        colabProfile: targetProfile,
+        diffusionModelName: COLAB_PROFILE_MODELS[targetProfile],
+        primaryUpscaleFactor: 1,
+        primaryAudioSteps: nextSettings.primaryVideoSteps,
+        loraName: nextLoraName,
+        loraBypassed: nextLoraBypassed,
+        secondaryLoraBypassed: true,
+        styleLoras: allowedStyleLoras,
+        colabSampler: colabSamplerFromValue((nextSettings as ColabVideoPresetSettings).colabSampler),
+        useSnapshotSettings: false,
+      }));
+      return;
+    }
+
+    const collection = loadVideoRegenerationPresets(window.localStorage, videoRegenerationSettingsFromValue);
+    setVideoRegenerationPresets(collection);
+    const wasColabOrigin = videoRegenerationDraft.originalSnapshot.channel === "colab";
+    const chosenPreset = collection.presets.find((preset) => preset.id === collection.defaultPresetId)
+      ?? (wasColabOrigin ? collection.presets[0] : undefined);
+    setSelectedVideoRegenerationPresetId(chosenPreset?.id ?? "");
+    setVideoRegenerationPresetName(chosenPreset?.name ?? "");
+    const fallbackLocalModule = workflowModules.find((entry) => (
+      !entry.deletedAt
+      && entry.capability === "video-generation"
+      && entry.id !== COLAB_WORKFLOW_MODULE_ID
+      && (entry.id === videoRegenerationDraft.originalSnapshot.workflowModuleId
+        || entry.id === workflowModuleDefaults["video-generation:reference-to-video"])
+    )) ?? workflowModules.find((entry) => !entry.deletedAt && entry.capability === "video-generation");
+    const sharedSteps = workflowUsesSharedPrimarySteps(fallbackLocalModule);
+    setVideoRegenerationDraft((current) => {
+      if (!current) return current;
+      const base = chosenPreset?.settings;
+      const rawModel = base?.diffusionModelName ?? current.originalSnapshot.diffusionModelName;
+      const isColabModel = Object.values(COLAB_PROFILE_MODELS).includes(rawModel);
+      const diffusionModelName = isColabModel
+        ? (h3DiffusionModelOptions[0] ?? DEFAULT_H3_DIFFUSION_MODEL_NAME)
+        : rawModel;
+      const primaryVideoSteps = base?.primaryVideoSteps ?? current.originalSnapshot.primaryVideoSteps;
+      return {
+        ...current,
+        colabProfile: undefined,
+        colabSampler: undefined,
+        ...(base ?? {}),
+        diffusionModelName,
+        primaryResolutionMegapixels: base?.primaryResolutionMegapixels ?? current.originalSnapshot.primaryResolutionMegapixels,
+        secondaryResolutionMegapixels: base?.secondaryResolutionMegapixels ?? current.originalSnapshot.secondaryResolutionMegapixels,
+        secondarySchedulerSteps: base?.secondarySchedulerSteps ?? current.originalSnapshot.secondarySchedulerSteps,
+        loraName: base?.loraName ?? current.originalSnapshot.loraName,
+        secondaryLoraName: base?.secondaryLoraName ?? current.originalSnapshot.secondaryLoraName,
+        secondaryLoraStrength: base?.secondaryLoraStrength ?? current.originalSnapshot.secondaryLoraStrength,
+        loraBypassed: base?.loraBypassed ?? current.originalSnapshot.loraBypassed,
+        secondaryLoraBypassed: base?.secondaryLoraBypassed ?? current.originalSnapshot.secondaryLoraBypassed,
+        primaryUpscaleFactor: base?.primaryUpscaleFactor ?? current.originalSnapshot.primaryUpscaleFactor,
+        primaryVideoSteps,
+        primaryAudioSteps: sharedSteps
+          ? primaryVideoSteps
+          : (base?.primaryAudioSteps ?? current.originalSnapshot.primaryAudioSteps),
+        primaryBrightness: base?.primaryBrightness ?? current.originalSnapshot.primaryBrightness,
+        primaryContrast: base?.primaryContrast ?? current.originalSnapshot.primaryContrast,
+        primarySaturation: base?.primarySaturation ?? current.originalSnapshot.primarySaturation,
+        secondaryBrightness: base?.secondaryBrightness ?? current.originalSnapshot.secondaryBrightness,
+        secondaryContrast: base?.secondaryContrast ?? current.originalSnapshot.secondaryContrast,
+        secondarySaturation: base?.secondarySaturation ?? current.originalSnapshot.secondarySaturation,
+        styleLoras: (base?.styleLoras ?? current.originalSnapshot.styleLoras).map((slot) => ({ ...slot })),
+        useSnapshotSettings: false,
+      };
+    });
+  }, [colab.available, colab.enabled, colab.loadProfilePresets, colab.profileDraft, colab.profileStatus, h3DiffusionModelOptions, showGlobalNotice, videoRegenerationDraft, workflowModuleDefaults, workflowModules]);
+
   const saveVideoRegenerationSettings = useCallback((asNew = false) => {
     if (!videoRegenerationDraft) return;
     const settings = videoRegenerationSettingsFromValue(videoRegenerationDraft);
@@ -5971,7 +6066,7 @@ function CanvasWorkspace() {
       setNotice(styleLoraError);
       return;
     }
-    const isColabSubmission = colab.enabled && Boolean(draft.colabProfile || draft.originalSnapshot.channel === "colab");
+    const isColabSubmission = colab.enabled && Boolean(draft.colabProfile);
     if (isColabSubmission) {
       if (draft.loraName.trim() && !isAllowedColabLoraName(draft.loraName)) {
         setNotice("Colab 渠道 1采主 LoRA 仅允许选择预热 LoRA");
@@ -5985,8 +6080,24 @@ function CanvasWorkspace() {
     const resolvedColabModel = draft.colabProfile
       ? COLAB_PROFILE_MODELS[draft.colabProfile]
       : (colab.profileStatus?.diffusionModelName || draft.diffusionModelName);
+    const localWorkflowModule = !isColabSubmission
+      ? (() => {
+        const generatorContent = draft.generatorId
+          ? nodesSnapshot.current.find((node) => node.id === draft.generatorId)?.data.record.content
+          : undefined;
+        const preferredId = draft.originalSnapshot.workflowModuleId !== COLAB_WORKFLOW_MODULE_ID
+          ? draft.originalSnapshot.workflowModuleId
+          : (typeof generatorContent?.workflowModuleId === "string" && generatorContent.workflowModuleId !== COLAB_WORKFLOW_MODULE_ID
+            ? generatorContent.workflowModuleId
+            : (workflowModuleDefaults["video-generation:reference-to-video"] ?? ""));
+        return workflowModules.find((module) => !module.deletedAt && module.id === preferredId)
+          ?? workflowModules.find((module) => !module.deletedAt && module.capability === "video-generation");
+      })()
+      : undefined;
     const snapshot: GenerationSnapshot = {
       ...draft.originalSnapshot,
+      channel: isColabSubmission ? "colab" : "local",
+      ...(localWorkflowModule ? { workflowModuleId: localWorkflowModule.id } : {}),
       secondaryResolutionMegapixels: draft.secondaryResolutionMegapixels,
       secondarySchedulerSteps: draft.secondarySchedulerSteps,
       loraName: draft.loraName,
@@ -6017,9 +6128,7 @@ function CanvasWorkspace() {
       loraStrength: Math.round(draft.loraStrength * 100) / 100,
       loraStrengthRecorded: true,
       primaryVideoSteps: draft.primaryVideoSteps,
-      primaryAudioSteps: (isColabSubmission || workflowUsesSharedPrimarySteps(workflowModules.find((module) => (
-        !module.deletedAt && module.id === draft.originalSnapshot.workflowModuleId
-      ))))
+      primaryAudioSteps: (isColabSubmission || workflowUsesSharedPrimarySteps(localWorkflowModule))
         ? draft.primaryVideoSteps
         : draft.primaryAudioSteps,
       primaryBrightness: Math.round(draft.primaryBrightness * 100) / 100,
@@ -6027,7 +6136,7 @@ function CanvasWorkspace() {
       primarySaturation: Math.round(draft.primarySaturation * 100) / 100,
       refImageSize: draft.refImageSize,
       refImageSizeRecorded: true,
-      ...(isColabSubmission ? { colabSampler: colabSamplerFromValue(draft.colabSampler) } : {}),
+      colabSampler: isColabSubmission ? colabSamplerFromValue(draft.colabSampler) : undefined,
     };
     setVideoRegenerationDraft(null);
     try {
@@ -6042,7 +6151,7 @@ function CanvasWorkspace() {
     } catch (error) {
       reportError(error);
     }
-  }, [colab.enabled, colab.profileStatus, executeVideoNode, regenerateGeneratedVideo, reportError, showGlobalNotice, videoRegenerationDraft, workflowModules]);
+  }, [colab.enabled, colab.profileStatus, executeVideoNode, regenerateGeneratedVideo, reportError, showGlobalNotice, videoRegenerationDraft, workflowModuleDefaults, workflowModules]);
 
   const configureSecondarySample = useCallback((previewId: string) => {
     const previewNode = nodesSnapshot.current.find((node) => node.id === previewId);
@@ -12766,6 +12875,7 @@ function CanvasWorkspace() {
         selectedPresetModified={selectedVideoRegenerationPresetModified}
         presetName={videoRegenerationPresetName}
         setPresetName={setVideoRegenerationPresetName}
+        selectChannel={selectVideoRegenerationChannel}
         selectPreset={selectVideoRegenerationPreset}
         setDefaultPreset={setDefaultVideoRegenerationPreset}
         deletePreset={deleteVideoRegenerationPreset}

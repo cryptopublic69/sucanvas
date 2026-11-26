@@ -1805,6 +1805,10 @@ button { color: inherit; }
 :root[data-theme="light"] .video-regeneration-ref-mode button { color: #6e7686; }
 :root[data-theme="light"] .video-regeneration-ref-mode button:hover { color: #5145a8; background: #ece9ff; }
 :root[data-theme="light"] .video-regeneration-ref-mode button.is-active { color: #fff; background: #675bcc; }
+:root[data-theme="light"] .video-regeneration-channel-switch { background: #f6f7fa; border-color: #d7dbe4; }
+:root[data-theme="light"] .video-regeneration-channel-switch button { color: #6e7686; }
+:root[data-theme="light"] .video-regeneration-channel-switch button:hover:not(:disabled) { color: #5145a8; background: #ece9ff; }
+:root[data-theme="light"] .video-regeneration-channel-switch button.is-active { color: #fff; background: #675bcc; }
 :root[data-theme="light"] .project-dialog .video-regeneration-note { color: #676f7f; background: #f2efff; border-color: #d8d2f2; }
 :root[data-theme="light"] .app-settings-header,
 :root[data-theme="light"] .app-settings-dialog > .project-dialog-actions { border-color: #dfe3ea; }
@@ -2554,10 +2558,18 @@ button { color: inherit; }
 .video-regeneration-dialog :is(.video-regeneration-presets, .video-regeneration-basic-fields, .video-regeneration-group) { padding: 14px; border: 1px solid #343847; border-radius: 10px; background: #1b1e28; min-width: 0; }
 :root[data-theme="light"] .video-regeneration-dialog :is(.video-regeneration-presets, .video-regeneration-basic-fields, .video-regeneration-group) { border-color: #d9dce6; background: #f1f3f8; }
 .video-regeneration-dialog :is(.video-regeneration-presets, .video-regeneration-basic-fields) > h3 { grid-column: 1 / -1; margin: 0; color: #d8d3ff; font-size: calc(13px + var(--ui-font-adjust)); font-weight: 600; line-height: 24px; }
-.video-regeneration-dialog .video-regeneration-presets > h3 { margin-bottom: 12px; }
+.video-regeneration-presets-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.video-regeneration-presets-header > h3 { margin: 0; color: #d8d3ff; font-size: calc(13px + var(--ui-font-adjust)); font-weight: 600; line-height: 24px; position: relative; padding-left: 12px; }
+.video-regeneration-presets-header > h3::before { content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 3px; height: 13px; border-radius: 2px; background: #8b7cf6; }
+.video-regeneration-channel-switch { display: inline-grid; grid-auto-flow: column; grid-auto-columns: minmax(0, auto); gap: 3px; padding: 3px; background: #0e1118; border: 1px solid #303642; border-radius: 9px; }
+.video-regeneration-channel-switch button { height: 28px; padding: 0 11px; color: #838b9b; background: transparent; border: 0; border-radius: 6px; cursor: pointer; font-size: calc(11px + var(--ui-font-adjust)); font-weight: 700; white-space: nowrap; }
+.video-regeneration-channel-switch button:hover:not(:disabled) { color: #dcd7ff; background: rgba(139, 124, 246, .10); }
+.video-regeneration-channel-switch button.is-active { color: #fff; background: #675bcc; }
+.video-regeneration-channel-switch button:disabled { opacity: 0.48; cursor: not-allowed; }
 .video-regeneration-dialog :is(.video-regeneration-presets, .video-regeneration-basic-fields, .video-regeneration-group, .video-regeneration-group-header) > h3 { position: relative; padding-left: 12px; }
 .video-regeneration-dialog :is(.video-regeneration-presets, .video-regeneration-basic-fields, .video-regeneration-group, .video-regeneration-group-header) > h3::before { content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 3px; height: 13px; border-radius: 2px; background: #8b7cf6; }
-:root[data-theme="light"] .video-regeneration-dialog :is(.video-regeneration-presets, .video-regeneration-basic-fields) > h3 { color: #554aa7; }
+:root[data-theme="light"] .video-regeneration-dialog :is(.video-regeneration-presets, .video-regeneration-basic-fields) > h3,
+:root[data-theme="light"] .video-regeneration-presets-header > h3 { color: #554aa7; }
 .project-dialog .video-regeneration-secondary-summary { grid-column: 1 / -1; margin: -4px 0 0; color: #8d94a4; font-size: calc(11px + var(--ui-font-adjust)); line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 :root[data-theme="light"] .project-dialog .video-regeneration-secondary-summary { color: #71798a; }
 @media (max-width: 480px) {

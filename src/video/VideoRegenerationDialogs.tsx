@@ -28,6 +28,7 @@ type VideoRegenerationDialogsProps = {
   selectedPresetModified: boolean;
   presetName: string;
   setPresetName: (name: string) => void;
+  selectChannel?: (channel: "local" | "colab") => void;
   selectPreset: (id: string) => void;
   setDefaultPreset: () => void;
   deletePreset: () => void;
@@ -54,6 +55,7 @@ export function VideoRegenerationDialogs({
   selectedPresetModified,
   presetName,
   setPresetName,
+  selectChannel,
   selectPreset,
   setDefaultPreset,
   deletePreset,
@@ -186,7 +188,33 @@ export function VideoRegenerationDialogs({
                 : `提示词与 Seed 来自“${videoRegenerationDraft.previewTitle}”；参数优先套用默认预设，未设默认时使用生成快照。`}</p>
             </div>
             <section className="video-regeneration-presets" aria-label="重新生成参数预设">
-              <h3>参数预设</h3>
+              <div className="video-regeneration-presets-header">
+                <h3>参数预设</h3>
+                {!videoRegenerationDraft.presetEditor && colab?.enabled && selectChannel && (
+                  <div className="video-regeneration-channel-switch" role="group" aria-label="生成渠道">
+                    <button
+                      type="button"
+                      className={!colabProfile ? "is-active" : ""}
+                      onClick={() => selectChannel("local")}
+                    >
+                      本地 ComfyUI
+                    </button>
+                    <button
+                      type="button"
+                      className={colabProfile ? "is-active" : ""}
+                      disabled={!colab.available && !colabProfile}
+                      title={colab.available
+                        ? "切换到 Colab 渠道并套用 Colab 预设"
+                        : (colab.profileStatus?.error || "Colab 渠道当前未连接或未配置")}
+                      onClick={() => selectChannel("colab")}
+                    >
+                      {colab.available && colab.profileStatus?.effectiveProfile
+                        ? `Colab · ${COLAB_PROFILE_LABELS[colab.profileStatus.effectiveProfile]}`
+                        : "Colab（未连接）"}
+                    </button>
+                  </div>
+                )}
+              </div>
               <div className="video-regeneration-preset-fields">
                 <label>
                   预设槽位
