@@ -905,6 +905,74 @@ fn active_prompt_version(node: &NodeRecord) -> Option<&Value> {
         .or_else(|| versions.last())
 }
 
+fn next_prompt_version_label(versions: &[Value]) -> String {
+    let highest = versions
+        .iter()
+        .filter_map(|v| v.get("label").and_then(Value::as_str))
+        .filter_map(|label| {
+            let trimmed = label.trim();
+            let num = trimmed
+                .strip_prefix('v')
+                .or_else(|| trimmed.strip_prefix('V'))
+                .unwrap_or(trimmed);
+            num.parse::<u32>().ok()
+        })
+        .max()
+        .unwrap_or(0);
+    format!("v{}", highest + 1)
+}
+
+struct ActivePromptFields {
+    text: String,
+    information: String,
+    title: String,
+    version_id: String,
+    version_label: String,
+    duration_seconds: Option<f64>,
+    reference_selection: Option<Value>,
+}
+
+fn extract_prompt_node_fields(node: &NodeRecord) -> ActivePromptFields {
+    let active_ver = active_prompt_version(node);
+    let text = active_ver
+        .and_then(|v| v.get("text").and_then(Value::as_str))
+        .or_else(|| node.content.get("text").and_then(Value::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let information = active_ver
+        .and_then(|v| v.get("information").and_then(Value::as_str))
+        .or_else(|| node.content.get("information").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_owned();
+    let title = active_ver
+        .and_then(|v| v.get("title").and_then(Value::as_str))
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&node.title)
+        .to_owned();
+    let version_id = active_ver
+        .and_then(|v| v.get("id").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_owned();
+    let version_label = active_ver
+        .and_then(|v| v.get("label").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_owned();
+    let duration_seconds = active_ver
+        .and_then(|v| v.pointer("/generationOptions/durationSeconds"))
+        .and_then(Value::as_f64);
+    let reference_selection = active_ver.and_then(|v| v.get("referenceSelection")).cloned();
+    ActivePromptFields {
+        text,
+        information,
+        title,
+        version_id,
+        version_label,
+        duration_seconds,
+        reference_selection,
+    }
+}
+
 fn summarize_node(state: &WebState, node: &NodeRecord, edges: &[crate::models::EdgeRecord]) -> Value {
     let mut normalized = serde_json::to_value(node).unwrap_or(Value::Null);
     rpc::normalize_result(state, &mut normalized);
@@ -943,6 +1011,12 @@ fn summarize_node(state: &WebState, node: &NodeRecord, edges: &[crate::models::E
             .and_then(|v| v.get("label"))
             .cloned()
             .unwrap_or(Value::Null);
+        summary["versionCount"] = json!(node
+            .content
+            .get("promptVersions")
+            .and_then(Value::as_array)
+            .map(|v| v.len())
+            .unwrap_or(0));
         summary["generationOptions"] = active_version
             .and_then(|v| v.get("generationOptions"))
             .cloned()
@@ -1095,6 +1169,32 @@ fn place_non_overlapping(
         y += height + gap;
     }
     (x + width + gap, anchor_y)
+}
+
+fn place_aligned_in_column(
+    existing: &[NodeRecord],
+    fixed_x: f64,
+    start_y: f64,
+    width: f64,
+    height: f64,
+    vertical_gap: f64,
+) -> (f64, f64) {
+    let gap = vertical_gap.max(16.0);
+    let x = fixed_x;
+    let mut y = start_y;
+    for _ in 0..200 {
+        let blocker = existing.iter().find(|other| {
+            x < other.x + other.width + 24.0
+                && x + width + 24.0 > other.x
+                && y < other.y + other.height + gap
+                && y + height + gap > other.y
+        });
+        let Some(other) = blocker else {
+            return (x, y);
+        };
+        y = (other.y + other.height + gap).max(y + 32.0);
+    }
+    place_non_overlapping(existing, fixed_x + width + 48.0, start_y, width, height)
 }
 
 async fn upload_asset(State(state): State<WebState>, mut multipart: Multipart) -> Response {
@@ -1365,6 +1465,8 @@ struct SubmitJobInput {
     information: Option<String>,
     #[serde(default)]
     create_prompt_node: Option<bool>,
+    #[serde(default)]
+    prompt_version_action: Option<String>,
     #[serde(default)]
     preset: Option<String>,
     #[serde(default)]
@@ -1703,6 +1805,18 @@ fn job_response_json(job: &AgentJobRecord) -> Value {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+    let prompt_version_id = job
+        .snapshot
+        .get("promptVersionId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let prompt_version_label = job
+        .snapshot
+        .get("promptVersionLabel")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     json!({
         "jobId": job.id,
         "requestId": job.request_id,
@@ -1715,6 +1829,8 @@ fn job_response_json(job: &AgentJobRecord) -> Value {
         "clientId": job.client_id,
         "promptId": job.prompt_id,
         "promptNodeId": prompt_node_id,
+        "promptVersionId": prompt_version_id,
+        "promptVersionLabel": prompt_version_label,
         "sourceNodeId": job.source_node_id,
         "generatorNodeId": job.generator_node_id,
         "placeholderNodeId": job.placeholder_node_id,
@@ -2368,6 +2484,24 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         );
     }
 
+    let prompt_version_action = match input
+        .prompt_version_action
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => "append",
+        Some("append") => "append",
+        Some("overwrite") => "overwrite",
+        Some("none") => "none",
+        Some(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "无效的 promptVersionAction（应为 append、overwrite 或 none）",
+            )
+        }
+    };
+
     // Check channel readiness and resolve presets before mutating the canvas.
     let settings = {
         let _guard = state.settings_guard.lock().await;
@@ -2496,6 +2630,11 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
     let mut prompt_version_label = String::new();
     let mut generator_node_id = String::new();
     let mut source_node_record: Option<NodeRecord> = None;
+    let mut target_text_node: Option<NodeRecord> = None;
+    let mut existing_active_text = String::new();
+    let mut existing_active_info = String::new();
+    let mut existing_active_title = String::new();
+    let mut existing_active_ref_selection: Option<Value> = None;
     let mut preset_name = resolved_preset
         .as_ref()
         .map(|p| p.name.clone())
@@ -2541,40 +2680,24 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
             .collect();
 
         if src_node.kind == "text" {
+            let fields = extract_prompt_node_fields(&src_node);
+            target_text_node = Some(src_node.clone());
+            existing_active_text = fields.text.clone();
+            existing_active_info = fields.information.clone();
+            existing_active_title = fields.title.clone();
+            existing_active_ref_selection = fields.reference_selection.clone();
             let active_ver = active_prompt_version(&src_node);
             if prompt_text.is_empty() {
-                prompt_text = active_ver
-                    .and_then(|v| v.get("text").and_then(Value::as_str))
-                    .or_else(|| src_node.content.get("text").and_then(Value::as_str))
-                    .unwrap_or("")
-                    .trim()
-                    .to_owned();
+                prompt_text = fields.text;
             }
             if prompt_info.is_empty() {
-                prompt_info = active_ver
-                    .and_then(|v| v.get("information").and_then(Value::as_str))
-                    .or_else(|| src_node.content.get("information").and_then(Value::as_str))
-                    .unwrap_or("")
-                    .to_owned();
+                prompt_info = fields.information;
             }
             prompt_node_id = src_node.id.clone();
-            prompt_node_title = active_ver
-                .and_then(|v| v.get("title").and_then(Value::as_str))
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or(&src_node.title)
-                .to_owned();
-            prompt_version_id = active_ver
-                .and_then(|v| v.get("id").and_then(Value::as_str))
-                .unwrap_or("")
-                .to_owned();
-            prompt_version_label = active_ver
-                .and_then(|v| v.get("label").and_then(Value::as_str))
-                .unwrap_or("")
-                .to_owned();
-            if let Some(dur) = active_ver
-                .and_then(|v| v.pointer("/generationOptions/durationSeconds"))
-                .and_then(Value::as_f64)
-            {
+            prompt_node_title = fields.title;
+            prompt_version_id = fields.version_id;
+            prompt_version_label = fields.version_label;
+            if let Some(dur) = fields.duration_seconds {
                 detected_duration = Some(dur);
             }
             // Collect any referenceSelection assets declared on the prompt version.
@@ -2716,40 +2839,23 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
                 .find(|n| n.kind == "text" && n.id == active_text_id)
                 .or_else(|| incoming_nodes.iter().copied().find(|n| n.kind == "text"));
             if let Some(text_node) = chosen_text {
-                let active_ver = active_prompt_version(text_node);
+                let fields = extract_prompt_node_fields(text_node);
+                target_text_node = Some(text_node.clone());
+                existing_active_text = fields.text.clone();
+                existing_active_info = fields.information.clone();
+                existing_active_title = fields.title.clone();
+                existing_active_ref_selection = fields.reference_selection.clone();
                 if prompt_text.is_empty() {
-                    prompt_text = active_ver
-                        .and_then(|v| v.get("text").and_then(Value::as_str))
-                        .or_else(|| text_node.content.get("text").and_then(Value::as_str))
-                        .unwrap_or("")
-                        .trim()
-                        .to_owned();
+                    prompt_text = fields.text;
                 }
                 if prompt_info.is_empty() {
-                    prompt_info = active_ver
-                        .and_then(|v| v.get("information").and_then(Value::as_str))
-                        .or_else(|| text_node.content.get("information").and_then(Value::as_str))
-                        .unwrap_or("")
-                        .to_owned();
+                    prompt_info = fields.information;
                 }
                 prompt_node_id = text_node.id.clone();
-                prompt_node_title = active_ver
-                    .and_then(|v| v.get("title").and_then(Value::as_str))
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or(&text_node.title)
-                    .to_owned();
-                prompt_version_id = active_ver
-                    .and_then(|v| v.get("id").and_then(Value::as_str))
-                    .unwrap_or("")
-                    .to_owned();
-                prompt_version_label = active_ver
-                    .and_then(|v| v.get("label").and_then(Value::as_str))
-                    .unwrap_or("")
-                    .to_owned();
-                if let Some(dur) = active_ver
-                    .and_then(|v| v.pointer("/generationOptions/durationSeconds"))
-                    .and_then(Value::as_f64)
-                {
+                prompt_node_title = fields.title;
+                prompt_version_id = fields.version_id;
+                prompt_version_label = fields.version_label;
+                if let Some(dur) = fields.duration_seconds {
                     detected_duration = Some(dur);
                 }
             }
@@ -2945,6 +3051,189 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
     let job_id = format!("job:{}", Uuid::new_v4());
     let _media_guard = state.media_guard.clone().lock_owned().await;
 
+    // 0) Append or overwrite prompt version when iterating on an existing text node.
+    if entry_mode == "node" && prompt_version_action != "none" {
+        if let Some(ref text_node) = target_text_node {
+            let supplied_prompt = input
+                .prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let supplied_info = input.information.as_deref();
+            let supplied_title = input
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let prompt_changed = supplied_prompt.is_some_and(|p| p != existing_active_text.trim());
+            let info_changed = supplied_info.is_some_and(|i| i != existing_active_info.as_str());
+            let has_content_update = prompt_changed || info_changed;
+            let should_mutate = (prompt_version_action == "append" && has_content_update)
+                || (prompt_version_action == "overwrite"
+                    && (has_content_update || supplied_title.is_some()));
+
+            if should_mutate {
+                let mut content_map = text_node.content.as_object().cloned().unwrap_or_default();
+                let mut versions: Vec<Value> = content_map
+                    .get("promptVersions")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+
+                if versions.is_empty() && !existing_active_text.trim().is_empty() {
+                    let seed_id = format!("version:{}", Uuid::new_v4());
+                    let seed_title = if existing_active_title.is_empty() {
+                        text_node.title.as_str()
+                    } else {
+                        existing_active_title.as_str()
+                    };
+                    let mut seed_ver = json!({
+                        "id": seed_id,
+                        "label": "v1",
+                        "title": seed_title,
+                        "text": existing_active_text,
+                        "information": existing_active_info,
+                        "createdAt": text_node.created_at,
+                        "source": "canvas",
+                    });
+                    if let Some(ref rs) = existing_active_ref_selection {
+                        if let Some(obj) = seed_ver.as_object_mut() {
+                            obj.insert("referenceSelection".to_owned(), rs.clone());
+                        }
+                    }
+                    versions.push(seed_ver);
+                }
+
+                let default_title = if existing_active_title.is_empty() {
+                    text_node.title.as_str()
+                } else {
+                    existing_active_title.as_str()
+                };
+                let version_title = supplied_title.unwrap_or(default_title).to_owned();
+                let target_version_id: String;
+                let target_version_label: String;
+
+                if prompt_version_action == "overwrite" && !versions.is_empty() {
+                    let active_id = content_map
+                        .get("activePromptVersionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    let idx = versions
+                        .iter()
+                        .position(|v| v.get("id").and_then(Value::as_str) == Some(active_id.as_str()))
+                        .unwrap_or(versions.len() - 1);
+                    target_version_id = versions[idx]
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("version:{}", Uuid::new_v4()));
+                    target_version_label = versions[idx]
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| "v1".to_owned());
+                    if let Some(obj) = versions[idx].as_object_mut() {
+                        obj.insert("id".to_owned(), json!(target_version_id));
+                        obj.insert("label".to_owned(), json!(target_version_label));
+                        obj.insert("title".to_owned(), json!(version_title));
+                        obj.insert("text".to_owned(), json!(prompt_text));
+                        obj.insert("information".to_owned(), json!(prompt_info));
+                        obj.insert(
+                            "generationOptions".to_owned(),
+                            json!({ "durationSeconds": submit_input.duration_seconds.round() as i64 }),
+                        );
+                    }
+                } else {
+                    target_version_label = next_prompt_version_label(&versions);
+                    target_version_id = format!("version:{}", Uuid::new_v4());
+                    let mut new_ver = json!({
+                        "id": target_version_id,
+                        "label": target_version_label,
+                        "title": version_title,
+                        "text": prompt_text,
+                        "information": prompt_info,
+                        "createdAt": now_rfc3339(),
+                        "requestId": format!("{request_id}:prompt"),
+                        "source": "agent",
+                        "generationOptions": {
+                            "durationSeconds": submit_input.duration_seconds.round() as i64,
+                        },
+                    });
+                    if input.images.is_empty() && input.audios.is_empty() && input.videos.is_empty() {
+                        if let Some(ref rs) = existing_active_ref_selection {
+                            if let Some(obj) = new_ver.as_object_mut() {
+                                obj.insert("referenceSelection".to_owned(), rs.clone());
+                            }
+                        }
+                    }
+                    versions.push(new_ver);
+                }
+
+                content_map.insert("contentNode".to_owned(), json!(true));
+                let has_content_type = content_map
+                    .get("contentType")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty());
+                if !has_content_type {
+                    content_map.insert("contentType".to_owned(), json!("prompt"));
+                }
+                content_map.insert("promptVersions".to_owned(), Value::Array(versions));
+                content_map.insert("activePromptVersionId".to_owned(), json!(target_version_id));
+                if !content_map.contains_key("bestPromptVersionId") {
+                    content_map.insert("bestPromptVersionId".to_owned(), json!(""));
+                }
+                content_map.insert("text".to_owned(), json!(prompt_text));
+                content_map.insert("information".to_owned(), json!(prompt_info));
+
+                match state.core.database.update_node(UpdateNodeInput {
+                    id: text_node.id.clone(),
+                    title: None,
+                    content: Some(Value::Object(content_map)),
+                    x: None,
+                    y: None,
+                    width: None,
+                    height: None,
+                    status: None,
+                }) {
+                    Ok(updated) => {
+                        prompt_node_id = updated.id.clone();
+                        prompt_node_title = version_title;
+                        prompt_version_id = target_version_id;
+                        prompt_version_label = target_version_label;
+                        if let Some(existing) = canvas_snapshot
+                            .nodes
+                            .iter_mut()
+                            .find(|n| n.id == updated.id)
+                        {
+                            *existing = updated.clone();
+                        }
+                        if source_node_record
+                            .as_ref()
+                            .is_some_and(|n| n.id == updated.id)
+                        {
+                            source_node_record = Some(updated.clone());
+                        }
+                        let _ = state.handle.emit("canvas://node-updated", updated);
+                    }
+                    Err(error) => {
+                        return api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Bottom-most existing video-generation node used for column alignment of new scenes.
+    let existing_bottom_generator = canvas_snapshot
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "video-generation")
+        .max_by(|a, b| (a.y + a.height).total_cmp(&(b.y + b.height)))
+        .cloned();
+
     // 1) Create prompt node if standalone and requested.
     let create_prompt_node = entry_mode == "standalone" && input.create_prompt_node.unwrap_or(true);
     if create_prompt_node {
@@ -2957,7 +3246,65 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
             .to_owned();
         let version_id = format!("version:{}", Uuid::new_v4());
         let created_at = now_rfc3339();
-        let (px, py) = place_non_overlapping(&canvas_snapshot.nodes, 80.0, 80.0, 460.0, 320.0);
+        let (px, py) = if let Some(ref pg) = existing_bottom_generator {
+            let row_y = pg.y + pg.height + 60.0;
+            let connected_text = canvas_snapshot
+                .edges
+                .iter()
+                .filter(|e| e.target_node_id == pg.id)
+                .filter_map(|e| canvas_snapshot.nodes.iter().find(|n| n.id == e.source_node_id))
+                .find(|n| n.kind == "text");
+            let fallback_text = canvas_snapshot
+                .nodes
+                .iter()
+                .filter(|n| n.kind == "text")
+                .max_by(|a, b| (a.y + a.height).total_cmp(&(b.y + b.height)));
+            let col_x = connected_text
+                .or(fallback_text)
+                .map(|t| t.x)
+                .unwrap_or_else(|| (pg.x - 460.0 - 48.0).max(80.0));
+            place_aligned_in_column(&canvas_snapshot.nodes, col_x, row_y, 460.0, 320.0, 48.0)
+        } else if let Some(prev_text) = canvas_snapshot
+            .nodes
+            .iter()
+            .filter(|n| n.kind == "text")
+            .max_by(|a, b| (a.y + a.height).total_cmp(&(b.y + b.height)))
+        {
+            place_aligned_in_column(
+                &canvas_snapshot.nodes,
+                prev_text.x,
+                prev_text.y + prev_text.height + 48.0,
+                460.0,
+                320.0,
+                48.0,
+            )
+        } else {
+            let media_nodes: Vec<&NodeRecord> = canvas_snapshot
+                .nodes
+                .iter()
+                .filter(|n| node_media_kind(n).is_some())
+                .collect();
+            if !media_nodes.is_empty() {
+                let max_right = media_nodes
+                    .iter()
+                    .map(|n| n.x + n.width)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let min_y = media_nodes
+                    .iter()
+                    .map(|n| n.y)
+                    .fold(f64::INFINITY, f64::min);
+                place_aligned_in_column(
+                    &canvas_snapshot.nodes,
+                    max_right + 48.0,
+                    min_y,
+                    460.0,
+                    320.0,
+                    48.0,
+                )
+            } else {
+                place_non_overlapping(&canvas_snapshot.nodes, 80.0, 80.0, 460.0, 320.0)
+            }
+        };
         let pcontent = json!({
             "text": prompt_text,
             "information": prompt_info,
@@ -3005,9 +3352,9 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         }
     }
 
-    // 2) Create video-generation node if we do not already have one.
+    // 2) Create video-generation node if we do not already have one, otherwise ensure media edges.
     if generator_node_id.is_empty() {
-        let anchor = if !prompt_node_id.is_empty() {
+        let prompt_anchor = if !prompt_node_id.is_empty() {
             canvas_snapshot
                 .nodes
                 .iter()
@@ -3015,16 +3362,30 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         } else {
             source_node_record.as_ref()
         };
-        let (gx_anchor, gy_anchor) = anchor
-            .map(|n| (n.x + n.width + 60.0, n.y))
-            .unwrap_or((80.0, 80.0));
-        let (gx, gy) = place_non_overlapping(
-            &canvas_snapshot.nodes,
-            gx_anchor,
-            gy_anchor,
-            VIDEO_GENERATION_NODE_WIDTH,
-            VIDEO_GENERATION_NODE_HEIGHT,
-        );
+        let (gx, gy) = if let Some(ref pg) = existing_bottom_generator {
+            let min_y = pg.y + pg.height + 60.0;
+            let start_y = prompt_anchor.map(|n| n.y.max(min_y)).unwrap_or(min_y);
+            place_aligned_in_column(
+                &canvas_snapshot.nodes,
+                pg.x,
+                start_y,
+                VIDEO_GENERATION_NODE_WIDTH,
+                VIDEO_GENERATION_NODE_HEIGHT,
+                60.0,
+            )
+        } else {
+            let (gx_anchor, gy_anchor) = prompt_anchor
+                .map(|n| (n.x + n.width + 48.0, n.y))
+                .unwrap_or((80.0, 80.0));
+            place_aligned_in_column(
+                &canvas_snapshot.nodes,
+                gx_anchor,
+                gy_anchor,
+                VIDEO_GENERATION_NODE_WIDTH,
+                VIDEO_GENERATION_NODE_HEIGHT,
+                60.0,
+            )
+        };
         let gen_content = build_generator_content(
             &submit_input,
             &channel,
@@ -3080,9 +3441,33 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
             }
             Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
         }
+    } else {
+        for item in collected_images
+            .iter()
+            .chain(collected_audios.iter())
+            .chain(collected_videos.iter())
+        {
+            if let Some(ref media_node_id) = item.node_id {
+                let already_linked = canvas_snapshot.edges.iter().any(|e| {
+                    e.source_node_id == *media_node_id && e.target_node_id == generator_node_id
+                });
+                if !already_linked {
+                    if let Ok(edge) = state.core.database.create_edge(CreateEdgeInput {
+                        canvas_id: Some(canvas_snapshot.canvas.id.clone()),
+                        source_node_id: media_node_id.clone(),
+                        target_node_id: generator_node_id.clone(),
+                        kind: Some("input".to_owned()),
+                        metadata: json!({}),
+                    }) {
+                        canvas_snapshot.edges.push(edge.clone());
+                        let _ = state.handle.emit("canvas://edge-created", edge);
+                    }
+                }
+            }
+        }
     }
 
-    // 3) Create generated-video placeholder node + output edge.
+    // 3) Create generated-video placeholder node + output edge (column-aligned to generator outputs).
     let generation_snapshot = build_video_generation_snapshot(
         &prompt_text,
         &prompt_info,
@@ -3099,22 +3484,45 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         &video_refs,
     );
     let (preview_w, preview_h) = preview_dimensions_for_aspect_ratio(&submit_input.aspect_ratio);
-    let placement_anchor = source_node_record
-        .as_ref()
-        .filter(|n| n.kind == "text")
-        .or_else(|| {
-            canvas_snapshot
-                .nodes
-                .iter()
-                .find(|n| n.id == generator_node_id)
-        });
-    let (ph_anchor_x, ph_anchor_y) = match placement_anchor {
-        Some(n) if n.kind == "text" => (n.x, n.y + n.height + 36.0),
-        Some(n) => (n.x + n.width + 60.0, n.y),
-        None => (80.0, 80.0),
+    let prev_generator_output = canvas_snapshot
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.kind == "generated-video"
+                && (n.content.get("sourceGeneratorId").and_then(Value::as_str)
+                    == Some(generator_node_id.as_str())
+                    || canvas_snapshot.edges.iter().any(|e| {
+                        e.source_node_id == generator_node_id && e.target_node_id == n.id
+                    }))
+        })
+        .max_by(|a, b| (a.y + a.height).total_cmp(&(b.y + b.height)))
+        .cloned();
+    let (ph_x, ph_y) = if let Some(ref prev_out) = prev_generator_output {
+        place_aligned_in_column(
+            &canvas_snapshot.nodes,
+            prev_out.x,
+            prev_out.y + prev_out.height + 24.0,
+            preview_w,
+            preview_h,
+            24.0,
+        )
+    } else {
+        let gen_node = canvas_snapshot
+            .nodes
+            .iter()
+            .find(|n| n.id == generator_node_id);
+        let (ph_anchor_x, ph_anchor_y) = gen_node
+            .map(|n| (n.x + n.width + 48.0, n.y))
+            .unwrap_or((80.0, 80.0));
+        place_aligned_in_column(
+            &canvas_snapshot.nodes,
+            ph_anchor_x,
+            ph_anchor_y,
+            preview_w,
+            preview_h,
+            24.0,
+        )
     };
-    let (ph_x, ph_y) =
-        place_non_overlapping(&canvas_snapshot.nodes, ph_anchor_x, ph_anchor_y, preview_w, preview_h);
     let mut ph_content = Map::new();
     ph_content.insert("generationPlaceholder".to_owned(), json!(true));
     ph_content.insert("placeholderClientId".to_owned(), json!(client_id));
@@ -4144,6 +4552,189 @@ mod tests {
             .find(|n| n.id == placeholder_id)
             .unwrap();
         assert_eq!(ph.content["status"], "cancelled");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn node_iteration_appends_prompt_version_and_aligns_columns() {
+        let fake_mp4 = b"\x00\x00\x00\x18ftypmp42mock-video-payload".to_vec();
+        let (comfy_url, _prompt_calls, _cancelled, _hold_history) =
+            spawn_mock_comfy(fake_mp4.clone()).await;
+        let (root, state, app) = setup_test_env(&comfy_url);
+
+        // Create scene 1 (standalone) -> creates text v1, generator 1, output 1.
+        let (s1_status, s1_body) = read_json(
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/agent/jobs")
+                        .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            json!({
+                                "requestId": "iter-req-1",
+                                "createCanvas": { "name": "Iterator Layout Canvas" },
+                                "prompt": "Scene 1 prompt v1",
+                                "information": "第一版大意",
+                                "title": "第一段",
+                                "preset": "测试快速预设"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s1_status, StatusCode::ACCEPTED);
+        assert_eq!(s1_body["job"]["promptVersionLabel"], "v1");
+        let canvas_id = s1_body["job"]["canvasId"].as_str().unwrap().to_owned();
+        let text_id = s1_body["job"]["promptNodeId"].as_str().unwrap().to_owned();
+        let gen1_id = s1_body["job"]["generatorNodeId"].as_str().unwrap().to_owned();
+        let out1_id = s1_body["job"]["placeholderNodeId"].as_str().unwrap().to_owned();
+
+        // Wait briefly for job 1 mock completion so output 1 settles.
+        let job1_id = s1_body["job"]["jobId"].as_str().unwrap().to_owned();
+        for _ in 0..40 {
+            let (_, body) = read_json(
+                app.clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("GET")
+                            .uri(format!("/v1/agent/jobs/{job1_id}"))
+                            .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            if body["job"]["status"] == "succeeded" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // Iterate on existing text node with updated prompt -> appends v2, reuses gen1, stacks out2.
+        let (s2_status, s2_body) = read_json(
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/agent/jobs")
+                        .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            json!({
+                                "requestId": "iter-req-2",
+                                "canvasId": canvas_id,
+                                "sourceNodeId": text_id,
+                                "prompt": "Scene 1 prompt v2 Hollywood camera",
+                                "information": "第二版好莱坞大意",
+                                "preset": "测试快速预设"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s2_status, StatusCode::ACCEPTED);
+        assert_eq!(s2_body["job"]["promptNodeId"], text_id);
+        assert_eq!(s2_body["job"]["promptVersionLabel"], "v2");
+        assert_eq!(s2_body["job"]["generatorNodeId"], gen1_id);
+        let out2_id = s2_body["job"]["placeholderNodeId"].as_str().unwrap().to_owned();
+        assert_ne!(out2_id, out1_id);
+
+        // Re-submitting with promptVersionAction="none" does not append v3.
+        let (s3_status, s3_body) = read_json(
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/agent/jobs")
+                        .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            json!({
+                                "requestId": "iter-req-3",
+                                "canvasId": canvas_id,
+                                "sourceNodeId": text_id,
+                                "prompt": "Ad-hoc override without saving version",
+                                "promptVersionAction": "none",
+                                "preset": "测试快速预设"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s3_status, StatusCode::ACCEPTED);
+        assert_eq!(s3_body["job"]["promptVersionLabel"], "v2");
+
+        // Creating a second standalone scene aligns text2.x == text1.x and gen2.x == gen1.x.
+        let (s4_status, s4_body) = read_json(
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/agent/jobs")
+                        .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            json!({
+                                "requestId": "iter-req-4",
+                                "canvasId": canvas_id,
+                                "prompt": "Scene 2 fresh sequence",
+                                "title": "第二段",
+                                "preset": "测试快速预设"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s4_status, StatusCode::ACCEPTED);
+        let text2_id = s4_body["job"]["promptNodeId"].as_str().unwrap().to_owned();
+        let gen2_id = s4_body["job"]["generatorNodeId"].as_str().unwrap().to_owned();
+
+        let loaded = state.core.database.load_project(&canvas_id).unwrap();
+        let text1 = loaded.nodes.iter().find(|n| n.id == text_id).unwrap();
+        let text2 = loaded.nodes.iter().find(|n| n.id == text2_id).unwrap();
+        let gen1 = loaded.nodes.iter().find(|n| n.id == gen1_id).unwrap();
+        let gen2 = loaded.nodes.iter().find(|n| n.id == gen2_id).unwrap();
+        let out1 = loaded.nodes.iter().find(|n| n.id == out1_id).unwrap();
+        let out2 = loaded.nodes.iter().find(|n| n.id == out2_id).unwrap();
+
+        let versions = text1.content["promptVersions"].as_array().unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0]["label"], "v1");
+        assert_eq!(versions[1]["label"], "v2");
+        assert_eq!(versions[1]["text"], "Scene 1 prompt v2 Hollywood camera");
+        assert_eq!(
+            text1.content["activePromptVersionId"].as_str().unwrap(),
+            versions[1]["id"].as_str().unwrap()
+        );
+        assert_eq!(text1.content["text"], "Scene 1 prompt v2 Hollywood camera");
+
+        // Same video-generation column & stacked output column checks.
+        assert_eq!(out2.x, out1.x);
+        assert!(out2.y > out1.y + out1.height);
+        assert_eq!(gen2.x, gen1.x);
+        assert!(gen2.y > gen1.y + gen1.height);
+        assert_eq!(text2.x, text1.x);
 
         let _ = std::fs::remove_dir_all(root);
     }

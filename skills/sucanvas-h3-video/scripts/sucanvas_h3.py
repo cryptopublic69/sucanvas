@@ -591,6 +591,8 @@ def cmd_submit(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, 
 
     if args.title:
         payload["title"] = args.title
+    if args.prompt_version_action:
+        payload["promptVersionAction"] = args.prompt_version_action
     if args.no_prompt_node:
         payload["createPromptNode"] = False
     if args.preset:
@@ -824,6 +826,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_submit.add_argument("--info-file", help="Path to UTF-8 Chinese information/explanation file")
     p_submit.add_argument("--info", help="Inline information text")
     p_submit.add_argument("--title", help="Optional prompt node title")
+    p_submit.add_argument(
+        "--prompt-version-action",
+        choices=["append", "overwrite", "none"],
+        help="When iterating via --source-node-id with new prompt/info: append (default, adds v2/v3), overwrite, or none",
+    )
     p_submit.add_argument("--no-prompt-node", action="store_true", help="Do not create a prompt node in standalone mode")
     p_submit.add_argument("--preset", help="Preset name or ID (discover via `capabilities`)")
     p_submit.add_argument("--channel", default="local", choices=["local", "colab"], help="Execution channel")

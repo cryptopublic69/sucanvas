@@ -24,7 +24,7 @@ Returns:
 `GET /v1/agent/canvases/{canvasId}/nodes?kind=<optional-kind>`
 
 Returns `{ ok, canvas, nodes, edges }`:
-- `text` nodes include `contentType`, active `text`, `information`, `activeVersionLabel`, `generationOptions`, `referenceSelection`.
+- `text` nodes include `contentType`, active `text`, `information`, `activeVersionId`, `activeVersionLabel`, `versionCount`, `generationOptions`, `referenceSelection`.
 - `video-generation` nodes include `workflowModuleId`, `generationMode`, `generationChannel`, `aspectRatio`, `durationSeconds`, `incomingNodeIds`.
 - Media nodes (`image`, `audio`, `video`, `generated-video`) include `originalName`, `assetPath`, `videoUrl`.
 
@@ -44,14 +44,15 @@ Key fields:
   - `canvasId`: existing canvas or folder subcanvas ID (users can copy this from the `i` badge in the UI).
   - `createCanvas`: `{ "name": "...", "shared": false }`.
 - Entry mode:
-  - `mode: "standalone"` (default when `sourceNodeId` omitted): requires `prompt`; optional `title`, `information`, `createPromptNode` (default `true`), `images` / `audios` / `videos` (each item can be `assetRef`, `nodeId`, or `{ assetRef|nodeId, role }`).
+  - `mode: "standalone"` (default when `sourceNodeId` omitted): requires `prompt`; optional `title`, `information`, `createPromptNode` (default `true`), `images` / `audios` / `videos` (each item can be `assetRef`, `nodeId`, or `{ assetRef|nodeId, role }`). Places new prompt & `video-generation` nodes column-aligned below existing ones.
   - `mode: "node"` (inferred when `sourceNodeId` is set): `sourceNodeId` points to an existing `text` or `video-generation` node in `canvasId`.
+  - `promptVersionAction` (used in `mode: "node"`, default `"append"`): `"append"` automatically appends `v2`/`v3` in the target `text` node's `promptVersions` and activates it when `prompt`/`information` changes; `"overwrite"` updates the active version in place; `"none"` keeps `promptVersions` unchanged.
 - Preset & options:
   - `preset`: exact preset name or ID from `/v1/agent/capabilities`. Unknown names return `400` listing available presets.
   - `channel`: `"local"` (default) or `"colab"`.
   - `durationSeconds` (2..15), `aspectRatio` (`16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `1:1`), `seedMode` (`random`|`fixed`), `seed`, `refImageSize` (`match`|`max`), `workflowModuleId`, `colabSampler`, `secondarySamplingEnabled`.
 
-Returns `202 Accepted` immediately with `{ ok, canvasCreated, deduplicated, job }`. The server creates placeholder canvas nodes immediately, runs ComfyUI in the background, and automatically updates the canvas placeholder into playable `generated-video` nodes + SSE events even if the caller disconnects.
+Returns `202 Accepted` immediately with `{ ok, canvasCreated, deduplicated, job }` (including `promptNodeId`, `promptVersionId`, `promptVersionLabel`, `generatorNodeId`, `placeholderNodeId`). The server creates placeholder canvas nodes immediately, runs ComfyUI in the background, and automatically updates the canvas placeholder into playable `generated-video` nodes + SSE events even if the caller disconnects.
 
 ### 6. Poll, cancel, and download outputs
 - `GET /v1/agent/jobs/{jobId}`: returns `{ ok, job }` (`status`: `queued` | `running` | `succeeded` | `failed` | `cancelled`). Reconciles orphaned jobs automatically if the server restarted mid-run.

@@ -46,7 +46,8 @@ Do not guess or invent preset names. Pass the exact `name` or `id` returned unde
   - Or pass `--new-canvas "新画布名称"` directly to `submit`.
 
 ### 3. Choose the entry mode
-- **Standalone (prompt + optional assets)**:
+- **New scene / standalone (`mode=standalone`)**:
+  Use when starting a brand-new scene or segment (e.g., Segment 2 after Segment 1). Creates aligned `text` + `video-generation` + output nodes in columns below any existing ones.
   Write long or multilingual prompts to a UTF-8 file first (avoid inline shell escaping issues). Upload local reference files first if needed:
   ```bash
   python3 scripts/sucanvas_h3.py upload --file /path/to/ref.png --canvas-id "<canvasId>" --create-node
@@ -59,15 +60,19 @@ Do not guess or invent preset names. Pass the exact `name` or `id` returned unde
     --image "<assetRef-or-nodeId>" \
     --request-id "stable-unique-id"
   ```
-- **Existing node (`--source-node-id`)**:
-  Inspect nodes in the canvas first, then trigger generation directly from an existing `text` prompt node or `video-generation` node:
+- **Iterate / revise existing scene (`--source-node-id`)**:
+  **Default rule when revising the same scene/shot (v2, v3...)**: pass `--source-node-id "<textNodeId-or-generatorNodeId>"` instead of creating a duplicate standalone set.
+  - When `--prompt` / `--prompt-file` or `--info` / `--info-file` differs from the active version, the server automatically appends `v2` / `v3` inside that `text` node's prompt iterator (`--prompt-version-action append`, default), switches `activePromptVersionId` to it, reuses the connected `video-generation` node & reference edges, and stacks the new output video neatly in the same output column.
+  - Pass `--prompt-version-action none` to run a one-off prompt override without adding a version, or `overwrite` to update the active version in place.
+  - Without `--prompt-file`, it directly triggers generation from the active version:
   ```bash
   python3 scripts/sucanvas_h3.py nodes --canvas-id "<canvasId>"
   python3 scripts/sucanvas_h3.py submit \
     --canvas-id "<canvasId>" \
     --source-node-id "<nodeId>" \
+    --prompt-file /path/to/prompt_v2.txt \
     --preset "<exact-preset-name>" \
-    --request-id "stable-unique-id"
+    --request-id "stable-unique-id-v2"
   ```
 
 ### 4. Wait safely without duplicate submissions

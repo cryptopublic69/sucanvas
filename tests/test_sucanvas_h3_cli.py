@@ -348,7 +348,7 @@ class TestSucanvasH3Cli(unittest.TestCase):
         self.assertEqual(self.state.last_submit["createCanvas"]["name"], "新建画布任务")
         self.assertEqual(self.state.last_submit["mode"], "standalone")
 
-        # 2. Submit with --source-node-id (node mode)
+        # 2. Submit with --source-node-id (node mode) + prompt version iteration
         node_sub = run_cli(
             [
                 "submit",
@@ -356,6 +356,10 @@ class TestSucanvasH3Cli(unittest.TestCase):
                 "canvas:1",
                 "--source-node-id",
                 "node:text-1",
+                "--prompt",
+                "Updated v2 prompt",
+                "--prompt-version-action",
+                "append",
                 "--preset",
                 "电影级预设",
                 "--request-id",
@@ -366,6 +370,8 @@ class TestSucanvasH3Cli(unittest.TestCase):
         self.assertEqual(node_sub.returncode, 0, node_sub.stderr)
         self.assertEqual(self.state.last_submit["mode"], "node")
         self.assertEqual(self.state.last_submit["sourceNodeId"], "node:text-1")
+        self.assertEqual(self.state.last_submit["prompt"], "Updated v2 prompt")
+        self.assertEqual(self.state.last_submit["promptVersionAction"], "append")
 
         # 3. Cancel job
         cancel = run_cli(["cancel", "--job-id", "job:1"], self.env)
