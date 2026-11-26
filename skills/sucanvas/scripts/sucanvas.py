@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Zero-dependency cross-platform CLI for SuCanvas Web H3 video generation (/v1/agent/*)."""
+"""Zero-dependency cross-platform CLI for SuCanvas Web (/v1/agent/*)."""
 
 from __future__ import annotations
 
@@ -19,8 +19,9 @@ import uuid
 from typing import Any
 
 
-DEFAULT_CONFIG_PATH = pathlib.Path.home() / ".config" / "sucanvas-h3" / "config.json"
-DEFAULT_DOWNLOAD_DIR = pathlib.Path.home() / ".cache" / "sucanvas-h3" / "downloads"
+DEFAULT_CONFIG_PATH = pathlib.Path.home() / ".config" / "sucanvas" / "config.json"
+LEGACY_CONFIG_PATH = pathlib.Path.home() / ".config" / "sucanvas-h3" / "config.json"
+DEFAULT_DOWNLOAD_DIR = pathlib.Path.home() / ".cache" / "sucanvas" / "downloads"
 MANIFEST_FILENAME = "manifest.json"
 
 
@@ -81,8 +82,13 @@ def _mask_token(token: str) -> str:
 
 
 def _resolve_runtime_settings(args: argparse.Namespace) -> dict[str, Any]:
-    cfg_path = _config_path(getattr(args, "config", None))
-    file_cfg = _load_config_file(cfg_path)
+    override = getattr(args, "config", None)
+    env_path = os.environ.get("SUCANVAS_CONFIG", "").strip()
+    cfg_path = _config_path(override)
+    if not override and not env_path and not cfg_path.is_file() and LEGACY_CONFIG_PATH.is_file():
+        file_cfg = _load_config_file(LEGACY_CONFIG_PATH)
+    else:
+        file_cfg = _load_config_file(cfg_path)
 
     base_url = (
         getattr(args, "base_url", None)
@@ -789,8 +795,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--insecure", action="store_true", help="Skip TLS certificate verification")
 
     parser = argparse.ArgumentParser(
-        prog="sucanvas_h3.py",
-        description="Cross-agent CLI for SuCanvas Web H3 video generation (/v1/agent/*).",
+        prog="sucanvas.py",
+        description="Cross-agent CLI for SuCanvas Web (/v1/agent/*): canvases, assets, H3/external video & future image workflows.",
         parents=[common],
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -835,7 +841,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_upload.add_argument("--y", type=float, help="Optional node Y coordinate")
     p_upload.set_defaults(func=cmd_upload)
 
-    p_submit = sub.add_parser("submit", help="Submit async H3 video generation job", parents=[common])
+    p_submit = sub.add_parser("submit", help="Submit async generation job", parents=[common])
     p_submit.add_argument("--canvas-id", help="Existing target canvas ID")
     p_submit.add_argument("--new-canvas", help="Create a new canvas with this name before submitting")
     p_submit.add_argument("--new-canvas-shared", action="store_true", help="Make the newly created canvas shared")

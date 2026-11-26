@@ -1,6 +1,6 @@
-# SuCanvas Web Agent Video API (`/v1/agent/*`)
+# SuCanvas Web Agent API (`/v1/agent/*`)
 
-All endpoints require `Authorization: Bearer <token>` (from SuCanvas Web `data/web-integration-token`). Requests do not require cookies or browser `Origin` headers.
+All endpoints require `Authorization: Bearer <token>` (from SuCanvas Web `data/web-integration-token`). Requests do not require cookies or browser `Origin` headers. Built for unified SuCanvas canvas automation across MiniMax H3 video, external Seedance 2.0/2.5 video platforms, and future image/media generation workflows.
 
 ## Endpoints
 

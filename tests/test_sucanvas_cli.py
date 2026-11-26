@@ -13,9 +13,9 @@ import unittest
 CLI_PATH = (
     pathlib.Path(__file__).resolve().parent.parent
     / "skills"
-    / "sucanvas-h3-video"
+    / "sucanvas"
     / "scripts"
-    / "sucanvas_h3.py"
+    / "sucanvas.py"
 )
 
 
@@ -174,7 +174,7 @@ def run_cli(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess
     )
 
 
-class TestSucanvasH3Cli(unittest.TestCase):
+class TestSucanvasCli(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.tmp.name)
@@ -490,6 +490,10 @@ class TestSucanvasH3Cli(unittest.TestCase):
         self.assertEqual(dl.returncode, 0, dl.stderr)
         dl_path = pathlib.Path(json.loads(dl.stdout)["downloaded"][0]["filePath"])
         self.assertEqual(dl_path.read_bytes(), self.state.video_bytes)
+
+        help_res = run_cli(["--help"], self.env)
+        self.assertEqual(help_res.returncode, 0, help_res.stderr)
+        self.assertIn("sucanvas.py", help_res.stdout)
 
 
 if __name__ == "__main__":
