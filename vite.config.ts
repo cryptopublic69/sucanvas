@@ -50,7 +50,10 @@ export default defineConfig(async ({ mode, command }) => {
       handler: (html: string) => html.replace("</head>", '<link rel="icon" type="image/x-icon" href="/src-tauri/icons/icon.ico" />\n  </head>'),
     },
   }] : []), ...(webDevelopment ? [webDevOriginGuard()] : [])],
-  define: webDevelopment ? { "import.meta.env.SUCANVAS_WEB_DEV_BACKEND": JSON.stringify(new URL(webBackend).origin) } : {},
+  define: {
+    ...(webDevelopment ? { "import.meta.env.SUCANVAS_WEB_DEV_BACKEND": JSON.stringify(new URL(webBackend).origin) } : {}),
+    __SUCANVAS_WEB_ASSET_VERSION__: JSON.stringify(mode === "web" && command === "build" ? assetVersion : ""),
+  },
   resolve: mode === "web" ? {
     alias: Object.fromEntries([
       "@tauri-apps/api/core", "@tauri-apps/api/event", "@tauri-apps/api/webview",

@@ -56,7 +56,8 @@ const WORKFLOW_MODULE_DEFAULTS_KEY: &str = "infinite-canvas:workflow-module-defa
 const DEFAULT_H3_DIFFUSION_MODEL_NAME: &str =
     r"MinimaxH3\minimax_h3_fl2va_pruned_int8_convrot.safetensors";
 const VIDEO_GENERATION_NODE_WIDTH: f64 = 460.0;
-const VIDEO_GENERATION_NODE_HEIGHT: f64 = 356.0;
+const VIDEO_GENERATION_NODE_HEIGHT: f64 = 840.0;
+const SCENE_ROW_VERTICAL_GAP: f64 = 168.0;
 const GENERATED_VIDEO_PREVIEW_WIDTH: f64 = 420.0;
 const GENERATED_VIDEO_PORTRAIT_PREVIEW_WIDTH: f64 = 300.0;
 const GENERATED_VIDEO_FOOTER_HEIGHT: f64 = 38.0;
@@ -3260,20 +3261,28 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         }
     }
 
+    let (preview_w, preview_h) = preview_dimensions_for_aspect_ratio(&submit_input.aspect_ratio);
+
     // Bottom-most existing video-generation node used for column alignment of new scenes.
     let existing_bottom_generator = canvas_snapshot
         .nodes
         .iter()
         .filter(|n| n.kind == "video-generation")
-        .max_by(|a, b| (a.y + a.height).total_cmp(&(b.y + b.height)))
+        .max_by(|a, b| {
+            (a.y + a.height)
+                .total_cmp(&(b.y + b.height))
+                .then_with(|| a.created_at.cmp(&b.created_at))
+        })
         .cloned();
 
-    // Synchronize row top-edge Y across text and video-generation nodes when creating a new row.
+    // Synchronize row top-edge Y across text, video-generation, and first generated-video columns.
     let create_prompt_node = entry_mode == "standalone" && input.create_prompt_node.unwrap_or(true);
     let (synced_text_pos, synced_gen_pos): (Option<(f64, f64)>, Option<(f64, f64)>) =
         if let Some(ref pg) = existing_bottom_generator {
-            let base_y = pg.y + pg.height + 60.0;
+            let effective_pg_height = pg.height.max(VIDEO_GENERATION_NODE_HEIGHT);
+            let base_y = pg.y + effective_pg_height + SCENE_ROW_VERTICAL_GAP;
             let gen_x = pg.x;
+            let preview_x = gen_x + VIDEO_GENERATION_NODE_WIDTH + 48.0;
             let connected_text = canvas_snapshot
                 .edges
                 .iter()
@@ -3292,6 +3301,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
 
             let mut row_y = base_y;
             for _ in 0..10 {
+                let start_y = row_y;
                 if create_prompt_node {
                     let (_, ty) = place_aligned_in_column(
                         &canvas_snapshot.nodes,
@@ -3299,9 +3309,9 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
                         row_y,
                         460.0,
                         320.0,
-                        48.0,
+                        SCENE_ROW_VERTICAL_GAP,
                     );
-                    row_y = ty;
+                    row_y = row_y.max(ty);
                 }
                 if generator_node_id.is_empty() {
                     let (_, gy) = place_aligned_in_column(
@@ -3310,14 +3320,20 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
                         row_y,
                         VIDEO_GENERATION_NODE_WIDTH,
                         VIDEO_GENERATION_NODE_HEIGHT,
-                        60.0,
+                        SCENE_ROW_VERTICAL_GAP,
                     );
-                    if (gy - row_y).abs() < 0.5 || !create_prompt_node {
-                        row_y = gy;
-                        break;
-                    }
-                    row_y = gy;
-                } else {
+                    row_y = row_y.max(gy);
+                    let (_, py) = place_aligned_in_column(
+                        &canvas_snapshot.nodes,
+                        preview_x,
+                        row_y,
+                        preview_w,
+                        preview_h,
+                        SCENE_ROW_VERTICAL_GAP,
+                    );
+                    row_y = row_y.max(py);
+                }
+                if (row_y - start_y).abs() < 0.5 {
                     break;
                 }
             }
@@ -3549,7 +3565,6 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         &audio_refs,
         &video_refs,
     );
-    let (preview_w, preview_h) = preview_dimensions_for_aspect_ratio(&submit_input.aspect_ratio);
     let latest_generator_output = canvas_snapshot
         .nodes
         .iter()
@@ -4252,6 +4267,7 @@ mod tests {
                 events: tokio::sync::broadcast::channel(8).0,
             })),
             media,
+            asset_version: None,
         };
         let app = router(state.clone()).layer(middleware::from_fn_with_state(
             state.clone(),
@@ -4803,13 +4819,15 @@ mod tests {
 
         // Top-edge alignment on each row, horizontal right continuation for iterated outputs,
         // and vertical column alignment across scenes.
+        assert_eq!(gen1.height, 840.0);
+        assert_eq!(gen2.height, 840.0);
         assert_eq!(text1.y, gen1.y);
         assert_eq!(out1.y, gen1.y);
         assert_eq!(out2.y, out1.y);
         assert!(out2.x >= out1.x + out1.width);
         assert_eq!(text2.x, text1.x);
         assert_eq!(gen2.x, gen1.x);
-        assert!(gen2.y > gen1.y + gen1.height);
+        assert!(gen2.y >= gen1.y + gen1.height + 168.0);
         assert_eq!(text2.y, gen2.y);
         assert_eq!(out_row2.y, gen2.y);
 

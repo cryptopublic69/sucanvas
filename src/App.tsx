@@ -8593,7 +8593,12 @@ function CanvasWorkspace() {
             let records = event.payload;
             const activeCanvasId = activeProjectIdRef.current;
             const activeRecords = records.filter((record) => record.canvasId === activeCanvasId);
-            if (activeCanvasId && activeRecords.length) {
+            const preserveServerBatchPlacement = activeRecords.every((record) => (
+              record.source === "agent" ||
+              record.source === "comfyui-placeholder" ||
+              record.source === "comfyui"
+            ));
+            if (activeCanvasId && activeRecords.length && !preserveServerBatchPlacement) {
               const minX = Math.min(...activeRecords.map((record) => record.x));
               const minY = Math.min(...activeRecords.map((record) => record.y));
               const maxX = Math.max(...activeRecords.map((record) => record.x + record.width));

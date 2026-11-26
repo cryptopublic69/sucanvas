@@ -32,7 +32,7 @@ use crate::{
 };
 use axum::{
     body::{to_bytes, Body},
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Query, State},
     http::{header, HeaderMap, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{
@@ -71,6 +71,31 @@ pub(crate) struct WebState {
     comfy_relays: Arc<ws_handover::Registry>,
     presence: Arc<presence::Presence>,
     media: Arc<media_cleanup::MediaRegistry>,
+    asset_version: Option<String>,
+}
+
+fn read_asset_version(executable_root: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read(executable_root.join("build-info.json")).ok()?;
+    let value: Value = serde_json::from_slice(&raw).ok()?;
+    value
+        .get("assetVersion")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn sse_client_is_stale(expected: Option<&str>, actual: Option<&str>) -> bool {
+    let Some(expected) = expected.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    actual.map(str::trim).filter(|s| !s.is_empty()) != Some(expected)
+}
+
+#[derive(serde::Deserialize)]
+struct EventsQuery {
+    #[serde(rename = "assetVersion")]
+    asset_version: Option<String>,
 }
 
 impl WebState {
@@ -302,6 +327,7 @@ pub async fn run() -> Result<(), String> {
         tasks: Arc::new(tasks::Tasks::default()),
         agent_jobs,
         comfy_relays: Arc::default(),
+        asset_version: read_asset_version(&executable_root),
     };
     // Presence: tabs without a heartbeat for presence::TIMEOUT_SECONDS leave.
     let sweeper = state.presence.clone();
@@ -566,7 +592,28 @@ fn deliverable_with(
         || event_name.is_some_and(crate::colab_channel::web::is_colab_event)
         || session.role == users::Role::Admin
 }
-async fn events(State(state): State<WebState>, headers: HeaderMap) -> impl IntoResponse {
+async fn events(
+    State(state): State<WebState>,
+    Query(query): Query<EventsQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if state.auth.authenticated(&headers)
+        && sse_client_is_stale(
+            state.asset_version.as_deref(),
+            query.asset_version.as_deref(),
+        )
+    {
+        let resync = futures_util::stream::once(async {
+            Ok::<_, Infallible>(
+                Event::default().data(
+                    json!({"event": "canvas://resync", "payload": null}).to_string(),
+                ),
+            )
+        });
+        return Sse::new(resync)
+            .keep_alive(KeepAlive::default())
+            .into_response();
+    }
     let receiver = state.handle.events.subscribe();
     let stream = futures_util::stream::unfold(
         (receiver, state, headers),
@@ -612,7 +659,9 @@ async fn events(State(state): State<WebState>, headers: HeaderMap) -> impl IntoR
             Event::default().data(json!({"event": "web://ready", "payload": null}).to_string()),
         )
     });
-    Sse::new(ready.chain(stream)).keep_alive(KeepAlive::default())
+    Sse::new(ready.chain(stream))
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 async fn read_settings(State(state): State<WebState>) -> impl IntoResponse {
     let state = state.connection_snapshot();
@@ -693,5 +742,15 @@ mod tests {
         assert!(deliverable_with(store, &world.admin, &unrouted));
         let resync = json!({"event": "canvas://resync", "payload": {}});
         assert!(deliverable_with(store, &world.bob, &resync));
+    }
+
+    #[test]
+    fn sse_client_is_stale_detects_missing_or_mismatched_version() {
+        assert!(!sse_client_is_stale(None, None));
+        assert!(!sse_client_is_stale(None, Some("v1")));
+        assert!(!sse_client_is_stale(Some("v2"), Some("v2")));
+        assert!(sse_client_is_stale(Some("v2"), None));
+        assert!(sse_client_is_stale(Some("v2"), Some("")));
+        assert!(sse_client_is_stale(Some("v2"), Some("v1")));
     }
 }

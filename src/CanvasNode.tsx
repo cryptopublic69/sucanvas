@@ -5449,6 +5449,7 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const generatedVideoPromptTitle = generatedVideoSnapshot?.promptVersionLabel
     ? `${generatedVideoPromptBaseTitle || "提示词"} · ${generatedVideoSnapshot.promptVersionLabel}`
     : generatedVideoPromptBaseTitle;
+  const generatedVideoPromptVersionLabel = generatedVideoSnapshot?.promptVersionLabel?.trim() || "";
   const generatedImageSeed = isGeneratedImage && typeof record.content.seed === "string"
     ? record.content.seed
     : "";
@@ -8281,8 +8282,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                   )}
                   <section className="generated-video-prompt-info">
                     <div>
-                      <h4 title={generatedVideoPromptTitle || "提示词"}>
-                        提示词{generatedVideoPromptTitle ? ` ${generatedVideoPromptTitle}` : ""}
+                      <h4 title={generatedVideoPromptVersionLabel ? `提示词 ${generatedVideoPromptVersionLabel}` : "提示词"}>
+                        提示词{generatedVideoPromptVersionLabel ? ` ${generatedVideoPromptVersionLabel}` : ""}
                       </h4>
                       <button
                         type="button"

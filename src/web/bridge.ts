@@ -6,6 +6,8 @@ import { generationRequest, WebHttpError } from "./generationRequest";
 import { readLocalVideoMetadata } from "./localVideoMetadata";
 import { rememberUploadedVideoMetadata } from "../media/uploadedVideoMetadata";
 const devBackend = import.meta.env.DEV ? import.meta.env.SUCANVAS_WEB_DEV_BACKEND ?? "" : "";
+declare const __SUCANVAS_WEB_ASSET_VERSION__: string | undefined;
+const buildAssetVersion = typeof __SUCANVAS_WEB_ASSET_VERSION__ === "string" ? __SUCANVAS_WEB_ASSET_VERSION__ : "";
 let serverOrigin = devBackend;
 type DragDropEvent =
   | { type: "enter" | "drop"; paths: string[]; position: { x: number; y: number } }
@@ -47,7 +49,10 @@ export async function request<T>(path: string, options?: RequestInit, timeoutMs?
 }
 function connectEvents(): Promise<void> {
   if (eventReady) return eventReady;
-  events = new EventSource("/api/events");
+  const eventsUrl = buildAssetVersion
+    ? `/api/events?assetVersion=${encodeURIComponent(buildAssetVersion)}`
+    : "/api/events";
+  events = new EventSource(eventsUrl);
   eventReady = new Promise<void>((resolve, reject) => {
     const timeout = window.setTimeout(() => { reject(new Error("无法连接任务通知服务")); closeEvents(); }, 15000);
     events!.onopen = () => { window.clearTimeout(timeout); resolve(); };
