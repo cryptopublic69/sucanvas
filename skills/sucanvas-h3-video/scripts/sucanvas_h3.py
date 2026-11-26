@@ -556,13 +556,18 @@ def cmd_upload(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, 
     return json.loads(resp_bytes.decode("utf-8"))
 
 
+EXTERNAL_CHANNELS = ("jimeng-cn", "dreamina-jp", "libtv", "lovart")
+ALL_CHANNELS = ("local", "colab", *EXTERNAL_CHANNELS)
+
+
 def cmd_submit(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, Any]:
     if bool(args.canvas_id) == bool(args.new_canvas):
         raise CliError("Specify exactly one of --canvas-id or --new-canvas.")
 
+    is_external = args.channel in EXTERNAL_CHANNELS
     payload: dict[str, Any] = {
         "requestId": args.request_id or f"cli-job:{uuid.uuid4()}",
-        "kind": "h3-video",
+        "kind": "external-video" if is_external else "h3-video",
         "channel": args.channel,
     }
     if args.canvas_id:
@@ -613,6 +618,14 @@ def cmd_submit(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, 
         payload["colabSampler"] = args.colab_sampler
     if args.secondary_sampling:
         payload["secondarySamplingEnabled"] = True
+    if args.model:
+        payload["modelId"] = args.model
+    if args.resolution:
+        payload["resolution"] = args.resolution
+    if args.provider_mode:
+        payload["externalMode"] = args.provider_mode
+    if args.sound is not None:
+        payload["enableSound"] = bool(args.sound)
     if args.image:
         payload["images"] = [_parse_image_spec(item) for item in args.image]
     if args.audio:
@@ -832,10 +845,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="When iterating via --source-node-id with new prompt/info: append (default, adds v2/v3), overwrite, or none",
     )
     p_submit.add_argument("--no-prompt-node", action="store_true", help="Do not create a prompt node in standalone mode")
-    p_submit.add_argument("--preset", help="Preset name or ID (discover via `capabilities`)")
-    p_submit.add_argument("--channel", default="local", choices=["local", "colab"], help="Execution channel")
+    p_submit.add_argument("--preset", help="Preset name or ID for local/colab H3 (discover via `capabilities`)")
+    p_submit.add_argument(
+        "--channel",
+        default="local",
+        choices=list(ALL_CHANNELS),
+        help="Execution channel: local, colab, jimeng-cn, dreamina-jp, libtv, or lovart",
+    )
     p_submit.add_argument("--workflow-module-id", help="Explicit local workflow module ID")
-    p_submit.add_argument("--duration", type=float, help="Duration seconds (2..15)")
+    p_submit.add_argument(
+        "--model",
+        help="External platform model ID/label (e.g. seedance_2.5, seedance_2.0_vip, Seedance 2.5, generate_video_seedance_v2_5)",
+    )
+    p_submit.add_argument(
+        "--resolution",
+        help="External platform resolution (e.g. 480p, 720p, 1080p, 4k, auto)",
+    )
+    p_submit.add_argument(
+        "--provider-mode",
+        help="External platform generation mode (e.g. auto, t2v, first_last_frame, m2v, text2video, image2video, mixed2video)",
+    )
+    sound_group = p_submit.add_mutually_exclusive_group()
+    sound_group.add_argument(
+        "--sound",
+        dest="sound",
+        action="store_true",
+        default=None,
+        help="Enable native audio output on supported external platforms (default on)",
+    )
+    sound_group.add_argument(
+        "--no-sound",
+        dest="sound",
+        action="store_false",
+        help="Mute native audio output on supported external platforms (e.g. libtv)",
+    )
+    p_submit.add_argument("--duration", type=float, help="Duration seconds (2..15 for H3, model-specific up to 30s for Seedance 2.5)")
     p_submit.add_argument("--aspect-ratio", help="Aspect ratio (16:9, 9:16, 4:3, 3:4, 3:2, 2:3, 1:1)")
     p_submit.add_argument("--seed-mode", choices=["random", "fixed"], help="Seed mode")
     p_submit.add_argument("--seed", help="Fixed seed value")

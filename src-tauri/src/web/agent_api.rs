@@ -22,6 +22,17 @@ use crate::{
         },
     },
     commands,
+    external_providers::{
+        catalog::{
+            models_for_provider, probe_all_providers, resolve_lovart_credentials,
+            resolve_model_spec, resolve_provider_binary, ExternalVideoModelSpec, ProviderId,
+        },
+        runner::{
+            cancel_video as cancel_external_video, submit_video as submit_external_video,
+            ExternalVideoSubmitInput,
+        },
+        PROVIDER_OUTPUTS_DIR,
+    },
     models::{
         ComfyOutputFile, ComfySubmitInput, CreateEdgeInput, CreateNodeInput, H3StyleLora,
         NodeRecord, UpdateNodeInput, WorkspaceSnapshot,
@@ -248,10 +259,11 @@ impl AgentJobStore {
                     prompt_id = ?3,
                     output_node_ids_json = ?4,
                     outputs_json = ?5,
-                    seed = ?6,
-                    execution_elapsed_seconds = ?7,
-                    error = ?8,
-                    updated_at = ?9
+                    snapshot_json = ?6,
+                    seed = ?7,
+                    execution_elapsed_seconds = ?8,
+                    error = ?9,
+                    updated_at = ?10
                  WHERE id = ?1",
                 params![
                     job.id,
@@ -259,6 +271,7 @@ impl AgentJobStore {
                     job.prompt_id,
                     serde_json::to_string(&job.output_node_ids).unwrap_or_else(|_| "[]".into()),
                     serde_json::to_string(&job.outputs).unwrap_or_else(|_| "[]".into()),
+                    serde_json::to_string(&job.snapshot).unwrap_or_else(|_| "{}".into()),
                     job.seed,
                     job.execution_elapsed_seconds,
                     job.error,
@@ -674,29 +687,54 @@ async fn get_capabilities(State(state): State<WebState>) -> Response {
         })
         .collect::<Vec<_>>();
     let colab_status = inspect_colab_profile(&state, false).await;
+    let external_providers = probe_all_providers(&state.executable_root, &state.core.data_dir).await;
+    let mut channels = Map::new();
+    channels.insert(
+        "local".to_owned(),
+        json!({
+            "configured": !state.config.comfy_url.trim().is_empty(),
+            "inputDirectoryConfigured": !state.config.comfy_input_directory.trim().is_empty(),
+            "outputDirectoryConfigured": !state.config.comfy_output_directory.trim().is_empty(),
+        }),
+    );
+    channels.insert(
+        "colab".to_owned(),
+        json!({
+            "configured": colab_status.configured,
+            "reachable": colab_status.reachable,
+            "available": colab_status.available,
+            "effectiveProfile": colab_status.effective_profile,
+            "label": colab_status.label,
+            "workflowLabel": COLAB_WORKFLOW_LABEL,
+            "diffusionModelName": colab_status.diffusion_model_name,
+            "allowedLoras": colab_status.allowed_loras,
+            "samplerOptions": colab_status.sampler_options,
+            "error": colab_status.error,
+        }),
+    );
+    for p in &external_providers {
+        let default_model_id = p.models.first().map(|m| m.id.as_str()).unwrap_or("");
+        let model_ids = p.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>();
+        channels.insert(
+            p.provider.as_str().to_owned(),
+            json!({
+                "label": p.label,
+                "installed": p.installed,
+                "loggedIn": p.logged_in,
+                "ready": p.ready,
+                "statusText": p.status_text,
+                "error": p.error,
+                "defaultModelId": default_model_id,
+                "modelIds": model_ids,
+            }),
+        );
+    }
     Json(json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
-        "kinds": ["h3-video"],
-        "channels": {
-            "local": {
-                "configured": !state.config.comfy_url.trim().is_empty(),
-                "inputDirectoryConfigured": !state.config.comfy_input_directory.trim().is_empty(),
-                "outputDirectoryConfigured": !state.config.comfy_output_directory.trim().is_empty(),
-            },
-            "colab": {
-                "configured": colab_status.configured,
-                "reachable": colab_status.reachable,
-                "available": colab_status.available,
-                "effectiveProfile": colab_status.effective_profile,
-                "label": colab_status.label,
-                "workflowLabel": COLAB_WORKFLOW_LABEL,
-                "diffusionModelName": colab_status.diffusion_model_name,
-                "allowedLoras": colab_status.allowed_loras,
-                "samplerOptions": colab_status.sampler_options,
-                "error": colab_status.error,
-            }
-        },
+        "kinds": ["h3-video", "external-video"],
+        "channels": channels,
+        "externalProviders": external_providers,
         "workflows": workflows,
         "presets": {
             "local": {
@@ -1044,6 +1082,26 @@ fn summarize_node(state: &WebState, node: &NodeRecord, edges: &[crate::models::E
             .get("generationChannel")
             .cloned()
             .unwrap_or(Value::Null);
+        summary["externalProvider"] = content
+            .get("externalProvider")
+            .cloned()
+            .unwrap_or(Value::Null);
+        summary["externalModelId"] = content
+            .get("externalModelId")
+            .cloned()
+            .unwrap_or(Value::Null);
+        summary["externalResolution"] = content
+            .get("externalResolution")
+            .cloned()
+            .unwrap_or(Value::Null);
+        summary["externalMode"] = content
+            .get("externalMode")
+            .cloned()
+            .unwrap_or(Value::Null);
+        summary["externalEnableSound"] = content
+            .get("externalEnableSound")
+            .cloned()
+            .unwrap_or(Value::Null);
         summary["aspectRatio"] = content
             .get("generationAspectRatio")
             .cloned()
@@ -1060,6 +1118,19 @@ fn summarize_node(state: &WebState, node: &NodeRecord, edges: &[crate::models::E
             .unwrap_or(Value::Null);
         summary["assetPath"] = content.get("assetPath").cloned().unwrap_or(Value::Null);
         summary["videoUrl"] = content.get("videoUrl").cloned().unwrap_or(Value::Null);
+        summary["externalProvider"] = content
+            .get("externalProvider")
+            .cloned()
+            .unwrap_or(Value::Null);
+        summary["externalModelId"] = content
+            .get("externalModelId")
+            .cloned()
+            .unwrap_or(Value::Null);
+        summary["externalModelLabel"] = content
+            .get("externalModelLabel")
+            .cloned()
+            .unwrap_or(Value::Null);
+        summary["costCredits"] = content.get("costCredits").cloned().unwrap_or(Value::Null);
         summary["generationPlaceholder"] = content
             .get("generationPlaceholder")
             .cloned()
@@ -1517,6 +1588,14 @@ struct SubmitJobInput {
     #[serde(default)]
     colab_sampler: Option<String>,
     #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    resolution: Option<String>,
+    #[serde(default)]
+    external_mode: Option<String>,
+    #[serde(default)]
+    enable_sound: Option<bool>,
+    #[serde(default)]
     images: Vec<MediaRefInput>,
     #[serde(default)]
     audios: Vec<MediaRefInput>,
@@ -1633,6 +1712,7 @@ fn resolve_physical_asset_path(state: &WebState, asset_ref: &str) -> Result<Stri
             .core
             .data_dir
             .join(crate::colab_channel::COLAB_OUTPUTS_DIR),
+        state.core.data_dir.join(PROVIDER_OUTPUTS_DIR),
     ];
     if !state.config.comfy_input_directory.trim().is_empty() {
         let input_dir = PathBuf::from(&state.config.comfy_input_directory);
@@ -1690,6 +1770,319 @@ fn normalize_output_asset_path(output_value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+#[derive(Clone, Debug, Default)]
+struct ExternalNodeDefaults {
+    model_id: Option<String>,
+    resolution: Option<String>,
+    ext_mode: Option<String>,
+    enable_sound: Option<bool>,
+    aspect_ratio: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedExternalConfig {
+    provider: ProviderId,
+    spec: ExternalVideoModelSpec,
+    resolution: String,
+    ext_mode: String,
+    enable_sound: bool,
+    duration_seconds: i64,
+    aspect_ratio: String,
+}
+
+fn non_empty_trimmed(val: Option<&str>) -> Option<String> {
+    val.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn extract_external_node_defaults(content: &Value) -> ExternalNodeDefaults {
+    ExternalNodeDefaults {
+        model_id: non_empty_trimmed(content.get("externalModelId").and_then(Value::as_str)),
+        resolution: non_empty_trimmed(content.get("externalResolution").and_then(Value::as_str)),
+        ext_mode: non_empty_trimmed(content.get("externalMode").and_then(Value::as_str)),
+        enable_sound: content.get("externalEnableSound").and_then(Value::as_bool),
+        aspect_ratio: non_empty_trimmed(content.get("generationAspectRatio").and_then(Value::as_str)),
+    }
+}
+
+fn match_canonical_option(options: &[String], requested: &str) -> Option<String> {
+    options
+        .iter()
+        .find(|opt| opt.eq_ignore_ascii_case(requested.trim()))
+        .cloned()
+}
+
+fn check_external_provider_readiness(state: &WebState, provider: ProviderId) -> Result<(), String> {
+    if resolve_provider_binary(provider, &state.executable_root).is_none() {
+        return Err(format!(
+            "服务器未找到 {} 对应的 CLI/脚本（请先在服务器配置并登录）",
+            provider.label()
+        ));
+    }
+    if provider == ProviderId::Lovart && resolve_lovart_credentials(&state.core.data_dir).is_none() {
+        return Err("Lovart 凭据未配置（请先在服务器设置 LOVART_API_KEY / SK）".to_owned());
+    }
+    Ok(())
+}
+
+fn resolve_external_submit_config(
+    state: &WebState,
+    provider: ProviderId,
+    input: &SubmitJobInput,
+    node_defaults: &ExternalNodeDefaults,
+    detected_duration: Option<f64>,
+    prompt_text: Option<&str>,
+    image_count: usize,
+    video_count: usize,
+    audio_count: usize,
+) -> Result<ResolvedExternalConfig, String> {
+    check_external_provider_readiness(state, provider)?;
+
+    let models = models_for_provider(provider);
+    let spec = if let Some(requested_model) = non_empty_trimmed(input.model_id.as_deref()) {
+        models
+            .iter()
+            .find(|m| {
+                m.id.eq_ignore_ascii_case(&requested_model)
+                    || m.label.eq_ignore_ascii_case(&requested_model)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                let ids = models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(", ");
+                format!(
+                    "平台 {} 不支持模型 `{}`（可选：{}）",
+                    provider.label(),
+                    requested_model,
+                    ids
+                )
+            })?
+    } else {
+        resolve_model_spec(provider, node_defaults.model_id.as_deref())
+    };
+
+    let resolution = if let Some(requested_res) = non_empty_trimmed(input.resolution.as_deref()) {
+        match_canonical_option(&spec.resolutions, &requested_res).ok_or_else(|| {
+            format!(
+                "{} · {} 不支持分辨率 `{}`（可选：{}）",
+                provider.label(),
+                spec.label,
+                requested_res,
+                spec.resolutions.join(", ")
+            )
+        })?
+    } else if let Some(node_res) = node_defaults
+        .resolution
+        .as_deref()
+        .and_then(|r| match_canonical_option(&spec.resolutions, r))
+    {
+        node_res
+    } else {
+        spec.default_resolution.clone()
+    };
+
+    let ext_mode = if let Some(requested_mode) = non_empty_trimmed(input.external_mode.as_deref()) {
+        match_canonical_option(&spec.modes, &requested_mode).ok_or_else(|| {
+            format!(
+                "{} · {} 不支持生成模式 `{}`（可选：{}）",
+                provider.label(),
+                spec.label,
+                requested_mode,
+                spec.modes.join(", ")
+            )
+        })?
+    } else if let Some(node_mode) = node_defaults
+        .ext_mode
+        .as_deref()
+        .and_then(|m| match_canonical_option(&spec.modes, m))
+    {
+        node_mode
+    } else {
+        spec.modes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "auto".to_owned())
+    };
+
+    let enable_sound = input.enable_sound.or(node_defaults.enable_sound).unwrap_or(true);
+    let duration_seconds = (input
+        .duration_seconds
+        .or(detected_duration)
+        .unwrap_or(spec.default_duration as f64)
+        .round() as i64)
+        .clamp(spec.min_duration, spec.max_duration);
+
+    let aspect_ratio = if let Some(requested_ratio) = non_empty_trimmed(input.aspect_ratio.as_deref())
+    {
+        match_canonical_option(&spec.aspect_ratios, &requested_ratio).ok_or_else(|| {
+            format!(
+                "{} · {} 不支持画幅比 `{}`（可选：{}）",
+                provider.label(),
+                spec.label,
+                requested_ratio,
+                spec.aspect_ratios.join(", ")
+            )
+        })?
+    } else {
+        node_defaults
+            .aspect_ratio
+            .clone()
+            .unwrap_or_else(|| "16:9".to_owned())
+    };
+
+    if let Some(prompt) = prompt_text {
+        let prompt_chars = prompt.trim().chars().count();
+        if let Some(limit) = spec.max_prompt_length {
+            if prompt_chars > limit {
+                return Err(format!(
+                    "提示词长度（{} 字）超过 {} 上限（{} 字），请精简提示词或切换至 Seedance 2.5（支持 15000 字）",
+                    prompt_chars, spec.label, limit
+                ));
+            }
+        }
+    }
+
+    if image_count > spec.max_images {
+        return Err(format!(
+            "{} · {} 最多支持 {} 张参考图，当前传入 {} 张",
+            provider.label(),
+            spec.label,
+            spec.max_images,
+            image_count
+        ));
+    }
+    if video_count > spec.max_videos {
+        return Err(format!(
+            "{} · {} 最多支持 {} 段参考视频，当前传入 {} 段",
+            provider.label(),
+            spec.label,
+            spec.max_videos,
+            video_count
+        ));
+    }
+    if audio_count > spec.max_audios {
+        return Err(format!(
+            "{} · {} 最多支持 {} 段参考音频，当前传入 {} 段",
+            provider.label(),
+            spec.label,
+            spec.max_audios,
+            audio_count
+        ));
+    }
+
+    Ok(ResolvedExternalConfig {
+        provider,
+        spec,
+        resolution,
+        ext_mode,
+        enable_sound,
+        duration_seconds,
+        aspect_ratio,
+    })
+}
+
+fn apply_external_fields_to_map(map: &mut Map<String, Value>, cfg: &ResolvedExternalConfig) {
+    map.insert("externalProvider".into(), json!(cfg.provider.as_str()));
+    map.insert("externalProviderLabel".into(), json!(cfg.provider.label()));
+    map.insert("externalModelId".into(), json!(cfg.spec.id));
+    map.insert("externalModelLabel".into(), json!(cfg.spec.label));
+    map.insert("externalResolution".into(), json!(cfg.resolution));
+    map.insert("externalMode".into(), json!(cfg.ext_mode));
+    map.insert("externalEnableSound".into(), json!(cfg.enable_sound));
+}
+
+fn map_external_status(ext_status: &str) -> &'static str {
+    match ext_status {
+        "queued" => "queued",
+        "running" | "confirming" | "awaiting_confirmation" => "running",
+        "succeeded" => "succeeded",
+        "failed" => "failed",
+        "cancelled" => "cancelled",
+        _ => "running",
+    }
+}
+
+fn sync_external_agent_job(state: &WebState, job: &mut AgentJobRecord) {
+    if ProviderId::from_str(&job.channel).is_none() {
+        return;
+    }
+    let ext_id = job
+        .prompt_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            job.snapshot
+                .get("externalJobId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        });
+    let Some(ext_id) = ext_id else {
+        return;
+    };
+    let Ok(Some(ext)) = state.external_jobs.get(ext_id) else {
+        return;
+    };
+
+    let mapped_status = map_external_status(&ext.status);
+    let mut changed = job.status != mapped_status
+        || job.error != ext.error
+        || job.execution_elapsed_seconds != ext.execution_elapsed_seconds;
+
+    job.status = mapped_status.to_owned();
+    job.error = ext.error.clone();
+    job.execution_elapsed_seconds = ext.execution_elapsed_seconds;
+    job.updated_at = ext.updated_at.clone();
+
+    let mut snap = job.snapshot.as_object().cloned().unwrap_or_default();
+    let prev_stage = snap
+        .get("stageMessage")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let prev_credits = snap.get("costCredits").and_then(Value::as_i64);
+    if prev_stage.as_deref() != Some(ext.stage_message.as_str())
+        || prev_credits != ext.cost_credits
+        || snap.get("externalJobId").and_then(Value::as_str) != Some(ext.id.as_str())
+    {
+        changed = true;
+    }
+    snap.insert("externalJobId".to_owned(), json!(ext.id));
+    snap.insert("externalProvider".to_owned(), json!(ext.provider.as_str()));
+    snap.insert("externalProviderLabel".to_owned(), json!(ext.provider_label));
+    snap.insert("externalModelId".to_owned(), json!(ext.model_id));
+    snap.insert("externalModelLabel".to_owned(), json!(ext.model_label));
+    snap.insert("stageMessage".to_owned(), json!(ext.stage_message));
+    snap.insert("costCredits".to_owned(), json!(ext.cost_credits));
+    snap.insert("quoteSummary".to_owned(), json!(ext.quote_summary));
+    job.snapshot = Value::Object(snap);
+
+    if ext.status == "succeeded" && job.outputs.is_empty() {
+        if let Some(ref asset_path) = ext.output_asset_path {
+            let filename = asset_path
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{}.mp4", ext.id));
+            job.output_node_ids = vec![ext.placeholder_node_id.clone()];
+            job.outputs = vec![json!({
+                "assetPath": asset_path,
+                "url": ext.output_video_url,
+                "filename": filename,
+                "subfolder": "",
+                "fileType": "output",
+                "costCredits": ext.cost_credits,
+            })];
+            changed = true;
+        }
+    }
+
+    if changed {
+        let _ = state.agent_jobs.update_status(job);
+    }
+}
+
 fn build_video_generation_snapshot(
     prompt: &str,
     prompt_info: &str,
@@ -1701,6 +2094,7 @@ fn build_video_generation_snapshot(
     submit_input: &ComfySubmitInput,
     workflow_module_revision: &str,
     channel: &str,
+    external_cfg: Option<&ResolvedExternalConfig>,
     image_refs: &[String],
     audio_refs: &[String],
     video_refs: &[String],
@@ -1807,6 +2201,9 @@ fn build_video_generation_snapshot(
     if channel == "colab" {
         map.insert("colabSampler".into(), json!(submit_input.colab_sampler));
     }
+    if let Some(cfg) = external_cfg {
+        apply_external_fields_to_map(&mut map, cfg);
+    }
     Value::Object(map)
 }
 
@@ -1826,25 +2223,17 @@ fn job_response_json(job: &AgentJobRecord) -> Value {
             item
         })
         .collect::<Vec<_>>();
-    let prompt_node_id = job
-        .snapshot
-        .get("promptNodeId")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    let prompt_version_id = job
-        .snapshot
-        .get("promptVersionId")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    let prompt_version_label = job
-        .snapshot
-        .get("promptVersionLabel")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    json!({
+    let snap_str = |key: &str| {
+        job.snapshot
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let prompt_node_id = snap_str("promptNodeId");
+    let prompt_version_id = snap_str("promptVersionId");
+    let prompt_version_label = snap_str("promptVersionLabel");
+    let mut payload = json!({
         "jobId": job.id,
         "requestId": job.request_id,
         "kind": job.kind,
@@ -1870,7 +2259,34 @@ fn job_response_json(job: &AgentJobRecord) -> Value {
         "cancelUrl": format!("/v1/agent/jobs/{}/cancel", job.id),
         "createdAt": job.created_at,
         "updatedAt": job.updated_at,
-    })
+    });
+    if ProviderId::from_str(&job.channel).is_some()
+        || job.snapshot.get("externalProvider").is_some()
+    {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "externalJobId".to_owned(),
+                json!(snap_str("externalJobId").or_else(|| job.prompt_id.clone())),
+            );
+            obj.insert("externalProvider".to_owned(), json!(snap_str("externalProvider")));
+            obj.insert(
+                "externalProviderLabel".to_owned(),
+                json!(snap_str("externalProviderLabel")),
+            );
+            obj.insert("externalModelId".to_owned(), json!(snap_str("externalModelId")));
+            obj.insert("externalModelLabel".to_owned(), json!(snap_str("externalModelLabel")));
+            obj.insert("stageMessage".to_owned(), json!(snap_str("stageMessage")));
+            obj.insert(
+                "costCredits".to_owned(),
+                job.snapshot.get("costCredits").cloned().unwrap_or(Value::Null),
+            );
+            obj.insert(
+                "quoteSummary".to_owned(),
+                job.snapshot.get("quoteSummary").cloned().unwrap_or(Value::Null),
+            );
+        }
+    }
+    payload
 }
 
 fn apply_preset_to_submit(
@@ -2104,6 +2520,7 @@ fn build_generator_content(
     channel: &str,
     mode: &str,
     workflow_module_revision: &str,
+    external_cfg: Option<&ResolvedExternalConfig>,
 ) -> Value {
     let mut map = Map::new();
     map.insert("provider".into(), json!(""));
@@ -2215,6 +2632,9 @@ fn build_generator_content(
     );
     map.insert("manualHeight".into(), json!(VIDEO_GENERATION_NODE_HEIGHT));
     map.insert("layoutTextInputCount".into(), json!(1));
+    if let Some(cfg) = external_cfg {
+        apply_external_fields_to_map(&mut map, cfg);
+    }
     Value::Object(map)
 }
 
@@ -2424,16 +2844,35 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
     let state = state.connection_snapshot();
     let actor = resolve_actor(&state);
 
+    let channel = input
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("local")
+        .to_ascii_lowercase();
+    let external_provider = ProviderId::from_str(&channel);
+    if channel != "local" && channel != "colab" && external_provider.is_none() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "channel 必须是 local、colab、jimeng-cn、dreamina-jp、libtv 或 lovart",
+        );
+    }
+
     let kind = input
         .kind
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("h3-video");
-    if kind != "h3-video" {
+        .unwrap_or(if external_provider.is_some() {
+            "external-video"
+        } else {
+            "h3-video"
+        });
+    if !matches!(kind, "h3-video" | "external-video" | "video") {
         return api_error(
             StatusCode::BAD_REQUEST,
-            format!("当前仅支持 h3-video 生成类型，收到：{kind}"),
+            format!("当前仅支持 h3-video / external-video 生成类型，收到：{kind}"),
         );
     }
 
@@ -2446,7 +2885,8 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         .unwrap_or_else(|| format!("agent-req:{}", Uuid::new_v4()));
 
     match state.agent_jobs.get_by_request_id(&request_id) {
-        Ok(Some(existing)) => {
+        Ok(Some(mut existing)) => {
+            sync_external_agent_job(&state, &mut existing);
             return (
                 StatusCode::OK,
                 Json(json!({
@@ -2472,17 +2912,6 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
             StatusCode::BAD_REQUEST,
             "必须指定已有 canvasId 或传 createCanvas 新建画布",
         );
-    }
-
-    let channel = input
-        .channel
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("local")
-        .to_ascii_lowercase();
-    if channel != "local" && channel != "colab" {
-        return api_error(StatusCode::BAD_REQUEST, "channel 必须是 local 或 colab");
     }
 
     let entry_mode = match input
@@ -2537,6 +2966,23 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         }
     };
 
+    // Pre-validate external provider options & readiness before mutating/creating any canvas.
+    if let Some(provider) = external_provider {
+        if let Err(message) = resolve_external_submit_config(
+            &state,
+            provider,
+            &input,
+            &ExternalNodeDefaults::default(),
+            None,
+            input.prompt.as_deref().filter(|s| !s.trim().is_empty()),
+            input.images.len(),
+            input.videos.len(),
+            input.audios.len(),
+        ) {
+            return api_error(StatusCode::BAD_REQUEST, message);
+        }
+    }
+
     // Check channel readiness and resolve presets before mutating the canvas.
     let settings = {
         let _guard = state.settings_guard.lock().await;
@@ -2544,7 +2990,9 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
     };
     let workflow_defaults = load_workflow_module_defaults(&settings);
 
-    let (target_server_url, colab_profile_id, colab_diffusion_model) = if channel == "colab" {
+    let (target_server_url, colab_profile_id, colab_diffusion_model) = if external_provider.is_some() {
+        (String::new(), None, None)
+    } else if channel == "colab" {
         let profile = inspect_colab_profile(&state, false).await;
         if !profile.configured {
             return api_error(
@@ -2583,22 +3031,27 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         (state.config.comfy_url.clone(), None, None)
     };
 
-    let preset_collection = if channel == "colab" {
-        load_colab_presets(&settings, colab_profile_id.as_deref().unwrap_or("dasiwa"))
+    let resolved_preset = if external_provider.is_some() {
+        None
     } else {
-        load_local_presets(&settings)
-    };
-    let resolved_preset = match resolve_preset_from_collection(
-        &preset_collection,
-        input.preset.as_deref(),
-    ) {
-        Ok(found) => found,
-        Err(message) => return api_error(StatusCode::BAD_REQUEST, message),
+        let preset_collection = if channel == "colab" {
+            load_colab_presets(&settings, colab_profile_id.as_deref().unwrap_or("dasiwa"))
+        } else {
+            load_local_presets(&settings)
+        };
+        match resolve_preset_from_collection(&preset_collection, input.preset.as_deref()) {
+            Ok(found) => found,
+            Err(message) => return api_error(StatusCode::BAD_REQUEST, message),
+        }
     };
 
-    let video_modules = match list_video_modules(&state) {
-        Ok(list) => list,
-        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    let video_modules = if external_provider.is_some() {
+        Vec::new()
+    } else {
+        match list_video_modules(&state) {
+            Ok(list) => list,
+            Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+        }
     };
     if channel == "local" && video_modules.is_empty() {
         return api_error(
@@ -2679,6 +3132,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
     let mut collected_audios: Vec<ResolvedMediaItem> = Vec::new();
     let mut collected_videos: Vec<ResolvedMediaItem> = Vec::new();
     let mut detected_duration: Option<f64> = None;
+    let mut node_ext_defaults = ExternalNodeDefaults::default();
     let mut generator_mode = "reference-to-video".to_owned();
     let mut explicit_module_id = input
         .workflow_module_id
@@ -2778,6 +3232,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
                     generator_mode = mode.to_owned();
                 }
                 apply_node_content_to_submit(&gen_node.content, &channel, &mut submit_input);
+                node_ext_defaults = extract_external_node_defaults(&gen_node.content);
                 if detected_duration.is_none() {
                     detected_duration = gen_node
                         .content
@@ -2852,6 +3307,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
                 generator_mode = mode.to_owned();
             }
             apply_node_content_to_submit(&src_node.content, &channel, &mut submit_input);
+            node_ext_defaults = extract_external_node_defaults(&src_node.content);
             detected_duration = src_node
                 .content
                 .get("generationDuration")
@@ -2957,85 +3413,112 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         }
     }
 
-    // Apply preset (if explicitly specified, or in standalone mode, or when resolved as default).
-    if let Some(ref preset) = resolved_preset {
-        if input.preset.is_some() || generator_node_id.is_empty() {
-            apply_preset_to_submit(&preset.settings, &channel, &mut submit_input);
-            preset_name = preset.name.clone();
-        }
-    } else if input.preset.is_none() && !generator_node_id.is_empty() {
-        preset_name = "节点当前参数".to_owned();
-    }
-
-    // Resolve local workflow module if channel == "local".
-    let workflow_module_revision = if channel == "local" {
-        submit_input.input_root_path = state.config.comfy_input_directory.clone();
-        let chosen = explicit_module_id
-            .as_deref()
-            .and_then(|id| video_modules.iter().find(|m| m.manifest.id == id))
-            .or_else(|| {
-                let slot_key = format!("video-generation:{generator_mode}");
-                workflow_defaults
-                    .get(&slot_key)
-                    .or_else(|| workflow_defaults.get("video-generation:reference-to-video"))
-                    .and_then(|id| video_modules.iter().find(|m| &m.manifest.id == id))
-            })
-            .or_else(|| {
-                video_modules
-                    .iter()
-                    .find(|m| m.manifest.variant == generator_mode)
-                    .or_else(|| video_modules.first())
-            });
-        let Some(module) = chosen else {
-            return api_error(StatusCode::BAD_REQUEST, "未找到可用的本地 H3 工作流模块");
+    // Resolve workflow / preset / external provider config before mutating canvas nodes.
+    let mut resolved_external_cfg: Option<ResolvedExternalConfig> = None;
+    let workflow_module_revision = if let Some(provider) = external_provider {
+        let ext_cfg = match resolve_external_submit_config(
+            &state,
+            provider,
+            &input,
+            &node_ext_defaults,
+            detected_duration,
+            Some(&prompt_text),
+            collected_images.len(),
+            collected_videos.len(),
+            collected_audios.len(),
+        ) {
+            Ok(cfg) => cfg,
+            Err(message) => return api_error(StatusCode::BAD_REQUEST, message),
         };
-        submit_input.workflow_module_id = Some(module.manifest.id.clone());
-        generator_mode = module.manifest.variant.clone();
-        if resolved_preset.is_none() && generator_node_id.is_empty() {
-            let dm = module.manifest.defaults.diffusion_model_name.trim();
-            if !dm.is_empty() {
-                submit_input.diffusion_model_name = dm.to_owned();
-            }
-        }
-        module.manifest.revision.clone()
-    } else {
+        preset_name = format!("{} · {}", provider.label(), ext_cfg.spec.label);
         submit_input.workflow_module_id = None;
-        if let Some(sampler) = input.colab_sampler.as_deref() {
-            match normalize_colab_sampler(Some(sampler)) {
-                Ok(normalized) => submit_input.colab_sampler = Some(normalized),
-                Err(error) => return api_error(StatusCode::BAD_REQUEST, error),
-            }
-        }
-        colab_profile_id.clone().unwrap_or_default()
-    };
-
-    // Apply per-request overrides.
-    submit_input.prompt = prompt_text.clone();
-    if let Some(duration) = input.duration_seconds.or(detected_duration) {
-        submit_input.duration_seconds = duration;
-    }
-    if let Some(ref ratio) = input.aspect_ratio {
-        submit_input.aspect_ratio = ratio.trim().to_owned();
-    }
-    if let Some(ref smode) = input.seed_mode {
-        submit_input.seed_mode = smode.trim().to_owned();
-    }
-    if let Some(ref s) = input.seed {
-        submit_input.seed = s.trim().to_owned();
-    }
-    if let Some(ref ref_size) = input.ref_image_size {
-        submit_input.ref_image_size = ref_size.trim().to_owned();
-    }
-    if let Some(strict) = input.strict_prompt_tags {
-        submit_input.strict_prompt_tags = Some(strict);
-    }
-    if channel != "colab" {
-        if let Some(sec) = input.secondary_sampling_enabled {
-            submit_input.secondary_sampling_enabled = sec;
-        }
+        submit_input.prompt = prompt_text.clone();
+        submit_input.duration_seconds = ext_cfg.duration_seconds as f64;
+        submit_input.aspect_ratio = ext_cfg.aspect_ratio.clone();
+        resolved_external_cfg = Some(ext_cfg);
+        String::new()
     } else {
-        submit_input.secondary_sampling_enabled = false;
-    }
+        // Apply preset (if explicitly specified, or in standalone mode, or when resolved as default).
+        if let Some(ref preset) = resolved_preset {
+            if input.preset.is_some() || generator_node_id.is_empty() {
+                apply_preset_to_submit(&preset.settings, &channel, &mut submit_input);
+                preset_name = preset.name.clone();
+            }
+        } else if input.preset.is_none() && !generator_node_id.is_empty() {
+            preset_name = "节点当前参数".to_owned();
+        }
+
+        // Resolve local workflow module if channel == "local".
+        let rev = if channel == "local" {
+            submit_input.input_root_path = state.config.comfy_input_directory.clone();
+            let chosen = explicit_module_id
+                .as_deref()
+                .and_then(|id| video_modules.iter().find(|m| m.manifest.id == id))
+                .or_else(|| {
+                    let slot_key = format!("video-generation:{generator_mode}");
+                    workflow_defaults
+                        .get(&slot_key)
+                        .or_else(|| workflow_defaults.get("video-generation:reference-to-video"))
+                        .and_then(|id| video_modules.iter().find(|m| &m.manifest.id == id))
+                })
+                .or_else(|| {
+                    video_modules
+                        .iter()
+                        .find(|m| m.manifest.variant == generator_mode)
+                        .or_else(|| video_modules.first())
+                });
+            let Some(module) = chosen else {
+                return api_error(StatusCode::BAD_REQUEST, "未找到可用的本地 H3 工作流模块");
+            };
+            submit_input.workflow_module_id = Some(module.manifest.id.clone());
+            generator_mode = module.manifest.variant.clone();
+            if resolved_preset.is_none() && generator_node_id.is_empty() {
+                let dm = module.manifest.defaults.diffusion_model_name.trim();
+                if !dm.is_empty() {
+                    submit_input.diffusion_model_name = dm.to_owned();
+                }
+            }
+            module.manifest.revision.clone()
+        } else {
+            submit_input.workflow_module_id = None;
+            if let Some(sampler) = input.colab_sampler.as_deref() {
+                match normalize_colab_sampler(Some(sampler)) {
+                    Ok(normalized) => submit_input.colab_sampler = Some(normalized),
+                    Err(error) => return api_error(StatusCode::BAD_REQUEST, error),
+                }
+            }
+            colab_profile_id.clone().unwrap_or_default()
+        };
+
+        // Apply per-request overrides.
+        submit_input.prompt = prompt_text.clone();
+        if let Some(duration) = input.duration_seconds.or(detected_duration) {
+            submit_input.duration_seconds = duration;
+        }
+        if let Some(ref ratio) = input.aspect_ratio {
+            submit_input.aspect_ratio = ratio.trim().to_owned();
+        }
+        if let Some(ref smode) = input.seed_mode {
+            submit_input.seed_mode = smode.trim().to_owned();
+        }
+        if let Some(ref s) = input.seed {
+            submit_input.seed = s.trim().to_owned();
+        }
+        if let Some(ref ref_size) = input.ref_image_size {
+            submit_input.ref_image_size = ref_size.trim().to_owned();
+        }
+        if let Some(strict) = input.strict_prompt_tags {
+            submit_input.strict_prompt_tags = Some(strict);
+        }
+        if channel != "colab" {
+            if let Some(sec) = input.secondary_sampling_enabled {
+                submit_input.secondary_sampling_enabled = sec;
+            }
+        } else {
+            submit_input.secondary_sampling_enabled = false;
+        }
+        rev
+    };
 
     // Validate physical paths for all media inputs before creating canvas nodes.
     let mut physical_images = Vec::with_capacity(collected_images.len());
@@ -3473,6 +3956,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
             &channel,
             &generator_mode,
             &workflow_module_revision,
+            resolved_external_cfg.as_ref(),
         );
         match state.core.database.create_node(CreateNodeInput {
             canvas_id: Some(canvas_snapshot.canvas.id.clone()),
@@ -3550,7 +4034,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
     }
 
     // 3) Create generated-video placeholder node + output edge (top-aligned first video, subsequent videos placed to the right).
-    let generation_snapshot = build_video_generation_snapshot(
+    let mut generation_snapshot = build_video_generation_snapshot(
         &prompt_text,
         &prompt_info,
         &prompt_node_id,
@@ -3561,6 +4045,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         &submit_input,
         &workflow_module_revision,
         &channel,
+        resolved_external_cfg.as_ref(),
         &image_refs,
         &audio_refs,
         &video_refs,
@@ -3615,15 +4100,23 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
     ph_content.insert("executionProgress".to_owned(), Value::Null);
     ph_content.insert(
         "validationMessage".to_owned(),
-        json!(if channel == "colab" {
-            "正在上传素材并提交到 Colab ComfyUI…"
+        json!(if let Some(ref cfg) = resolved_external_cfg {
+            format!("正在上传素材并提交到 {} · {}…", cfg.provider.label(), cfg.spec.label)
+        } else if channel == "colab" {
+            "正在上传素材并提交到 Colab ComfyUI…".to_owned()
         } else {
-            "正在上传素材并提交到远程 ComfyUI…"
+            "正在上传素材并提交到远程 ComfyUI…".to_owned()
         }),
     );
     ph_content.insert("sourceGeneratorId".to_owned(), json!(generator_node_id));
     if channel == "colab" {
         ph_content.insert("comfyChannel".to_owned(), json!("colab"));
+    }
+    if let Some(ref cfg) = resolved_external_cfg {
+        ph_content.insert("externalProvider".to_owned(), json!(cfg.provider.as_str()));
+        ph_content.insert("externalProviderLabel".to_owned(), json!(cfg.provider.label()));
+        ph_content.insert("externalModelId".to_owned(), json!(cfg.spec.id));
+        ph_content.insert("externalModelLabel".to_owned(), json!(cfg.spec.label));
     }
     ph_content.insert("generationSnapshot".to_owned(), generation_snapshot.clone());
 
@@ -3632,7 +4125,14 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         kind: Some("generated-video".to_owned()),
         title: "视频预览（生成中）".to_owned(),
         content: Value::Object(ph_content),
-        source: Some("comfyui-placeholder".to_owned()),
+        source: Some(
+            if resolved_external_cfg.is_some() {
+                "external-provider-placeholder"
+            } else {
+                "comfyui-placeholder"
+            }
+            .to_owned(),
+        ),
         request_id: Some(format!("generation-placeholder:{client_id}")),
         x: Some(ph_x),
         y: Some(ph_y),
@@ -3664,7 +4164,7 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         .remember_task(&client_id, &actor.user_id);
 
     let now = now_rfc3339();
-    let job = AgentJobRecord {
+    let mut job = AgentJobRecord {
         id: job_id.clone(),
         request_id: request_id.clone(),
         canvas_id: canvas_snapshot.canvas.id.clone(),
@@ -3676,17 +4176,70 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
         client_id: client_id.clone(),
         prompt_id: None,
         source_node_id: source_node_record.map(|n| n.id),
-        generator_node_id: Some(generator_node_id),
+        generator_node_id: Some(generator_node_id.clone()),
         placeholder_node_id: Some(placeholder_node.id.clone()),
         output_node_ids: Vec::new(),
         outputs: Vec::new(),
-        snapshot: generation_snapshot,
+        snapshot: generation_snapshot.clone(),
         seed: None,
         execution_elapsed_seconds: None,
         error: None,
         created_at: now.clone(),
         updated_at: now,
     };
+
+    if let Some(ext_cfg) = resolved_external_cfg {
+        let ext_input = ExternalVideoSubmitInput {
+            canvas_id: canvas_snapshot.canvas.id.clone(),
+            provider: ext_cfg.provider,
+            model_id: Some(ext_cfg.spec.id.clone()),
+            prompt: prompt_text,
+            duration_seconds: ext_cfg.duration_seconds,
+            aspect_ratio: ext_cfg.aspect_ratio,
+            resolution: Some(ext_cfg.resolution),
+            mode: Some(ext_cfg.ext_mode),
+            enable_sound: Some(ext_cfg.enable_sound),
+            generator_node_id,
+            placeholder_node_id: placeholder_node.id.clone(),
+            image_paths: image_refs,
+            video_paths: video_refs,
+            audio_paths: audio_refs,
+            prompt_version_label: (!prompt_version_label.is_empty()).then_some(prompt_version_label),
+            prompt_source_node_id: (!prompt_node_id.is_empty()).then_some(prompt_node_id),
+            prompt_source_title: (!prompt_node_title.is_empty()).then_some(prompt_node_title),
+            title: input.title.clone(),
+        };
+        match submit_external_video(state.clone(), actor.user_id.clone(), ext_input).await {
+            Ok(ext_job) => {
+                job.status = map_external_status(&ext_job.status).to_owned();
+                job.prompt_id = Some(ext_job.id.clone());
+                if let Some(obj) = generation_snapshot.as_object_mut() {
+                    obj.insert("externalJobId".to_owned(), json!(ext_job.id));
+                    obj.insert("stageMessage".to_owned(), json!(ext_job.stage_message));
+                    obj.insert("costCredits".to_owned(), json!(ext_job.cost_credits));
+                    obj.insert("quoteSummary".to_owned(), json!(ext_job.quote_summary));
+                }
+                job.snapshot = generation_snapshot;
+                if let Err(error) = state.agent_jobs.insert(&job) {
+                    return api_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+                }
+                return (
+                    StatusCode::ACCEPTED,
+                    Json(json!({
+                        "ok": true,
+                        "canvasCreated": canvas_created,
+                        "deduplicated": false,
+                        "job": job_response_json(&job),
+                    })),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                mark_placeholder_failed(&state, &mut job, false, &error);
+                return api_error(StatusCode::BAD_REQUEST, error);
+            }
+        }
+    }
 
     if let Err(error) = state.agent_jobs.insert(&job) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, error);
@@ -3772,6 +4325,10 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
 }
 
 async fn reconcile_orphan_job(state: &WebState, job: &mut AgentJobRecord) {
+    if ProviderId::from_str(&job.channel).is_some() {
+        sync_external_agent_job(state, job);
+        return;
+    }
     if !matches!(job.status.as_str(), "queued" | "running") {
         return;
     }
@@ -3866,10 +4423,30 @@ async fn cancel_job(State(state): State<WebState>, AxumPath(job_id): AxumPath<St
         Ok(None) => return api_error(StatusCode::NOT_FOUND, format!("找不到任务：{job_id}")),
         Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
+    sync_external_agent_job(&state, &mut job);
     if matches!(
         job.status.as_str(),
         "succeeded" | "failed" | "cancelled"
     ) {
+        return Json(json!({
+            "ok": true,
+            "job": job_response_json(&job),
+        }))
+        .into_response();
+    }
+    if ProviderId::from_str(&job.channel).is_some() {
+        let ext_id = job
+            .prompt_id
+            .as_deref()
+            .or_else(|| job.snapshot.get("externalJobId").and_then(Value::as_str))
+            .map(str::to_owned);
+        if let Some(ext_job) = ext_id.and_then(|id| state.external_jobs.get(&id).ok().flatten()) {
+            let _ = cancel_external_video(state.clone(), ext_job).await;
+            sync_external_agent_job(&state, &mut job);
+        }
+        if job.status != "cancelled" {
+            mark_placeholder_failed(&state, &mut job, true, "任务已被外部请求取消");
+        }
         return Json(json!({
             "ok": true,
             "job": job_response_json(&job),
@@ -3903,11 +4480,12 @@ async fn download_job_output(
     request: axum::http::Request<Body>,
 ) -> Response {
     let state = state.connection_snapshot();
-    let job = match state.agent_jobs.get(&job_id) {
+    let mut job = match state.agent_jobs.get(&job_id) {
         Ok(Some(job)) => job,
         Ok(None) => return api_error(StatusCode::NOT_FOUND, format!("找不到任务：{job_id}")),
         Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
+    sync_external_agent_job(&state, &mut job);
     let Some(output_val) = job.outputs.get(index) else {
         return api_error(
             StatusCode::NOT_FOUND,
@@ -3929,6 +4507,9 @@ async fn download_job_output(
             }
             return response;
         }
+    }
+    if ProviderId::from_str(&job.channel).is_some() {
+        return api_error(StatusCode::NOT_FOUND, "外部平台成片文件不存在或尚未就绪");
     }
 
     // Fallback: proxy directly from ComfyUI /view when comfy_output_directory is unconfigured.
@@ -4835,6 +5416,310 @@ mod tests {
         assert!(gen2.y >= gen1.y + gen1.height + 168.0);
         assert_eq!(text2.y, gen2.y);
         assert_eq!(out_row2.y, gen2.y);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn agent_capabilities_exposes_external_providers_and_validates_params() {
+        let (root, state, app) = setup_test_env("http://127.0.0.1:9");
+
+        // Create a dummy jimeng-cn executable under executable_root/tools/jimeng-cn/dreamina-canvas.exe
+        let dummy_bin_dir = root.join("tools").join("jimeng-cn");
+        std::fs::create_dir_all(&dummy_bin_dir).unwrap();
+        let dummy_exe = if cfg!(windows) {
+            dummy_bin_dir.join("dreamina-canvas.exe")
+        } else {
+            dummy_bin_dir.join("dreamina-canvas")
+        };
+        std::fs::write(&dummy_exe, b"").unwrap();
+
+        let (status, cap) = read_json(
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("GET")
+                        .uri("/v1/agent/capabilities")
+                        .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let kinds = cap["kinds"].as_array().unwrap();
+        assert!(kinds.contains(&json!("h3-video")));
+        assert!(kinds.contains(&json!("external-video")));
+        for provider_id in ["jimeng-cn", "dreamina-jp", "libtv", "lovart"] {
+            assert!(
+                cap["channels"].get(provider_id).is_some(),
+                "missing channel {provider_id}"
+            );
+        }
+        let ext_list = cap["externalProviders"].as_array().unwrap();
+        assert_eq!(ext_list.len(), 4);
+
+        let initial_canvas_count = state.core.database.list_project_summaries().unwrap().len();
+
+        // Unknown channel returns 400.
+        let (bad_ch_status, _) = read_json(
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/agent/jobs")
+                        .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            json!({
+                                "createCanvas": { "name": "Should Not Be Created" },
+                                "channel": "unknown-vendor",
+                                "prompt": "hello"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(bad_ch_status, StatusCode::BAD_REQUEST);
+
+        // Using resolve_external_submit_config directly validates model, resolution, mode, prompt len & media limits cleanly
+        // without creating orphan canvases. Note env overrides like JIMENG_CN_BIN may or may not exist on test machine,
+        // so point executable_root to dummy_bin_dir parent.
+        let empty_defaults = ExternalNodeDefaults::default();
+        let bad_model_input: SubmitJobInput = serde_json::from_value(json!({
+            "channel": "jimeng-cn",
+            "modelId": "non_existent_model",
+            "prompt": "test prompt"
+        }))
+        .unwrap();
+        if resolve_provider_binary(ProviderId::JimengCn, &state.executable_root).is_some() {
+            let err = resolve_external_submit_config(
+                &state,
+                ProviderId::JimengCn,
+                &bad_model_input,
+                &empty_defaults,
+                None,
+                Some("test prompt"),
+                0,
+                0,
+                0,
+            )
+            .unwrap_err();
+            assert!(err.contains("不支持模型"), "err={err}");
+
+            let long_prompt = "字".repeat(4001);
+            let long_input: SubmitJobInput = serde_json::from_value(json!({
+                "channel": "jimeng-cn",
+                "modelId": "seedance_2.0_vip",
+                "prompt": long_prompt
+            }))
+            .unwrap();
+            let err_len = resolve_external_submit_config(
+                &state,
+                ProviderId::JimengCn,
+                &long_input,
+                &empty_defaults,
+                None,
+                Some(&"字".repeat(4001)),
+                0,
+                0,
+                0,
+            )
+            .unwrap_err();
+            assert!(err_len.contains("4000"), "err={err_len}");
+        }
+
+        // Neither bad request created a canvas.
+        assert_eq!(
+            state.core.database.list_project_summaries().unwrap().len(),
+            initial_canvas_count
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn external_agent_job_syncs_outputs_credits_cancel_and_downloads() {
+        let (root, state, app) = setup_test_env("http://127.0.0.1:9");
+        let fake_mp4 = b"\x00\x00\x00\x18ftypmp42external-provider-video".to_vec();
+
+        // Create a canvas and placeholder node via HTTP/DB.
+        let canvas = state.core.database.create_project("External Agent Canvas").unwrap();
+        let ph = state
+            .core
+            .database
+            .create_node(CreateNodeInput {
+                canvas_id: Some(canvas.canvas.id.clone()),
+                kind: Some("generated-video".to_owned()),
+                title: "视频预览".to_owned(),
+                content: json!({
+                    "externalProvider": "jimeng-cn",
+                    "externalProviderLabel": "即梦 CN",
+                    "externalModelId": "seedance_2.5",
+                    "externalModelLabel": "Seedance 2.5",
+                    "costCredits": 35
+                }),
+                source: Some("external-provider".to_owned()),
+                request_id: Some("ext-ph-test-1".to_owned()),
+                x: Some(100.0),
+                y: Some(100.0),
+                width: Some(420.0),
+                height: Some(274.0),
+            })
+            .unwrap()
+            .node;
+
+        let out_dir = state.core.data_dir.join(PROVIDER_OUTPUTS_DIR);
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let out_file = out_dir.join("seedance_clip.mp4");
+        std::fs::write(&out_file, &fake_mp4).unwrap();
+        let asset_path = format!("sucanvas://{PROVIDER_OUTPUTS_DIR}/seedance_clip.mp4");
+
+        let ext_job = crate::external_providers::runner::ExternalVideoJobRecord {
+            id: "ext-test-job-1".to_owned(),
+            canvas_id: canvas.canvas.id.clone(),
+            provider: ProviderId::JimengCn,
+            provider_label: "即梦 CN".to_owned(),
+            model_id: "seedance_2.5".to_owned(),
+            model_label: "Seedance 2.5".to_owned(),
+            generator_node_id: "node:gen-ext-1".to_owned(),
+            placeholder_node_id: ph.id.clone(),
+            user_id: "user:admin".to_owned(),
+            status: "succeeded".to_owned(),
+            stage_message: "视频生成完成 · 消耗 35 积分".to_owned(),
+            cost_credits: Some(35),
+            quote_summary: Some("Seedance 2.5 · 35 积分".to_owned()),
+            remote_project_id: None,
+            remote_node_id: None,
+            remote_submit_id: None,
+            remote_thread_id: None,
+            working_dir: None,
+            output_asset_path: Some(asset_path.clone()),
+            output_video_url: Some("/api/resource?resource=sucanvas%3A%2F%2Fprovider-outputs%2Fseedance_clip.mp4".to_owned()),
+            request_json: "{}".to_owned(),
+            error: None,
+            execution_elapsed_seconds: Some(12.5),
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+        };
+        state.external_jobs.insert(&ext_job).unwrap();
+
+        let agent_job = AgentJobRecord {
+            id: "job:ext-sync-1".to_owned(),
+            request_id: "req:ext-sync-1".to_owned(),
+            canvas_id: canvas.canvas.id.clone(),
+            kind: "external-video".to_owned(),
+            channel: "jimeng-cn".to_owned(),
+            entry_mode: "standalone".to_owned(),
+            preset_name: "即梦 CN · Seedance 2.5".to_owned(),
+            status: "running".to_owned(),
+            client_id: "client-ext-1".to_owned(),
+            prompt_id: Some(ext_job.id.clone()),
+            source_node_id: None,
+            generator_node_id: Some("node:gen-ext-1".to_owned()),
+            placeholder_node_id: Some(ph.id.clone()),
+            output_node_ids: Vec::new(),
+            outputs: Vec::new(),
+            snapshot: json!({
+                "externalJobId": ext_job.id,
+                "externalProvider": "jimeng-cn",
+                "externalProviderLabel": "即梦 CN",
+                "externalModelId": "seedance_2.5",
+                "externalModelLabel": "Seedance 2.5",
+            }),
+            seed: None,
+            execution_elapsed_seconds: None,
+            error: None,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+        };
+        state.agent_jobs.insert(&agent_job).unwrap();
+
+        // GET /v1/agent/jobs/{jobId} syncs status, credits, and outputs cleanly.
+        let (get_status, get_body) = read_json(
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("GET")
+                        .uri("/v1/agent/jobs/job%3Aext-sync-1")
+                        .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(get_status, StatusCode::OK);
+        assert_eq!(get_body["job"]["status"], "succeeded");
+        assert_eq!(get_body["job"]["costCredits"], 35);
+        assert_eq!(get_body["job"]["externalProvider"], "jimeng-cn");
+        assert_eq!(get_body["job"]["externalModelId"], "seedance_2.5");
+        assert_eq!(get_body["job"]["outputs"][0]["filename"], "seedance_clip.mp4");
+
+        // Download endpoint streams the synced external provider MP4.
+        let dl_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/agent/jobs/job%3Aext-sync-1/outputs/0")
+                    .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dl_resp.status(), StatusCode::OK);
+        let dl_bytes = to_bytes(dl_resp.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(dl_bytes.as_ref(), fake_mp4.as_slice());
+
+        // Running external job can be cancelled via /v1/agent/jobs/{jobId}/cancel.
+        let running_ext = crate::external_providers::runner::ExternalVideoJobRecord {
+            id: "ext-test-job-2".to_owned(),
+            status: "running".to_owned(),
+            output_asset_path: None,
+            output_video_url: None,
+            cost_credits: None,
+            ..ext_job.clone()
+        };
+        state.external_jobs.insert(&running_ext).unwrap();
+        let running_agent = AgentJobRecord {
+            id: "job:ext-cancel-1".to_owned(),
+            request_id: "req:ext-cancel-1".to_owned(),
+            prompt_id: Some(running_ext.id.clone()),
+            status: "running".to_owned(),
+            snapshot: json!({ "externalJobId": running_ext.id }),
+            ..agent_job
+        };
+        state.agent_jobs.insert(&running_agent).unwrap();
+
+        let (cancel_status, cancel_body) = read_json(
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/agent/jobs/job%3Aext-cancel-1/cancel")
+                        .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(cancel_status, StatusCode::OK);
+        assert_eq!(cancel_body["job"]["status"], "cancelled");
+        assert_eq!(
+            state.external_jobs.get(&running_ext.id).unwrap().unwrap().status,
+            "cancelled"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

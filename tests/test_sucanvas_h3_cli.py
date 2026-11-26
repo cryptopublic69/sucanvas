@@ -89,19 +89,20 @@ def make_handler(state: MockState):
                     if status == "succeeded"
                     else []
                 )
-                self._send_json(
-                    200,
-                    {
-                        "ok": True,
-                        "job": {
-                            "jobId": "job:1",
-                            "canvasId": "canvas:1",
-                            "presetName": "电影级预设",
-                            "status": status,
-                            "outputs": outputs,
-                        },
-                    },
-                )
+                job_payload = {
+                    "jobId": "job:1",
+                    "canvasId": state.last_submit.get("canvasId", "canvas:1"),
+                    "channel": state.last_submit.get("channel", "local"),
+                    "presetName": state.last_submit.get("preset") or "即梦 CN · Seedance 2.5",
+                    "status": status,
+                    "outputs": outputs,
+                }
+                if state.last_submit.get("channel") in {"jimeng-cn", "dreamina-jp", "libtv", "lovart"}:
+                    job_payload["externalProvider"] = state.last_submit.get("channel")
+                    job_payload["externalModelId"] = state.last_submit.get("modelId", "seedance_2.5")
+                    job_payload["stageMessage"] = "视频生成完成 · 消耗 35 积分" if status == "succeeded" else "排队中…"
+                    job_payload["costCredits"] = 35 if status == "succeeded" else None
+                self._send_json(200, {"ok": True, "job": job_payload})
             elif self.path == "/v1/agent/jobs/job%3A1/outputs/0":
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp4")
@@ -409,6 +410,69 @@ class TestSucanvasH3Cli(unittest.TestCase):
         self.assertEqual(json.loads(by_job.stdout)["deletedCount"], 1)
         self.assertFalse(f2.exists())
         self.assertTrue(f3.exists())
+
+    def test_external_provider_channels_submit_wait_and_download(self) -> None:
+        run_cli(
+            [
+                "config",
+                "init",
+                "--base-url",
+                self.base_url,
+                "--token",
+                self.state.token,
+                "--download-dir",
+                str(self.dl_dir),
+            ],
+            self.env,
+        )
+        for ch in ("jimeng-cn", "dreamina-jp", "libtv", "lovart"):
+            self.state.poll_counts.clear()
+            sub = run_cli(
+                [
+                    "submit",
+                    "--canvas-id",
+                    "canvas:1",
+                    "--source-node-id",
+                    "node:text-1",
+                    "--channel",
+                    ch,
+                    "--model",
+                    "seedance_2.5",
+                    "--resolution",
+                    "720p",
+                    "--provider-mode",
+                    "m2v",
+                    "--no-sound",
+                    "--duration",
+                    "8",
+                    "--aspect-ratio",
+                    "16:9",
+                    "--prompt",
+                    "External platform smoke prompt",
+                    "--request-id",
+                    f"req-ext-{ch}",
+                ],
+                self.env,
+            )
+            self.assertEqual(sub.returncode, 0, sub.stderr)
+            self.assertEqual(self.state.last_submit["kind"], "external-video")
+            self.assertEqual(self.state.last_submit["channel"], ch)
+            self.assertEqual(self.state.last_submit["modelId"], "seedance_2.5")
+            self.assertEqual(self.state.last_submit["resolution"], "720p")
+            self.assertEqual(self.state.last_submit["externalMode"], "m2v")
+            self.assertIs(self.state.last_submit["enableSound"], False)
+            self.assertNotIn("preset", self.state.last_submit)
+
+        self.state.finish_after_polls = 1
+        wait_res = run_cli(["wait", "--job-id", "job:1", "--timeout", "5", "--poll", "0.2"], self.env)
+        self.assertEqual(wait_res.returncode, 0, wait_res.stderr)
+        wait_data = json.loads(wait_res.stdout)
+        self.assertEqual(wait_data["job"]["costCredits"], 35)
+
+        dl = run_cli(["download", "--job-id", "job:1"], self.env)
+        self.assertEqual(dl.returncode, 0, dl.stderr)
+        dl_path = pathlib.Path(json.loads(dl.stdout)["downloaded"][0]["filePath"])
+        self.assertEqual(dl_path.read_bytes(), self.state.video_bytes)
 
 
 if __name__ == "__main__":

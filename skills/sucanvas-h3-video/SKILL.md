@@ -1,11 +1,11 @@
 ---
 name: sucanvas-h3-video
-description: Submit, monitor, download, and clean up MiniMax H3 video generation jobs on a remote or local SuCanvas Web server via its Bearer-authenticated /v1/agent/* API. Use when the user wants to generate H3 videos into an existing or newly created SuCanvas canvas (either from a prompt + reference assets or by triggering an existing prompt/generator node), pull completed MP4s locally, or clean up cached local videos.
+description: Submit, monitor, download, and clean up MiniMax H3 (local/Colab) and external Seedance 2.0/2.5 (jimeng-cn, dreamina-jp, libtv, lovart) video generation jobs on a remote or local SuCanvas Web server via its Bearer-authenticated /v1/agent/* API. Use when the user wants to generate videos into an existing or newly created SuCanvas canvas (either from a prompt + reference assets or by triggering an existing prompt/generator node), pull completed MP4s locally, or clean up cached local videos.
 ---
 
-# SuCanvas H3 Video Generation
+# SuCanvas Video Generation (H3 & External Seedance 2.0/2.5)
 
-Drive H3 video generation through the bundled zero-dependency CLI (`scripts/sucanvas_h3.py`) so generated videos land directly as playable nodes inside SuCanvas Web canvases and can also be downloaded locally.
+Drive MiniMax H3 (`local` / `colab`) and the 4 integrated external Seedance 2.0/2.5 platforms (`jimeng-cn`, `dreamina-jp`, `libtv`, `lovart`) through the bundled zero-dependency CLI (`scripts/sucanvas_h3.py`) so generated videos land directly as playable nodes inside SuCanvas Web canvases and can also be downloaded locally.
 
 Read [references/api-contract.md](references/api-contract.md) for full endpoint and field semantics.
 
@@ -30,14 +30,15 @@ python3 scripts/sucanvas_h3.py config show
 
 ## Standard Workflow
 
-### 1. Discover channels, workflows, and exact preset names
-Always query capabilities before submitting if the exact preset name or Colab readiness is uncertain:
+### 1. Discover channels, workflows, presets, and external models
+Always query capabilities before submitting if the exact preset name, Colab readiness, or external provider status/model IDs are uncertain:
 
 ```bash
 python3 scripts/sucanvas_h3.py capabilities
 ```
 
-Do not guess or invent preset names. Pass the exact `name` or `id` returned under `presets.local.items` or `presets.colab.<profile>.items`.
+- For `local` / `colab` (MiniMax H3): do not guess preset names — pass the exact `name` or `id` returned under `presets.local.items` or `presets.colab.<profile>.items`.
+- For the 4 external Seedance platforms (`jimeng-cn`, `dreamina-jp`, `libtv`, `lovart`): inspect `externalProviders` (and `channels.<id>`) to verify `ready: true` (`installed` & `loggedIn`), exact `models[].id`, supported `resolutions`, `minDuration`..`maxDuration`, `modes`, media limits (`maxImages`, `maxVideos`, `maxAudios`), and `maxPromptLength` (Seedance 2.0 on Jimeng/Dreamina is capped at 4,000 chars vs 15,000 chars on Seedance 2.5). Do **not** pass `--preset` on external channels; use `--model`, `--resolution`, `--provider-mode`, `--duration`, `--aspect-ratio`, and `--sound` / `--no-sound`. External jobs are auto-confirmed on the server and automatically record `costCredits` on completion.
 
 ### 2. Locate the target canvas
 - If the user provides a `canvasId` (copied from the `i` icon on a SuCanvas project card or canvas header), use `--canvas-id "<id>"`.
@@ -73,6 +74,20 @@ Do not guess or invent preset names. Pass the exact `name` or `id` returned unde
     --prompt-file /path/to/prompt_v2.txt \
     --preset "<exact-preset-name>" \
     --request-id "stable-unique-id-v2"
+  ```
+- **Using an external Seedance platform (`jimeng-cn`, `dreamina-jp`, `libtv`, `lovart`)**:
+  Replace `--preset` with `--channel <provider>` and optional `--model`, `--resolution`, `--provider-mode`, `--duration`, `--no-sound`:
+  ```bash
+  python3 scripts/sucanvas_h3.py submit \
+    --canvas-id "<canvasId>" \
+    --source-node-id "<nodeId>" \
+    --channel jimeng-cn \
+    --model seedance_2.5 \
+    --resolution 720p \
+    --duration 5 \
+    --aspect-ratio 16:9 \
+    --prompt-file /path/to/prompt.txt \
+    --request-id "stable-jimeng-req-1"
   ```
 
 ### 4. Wait safely without duplicate submissions
