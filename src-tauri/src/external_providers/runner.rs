@@ -781,9 +781,24 @@ async fn run_cancellable_command(
 fn format_dreamina_cli_error(rc: i32, parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
     if let Some(val) = parsed {
         if let Some(err) = val.get("error") {
-            let code = err.get("code").and_then(Value::as_i64);
+            let code_str = err
+                .get("code")
+                .and_then(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .or_else(|| v.as_i64().map(|n| n.to_string()))
+                })
+                .unwrap_or_default();
             let msg = err.get("message").and_then(Value::as_str).unwrap_or("");
             let reason = err.get("reason").and_then(Value::as_str).unwrap_or("");
+            let val_field = err
+                .pointer("/validation/fieldPath")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let val_detail = err
+                .pointer("/validation/detail")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let diags = err
                 .get("diagnostics")
                 .and_then(Value::as_array)
@@ -795,14 +810,21 @@ fn format_dreamina_cli_error(rc: i32, parsed: Option<&Value>, stdout: &str, stde
                 })
                 .unwrap_or_default();
             let mut parts = Vec::new();
-            if let Some(c) = code {
-                parts.push(format!("code={c}"));
+            if !code_str.is_empty() {
+                parts.push(format!("code={code_str}"));
             }
             if !reason.is_empty() {
                 parts.push(reason.to_owned());
             }
             if !msg.is_empty() {
                 parts.push(msg.to_owned());
+            }
+            if !val_detail.is_empty() {
+                if val_field.is_empty() {
+                    parts.push(val_detail.to_owned());
+                } else {
+                    parts.push(format!("{val_field}: {val_detail}"));
+                }
             }
             if !diags.is_empty() {
                 parts.push(diags);
@@ -1944,9 +1966,16 @@ async fn run_lovart_submit_or_chat(
     }
 
     let prefer_models = json!({ "VIDEO": [job.model_id] }).to_string();
+    let res_hint = input
+        .resolution
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
+        .map(|s| format!("，分辨率 {s}"))
+        .unwrap_or_default();
     let skip_hint = format!(
-        "直接调用 {}、跳过故事板确认和分镜图（画面比例 {}，时长 {} 秒）",
-        job.model_label, input.aspect_ratio, input.duration_seconds
+        "直接调用 {}、跳过故事板确认和分镜图（画面比例 {}，时长 {} 秒{}）",
+        job.model_label, input.aspect_ratio, input.duration_seconds, res_hint
     );
     let final_prompt = if input.prompt.contains("跳过故事板") {
         input.prompt.clone()
@@ -2196,6 +2225,15 @@ pub(crate) async fn submit_video(
         return Err("视频生成提示词不能为空".to_owned());
     }
     let spec = resolve_model_spec(input.provider, input.model_id.as_deref());
+    let prompt_chars = input.prompt.trim().chars().count();
+    if let Some(limit) = spec.max_prompt_length {
+        if prompt_chars > limit {
+            return Err(format!(
+                "提示词长度（{} 字）超过 {} 上限（{} 字），请精简提示词或切换至 Seedance 2.5（支持 15000 字）",
+                prompt_chars, spec.label, limit
+            ));
+        }
+    }
     input.model_id = Some(spec.id.clone());
     input.duration_seconds = input
         .duration_seconds
@@ -2350,6 +2388,21 @@ mod tests {
         });
         let err = parse_dreamina_wait_result(&wait_blocked).unwrap_err();
         assert!(err.contains("审核拦截"));
+
+        let str_err = json!({
+            "ok": false,
+            "error": {
+                "code": "cli.invalid_generation_reference",
+                "message": "Invalid generation reference.",
+                "validation": {
+                    "fieldPath": "ref[0]",
+                    "detail": "Use node:<nodeId> or res:<resourceId>"
+                }
+            }
+        });
+        let formatted = format_dreamina_cli_error(1, Some(&str_err), "", "");
+        assert!(formatted.contains("cli.invalid_generation_reference"));
+        assert!(formatted.contains("ref[0]"));
     }
 
     #[test]

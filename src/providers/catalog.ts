@@ -44,6 +44,7 @@ function makeSpec(
   maxImages: number,
   maxVideos: number,
   maxAudios: number,
+  maxPromptLength: number | null = null,
 ): ExternalVideoModelSpec {
   return {
     id,
@@ -60,6 +61,7 @@ function makeSpec(
     maxImages,
     maxVideos,
     maxAudios,
+    maxPromptLength,
   };
 }
 
@@ -68,20 +70,20 @@ export const FALLBACK_MODELS_BY_PROVIDER: Record<
   ExternalVideoModelSpec[]
 > = {
   "jimeng-cn": [
-    makeSpec("seedance_2.5", "Seedance 2.5", "2.5", ["480p", "720p", "1080p", "4k"], "720p", 4, 30, DREAMINA_MODES, false, 30, 10, 10),
-    makeSpec("seedance_2.5_flash", "Seedance 2.5 Flash", "2.5", ["480p", "720p"], "720p", 4, 30, DREAMINA_MODES, false, 10, 5, 5),
-    makeSpec("seedance_2.5_draft", "Seedance 2.5 Draft（样片）", "2.5", ["480p"], "480p", 4, 30, DREAMINA_MODES, false, 30, 10, 10),
-    makeSpec("seedance_2.0_vip", "Seedance 2.0 VIP", "2.0", ["720p", "1080p", "4K"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3),
-    makeSpec("seedance_2.0_fast_vip", "Seedance 2.0 Fast VIP", "2.0", ["720p"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3),
-    makeSpec("seedance_2.0_mini", "Seedance 2.0 Mini", "2.0", ["720p"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3),
+    makeSpec("seedance_2.5", "Seedance 2.5", "2.5", ["480p", "720p", "1080p", "4k"], "720p", 4, 30, DREAMINA_MODES, false, 30, 10, 10, 15_000),
+    makeSpec("seedance_2.5_flash", "Seedance 2.5 Flash", "2.5", ["480p", "720p"], "720p", 4, 30, DREAMINA_MODES, false, 10, 5, 5, 15_000),
+    makeSpec("seedance_2.5_draft", "Seedance 2.5 Draft（样片）", "2.5", ["480p"], "480p", 4, 30, DREAMINA_MODES, false, 30, 10, 10, 15_000),
+    makeSpec("seedance_2.0_vip", "Seedance 2.0 VIP", "2.0", ["720p", "1080p", "4K"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3, 4_000),
+    makeSpec("seedance_2.0_fast_vip", "Seedance 2.0 Fast VIP", "2.0", ["720p"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3, 4_000),
+    makeSpec("seedance_2.0_mini", "Seedance 2.0 Mini", "2.0", ["720p"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3, 4_000),
   ],
   "dreamina-jp": [
-    makeSpec("seedance_2.5", "Seedance 2.5", "2.5", ["480p", "720p", "1080p", "4k"], "720p", 4, 30, DREAMINA_MODES, false, 30, 10, 10),
-    makeSpec("seedance_2.5_flash", "Seedance 2.5 Flash", "2.5", ["480p", "720p"], "720p", 4, 30, DREAMINA_MODES, false, 10, 5, 5),
-    makeSpec("seedance_2.5_draft", "Seedance 2.5 Draft", "2.5", ["480p"], "480p", 4, 30, DREAMINA_MODES, false, 30, 10, 10),
-    makeSpec("seedance_2.0", "Seedance 2.0", "2.0", ["720p", "1080p", "4K"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3),
-    makeSpec("seedance_2.0_fast", "Seedance 2.0 Fast", "2.0", ["720p"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3),
-    makeSpec("seedance_2.0_mini", "Seedance 2.0 Mini", "2.0", ["720p"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3),
+    makeSpec("seedance_2.5", "Seedance 2.5", "2.5", ["480p", "720p", "1080p", "4k"], "720p", 4, 30, DREAMINA_MODES, false, 30, 10, 10, 15_000),
+    makeSpec("seedance_2.5_flash", "Seedance 2.5 Flash", "2.5", ["480p", "720p"], "720p", 4, 30, DREAMINA_MODES, false, 10, 5, 5, 15_000),
+    makeSpec("seedance_2.5_draft", "Seedance 2.5 Draft", "2.5", ["480p"], "480p", 4, 30, DREAMINA_MODES, false, 30, 10, 10, 15_000),
+    makeSpec("seedance_2.0", "Seedance 2.0", "2.0", ["720p", "1080p", "4K"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3, 4_000),
+    makeSpec("seedance_2.0_fast", "Seedance 2.0 Fast", "2.0", ["720p"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3, 4_000),
+    makeSpec("seedance_2.0_mini", "Seedance 2.0 Mini", "2.0", ["720p"], "720p", 4, 15, DREAMINA_MODES, false, 9, 3, 3, 4_000),
   ],
   libtv: [
     makeSpec("Seedance 2.5", "Seedance 2.5", "2.5", ["480p", "720p", "1080p", "4k"], "720p", 4, 30, LIBTV_MODES, true, 30, 10, 10),
@@ -92,11 +94,11 @@ export const FALLBACK_MODELS_BY_PROVIDER: Record<
     makeSpec("Seedance 2.0 Mini", "Seedance 2.0 Mini", "2.0", ["480p", "720p"], "720p", 4, 15, LIBTV_MODES, true, 9, 3, 3),
   ],
   lovart: [
-    makeSpec("generate_video_seedance_v2_5", "Seedance 2.5", "2.5", ["auto"], "auto", 4, 15, LOVART_MODES, false, 9, 0, 0),
-    makeSpec("generate_video_seedance_v2_5_flash", "Seedance 2.5 Flash", "2.5", ["auto"], "auto", 4, 15, LOVART_MODES, false, 9, 0, 0),
-    makeSpec("generate_video_seedance_v2_0", "Seedance 2.0", "2.0", ["auto"], "auto", 4, 15, LOVART_MODES, false, 9, 0, 0),
-    makeSpec("generate_video_seedance_v2_0_fast", "Seedance 2.0 Fast", "2.0", ["auto"], "auto", 4, 15, LOVART_MODES, false, 9, 0, 0),
-    makeSpec("generate_video_seedance_v2_0_mini", "Seedance 2.0 Mini", "2.0", ["auto"], "auto", 4, 15, LOVART_MODES, false, 9, 0, 0),
+    makeSpec("generate_video_seedance_v2_5", "Seedance 2.5", "2.5", ["auto", "480p", "720p", "1080p"], "auto", 4, 15, LOVART_MODES, false, 9, 0, 0),
+    makeSpec("generate_video_seedance_v2_5_flash", "Seedance 2.5 Flash", "2.5", ["auto", "480p", "720p", "1080p"], "auto", 4, 15, LOVART_MODES, false, 9, 0, 0),
+    makeSpec("generate_video_seedance_v2_0", "Seedance 2.0", "2.0", ["auto", "480p", "720p", "1080p"], "auto", 4, 15, LOVART_MODES, false, 9, 0, 0),
+    makeSpec("generate_video_seedance_v2_0_fast", "Seedance 2.0 Fast", "2.0", ["auto", "480p", "720p", "1080p"], "auto", 4, 15, LOVART_MODES, false, 9, 0, 0),
+    makeSpec("generate_video_seedance_v2_0_mini", "Seedance 2.0 Mini", "2.0", ["auto", "480p", "720p", "1080p"], "auto", 4, 15, LOVART_MODES, false, 9, 0, 0),
   ],
 };
 

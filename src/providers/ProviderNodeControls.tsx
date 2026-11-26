@@ -145,15 +145,15 @@ export function ExternalProviderVideoFields({
         />
       </div>
 
-      {spec.resolutions.length > 1 && (
-        <div className="video-workflow-module-select">
-          <span>分辨率</span>
+      <div className="video-workflow-module-select">
+        <span>分辨率</span>
+        {spec.resolutions.length > 1 ? (
           <Select
             value={selectedResolution}
             ariaLabel="外部平台视频分辨率"
             options={spec.resolutions.map((res) => ({
               value: res,
-              label: res.toUpperCase(),
+              label: res === "auto" ? "自动（平台默认）" : res.toUpperCase(),
             }))}
             onChange={(resolution) => onUpdateContent({
               externalResolution: resolution,
@@ -161,12 +161,21 @@ export function ExternalProviderVideoFields({
               validationMessage: "",
             })}
           />
-        </div>
-      )}
+        ) : (
+          <div
+            className="video-locked-value external-provider-locked-value"
+            title="当前模型仅支持默认固定分辨率"
+          >
+            {selectedResolution === "auto"
+              ? "自动（由平台决定）"
+              : `${selectedResolution.toUpperCase()}（默认固定）`}
+          </div>
+        )}
+      </div>
 
-      {spec.modes.length > 1 && (
-        <div className="video-workflow-module-select">
-          <span>生成模式</span>
+      <div className="video-workflow-module-select">
+        <span>生成模式</span>
+        {spec.modes.length > 1 ? (
           <Select
             value={selectedMode}
             ariaLabel="外部平台视频生成模式"
@@ -180,8 +189,15 @@ export function ExternalProviderVideoFields({
               validationMessage: "",
             })}
           />
-        </div>
-      )}
+        ) : (
+          <div
+            className="video-locked-value external-provider-locked-value"
+            title="当前平台使用默认生成模式"
+          >
+            {externalModeLabel(selectedMode)}
+          </div>
+        )}
+      </div>
 
       {spec.supportsAudioToggle && (
         <div className="video-workflow-module-select">

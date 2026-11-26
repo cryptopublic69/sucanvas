@@ -3056,10 +3056,24 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
     workflowModuleRevision: typeof snapshot.workflowModuleRevision === "string"
       ? snapshot.workflowModuleRevision
       : "",
-    channel: snapshot.channel === "colab" ? "colab" : "local",
+    channel: snapshot.channel === "colab"
+      ? "colab"
+      : isExternalVideoChannel(snapshot.channel)
+        ? snapshot.channel
+        : "local",
     ...(typeof snapshot.colabSampler === "string" && snapshot.colabSampler.trim()
       ? { colabSampler: snapshot.colabSampler.trim() }
       : {}),
+    ...(isExternalVideoChannel(snapshot.externalProvider) ? {
+      externalProvider: snapshot.externalProvider,
+      ...(typeof snapshot.externalProviderLabel === "string" ? { externalProviderLabel: snapshot.externalProviderLabel } : {}),
+      ...(typeof snapshot.externalModelId === "string" ? { externalModelId: snapshot.externalModelId } : {}),
+      ...(typeof snapshot.externalModelLabel === "string" ? { externalModelLabel: snapshot.externalModelLabel } : {}),
+      ...(typeof snapshot.externalResolution === "string" ? { externalResolution: snapshot.externalResolution } : {}),
+      ...(typeof snapshot.externalMode === "string" ? { externalMode: snapshot.externalMode } : {}),
+      ...(typeof snapshot.externalQuotedCredits === "number" ? { externalQuotedCredits: snapshot.externalQuotedCredits } : {}),
+      ...(typeof snapshot.externalEnableSound === "boolean" ? { externalEnableSound: snapshot.externalEnableSound } : {}),
+    } : {}),
     ...(imageRecovery ? { imageRecovery } : {}),
     ...(videoUpscaleFromValue(snapshot.videoUpscale) ? { videoUpscale: videoUpscaleFromValue(snapshot.videoUpscale) } : {}),
   };
@@ -3072,6 +3086,14 @@ function persistedComfyTaskFromPlaceholder(record: NodeRecord): PersistedComfyTa
   ) {
     return null;
   }
+  const snapshot = generationSnapshotFromContent(record.content);
+  if (
+    isExternalVideoChannel(record.content.externalProvider)
+    || isExternalVideoChannel(snapshot?.channel)
+    || typeof record.content.externalJobId === "string"
+  ) {
+    return null;
+  }
   const clientId = typeof record.content.placeholderClientId === "string"
     ? record.content.placeholderClientId
     : "";
@@ -3081,7 +3103,6 @@ function persistedComfyTaskFromPlaceholder(record: NodeRecord): PersistedComfyTa
   const sourcePreviewId = typeof record.content.sourcePreviewId === "string"
     ? record.content.sourcePreviewId
     : "";
-  const snapshot = generationSnapshotFromContent(record.content);
   if (!clientId || !sourceGeneratorId || !snapshot) return null;
   const parsedStartedAt = Date.parse(record.createdAt);
   const imageTask = record.kind === "generated-image" ? snapshot.imageRecovery : undefined;
@@ -4360,6 +4381,13 @@ function validateVideoExecution(
   if (externalSpec) {
     if (!textInputs.length || !activeTextInput || !textFromContent(activeTextInput.content).trim()) {
       return { valid: false, message: "请先连接并填写文字提示词节点" };
+    }
+    const promptChars = textFromContent(activeTextInput.content).trim().length;
+    if (externalSpec.maxPromptLength && promptChars > externalSpec.maxPromptLength) {
+      return {
+        valid: false,
+        message: `提示词长度（${promptChars} 字）超过 ${externalSpec.label} 上限（${externalSpec.maxPromptLength} 字），请精简提示词或切换至 Seedance 2.5（支持 15000 字）`,
+      };
     }
     if (images.length > externalSpec.maxImages) {
       return { valid: false, message: `当前模型最多支持 ${externalSpec.maxImages} 张参考图（当前 ${images.length} 张）` };

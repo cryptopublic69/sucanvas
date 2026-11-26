@@ -69,6 +69,18 @@
   flex-shrink: 0;
 }
 
+.external-provider-locked-value {
+  display: flex;
+  align-items: center;
+  min-height: 33px;
+  padding: 0 9px;
+  border-radius: 7px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.48);
+  color: #cbd5e1;
+  font-size: calc(12.5px + var(--ui-font-adjust));
+}
+
 .external-provider-confirm-card {
   margin-top: 2px;
   padding: 10px;

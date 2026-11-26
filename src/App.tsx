@@ -2300,9 +2300,22 @@ function CanvasWorkspace() {
 
   useEffect(() => {
     if (!activeProjectId) return;
+    const prunedPersisted = persistedComfyTasks.current.filter(
+      (task) => !isExternalVideoChannel(task.snapshot.channel),
+    );
+    if (prunedPersisted.length !== persistedComfyTasks.current.length) {
+      savePersistedComfyTasks(prunedPersisted);
+    }
     const reconstructedTasks = contentNodes
       .map((node) => node.data.record)
       .filter((record) => {
+        if (
+          isExternalVideoChannel(record.content.externalProvider)
+          || isExternalVideoChannel(record.content.generationChannel)
+          || typeof record.content.externalJobId === "string"
+        ) {
+          return false;
+        }
         const status = record.content.status;
         const validationMessage = typeof record.content.validationMessage === "string"
           ? record.content.validationMessage
@@ -2338,6 +2351,13 @@ function CanvasWorkspace() {
         )),
     );
     contentNodes.forEach((node) => {
+      if (
+        isExternalVideoChannel(node.data.record.content.externalProvider)
+        || isExternalVideoChannel(node.data.record.content.generationChannel)
+        || typeof node.data.record.content.externalJobId === "string"
+      ) {
+        return;
+      }
       const status = node.data.record.content.status;
       if (status !== "running" && status !== "cancelling") return;
       const isPlaceholder = node.data.record.content.generationPlaceholder === true;
@@ -2835,8 +2855,27 @@ function CanvasWorkspace() {
     type PlaceholderTask = Pick<PersistedComfyTask, "clientId" | "nodeId" | "kind" | "placeholderNodeId"> & {
       channel?: VideoExecutionChannel;
     };
+    const externalPlaceholderJobIds = records
+      .filter((record) => (
+        record.content.generationPlaceholder === true
+        && typeof record.content.externalJobId === "string"
+        && record.content.externalJobId
+        && ["queued", "running", "awaiting_confirmation", "confirming"].includes(String(record.content.status ?? ""))
+      ))
+      .map((record) => String(record.content.externalJobId));
+    for (const jobId of [...new Set(externalPlaceholderJobIds)]) {
+      try {
+        await externalProviders.cancelVideo(jobId);
+      } catch (error) {
+        reportError(error);
+      }
+    }
     const tasks: PlaceholderTask[] = records
-      .filter((record) => record.content.generationPlaceholder === true)
+      .filter((record) => (
+        record.content.generationPlaceholder === true
+        && !isExternalVideoChannel(record.content.externalProvider)
+        && typeof record.content.externalJobId !== "string"
+      ))
       .flatMap<PlaceholderTask>((record) => {
         const clientId = typeof record.content.placeholderClientId === "string"
           ? record.content.placeholderClientId
@@ -3893,14 +3932,17 @@ function CanvasWorkspace() {
     const position = positionOverride ?? (placeBelowSource
       ? generatedPreviewPositionBelow(source, placementRecords, previewWidth, previewHeight)
       : generatedPreviewPosition(source, placementRecords, previewWidth, previewHeight));
+    const isExternalSnapshot = isExternalVideoChannel(snapshot.channel);
     const reservationId = `generation-placeholder:${clientId}`;
     const placeholderContent: JsonObject = {
       generationPlaceholder: true,
-      placeholderClientId: clientId,
+      ...(!isExternalSnapshot ? { placeholderClientId: clientId } : {}),
       status: "running",
       executionProgress: null,
       validationMessage: processing ? "正在准备视频超分…" : secondary
         ? `正在准备二次采样（${snapshot.secondaryResolutionMegapixels.toFixed(1)} MP）…`
+        : isExternalSnapshot
+          ? `正在上传素材并提交到 ${snapshot.externalProviderLabel ?? snapshot.channel}…`
         : snapshot.channel === "colab"
           ? "正在上传素材并提交到 Colab ComfyUI…"
           : "正在上传素材并提交到远程 ComfyUI…",
@@ -3908,6 +3950,12 @@ function CanvasWorkspace() {
       ...(secondary ? { sourcePreviewId: source.id } : {}),
       ...(seed !== undefined ? { seed } : {}),
       ...(snapshot.channel === "colab" ? { comfyChannel: "colab" } : {}),
+      ...(isExternalSnapshot && snapshot.externalProvider ? {
+        externalProvider: snapshot.externalProvider,
+        ...(snapshot.externalProviderLabel ? { externalProviderLabel: snapshot.externalProviderLabel } : {}),
+        ...(snapshot.externalModelId ? { externalModelId: snapshot.externalModelId } : {}),
+        ...(snapshot.externalModelLabel ? { externalModelLabel: snapshot.externalModelLabel } : {}),
+      } : {}),
       generationSnapshot: snapshot,
       ...(processing ? { videoUpscale: processing } : {}),
     };
@@ -3917,7 +3965,7 @@ function CanvasWorkspace() {
       kind: "generated-video",
       title: processing ? "超分预览（生成中）" : secondary ? "2采预览（生成中）" : "视频预览（生成中）",
       content: placeholderContent,
-      source: "comfyui-placeholder",
+      source: isExternalSnapshot ? "external-provider-placeholder" : "comfyui-placeholder",
       requestId: reservationId,
       x: position.x,
       y: position.y,
@@ -4445,6 +4493,15 @@ function CanvasWorkspace() {
         snapshot.externalModelId ?? target.content.externalModelId,
         externalProviders.providersById[executionChannel],
       );
+      const promptChars = snapshot.prompt.trim().length;
+      if (extSpec.maxPromptLength && promptChars > extSpec.maxPromptLength) {
+        const message = `提示词长度（${promptChars} 字）超过 ${extSpec.label} 上限（${extSpec.maxPromptLength} 字），请精简提示词或切换至 Seedance 2.5（支持 15000 字）`;
+        changeNode(targetId, {
+          content: { ...target.content, status: "invalid", validationMessage: message },
+        });
+        rejectSubmission(message);
+        return;
+      }
       if (snapshot.imagePaths.length > extSpec.maxImages
         || snapshot.videoPaths.length > extSpec.maxVideos
         || snapshot.audioPaths.length > extSpec.maxAudios) {
@@ -7714,6 +7771,7 @@ function CanvasWorkspace() {
       const tasks = persistedComfyTasks.current.filter((task) => (
         task.canvasId === activeProjectId
         && !ownedComfyClients.current.has(task.clientId)
+        && !isExternalVideoChannel(task.snapshot.channel)
       ));
       if (tasks.length) {
         tasks.forEach((task) => {

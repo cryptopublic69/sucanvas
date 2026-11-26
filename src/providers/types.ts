@@ -21,6 +21,7 @@ export interface ExternalVideoModelSpec {
   maxImages: number;
   maxVideos: number;
   maxAudios: number;
+  maxPromptLength?: number | null;
 }
 
 export interface ProviderStatusSnapshot {

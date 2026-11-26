@@ -63,6 +63,34 @@ test("Seedance 2.0 and 2.5 catalog lookup and duration clamping", () => {
   }
   assert.equal(isExternalVideoChannel("local"), false);
   assert.equal(isExternalVideoChannel("colab"), false);
+
+  const cnMini = resolveExternalModelSpec("jimeng-cn", "seedance_2.0_mini");
+  assert.equal(cnMini.defaultResolution, "720p");
+  assert.equal(cnMini.maxPromptLength, 4000);
+  const cn25 = resolveExternalModelSpec("jimeng-cn", "seedance_2.5");
+  assert.equal(cn25.maxPromptLength, 15000);
+  const jpMini = resolveExternalModelSpec("dreamina-jp", "seedance_2.0_mini");
+  assert.equal(jpMini.defaultResolution, "720p");
+  assert.equal(jpMini.maxPromptLength, 4000);
+
+  const lovart25 = resolveExternalModelSpec("lovart", "generate_video_seedance_v2_5");
+  assert.deepEqual(lovart25.resolutions, ["auto", "480p", "720p", "1080p"]);
+  assert.equal(lovart25.defaultResolution, "auto");
+});
+
+test("ProviderNodeControls always shows resolution and mode rows including single-option defaults", async () => {
+  const source = await readFile(new URL("../src/providers/ProviderNodeControls.tsx", import.meta.url), "utf8");
+  assert.match(source, /<span>分辨率<\/span>/);
+  assert.match(source, /默认固定/);
+  assert.match(source, /<span>生成模式<\/span>/);
+  assert.doesNotMatch(source, /spec\.resolutions\.length\s*>\s*1\s*&&\s*\(\s*<div/);
+});
+
+test("ComfyUI recovery ignores external provider placeholders", async () => {
+  const canvasNodeSource = await readFile(new URL("../src/CanvasNode.tsx", import.meta.url), "utf8");
+  assert.match(canvasNodeSource, /function persistedComfyTaskFromPlaceholder[\s\S]*isExternalVideoChannel\(record\.content\.externalProvider\)/);
+  const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(appSource, /!isExternalVideoChannel\(task\.snapshot\.channel\)/);
 });
 
 test("normalizeVideoExecutionChannel preserves external providers in web mode and falls back on desktop", () => {

@@ -78,6 +78,7 @@ pub struct ExternalVideoModelSpec {
     pub max_images: usize,
     pub max_videos: usize,
     pub max_audios: usize,
+    pub max_prompt_length: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,6 +144,7 @@ fn model_spec(
     max_images: usize,
     max_videos: usize,
     max_audios: usize,
+    max_prompt_length: Option<usize>,
 ) -> ExternalVideoModelSpec {
     ExternalVideoModelSpec {
         id: id.to_owned(),
@@ -159,41 +161,42 @@ fn model_spec(
         max_images,
         max_videos,
         max_audios,
+        max_prompt_length,
     }
 }
 
 pub fn models_for_provider(provider: ProviderId) -> Vec<ExternalVideoModelSpec> {
     match provider {
         ProviderId::JimengCn => vec![
-            model_spec("seedance_2.5", "Seedance 2.5", "2.5", &["480p", "720p", "1080p", "4k"], "720p", 4, 30, 5, dreamina_modes(), false, 30, 10, 10),
-            model_spec("seedance_2.5_flash", "Seedance 2.5 Flash", "2.5", &["480p", "720p"], "720p", 4, 30, 5, dreamina_modes(), false, 10, 5, 5),
-            model_spec("seedance_2.5_draft", "Seedance 2.5 Draft（样片）", "2.5", &["480p"], "480p", 4, 30, 5, dreamina_modes(), false, 30, 10, 10),
-            model_spec("seedance_2.0_vip", "Seedance 2.0 VIP", "2.0", &["720p", "1080p", "4K"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3),
-            model_spec("seedance_2.0_fast_vip", "Seedance 2.0 Fast VIP", "2.0", &["720p"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3),
-            model_spec("seedance_2.0_mini", "Seedance 2.0 Mini", "2.0", &["720p"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3),
+            model_spec("seedance_2.5", "Seedance 2.5", "2.5", &["480p", "720p", "1080p", "4k"], "720p", 4, 30, 5, dreamina_modes(), false, 30, 10, 10, Some(15_000)),
+            model_spec("seedance_2.5_flash", "Seedance 2.5 Flash", "2.5", &["480p", "720p"], "720p", 4, 30, 5, dreamina_modes(), false, 10, 5, 5, Some(15_000)),
+            model_spec("seedance_2.5_draft", "Seedance 2.5 Draft（样片）", "2.5", &["480p"], "480p", 4, 30, 5, dreamina_modes(), false, 30, 10, 10, Some(15_000)),
+            model_spec("seedance_2.0_vip", "Seedance 2.0 VIP", "2.0", &["720p", "1080p", "4K"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3, Some(4_000)),
+            model_spec("seedance_2.0_fast_vip", "Seedance 2.0 Fast VIP", "2.0", &["720p"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3, Some(4_000)),
+            model_spec("seedance_2.0_mini", "Seedance 2.0 Mini", "2.0", &["720p"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3, Some(4_000)),
         ],
         ProviderId::DreaminaJp => vec![
-            model_spec("seedance_2.5", "Seedance 2.5", "2.5", &["480p", "720p", "1080p", "4k"], "720p", 4, 30, 5, dreamina_modes(), false, 30, 10, 10),
-            model_spec("seedance_2.5_flash", "Seedance 2.5 Flash", "2.5", &["480p", "720p"], "720p", 4, 30, 5, dreamina_modes(), false, 10, 5, 5),
-            model_spec("seedance_2.5_draft", "Seedance 2.5 Draft", "2.5", &["480p"], "480p", 4, 30, 5, dreamina_modes(), false, 30, 10, 10),
-            model_spec("seedance_2.0", "Seedance 2.0", "2.0", &["720p", "1080p", "4K"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3),
-            model_spec("seedance_2.0_fast", "Seedance 2.0 Fast", "2.0", &["720p"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3),
-            model_spec("seedance_2.0_mini", "Seedance 2.0 Mini", "2.0", &["720p"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3),
+            model_spec("seedance_2.5", "Seedance 2.5", "2.5", &["480p", "720p", "1080p", "4k"], "720p", 4, 30, 5, dreamina_modes(), false, 30, 10, 10, Some(15_000)),
+            model_spec("seedance_2.5_flash", "Seedance 2.5 Flash", "2.5", &["480p", "720p"], "720p", 4, 30, 5, dreamina_modes(), false, 10, 5, 5, Some(15_000)),
+            model_spec("seedance_2.5_draft", "Seedance 2.5 Draft", "2.5", &["480p"], "480p", 4, 30, 5, dreamina_modes(), false, 30, 10, 10, Some(15_000)),
+            model_spec("seedance_2.0", "Seedance 2.0", "2.0", &["720p", "1080p", "4K"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3, Some(4_000)),
+            model_spec("seedance_2.0_fast", "Seedance 2.0 Fast", "2.0", &["720p"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3, Some(4_000)),
+            model_spec("seedance_2.0_mini", "Seedance 2.0 Mini", "2.0", &["720p"], "720p", 4, 15, 5, dreamina_modes(), false, 9, 3, 3, Some(4_000)),
         ],
         ProviderId::Libtv => vec![
-            model_spec("Seedance 2.5", "Seedance 2.5", "2.5", &["480p", "720p", "1080p", "4k"], "720p", 4, 30, 5, libtv_modes(), true, 30, 10, 10),
-            model_spec("Seedance 2.5 Flash", "Seedance 2.5 Flash", "2.5", &["480p", "720p"], "720p", 4, 30, 5, libtv_modes(), true, 10, 5, 5),
-            model_spec("Seedance 2.5（样片模式）", "Seedance 2.5（样片模式）", "2.5", &["480p"], "480p", 4, 30, 5, libtv_modes(), true, 30, 10, 10),
-            model_spec("Seedance 2.0 VIP", "Seedance 2.0 VIP", "2.0", &["480p", "720p"], "720p", 4, 15, 5, libtv_modes(), true, 9, 3, 3),
-            model_spec("Seedance 2.0 Fast VIP", "Seedance 2.0 Fast VIP", "2.0", &["480p", "720p"], "720p", 4, 15, 5, libtv_modes(), true, 9, 3, 3),
-            model_spec("Seedance 2.0 Mini", "Seedance 2.0 Mini", "2.0", &["480p", "720p"], "720p", 4, 15, 5, libtv_modes(), true, 9, 3, 3),
+            model_spec("Seedance 2.5", "Seedance 2.5", "2.5", &["480p", "720p", "1080p", "4k"], "720p", 4, 30, 5, libtv_modes(), true, 30, 10, 10, None),
+            model_spec("Seedance 2.5 Flash", "Seedance 2.5 Flash", "2.5", &["480p", "720p"], "720p", 4, 30, 5, libtv_modes(), true, 10, 5, 5, None),
+            model_spec("Seedance 2.5（样片模式）", "Seedance 2.5（样片模式）", "2.5", &["480p"], "480p", 4, 30, 5, libtv_modes(), true, 30, 10, 10, None),
+            model_spec("Seedance 2.0 VIP", "Seedance 2.0 VIP", "2.0", &["480p", "720p"], "720p", 4, 15, 5, libtv_modes(), true, 9, 3, 3, None),
+            model_spec("Seedance 2.0 Fast VIP", "Seedance 2.0 Fast VIP", "2.0", &["480p", "720p"], "720p", 4, 15, 5, libtv_modes(), true, 9, 3, 3, None),
+            model_spec("Seedance 2.0 Mini", "Seedance 2.0 Mini", "2.0", &["480p", "720p"], "720p", 4, 15, 5, libtv_modes(), true, 9, 3, 3, None),
         ],
         ProviderId::Lovart => vec![
-            model_spec("generate_video_seedance_v2_5", "Seedance 2.5", "2.5", &["auto"], "auto", 4, 15, 5, lovart_modes(), false, 9, 0, 0),
-            model_spec("generate_video_seedance_v2_5_flash", "Seedance 2.5 Flash", "2.5", &["auto"], "auto", 4, 15, 5, lovart_modes(), false, 9, 0, 0),
-            model_spec("generate_video_seedance_v2_0", "Seedance 2.0", "2.0", &["auto"], "auto", 4, 15, 5, lovart_modes(), false, 9, 0, 0),
-            model_spec("generate_video_seedance_v2_0_fast", "Seedance 2.0 Fast", "2.0", &["auto"], "auto", 4, 15, 5, lovart_modes(), false, 9, 0, 0),
-            model_spec("generate_video_seedance_v2_0_mini", "Seedance 2.0 Mini", "2.0", &["auto"], "auto", 4, 15, 5, lovart_modes(), false, 9, 0, 0),
+            model_spec("generate_video_seedance_v2_5", "Seedance 2.5", "2.5", &["auto", "480p", "720p", "1080p"], "auto", 4, 15, 5, lovart_modes(), false, 9, 0, 0, None),
+            model_spec("generate_video_seedance_v2_5_flash", "Seedance 2.5 Flash", "2.5", &["auto", "480p", "720p", "1080p"], "auto", 4, 15, 5, lovart_modes(), false, 9, 0, 0, None),
+            model_spec("generate_video_seedance_v2_0", "Seedance 2.0", "2.0", &["auto", "480p", "720p", "1080p"], "auto", 4, 15, 5, lovart_modes(), false, 9, 0, 0, None),
+            model_spec("generate_video_seedance_v2_0_fast", "Seedance 2.0 Fast", "2.0", &["auto", "480p", "720p", "1080p"], "auto", 4, 15, 5, lovart_modes(), false, 9, 0, 0, None),
+            model_spec("generate_video_seedance_v2_0_mini", "Seedance 2.0 Mini", "2.0", &["auto", "480p", "720p", "1080p"], "auto", 4, 15, 5, lovart_modes(), false, 9, 0, 0, None),
         ],
     }
 }
@@ -569,6 +572,12 @@ mod tests {
                 id
             );
             assert!(models.iter().all(|m| m.series == "2.5" || m.series == "2.0"));
+            if matches!(id, ProviderId::JimengCn | ProviderId::DreaminaJp) {
+                for m in &models {
+                    let expected = if m.series == "2.5" { Some(15_000) } else { Some(4_000) };
+                    assert_eq!(m.max_prompt_length, expected, "{:?} {}", id, m.id);
+                }
+            }
         }
     }
 
