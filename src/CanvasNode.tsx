@@ -830,6 +830,7 @@ interface GenerationSnapshot {
   externalResolution?: string;
   externalMode?: string;
   externalQuotedCredits?: number;
+  externalCreditsCost?: number;
   externalEnableSound?: boolean;
   imageRecovery?: ImageRecoverySnapshot;
 }
@@ -3072,6 +3073,7 @@ function generationSnapshotFromContent(content: JsonObject): GenerationSnapshot 
       ...(typeof snapshot.externalResolution === "string" ? { externalResolution: snapshot.externalResolution } : {}),
       ...(typeof snapshot.externalMode === "string" ? { externalMode: snapshot.externalMode } : {}),
       ...(typeof snapshot.externalQuotedCredits === "number" ? { externalQuotedCredits: snapshot.externalQuotedCredits } : {}),
+      ...(typeof snapshot.externalCreditsCost === "number" ? { externalCreditsCost: snapshot.externalCreditsCost } : {}),
       ...(typeof snapshot.externalEnableSound === "boolean" ? { externalEnableSound: snapshot.externalEnableSound } : {}),
     } : {}),
     ...(imageRecovery ? { imageRecovery } : {}),
@@ -8364,10 +8366,25 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
                         <ColabSnapshotMetaItem snapshot={generatedVideoSnapshot} />
                       </>
                     ) : (
-                      <div>
-                        <span>执行渠道</span>
-                        <strong>{generatedVideoSnapshot.externalProviderLabel ?? generatedVideoSnapshot.externalProvider}</strong>
-                      </div>
+                      <>
+                        <div>
+                          <span>执行渠道</span>
+                          <strong>{generatedVideoSnapshot.externalProviderLabel ?? generatedVideoSnapshot.externalProvider}</strong>
+                        </div>
+                        <div>
+                          <span>积分消耗</span>
+                          <strong>
+                            {(() => {
+                              const credits = generatedVideoSnapshot.externalCreditsCost
+                                ?? generatedVideoSnapshot.externalQuotedCredits
+                                ?? (typeof record.content.externalCostCredits === "number"
+                                  ? record.content.externalCostCredits
+                                  : null);
+                              return credits !== null ? `${credits} 积分` : "平台未返回";
+                            })()}
+                          </strong>
+                        </div>
+                      </>
                     )}
                   </section>
                   {generatedVideoSnapshot.externalProvider ? (

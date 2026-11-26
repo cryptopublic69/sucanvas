@@ -341,9 +341,11 @@ export function ExternalProviderSnapshotInfo({
   const mode = typeof snapshot.externalMode === "string"
     ? snapshot.externalMode
     : "";
-  const credits = typeof snapshot.externalQuotedCredits === "number"
-    ? snapshot.externalQuotedCredits
-    : null;
+  const credits = typeof snapshot.externalCreditsCost === "number"
+    ? snapshot.externalCreditsCost
+    : typeof snapshot.externalQuotedCredits === "number"
+      ? snapshot.externalQuotedCredits
+      : null;
   if (!providerLabel) return null;
   return (
     <section className="generated-video-stage-info">
@@ -360,7 +362,7 @@ export function ExternalProviderSnapshotInfo({
         {resolution && (
           <>
             <dt>分辨率</dt>
-            <dd>{resolution.toUpperCase()}</dd>
+            <dd>{resolution === "auto" ? "自动（平台默认）" : resolution.toUpperCase()}</dd>
           </>
         )}
         {mode && (
@@ -369,12 +371,8 @@ export function ExternalProviderSnapshotInfo({
             <dd>{externalModeLabel(mode)}</dd>
           </>
         )}
-        {credits !== null && (
-          <>
-            <dt>报价积分</dt>
-            <dd>{credits}</dd>
-          </>
-        )}
+        <dt>积分消耗</dt>
+        <dd>{credits !== null ? `${credits} 积分` : "平台未返回"}</dd>
       </dl>
     </section>
   );

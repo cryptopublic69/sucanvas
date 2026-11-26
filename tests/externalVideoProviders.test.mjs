@@ -89,6 +89,9 @@ test("ProviderNodeControls always shows resolution and mode rows including singl
 test("ComfyUI recovery ignores external provider placeholders", async () => {
   const canvasNodeSource = await readFile(new URL("../src/CanvasNode.tsx", import.meta.url), "utf8");
   assert.match(canvasNodeSource, /function persistedComfyTaskFromPlaceholder[\s\S]*isExternalVideoChannel\(record\.content\.externalProvider\)/);
+  assert.match(canvasNodeSource, /<span>积分消耗<\/span>/);
+  const controlsSource = await readFile(new URL("../src/providers/ProviderNodeControls.tsx", import.meta.url), "utf8");
+  assert.match(controlsSource, /<dt>积分消耗<\/dt>/);
   const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   assert.match(appSource, /!isExternalVideoChannel\(task\.snapshot\.channel\)/);
 });

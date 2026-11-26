@@ -635,6 +635,7 @@ fn finalize_job_success(
         "externalResolution": resolution,
         "externalMode": mode,
         "externalQuotedCredits": job.cost_credits,
+        "externalCreditsCost": job.cost_credits,
         "externalEnableSound": input.enable_sound.unwrap_or(true),
         "durationSeconds": input.duration_seconds,
         "aspectRatio": input.aspect_ratio,
@@ -976,7 +977,7 @@ fn parse_dreamina_quote_result(resp: &Value) -> Result<(Option<i64>, bool), Stri
     Ok((credits, confirmation_required))
 }
 
-fn parse_dreamina_wait_result(resp: &Value) -> Result<(String, Option<String>), String> {
+fn parse_dreamina_wait_result(resp: &Value) -> Result<(String, Option<String>, Option<i64>), String> {
     if resp.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(format_dreamina_cli_error(-1, Some(resp), "", ""));
     }
@@ -1013,7 +1014,11 @@ fn parse_dreamina_wait_result(resp: &Value) -> Result<(String, Option<String>), 
         .get("format")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    Ok((resource_id.to_owned(), format))
+    let credits_amount = primary
+        .get("creditsAmount")
+        .and_then(Value::as_i64)
+        .or_else(|| data.get("creditsAmount").and_then(Value::as_i64));
+    Ok((resource_id.to_owned(), format, credits_amount))
 }
 
 async fn run_dreamina_prepare_and_quote(
@@ -1246,13 +1251,13 @@ async fn run_dreamina_prepare_and_quote(
     };
     let (credits, _confirm_req) = parse_dreamina_quote_result(&qval).map_err(|e| (false, e))?;
     let quote_summary = match credits {
-        Some(c) => format!("预计消耗 {c} 积分（{} · {}），请确认后继续生成", job.provider_label, job.model_label),
-        None => format!("{} · {} 已完成预检，请确认后开始生成", job.provider_label, job.model_label),
+        Some(c) => format!("预计消耗 {c} 积分（{} · {}），正在自动确认并提交生成…", job.provider_label, job.model_label),
+        None => format!("{} · {} 已完成预检，正在自动确认并开始生成…", job.provider_label, job.model_label),
     };
     job.cost_credits = credits;
     job.quote_summary = Some(quote_summary.clone());
-    update_job_stage(state, job, "awaiting_confirmation", &quote_summary).map_err(|e| (false, e))?;
-    Ok(())
+    update_job_stage(state, job, "running", &quote_summary).map_err(|e| (false, e))?;
+    run_dreamina_confirm_and_wait(state, job, input, bin, cancel_rx).await
 }
 
 async fn run_dreamina_confirm_and_wait(
@@ -1397,7 +1402,11 @@ async fn run_dreamina_confirm_and_wait(
     let Some(wval) = wait_resp else {
         return Err((false, "等待生成结果时未收到有效 JSON".to_owned()));
     };
-    let (resource_id, format_ext) = parse_dreamina_wait_result(&wval).map_err(|e| (false, e))?;
+    let (resource_id, format_ext, wait_credits) =
+        parse_dreamina_wait_result(&wval).map_err(|e| (false, e))?;
+    if wait_credits.is_some() {
+        job.cost_credits = wait_credits;
+    }
 
     let (target_path, asset_path, video_url, subfolder, filename) =
         prepare_output_location(state, job, format_ext.as_deref().unwrap_or("mp4"))
@@ -1472,10 +1481,11 @@ fn infer_libtv_mode(image_count: usize, video_count: usize, audio_count: usize, 
     }
 }
 
-fn parse_libtv_ndjson(stdout: &str) -> (Option<i64>, Vec<String>, Option<String>) {
+fn parse_libtv_ndjson(stdout: &str) -> (Option<i64>, Vec<String>, Option<String>, Option<i64>) {
     let mut merged_status: Option<i64> = None;
     let mut urls = Vec::new();
     let mut prompt: Option<String> = None;
+    let mut credits: Option<i64> = None;
 
     for raw in stdout.lines() {
         let trimmed = raw.trim();
@@ -1485,6 +1495,26 @@ fn parse_libtv_ndjson(stdout: &str) -> (Option<i64>, Vec<String>, Option<String>
         let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
+        if let Some(c) = [
+            "/costPoints",
+            "/points",
+            "/credits",
+            "/creditCost",
+            "/data/costPoints",
+            "/data/points",
+            "/data/credits",
+            "/taskInfo/costPoints",
+            "/taskInfo/points",
+            "/taskInfo/credits",
+            "/data/taskInfo/costPoints",
+            "/data/taskInfo/points",
+            "/data/taskInfo/credits",
+        ]
+        .iter()
+        .find_map(|ptr| val.pointer(ptr).and_then(Value::as_i64))
+        {
+            credits = Some(c);
+        }
         if let Some(s) = val
             .get("status")
             .or_else(|| val.pointer("/taskInfo/status"))
@@ -1530,7 +1560,7 @@ fn parse_libtv_ndjson(stdout: &str) -> (Option<i64>, Vec<String>, Option<String>
             }
         }
     }
-    (merged_status, urls, prompt)
+    (merged_status, urls, prompt, credits)
 }
 
 async fn ensure_libtv_workspace(
@@ -1775,7 +1805,10 @@ async fn run_libtv_video(
         ));
     }
 
-    let (mut status_code, mut urls, _prompt) = parse_libtv_ndjson(&stdout);
+    let (mut status_code, mut urls, _prompt, ndjson_credits) = parse_libtv_ndjson(&stdout);
+    if ndjson_credits.is_some() {
+        job.cost_credits = ndjson_credits;
+    }
     if urls.is_empty() && status_code == Some(2) {
         let (rc_rb, stdout_rb, _) = run_cancellable_command(
             &bin_str,
@@ -1787,9 +1820,12 @@ async fn run_libtv_video(
         )
         .await?;
         if rc_rb == 0 {
-            let (rb_status, rb_urls, _) = parse_libtv_ndjson(&stdout_rb);
+            let (rb_status, rb_urls, _, rb_credits) = parse_libtv_ndjson(&stdout_rb);
             if status_code.is_none() {
                 status_code = rb_status;
+            }
+            if job.cost_credits.is_none() && rb_credits.is_some() {
+                job.cost_credits = rb_credits;
             }
             urls = rb_urls;
         }
@@ -1849,6 +1885,23 @@ async fn run_libtv_video(
         started.elapsed().as_secs_f64(),
     )
     .map_err(|e| (false, e))
+}
+
+fn extract_lovart_credits(val: &Value) -> Option<i64> {
+    [
+        "/credits",
+        "/cost_credits",
+        "/costCredits",
+        "/estimated_credits",
+        "/estimatedCredits",
+        "/pending_confirmation/credits",
+        "/pending_confirmation/cost_credits",
+        "/pending_confirmation/estimated_credits",
+        "/billing/credits",
+        "/billing/cost_credits",
+    ]
+    .iter()
+    .find_map(|ptr| val.pointer(ptr).and_then(Value::as_i64))
 }
 
 fn lovart_has_asset_moderation_rejection(val: &Value) -> bool {
@@ -2043,6 +2096,10 @@ async fn run_lovart_submit_or_chat(
         ));
     }
 
+    if let Some(c) = extract_lovart_credits(&parsed) {
+        job.cost_credits = Some(c);
+    }
+
     let final_status = parsed
         .get("final_status")
         .and_then(Value::as_str)
@@ -2057,16 +2114,12 @@ async fn run_lovart_submit_or_chat(
     }
 
     if final_status == "pending_confirmation" {
-        let summary = parsed
-            .get("agent_message")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("Lovart {} 等待确认积分消耗后开始生成", job.model_label));
-        job.quote_summary = Some(summary.clone());
-        update_job_stage(state, job, "awaiting_confirmation", &summary)
-            .map_err(|e| (false, e))?;
-        return Ok(());
+        let stage_msg = match job.cost_credits {
+            Some(c) => format!("Lovart 预计消耗 {c} 积分，正在自动确认生成任务…"),
+            None => format!("正在自动确认 Lovart {} 生成任务…", job.model_label),
+        };
+        update_job_stage(state, job, "running", &stage_msg).map_err(|e| (false, e))?;
+        return run_lovart_confirm(state, job, input, skill_script, cancel_rx).await;
     }
 
     if rc_chat != 0 || parsed.get("generation_succeeded").and_then(Value::as_bool) != Some(true) {
@@ -2180,6 +2233,10 @@ async fn run_lovart_confirm(
             false,
             "Lovart 参考图审核未通过（SEEDANCE_ASSET_MODERATION_REJECTED），请更换参考图片后重试".to_owned(),
         ));
+    }
+
+    if let Some(c) = extract_lovart_credits(&parsed) {
+        job.cost_credits = Some(c);
     }
 
     if rc_cf != 0 || parsed.get("generation_succeeded").and_then(Value::as_bool) != Some(true) {
@@ -2403,6 +2460,23 @@ mod tests {
         let formatted = format_dreamina_cli_error(1, Some(&str_err), "", "");
         assert!(formatted.contains("cli.invalid_generation_reference"));
         assert!(formatted.contains("ref[0]"));
+
+        let wait_ok = json!({
+            "ok": true,
+            "data": {
+                "state": "succeeded",
+                "resources": [{
+                    "state": "succeeded",
+                    "resourceId": "res-123",
+                    "format": "mp4",
+                    "creditsAmount": 42
+                }]
+            }
+        });
+        assert_eq!(
+            parse_dreamina_wait_result(&wait_ok).unwrap(),
+            ("res-123".to_owned(), Some("mp4".to_owned()), Some(42))
+        );
     }
 
     #[test]
@@ -2414,19 +2488,22 @@ mod tests {
         assert_eq!(infer_libtv_mode(1, 1, 0, None), "mixed2video");
         assert_eq!(infer_libtv_mode(2, 0, 0, Some("image2video")), "image2video");
 
-        let ndjson = "{\"status\":1}\n{\"status\":2,\"taskInfo\":{\"url\":\"https://cdn.example/out.mp4\"}}\n";
-        let (status, urls, _) = parse_libtv_ndjson(ndjson);
+        let ndjson = "{\"status\":1}\n{\"status\":2,\"taskInfo\":{\"url\":\"https://cdn.example/out.mp4\",\"costPoints\":28}}\n";
+        let (status, urls, _, credits) = parse_libtv_ndjson(ndjson);
         assert_eq!(status, Some(2));
         assert_eq!(urls, vec!["https://cdn.example/out.mp4"]);
+        assert_eq!(credits, Some(28));
     }
 
     #[test]
-    fn detects_lovart_moderation_and_stores_jobs_in_sqlite() {
+    fn detects_lovart_moderation_credits_and_stores_jobs_in_sqlite() {
         let val = json!({
             "final_status": "failed",
-            "failures": [{ "error": "SEEDANCE_ASSET_MODERATION_REJECTED" }]
+            "failures": [{ "error": "SEEDANCE_ASSET_MODERATION_REJECTED" }],
+            "pending_confirmation": { "credits": 60 }
         });
         assert!(lovart_has_asset_moderation_rejection(&val));
+        assert_eq!(extract_lovart_credits(&val), Some(60));
 
         let temp_dir = std::env::temp_dir().join(format!("ext-jobs-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&temp_dir).unwrap();
