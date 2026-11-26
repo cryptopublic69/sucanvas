@@ -49,7 +49,8 @@ python3 scripts/sucanvas.py capabilities
 ### 3. Choose the entry mode
 - **New scene / standalone (`mode=standalone`)**:
   Use when starting a brand-new scene or segment (e.g., Segment 2 after Segment 1). Top-aligns `text`, `video-generation`, and the first video output in a clean horizontal row below any existing scenes.
-  Write long or multilingual prompts to a UTF-8 file first (avoid inline shell escaping issues). Upload local reference files first if needed (`--create-node` automatically aligns reference top edges with the scene row; pass `--anchor-node-id <nodeId>` when adding refs to an earlier existing scene):
+  Write long or multilingual prompts to a UTF-8 file first (avoid inline shell escaping issues). Upload local reference files **with `--create-node`** first and capture the returned `node.id` (`node:...`) in exact `@图1` / `@图2` / `@图3` order (pass `--anchor-node-id <nodeId>` when adding refs to an earlier existing scene):
+  > **Important:** `upload` without `--create-node` only writes the file and returns an `assetRef` (`sucanvas-input://...`), without creating a canvas media node or wiring edges cleanly. `sucanvas.py submit` strictly rejects raw `assetRef` values for `--image`, `--audio`, and `--video` — always pass the canvas node ID `node:<uploadedNodeId>`.
   ```bash
   python3 scripts/sucanvas.py upload --file /path/to/ref.png --canvas-id "<canvasId>" --create-node
   python3 scripts/sucanvas.py submit \
@@ -58,7 +59,7 @@ python3 scripts/sucanvas.py capabilities
     --preset "<exact-preset-name>" \
     --duration 6 \
     --aspect-ratio 16:9 \
-    --image "<assetRef-or-nodeId>" \
+    --image "node:<uploadedNodeId>" \
     --request-id "stable-unique-id"
   ```
 - **Iterate / revise existing scene (`--source-node-id`)**:
@@ -90,7 +91,15 @@ python3 scripts/sucanvas.py capabilities
     --request-id "stable-jimeng-req-1"
   ```
 
-### 4. Wait safely without duplicate submissions
+### 4. Verify reference wiring & wait safely
+Immediately after `submit`, verify that the target `video-generation` node actually received every reference `input` edge (do not rely on `202 Accepted` or `generationMode` alone):
+
+```bash
+python3 scripts/sucanvas.py nodes --canvas-id "<canvasId>" --kind video-generation
+```
+
+Confirm `incomingNodeIds` on `generatorNodeId` contains the prompt `text` node AND every `node:...` reference media ID in order. When using reference images, always verify with this two-step check: (1) confirm `incomingNodeIds` contains every expected `image` node in order before/after completion, and (2) spot-check rendered visual details (face, hair, outfit/props) against the reference images rather than trusting `status: "succeeded"` alone.
+
 `submit` returns `202 Accepted` immediately with `jobId` and `requestId`. Poll with `wait` or `status`:
 
 ```bash

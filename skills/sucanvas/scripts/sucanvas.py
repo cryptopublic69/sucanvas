@@ -283,19 +283,29 @@ def _parse_image_spec(spec: str) -> dict[str, Any]:
             role = candidate[1:]
             raw = raw[: -len(candidate)]
             break
-    key = "nodeId" if raw.startswith("node:") else "assetRef"
-    obj: dict[str, Any] = {key: raw}
+    if not raw.startswith("node:"):
+        raise CliError(
+            f"Invalid --image reference {spec!r}: must be a canvas node ID starting with 'node:' "
+            "(optionally with :first or :last). Run `upload --file <path> --canvas-id <canvasId> "
+            "--create-node` first and pass the returned node.id instead of a raw assetRef."
+        )
+    obj: dict[str, Any] = {"nodeId": raw}
     if role:
         obj["role"] = role
     return obj
 
 
-def _parse_media_spec(spec: str) -> dict[str, Any]:
+def _parse_media_spec(spec: str, kind: str = "media") -> dict[str, Any]:
     raw = spec.strip()
     if not raw:
-        raise CliError("Media reference cannot be empty.")
-    key = "nodeId" if raw.startswith("node:") else "assetRef"
-    return {key: raw}
+        raise CliError(f"{kind.capitalize()} reference cannot be empty.")
+    if not raw.startswith("node:"):
+        raise CliError(
+            f"Invalid --{kind} reference {spec!r}: must be a canvas node ID starting with 'node:'. "
+            "Run `upload --file <path> --canvas-id <canvasId> --create-node` first and pass the "
+            "returned node.id instead of a raw assetRef."
+        )
+    return {"nodeId": raw}
 
 
 def _manifest_path(download_dir: pathlib.Path) -> pathlib.Path:
@@ -637,9 +647,9 @@ def cmd_submit(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, 
     if args.image:
         payload["images"] = [_parse_image_spec(item) for item in args.image]
     if args.audio:
-        payload["audios"] = [_parse_media_spec(item) for item in args.audio]
+        payload["audios"] = [_parse_media_spec(item, "audio") for item in args.audio]
     if args.video:
-        payload["videos"] = [_parse_media_spec(item) for item in args.video]
+        payload["videos"] = [_parse_media_spec(item, "video") for item in args.video]
 
     return _http_json(settings, "POST", "/v1/agent/jobs", json_body=payload)
 
@@ -898,9 +908,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_submit.add_argument("--ref-image-size", choices=["match", "max"], help="Reference image sizing mode")
     p_submit.add_argument("--colab-sampler", help="Colab sampler override")
     p_submit.add_argument("--secondary-sampling", action="store_true", help="Enable 2-pass sampling (local only)")
-    p_submit.add_argument("--image", action="append", help="Reference image assetRef or nodeId (optionally :first or :last)")
-    p_submit.add_argument("--audio", action="append", help="Reference audio assetRef or nodeId")
-    p_submit.add_argument("--video", action="append", help="Reference video assetRef or nodeId")
+    p_submit.add_argument(
+        "--image",
+        action="append",
+        help="Canvas image node ID starting with 'node:' (optionally :first or :last); upload with --create-node first",
+    )
+    p_submit.add_argument(
+        "--audio",
+        action="append",
+        help="Canvas audio node ID starting with 'node:'; upload with --create-node first",
+    )
+    p_submit.add_argument(
+        "--video",
+        action="append",
+        help="Canvas video node ID starting with 'node:'; upload with --create-node first",
+    )
     p_submit.add_argument("--request-id", help="Stable idempotency request ID")
     p_submit.set_defaults(func=cmd_submit)
 

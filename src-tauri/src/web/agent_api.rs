@@ -1218,6 +1218,127 @@ fn detect_media_kind(extension: &str) -> Option<&'static str> {
     }
 }
 
+fn mime_type_for_media(kind: &str, asset_ref: &str) -> &'static str {
+    let ext = asset_ref
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match (kind, ext.as_str()) {
+        ("image", "jpg" | "jpeg") => "image/jpeg",
+        ("image", "webp") => "image/webp",
+        ("image", "gif") => "image/gif",
+        ("image", "bmp") => "image/bmp",
+        ("image", "avif") => "image/avif",
+        ("image", _) => "image/png",
+        ("audio", "wav") => "audio/wav",
+        ("audio", "flac") => "audio/flac",
+        ("audio", "m4a") => "audio/mp4",
+        ("audio", "aac") => "audio/aac",
+        ("audio", "ogg") => "audio/ogg",
+        ("audio", _) => "audio/mpeg",
+        ("video", "mov") => "video/quicktime",
+        ("video", "webm") => "video/webm",
+        ("video", "mkv") => "video/x-matroska",
+        ("video", "avi") => "video/x-msvideo",
+        ("video", _) => "video/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
+fn media_node_dimensions(media_kind: &str) -> (f64, f64) {
+    let width = if media_kind == "video" { 420.0 } else { 360.0 };
+    let height = if media_kind == "audio" { 240.0 } else { 300.0 };
+    (width, height)
+}
+
+fn ensure_reference_media_nodes(
+    state: &WebState,
+    canvas_snapshot: &mut WorkspaceSnapshot,
+    prompt_node_id: &str,
+    generator_node_id: &str,
+    images: &mut [ResolvedMediaItem],
+    audios: &mut [ResolvedMediaItem],
+    videos: &mut [ResolvedMediaItem],
+) {
+    let anchor = canvas_snapshot
+        .nodes
+        .iter()
+        .find(|n| !prompt_node_id.is_empty() && n.id == prompt_node_id)
+        .or_else(|| {
+            canvas_snapshot
+                .nodes
+                .iter()
+                .find(|n| n.id == generator_node_id)
+        })
+        .map(|n| (n.x, n.y));
+    let (anchor_x, row_y) = anchor.unwrap_or((80.0, 80.0));
+
+    for (items, media_kind) in [
+        (images, "image"),
+        (audios, "audio"),
+        (videos, "video"),
+    ] {
+        for item in items.iter_mut() {
+            if item.node_id.is_some() {
+                continue;
+            }
+            let encoded_ref = storage::encode(state, &item.asset_ref);
+            if let Some(existing) = canvas_snapshot.nodes.iter().find(|node| {
+                node_media_kind(node) == Some(media_kind)
+                    && node
+                        .content
+                        .get("assetPath")
+                        .and_then(Value::as_str)
+                        .is_some_and(|p| p == encoded_ref || p == item.asset_ref)
+            }) {
+                item.node_id = Some(existing.id.clone());
+                continue;
+            }
+
+            let (media_w, media_h) = media_node_dimensions(media_kind);
+            let (mx, my) = place_aligned_in_row_left(
+                &canvas_snapshot.nodes,
+                anchor_x - media_w - 48.0,
+                row_y,
+                media_w,
+                media_h,
+                24.0,
+            );
+            let filename = item
+                .asset_ref
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("reference")
+                .to_owned();
+            let mime_type = mime_type_for_media(media_kind, &encoded_ref);
+            if let Ok(created) = state.core.database.create_node(CreateNodeInput {
+                canvas_id: Some(canvas_snapshot.canvas.id.clone()),
+                kind: Some(media_kind.to_owned()),
+                title: filename.clone(),
+                content: json!({
+                    "assetPath": encoded_ref,
+                    "mimeType": mime_type,
+                    "originalName": filename,
+                }),
+                source: Some("agent".to_owned()),
+                request_id: None,
+                x: Some(mx),
+                y: Some(my),
+                width: Some(media_w),
+                height: Some(media_h),
+            }) {
+                item.node_id = Some(created.node.id.clone());
+                canvas_snapshot.nodes.push(created.node.clone());
+                if created.created {
+                    let _ = state.handle.emit("canvas://node-created", created.node);
+                }
+            }
+        }
+    }
+}
+
 fn place_non_overlapping(
     existing: &[NodeRecord],
     anchor_x: f64,
@@ -4129,50 +4250,45 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
                         kind: Some("input".to_owned()),
                         metadata: json!({}),
                     }) {
+                        canvas_snapshot.edges.push(edge.clone());
                         let _ = state.handle.emit("canvas://edge-created", edge);
-                    }
-                }
-                for item in collected_images
-                    .iter()
-                    .chain(collected_audios.iter())
-                    .chain(collected_videos.iter())
-                {
-                    if let Some(ref media_node_id) = item.node_id {
-                        if let Ok(edge) = state.core.database.create_edge(CreateEdgeInput {
-                            canvas_id: Some(canvas_snapshot.canvas.id.clone()),
-                            source_node_id: media_node_id.clone(),
-                            target_node_id: generator_node_id.clone(),
-                            kind: Some("input".to_owned()),
-                            metadata: json!({}),
-                        }) {
-                            let _ = state.handle.emit("canvas://edge-created", edge);
-                        }
                     }
                 }
             }
             Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
         }
-    } else {
-        for item in collected_images
-            .iter()
-            .chain(collected_audios.iter())
-            .chain(collected_videos.iter())
-        {
-            if let Some(ref media_node_id) = item.node_id {
-                let already_linked = canvas_snapshot.edges.iter().any(|e| {
-                    e.source_node_id == *media_node_id && e.target_node_id == generator_node_id
-                });
-                if !already_linked {
-                    if let Ok(edge) = state.core.database.create_edge(CreateEdgeInput {
-                        canvas_id: Some(canvas_snapshot.canvas.id.clone()),
-                        source_node_id: media_node_id.clone(),
-                        target_node_id: generator_node_id.clone(),
-                        kind: Some("input".to_owned()),
-                        metadata: json!({}),
-                    }) {
-                        canvas_snapshot.edges.push(edge.clone());
-                        let _ = state.handle.emit("canvas://edge-created", edge);
-                    }
+    }
+
+    // Defense in depth: ensure any raw assetRef media inputs are backed by top-aligned canvas nodes
+    // and connected via incoming input edges to the generator node in exact order.
+    ensure_reference_media_nodes(
+        &state,
+        &mut canvas_snapshot,
+        &prompt_node_id,
+        &generator_node_id,
+        &mut collected_images,
+        &mut collected_audios,
+        &mut collected_videos,
+    );
+    for item in collected_images
+        .iter()
+        .chain(collected_audios.iter())
+        .chain(collected_videos.iter())
+    {
+        if let Some(ref media_node_id) = item.node_id {
+            let already_linked = canvas_snapshot.edges.iter().any(|e| {
+                e.source_node_id == *media_node_id && e.target_node_id == generator_node_id
+            });
+            if !already_linked {
+                if let Ok(edge) = state.core.database.create_edge(CreateEdgeInput {
+                    canvas_id: Some(canvas_snapshot.canvas.id.clone()),
+                    source_node_id: media_node_id.clone(),
+                    target_node_id: generator_node_id.clone(),
+                    kind: Some("input".to_owned()),
+                    metadata: json!({}),
+                }) {
+                    canvas_snapshot.edges.push(edge.clone());
+                    let _ = state.handle.emit("canvas://edge-created", edge);
                 }
             }
         }
@@ -5204,8 +5320,17 @@ mod tests {
         assert_eq!(*prompt_calls.lock().unwrap(), 1);
         assert_eq!(final_job["outputNodeIds"][0], placeholder_id);
 
-        // Placeholder node was updated to a final playable generated-video node.
+        // Placeholder node was updated to a final playable generated-video node,
+        // and the raw assetRef image was auto-materialized & linked into the generator.
         let loaded = state.core.database.load_project(&canvas_id).unwrap();
+        let generator_id = final_job["generatorNodeId"].as_str().unwrap();
+        let gen_node = loaded.nodes.iter().find(|n| n.id == generator_id).unwrap();
+        let auto_img = loaded.nodes.iter().find(|n| n.kind == "image").unwrap();
+        assert_eq!(auto_img.source, "agent");
+        assert_eq!(auto_img.y, gen_node.y);
+        assert!(loaded.edges.iter().any(|e| {
+            e.kind == "input" && e.source_node_id == auto_img.id && e.target_node_id == generator_id
+        }));
         let video_node = loaded
             .nodes
             .iter()

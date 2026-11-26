@@ -138,6 +138,11 @@ def make_handler(state: MockState):
                         "assetRef": "sucanvas-input://sucanvas-imports/asset-1.png",
                         "mediaKind": "image",
                         "filename": "参考图.png",
+                        "node": {
+                            "id": "node:img-1",
+                            "kind": "image",
+                            "title": "参考图.png",
+                        },
                     },
                 )
             elif self.path == "/v1/agent/jobs":
@@ -240,9 +245,9 @@ class TestSucanvasCli(unittest.TestCase):
         self.assertEqual(up.returncode, 0, up.stderr)
         self.assertEqual(self.state.last_upload_filename, "参考图.png")
         self.assertEqual(self.state.last_upload_anchor, "node:text-1")
-        asset_ref = json.loads(up.stdout)["assetRef"]
+        uploaded_node_id = json.loads(up.stdout)["node"]["id"]
 
-        # 3. Submit via UTF-8 prompt file & preset.
+        # 3. Submit via UTF-8 prompt file & preset using node: ID (and role suffix).
         prompt_file = self.root / "prompt.txt"
         prompt_file.write_text("夕阳下的海边漫步，中文与 English 混合", encoding="utf-8")
         sub = run_cli(
@@ -255,7 +260,7 @@ class TestSucanvasCli(unittest.TestCase):
                 "--preset",
                 "电影级预设",
                 "--image",
-                asset_ref,
+                f"{uploaded_node_id}:first",
                 "--request-id",
                 "req-utf8-1",
             ],
@@ -264,6 +269,10 @@ class TestSucanvasCli(unittest.TestCase):
         self.assertEqual(sub.returncode, 0, sub.stderr)
         self.assertEqual(self.state.submit_calls, 1)
         self.assertEqual(self.state.last_submit["preset"], "电影级预设")
+        self.assertEqual(
+            self.state.last_submit["images"],
+            [{"nodeId": "node:img-1", "role": "first"}],
+        )
         self.assertIn("夕阳下", self.state.last_submit["prompt"])
 
         # 4. Wait timeout returns exit code 2 and does NOT re-submit.
@@ -494,6 +503,40 @@ class TestSucanvasCli(unittest.TestCase):
         help_res = run_cli(["--help"], self.env)
         self.assertEqual(help_res.returncode, 0, help_res.stderr)
         self.assertIn("sucanvas.py", help_res.stdout)
+
+    def test_submit_rejects_raw_asset_ref_for_media(self) -> None:
+        run_cli(
+            [
+                "config",
+                "init",
+                "--base-url",
+                self.base_url,
+                "--token",
+                self.state.token,
+                "--download-dir",
+                str(self.dl_dir),
+            ],
+            self.env,
+        )
+        for flag in ("--image", "--audio", "--video"):
+            res = run_cli(
+                [
+                    "submit",
+                    "--canvas-id",
+                    "canvas:1",
+                    "--prompt",
+                    "test",
+                    "--preset",
+                    "电影级预设",
+                    flag,
+                    "sucanvas-input://sucanvas-imports/asset-1.png",
+                ],
+                self.env,
+            )
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("node:", res.stderr)
+            self.assertIn("--create-node", res.stderr)
+        self.assertEqual(self.state.submit_calls, 0)
 
 
 if __name__ == "__main__":

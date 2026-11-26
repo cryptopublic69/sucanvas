@@ -35,7 +35,7 @@ Returns `{ ok, canvas, nodes, edges }`:
 `POST /v1/agent/assets` (`multipart/form-data`)
 - `file` (required): image (`png/jpg/jpeg/webp/gif/bmp/avif`), audio (`mp3/wav/flac/m4a/aac/ogg`), or video (`mp4/mov/webm/mkv/avi`).
 - `canvasId` (required if `createNode=true`).
-- `createNode` (`"true"` | `"false"`, default `"false"`). When `"true"`, automatically top-aligns (`y`) the created media node with the target scene row (or to the left of `anchorNodeId`).
+- `createNode` (`"true"` | `"false"`, default `"false"`). Always pass `"true"` when referencing uploaded assets in `submit` (CLI rejects raw `assetRef` values to avoid unlinked generators); when `"true"`, automatically top-aligns (`y`) the created media node with the target scene row (or to the left of `anchorNodeId`) and returns `node.id` (`node:...`).
 - `anchorNodeId` (optional): existing `text` / `video-generation` / reference node ID whose row top edge (`y`) this uploaded reference node should align with.
 - Returns `201 Created` with `{ ok, assetRef, mediaKind, filename, node? }`.
 
@@ -49,7 +49,7 @@ Key fields:
   - `canvasId`: existing canvas or folder subcanvas ID (users can copy this from the `i` badge in the UI).
   - `createCanvas`: `{ "name": "...", "shared": false }`.
 - Entry mode:
-  - `mode: "standalone"` (default when `sourceNodeId` omitted): requires `prompt`; optional `title`, `information`, `createPromptNode` (default `true`), `images` / `audios` / `videos` (each item can be `assetRef`, `nodeId`, or `{ assetRef|nodeId, role }`). Places new prompt & `video-generation` nodes column-aligned below existing ones.
+  - `mode: "standalone"` (default when `sourceNodeId` omitted): requires `prompt`; optional `title`, `information`, `createPromptNode` (default `true`), `images` / `audios` / `videos` (prefer `node:...` / `{ nodeId: "node:...", role }` created via `upload --create-node`; `sucanvas.py` enforces `node:` IDs, while the HTTP API also auto-links/creates top-aligned media nodes + `input` edges if a raw `assetRef` is supplied). Places new prompt & `video-generation` nodes column-aligned below existing ones.
   - `mode: "node"` (inferred when `sourceNodeId` is set): `sourceNodeId` points to an existing `text` or `video-generation` node in `canvasId`.
   - `promptVersionAction` (used in `mode: "node"`, default `"append"`): `"append"` automatically appends `v2`/`v3` in the target `text` node's `promptVersions` and activates it when `prompt`/`information` changes; `"overwrite"` updates the active version in place; `"none"` keeps `promptVersions` unchanged.
 - Channel & options:
