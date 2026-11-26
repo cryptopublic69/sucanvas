@@ -8537,7 +8537,11 @@ function CanvasWorkspace() {
           if (!mounted) return;
           void (async () => {
             let record = event.payload;
-            if (activeProjectIdRef.current === record.canvasId) {
+            const preserveServerPlacement =
+              record.source === "agent" ||
+              record.source === "comfyui-placeholder" ||
+              record.source === "comfyui";
+            if (activeProjectIdRef.current === record.canvasId && !preserveServerPlacement) {
               const viewportCenter = screenToFlowPosition({
                 x: window.innerWidth / 2,
                 y: window.innerHeight / 2,
