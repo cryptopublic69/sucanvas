@@ -540,6 +540,8 @@ def cmd_upload(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, 
         if not args.canvas_id:
             raise CliError("--create-node requires --canvas-id")
         fields.append(("createNode", "true"))
+    if args.anchor_node_id:
+        fields.append(("anchorNodeId", args.anchor_node_id))
     if args.x is not None:
         fields.append(("x", str(args.x)))
     if args.y is not None:
@@ -825,6 +827,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_upload.add_argument("--file", required=True, help="Local asset file path")
     p_upload.add_argument("--canvas-id", help="Canvas ID (required when --create-node)")
     p_upload.add_argument("--create-node", action="store_true", help="Also create a canvas node")
+    p_upload.add_argument(
+        "--anchor-node-id",
+        help="Optional existing text or video-generation node ID to top-align this media node beside",
+    )
     p_upload.add_argument("--x", type=float, help="Optional node X coordinate")
     p_upload.add_argument("--y", type=float, help="Optional node Y coordinate")
     p_upload.set_defaults(func=cmd_upload)

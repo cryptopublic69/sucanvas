@@ -1295,6 +1295,199 @@ fn place_aligned_in_row(
     place_non_overlapping(existing, start_x, fixed_y + height + 36.0, width, height)
 }
 
+fn place_aligned_in_row_left(
+    existing: &[NodeRecord],
+    start_x: f64,
+    fixed_y: f64,
+    width: f64,
+    height: f64,
+    horizontal_gap: f64,
+) -> (f64, f64) {
+    let gap = horizontal_gap.max(16.0);
+    let mut x = start_x;
+    let y = fixed_y;
+    for _ in 0..200 {
+        let blocker = existing.iter().find(|other| {
+            x < other.x + other.width + gap
+                && x + width + gap > other.x
+                && y < other.y + other.height + 16.0
+                && y + height + 16.0 > other.y
+        });
+        let Some(other) = blocker else {
+            return (x, y);
+        };
+        x = (other.x - width - gap).min(x - 32.0);
+    }
+    place_non_overlapping(existing, start_x, fixed_y + height + 36.0, width, height)
+}
+
+fn compute_next_scene_row_layout(
+    nodes: &[NodeRecord],
+    edges: &[crate::models::EdgeRecord],
+    create_prompt_node: bool,
+    create_generator_node: bool,
+    preview_w: f64,
+    preview_h: f64,
+) -> Option<(f64, f64, f64)> {
+    let pg = nodes
+        .iter()
+        .filter(|n| n.kind == "video-generation")
+        .max_by(|a, b| {
+            (a.y + a.height)
+                .total_cmp(&(b.y + b.height))
+                .then_with(|| a.created_at.cmp(&b.created_at))
+        })?;
+
+    let effective_pg_height = pg.height.max(VIDEO_GENERATION_NODE_HEIGHT);
+    let base_y = pg.y + effective_pg_height + SCENE_ROW_VERTICAL_GAP;
+    let gen_x = pg.x;
+    let preview_x = gen_x + VIDEO_GENERATION_NODE_WIDTH + 48.0;
+    let connected_text = edges
+        .iter()
+        .filter(|e| e.target_node_id == pg.id)
+        .filter_map(|e| nodes.iter().find(|n| n.id == e.source_node_id))
+        .find(|n| n.kind == "text");
+    let fallback_text = nodes
+        .iter()
+        .filter(|n| n.kind == "text")
+        .max_by(|a, b| (a.y + a.height).total_cmp(&(b.y + b.height)));
+    let text_x = connected_text
+        .or(fallback_text)
+        .map(|t| t.x)
+        .unwrap_or_else(|| (pg.x - 460.0 - 48.0).max(80.0));
+
+    let mut row_y = base_y;
+    for _ in 0..10 {
+        let start_y = row_y;
+        if create_prompt_node {
+            let (_, ty) = place_aligned_in_column(
+                nodes,
+                text_x,
+                row_y,
+                460.0,
+                320.0,
+                SCENE_ROW_VERTICAL_GAP,
+            );
+            row_y = row_y.max(ty);
+        }
+        if create_generator_node {
+            let (_, gy) = place_aligned_in_column(
+                nodes,
+                gen_x,
+                row_y,
+                VIDEO_GENERATION_NODE_WIDTH,
+                VIDEO_GENERATION_NODE_HEIGHT,
+                SCENE_ROW_VERTICAL_GAP,
+            );
+            row_y = row_y.max(gy);
+            let (_, py) = place_aligned_in_column(
+                nodes,
+                preview_x,
+                row_y,
+                preview_w,
+                preview_h,
+                SCENE_ROW_VERTICAL_GAP,
+            );
+            row_y = row_y.max(py);
+        }
+        if (row_y - start_y).abs() < 0.5 {
+            break;
+        }
+    }
+    Some((text_x, gen_x, row_y))
+}
+
+fn compute_reference_media_position(
+    snapshot: &WorkspaceSnapshot,
+    media_kind: &str,
+    anchor_node_id: Option<&str>,
+) -> (f64, f64) {
+    let media_w = if media_kind == "video" { 420.0 } else { 360.0 };
+    let media_h = if media_kind == "audio" { 240.0 } else { 300.0 };
+
+    if let Some(anchor_id) = anchor_node_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(anchor) = snapshot.nodes.iter().find(|n| n.id == anchor_id) {
+            let (anchor_x, row_y) = if anchor.kind == "video-generation" {
+                let connected_text = snapshot
+                    .edges
+                    .iter()
+                    .filter(|e| e.target_node_id == anchor.id)
+                    .filter_map(|e| snapshot.nodes.iter().find(|n| n.id == e.source_node_id))
+                    .find(|n| n.kind == "text");
+                (connected_text.map(|t| t.x).unwrap_or(anchor.x), anchor.y)
+            } else {
+                (anchor.x, anchor.y)
+            };
+            return place_aligned_in_row_left(
+                &snapshot.nodes,
+                anchor_x - media_w - 48.0,
+                row_y,
+                media_w,
+                media_h,
+                24.0,
+            );
+        }
+    }
+
+    let (default_preview_w, default_preview_h) = preview_dimensions_for_aspect_ratio("16:9");
+    if let Some((text_x, _gen_x, row_y)) = compute_next_scene_row_layout(
+        &snapshot.nodes,
+        &snapshot.edges,
+        true,
+        true,
+        default_preview_w,
+        default_preview_h,
+    ) {
+        return place_aligned_in_row_left(
+            &snapshot.nodes,
+            text_x - media_w - 48.0,
+            row_y,
+            media_w,
+            media_h,
+            24.0,
+        );
+    }
+
+    if let Some(bottom_text) = snapshot
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "text")
+        .max_by(|a, b| (a.y + a.height).total_cmp(&(b.y + b.height)))
+    {
+        return place_aligned_in_row_left(
+            &snapshot.nodes,
+            bottom_text.x - media_w - 48.0,
+            bottom_text.y,
+            media_w,
+            media_h,
+            24.0,
+        );
+    }
+
+    let media_nodes: Vec<&NodeRecord> = snapshot
+        .nodes
+        .iter()
+        .filter(|n| node_media_kind(n).is_some())
+        .collect();
+    if !media_nodes.is_empty() {
+        let row_y = media_nodes.iter().map(|n| n.y).fold(f64::INFINITY, f64::min);
+        let max_right = media_nodes
+            .iter()
+            .map(|n| n.x + n.width)
+            .fold(f64::NEG_INFINITY, f64::max);
+        return place_aligned_in_row(
+            &snapshot.nodes,
+            max_right + 24.0,
+            row_y,
+            media_w,
+            media_h,
+            24.0,
+        );
+    }
+
+    (80.0, 80.0)
+}
+
 async fn upload_asset(State(state): State<WebState>, mut multipart: Multipart) -> Response {
     let state = state.connection_snapshot();
     let actor = resolve_actor(&state);
@@ -1308,6 +1501,7 @@ async fn upload_asset(State(state): State<WebState>, mut multipart: Multipart) -
 
     let mut canvas_id: Option<String> = None;
     let mut create_node = false;
+    let mut anchor_node_id: Option<String> = None;
     let mut pos_x: Option<f64> = None;
     let mut pos_y: Option<f64> = None;
     let mut staged_file: Option<(PathBuf, String, &'static str, String)> = None;
@@ -1364,6 +1558,12 @@ async fn upload_asset(State(state): State<WebState>, mut multipart: Multipart) -
                             text.trim().to_ascii_lowercase().as_str(),
                             "true" | "1" | "yes"
                         );
+                    }
+                    "anchorNodeId" | "sourceNodeId" => {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            anchor_node_id = Some(trimmed.to_owned());
+                        }
                     }
                     "x" => {
                         if !text.trim().is_empty() {
@@ -1427,13 +1627,21 @@ async fn upload_asset(State(state): State<WebState>, mut multipart: Multipart) -
         };
         let (x, y) = match (pos_x, pos_y) {
             (Some(x), Some(y)) => (x, y),
-            _ => place_non_overlapping(&snapshot.nodes, 80.0, 80.0, 360.0, 260.0),
+            _ => {
+                let (auto_x, auto_y) = compute_reference_media_position(
+                    &snapshot,
+                    media_kind,
+                    anchor_node_id.as_deref(),
+                );
+                (pos_x.unwrap_or(auto_x), pos_y.unwrap_or(auto_y))
+            }
         };
-        let imported = match commands::import_media(
+        let imported = match commands::import_media_with_source(
             staging_path.to_string_lossy().into_owned(),
             target_canvas_id.clone(),
             x,
             y,
+            "agent".to_owned(),
             PlatformState(&state.core),
         )
         .await
@@ -3746,80 +3954,17 @@ async fn submit_job(State(state): State<WebState>, Json(input): Json<SubmitJobIn
 
     let (preview_w, preview_h) = preview_dimensions_for_aspect_ratio(&submit_input.aspect_ratio);
 
-    // Bottom-most existing video-generation node used for column alignment of new scenes.
-    let existing_bottom_generator = canvas_snapshot
-        .nodes
-        .iter()
-        .filter(|n| n.kind == "video-generation")
-        .max_by(|a, b| {
-            (a.y + a.height)
-                .total_cmp(&(b.y + b.height))
-                .then_with(|| a.created_at.cmp(&b.created_at))
-        })
-        .cloned();
-
     // Synchronize row top-edge Y across text, video-generation, and first generated-video columns.
     let create_prompt_node = entry_mode == "standalone" && input.create_prompt_node.unwrap_or(true);
     let (synced_text_pos, synced_gen_pos): (Option<(f64, f64)>, Option<(f64, f64)>) =
-        if let Some(ref pg) = existing_bottom_generator {
-            let effective_pg_height = pg.height.max(VIDEO_GENERATION_NODE_HEIGHT);
-            let base_y = pg.y + effective_pg_height + SCENE_ROW_VERTICAL_GAP;
-            let gen_x = pg.x;
-            let preview_x = gen_x + VIDEO_GENERATION_NODE_WIDTH + 48.0;
-            let connected_text = canvas_snapshot
-                .edges
-                .iter()
-                .filter(|e| e.target_node_id == pg.id)
-                .filter_map(|e| canvas_snapshot.nodes.iter().find(|n| n.id == e.source_node_id))
-                .find(|n| n.kind == "text");
-            let fallback_text = canvas_snapshot
-                .nodes
-                .iter()
-                .filter(|n| n.kind == "text")
-                .max_by(|a, b| (a.y + a.height).total_cmp(&(b.y + b.height)));
-            let text_x = connected_text
-                .or(fallback_text)
-                .map(|t| t.x)
-                .unwrap_or_else(|| (pg.x - 460.0 - 48.0).max(80.0));
-
-            let mut row_y = base_y;
-            for _ in 0..10 {
-                let start_y = row_y;
-                if create_prompt_node {
-                    let (_, ty) = place_aligned_in_column(
-                        &canvas_snapshot.nodes,
-                        text_x,
-                        row_y,
-                        460.0,
-                        320.0,
-                        SCENE_ROW_VERTICAL_GAP,
-                    );
-                    row_y = row_y.max(ty);
-                }
-                if generator_node_id.is_empty() {
-                    let (_, gy) = place_aligned_in_column(
-                        &canvas_snapshot.nodes,
-                        gen_x,
-                        row_y,
-                        VIDEO_GENERATION_NODE_WIDTH,
-                        VIDEO_GENERATION_NODE_HEIGHT,
-                        SCENE_ROW_VERTICAL_GAP,
-                    );
-                    row_y = row_y.max(gy);
-                    let (_, py) = place_aligned_in_column(
-                        &canvas_snapshot.nodes,
-                        preview_x,
-                        row_y,
-                        preview_w,
-                        preview_h,
-                        SCENE_ROW_VERTICAL_GAP,
-                    );
-                    row_y = row_y.max(py);
-                }
-                if (row_y - start_y).abs() < 0.5 {
-                    break;
-                }
-            }
+        if let Some((text_x, gen_x, row_y)) = compute_next_scene_row_layout(
+            &canvas_snapshot.nodes,
+            &canvas_snapshot.edges,
+            create_prompt_node,
+            generator_node_id.is_empty(),
+            preview_w,
+            preview_h,
+        ) {
             (Some((text_x, row_y)), Some((gen_x, row_y)))
         } else {
             (None, None)
@@ -5720,6 +5865,165 @@ mod tests {
             state.external_jobs.get(&running_ext.id).unwrap().unwrap().status,
             "cancelled"
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn uploaded_reference_images_align_top_edges_across_scenes_and_anchors() {
+        let fake_mp4 = b"\x00\x00\x00\x18ftypmp42mock-video-payload".to_vec();
+        let (comfy_url, _prompt_calls, _cancelled, _hold_history) =
+            spawn_mock_comfy(fake_mp4).await;
+        let (root, state, app) = setup_test_env(&comfy_url);
+
+        let canvas = state
+            .core
+            .database
+            .create_project("Ref Top Alignment Canvas")
+            .unwrap();
+        let canvas_id = canvas.canvas.id;
+
+        let upload_node = |name: &str, anchor: Option<&str>| {
+            let app = app.clone();
+            let canvas_id = canvas_id.clone();
+            let name = name.to_owned();
+            let anchor = anchor.map(str::to_owned);
+            async move {
+                let boundary = "----refaligntestboundary";
+                let mut body = format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"canvasId\"\r\n\r\n{canvas_id}\r\n\
+                     --{boundary}\r\nContent-Disposition: form-data; name=\"createNode\"\r\n\r\ntrue\r\n"
+                );
+                if let Some(anchor_id) = anchor {
+                    body.push_str(&format!(
+                        "--{boundary}\r\nContent-Disposition: form-data; name=\"anchorNodeId\"\r\n\r\n{anchor_id}\r\n"
+                    ));
+                }
+                body.push_str(&format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: image/png\r\n\r\nPNGDATA\r\n--{boundary}--\r\n"
+                ));
+                let (status, resp) = read_json(
+                    app.oneshot(
+                        axum::http::Request::builder()
+                            .method("POST")
+                            .uri("/v1/agent/assets")
+                            .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                            .header(
+                                header::CONTENT_TYPE,
+                                format!("multipart/form-data; boundary={boundary}"),
+                            )
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CREATED, "resp={resp}");
+                resp
+            }
+        };
+
+        // 1. Empty canvas: two uploaded reference images share top edge y=80 side-by-side.
+        let r1 = upload_node("s1_ref1.png", None).await;
+        let r2 = upload_node("s1_ref2.png", None).await;
+        let n1: NodeRecord = serde_json::from_value(r1["node"].clone()).unwrap();
+        let n2: NodeRecord = serde_json::from_value(r2["node"].clone()).unwrap();
+        assert_eq!(n1.source, "agent");
+        assert_eq!(n2.source, "agent");
+        assert_eq!(n1.y, 80.0);
+        assert_eq!(n2.y, n1.y);
+        assert!(n2.x >= n1.x + n1.width);
+
+        // 2. Submit standalone Scene 1 -> prompt, generator, and placeholder align with n1.y.
+        let (s1_status, s1_body) = read_json(
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/agent/jobs")
+                        .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            json!({
+                                "requestId": "ref-align-s1",
+                                "canvasId": canvas_id,
+                                "prompt": "Scene 1 with two refs",
+                                "preset": "测试快速预设",
+                                "images": [n1.id, n2.id],
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s1_status, StatusCode::ACCEPTED);
+        let text1_id = s1_body["job"]["promptNodeId"].as_str().unwrap().to_owned();
+        let gen1_id = s1_body["job"]["generatorNodeId"].as_str().unwrap().to_owned();
+        let out1_id = s1_body["job"]["placeholderNodeId"].as_str().unwrap().to_owned();
+
+        let loaded1 = state.core.database.load_project(&canvas_id).unwrap();
+        let text1 = loaded1.nodes.iter().find(|n| n.id == text1_id).unwrap();
+        let gen1 = loaded1.nodes.iter().find(|n| n.id == gen1_id).unwrap();
+        let out1 = loaded1.nodes.iter().find(|n| n.id == out1_id).unwrap();
+        assert_eq!(text1.y, n1.y);
+        assert_eq!(gen1.y, n1.y);
+        assert_eq!(out1.y, n1.y);
+
+        // 3. Upload two reference images for Scene 2 without anchor -> auto-placed at Scene 2 row_y, left of text1.x.
+        let r3 = upload_node("s2_ref1.png", None).await;
+        let r4 = upload_node("s2_ref2.png", None).await;
+        let n3: NodeRecord = serde_json::from_value(r3["node"].clone()).unwrap();
+        let n4: NodeRecord = serde_json::from_value(r4["node"].clone()).unwrap();
+        assert_eq!(n3.y, n4.y);
+        assert!(n3.x + n3.width < text1.x);
+        assert!(n4.x + n4.width <= n3.x);
+
+        let (s2_status, s2_body) = read_json(
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/agent/jobs")
+                        .header(header::AUTHORIZATION, "Bearer secret-agent-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            json!({
+                                "requestId": "ref-align-s2",
+                                "canvasId": canvas_id,
+                                "prompt": "Scene 2 with two refs",
+                                "preset": "测试快速预设",
+                                "images": [n3.id, n4.id],
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s2_status, StatusCode::ACCEPTED);
+        let text2_id = s2_body["job"]["promptNodeId"].as_str().unwrap().to_owned();
+        let gen2_id = s2_body["job"]["generatorNodeId"].as_str().unwrap().to_owned();
+        let out2_id = s2_body["job"]["placeholderNodeId"].as_str().unwrap().to_owned();
+
+        let loaded2 = state.core.database.load_project(&canvas_id).unwrap();
+        let text2 = loaded2.nodes.iter().find(|n| n.id == text2_id).unwrap();
+        let gen2 = loaded2.nodes.iter().find(|n| n.id == gen2_id).unwrap();
+        let out2 = loaded2.nodes.iter().find(|n| n.id == out2_id).unwrap();
+        assert_eq!(text2.y, n3.y);
+        assert_eq!(gen2.y, n3.y);
+        assert_eq!(out2.y, n3.y);
+
+        // 4. Upload with explicit anchorNodeId pointing to Scene 1 prompt node -> top-aligned with text1.y.
+        let r5 = upload_node("s1_extra_ref.png", Some(&text1_id)).await;
+        let n5: NodeRecord = serde_json::from_value(r5["node"].clone()).unwrap();
+        assert_eq!(n5.y, text1.y);
+        assert!(n5.x + n5.width <= n2.x);
 
         let _ = std::fs::remove_dir_all(root);
     }

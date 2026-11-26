@@ -8752,7 +8752,9 @@ function CanvasWorkspace() {
             const preserveServerPlacement =
               record.source === "agent" ||
               record.source === "comfyui-placeholder" ||
-              record.source === "comfyui";
+              record.source === "comfyui" ||
+              record.source === "external-provider-placeholder" ||
+              record.source === "external-provider";
             if (activeProjectIdRef.current === record.canvasId && !preserveServerPlacement) {
               const viewportCenter = screenToFlowPosition({
                 x: window.innerWidth / 2,
@@ -8808,7 +8810,9 @@ function CanvasWorkspace() {
             const preserveServerBatchPlacement = activeRecords.every((record) => (
               record.source === "agent" ||
               record.source === "comfyui-placeholder" ||
-              record.source === "comfyui"
+              record.source === "comfyui" ||
+              record.source === "external-provider-placeholder" ||
+              record.source === "external-provider"
             ));
             if (activeCanvasId && activeRecords.length && !preserveServerBatchPlacement) {
               const minX = Math.min(...activeRecords.map((record) => record.x));
@@ -10330,14 +10334,16 @@ function CanvasWorkspace() {
       };
       let imported = 0;
       const failures: string[] = [];
+      let nextX = basePosition.x;
+      const rowY = basePosition.y;
 
-      for (const [index, path] of paths.entries()) {
+      for (const path of paths) {
         try {
           const result = await invoke<CreateNodeResult>("import_media", {
             path,
             canvasId: activeProjectId,
-            x: basePosition.x + index * CANVAS_GRID_SIZE,
-            y: basePosition.y + index * CANVAS_GRID_SIZE,
+            x: nextX,
+            y: rowY,
           });
           let importedNode = result.node;
           if (importedNode.kind === "image") {
@@ -10395,8 +10401,8 @@ function CanvasWorkspace() {
           const placement = reserveNodePlacement(
             activeProjectId,
             {
-              x: basePosition.x + index * CANVAS_GRID_SIZE,
-              y: basePosition.y + index * CANVAS_GRID_SIZE,
+              x: nextX,
+              y: rowY,
             },
             importedNode.width,
             importedNode.height,
@@ -10410,6 +10416,7 @@ function CanvasWorkspace() {
               },
             });
             finishNodePlacementReservation(placement.reservationId, [importedNode]);
+            nextX = placement.position.x + importedNode.width + CANVAS_GRID_SIZE;
           } catch (error) {
             finishNodePlacementReservation(placement.reservationId);
             throw error;

@@ -35,7 +35,8 @@ Returns `{ ok, canvas, nodes, edges }`:
 `POST /v1/agent/assets` (`multipart/form-data`)
 - `file` (required): image (`png/jpg/jpeg/webp/gif/bmp/avif`), audio (`mp3/wav/flac/m4a/aac/ogg`), or video (`mp4/mov/webm/mkv/avi`).
 - `canvasId` (required if `createNode=true`).
-- `createNode` (`"true"` | `"false"`, default `"false"`).
+- `createNode` (`"true"` | `"false"`, default `"false"`). When `"true"`, automatically top-aligns (`y`) the created media node with the target scene row (or to the left of `anchorNodeId`).
+- `anchorNodeId` (optional): existing `text` / `video-generation` / reference node ID whose row top edge (`y`) this uploaded reference node should align with.
 - Returns `201 Created` with `{ ok, assetRef, mediaKind, filename, node? }`.
 
 ### 5. Submit async H3 or external Seedance video job

@@ -49,7 +49,7 @@ python3 scripts/sucanvas_h3.py capabilities
 ### 3. Choose the entry mode
 - **New scene / standalone (`mode=standalone`)**:
   Use when starting a brand-new scene or segment (e.g., Segment 2 after Segment 1). Top-aligns `text`, `video-generation`, and the first video output in a clean horizontal row below any existing scenes.
-  Write long or multilingual prompts to a UTF-8 file first (avoid inline shell escaping issues). Upload local reference files first if needed:
+  Write long or multilingual prompts to a UTF-8 file first (avoid inline shell escaping issues). Upload local reference files first if needed (`--create-node` automatically aligns reference top edges with the scene row; pass `--anchor-node-id <nodeId>` when adding refs to an earlier existing scene):
   ```bash
   python3 scripts/sucanvas_h3.py upload --file /path/to/ref.png --canvas-id "<canvasId>" --create-node
   python3 scripts/sucanvas_h3.py submit \

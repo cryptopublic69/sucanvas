@@ -25,6 +25,7 @@ class MockState:
         self.submit_calls = 0
         self.last_submit: dict = {}
         self.last_upload_filename = ""
+        self.last_upload_anchor = ""
         self.poll_counts: dict[str, int] = {}
         self.finish_after_polls = 2
         self.video_bytes = b"\x00\x00\x00\x18ftypmp42cli-test-video"
@@ -127,6 +128,9 @@ def make_handler(state: MockState):
                 text = body.decode("utf-8", errors="replace")
                 if 'filename="参考图.png"' in text:
                     state.last_upload_filename = "参考图.png"
+                marker = 'name="anchorNodeId"\r\n\r\n'
+                if marker in text:
+                    state.last_upload_anchor = text.split(marker, 1)[1].split("\r\n", 1)[0]
                 self._send_json(
                     201,
                     {
@@ -220,9 +224,22 @@ class TestSucanvasH3Cli(unittest.TestCase):
 
         ref_file = self.root / "参考图.png"
         ref_file.write_bytes(b"png-bytes")
-        up = run_cli(["upload", "--file", str(ref_file), "--canvas-id", "canvas:1", "--create-node"], self.env)
+        up = run_cli(
+            [
+                "upload",
+                "--file",
+                str(ref_file),
+                "--canvas-id",
+                "canvas:1",
+                "--create-node",
+                "--anchor-node-id",
+                "node:text-1",
+            ],
+            self.env,
+        )
         self.assertEqual(up.returncode, 0, up.stderr)
         self.assertEqual(self.state.last_upload_filename, "参考图.png")
+        self.assertEqual(self.state.last_upload_anchor, "node:text-1")
         asset_ref = json.loads(up.stdout)["assetRef"]
 
         # 3. Submit via UTF-8 prompt file & preset.

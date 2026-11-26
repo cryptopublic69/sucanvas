@@ -684,10 +684,21 @@ pub async fn import_media(
     y: f64,
     state: State<'_, ApplicationState>,
 ) -> Result<CreateNodeResult, String> {
+    import_media_with_source(path, canvas_id, x, y, "manual".to_owned(), state).await
+}
+
+pub async fn import_media_with_source(
+    path: String,
+    canvas_id: String,
+    x: f64,
+    y: f64,
+    source: String,
+    state: State<'_, ApplicationState>,
+) -> Result<CreateNodeResult, String> {
     let database = state.database.clone();
     let assets_dir = state.assets_dir.clone();
     crate::platform::runtime::spawn_blocking(move || {
-        import_media_blocking(path, canvas_id, x, y, database, assets_dir)
+        import_media_blocking(path, canvas_id, x, y, source, database, assets_dir)
     })
     .await
     .map_err(|error| format!("媒体导入任务失败: {error}"))?
@@ -837,6 +848,7 @@ fn import_media_blocking(
     canvas_id: String,
     x: f64,
     y: f64,
+    source_tag: String,
     database: crate::db::Database,
     assets_dir: PathBuf,
 ) -> Result<CreateNodeResult, String> {
@@ -882,7 +894,7 @@ fn import_media_blocking(
             "mimeType": format.mime_type,
             "originalName": original_name,
         }),
-        source: Some("manual".to_owned()),
+        source: Some(source_tag),
         request_id: None,
         x: Some(x),
         y: Some(y),
