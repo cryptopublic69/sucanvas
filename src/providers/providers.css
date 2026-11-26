@@ -13,9 +13,31 @@
 }
 
 .external-provider-fields {
+  position: relative;
+  z-index: 20;
+  order: -6;
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.external-provider-fields > .video-workflow-module-select {
+  order: 0;
+  z-index: 1;
+}
+
+.video-channel-select:has(.settings-custom-select-toggle[aria-expanded="true"]),
+.external-provider-fields:has(.settings-custom-select-toggle[aria-expanded="true"]) {
+  z-index: 45;
+}
+
+.external-provider-fields > .video-workflow-module-select:has(.settings-custom-select-toggle[aria-expanded="true"]) {
+  z-index: 50;
+}
+
+.canvas-node.kind-video-generation:has(:is(.video-channel-select, .external-provider-fields) .settings-custom-select-toggle[aria-expanded="true"]),
+.kind-video-generation .video-node-body:has(:is(.video-channel-select, .external-provider-fields) .settings-custom-select-toggle[aria-expanded="true"]) {
+  overflow: visible;
 }
 
 .external-provider-status-pill {

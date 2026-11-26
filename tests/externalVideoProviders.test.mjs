@@ -83,3 +83,10 @@ test("generatedVideoDeletionPaths preserves sucanvas://provider-outputs resource
   assert.deepEqual(generatedVideoDeletionPaths("", content), [content.assetPath]);
   assert.deepEqual(generatedVideoDeletionPaths("E:\\ComfyUI\\output", content), [content.assetPath]);
 });
+
+test("providers.css keeps channel and external provider dropdown menus above lower controls", async () => {
+  const css = await readFile(new URL("../src/providers/providers.css", import.meta.url), "utf8");
+  assert.match(css, /\.external-provider-fields\s*\{[\s\S]*order:\s*-6;/);
+  assert.match(css, /\.external-provider-fields\s*>\s*\.video-workflow-module-select:has\(\.settings-custom-select-toggle\[aria-expanded="true"\]\)\s*\{[\s\S]*z-index:\s*50;/);
+  assert.match(css, /\.kind-video-generation\s+\.video-node-body:has\([^\n]+\)\s*\{[\s\S]*overflow:\s*visible;/);
+});
