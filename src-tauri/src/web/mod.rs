@@ -75,14 +75,26 @@ pub(crate) struct WebState {
 }
 
 fn read_asset_version(executable_root: &std::path::Path) -> Option<String> {
-    let raw = std::fs::read(executable_root.join("build-info.json")).ok()?;
-    let value: Value = serde_json::from_slice(&raw).ok()?;
-    value
-        .get("assetVersion")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+    for filename in ["build-info.json", "web-assets.json"] {
+        let Ok(raw) = std::fs::read(executable_root.join(filename)) else {
+            continue;
+        };
+        let body = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&raw);
+        if let Some(version) = serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("assetVersion")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+        {
+            return Some(version);
+        }
+    }
+    None
 }
 
 fn sse_client_is_stale(expected: Option<&str>, actual: Option<&str>) -> bool {
@@ -752,5 +764,27 @@ mod tests {
         assert!(sse_client_is_stale(Some("v2"), None));
         assert!(sse_client_is_stale(Some("v2"), Some("")));
         assert!(sse_client_is_stale(Some("v2"), Some("v1")));
+    }
+
+    #[test]
+    fn read_asset_version_strips_utf8_bom_and_falls_back_to_web_assets() {
+        let dir = std::env::temp_dir().join(format!("sucanvas-asset-version-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("build-info.json"),
+            b"\xef\xbb\xbf{\"assetVersion\":\"rev-bom-123\"}",
+        )
+        .unwrap();
+        assert_eq!(read_asset_version(&dir).as_deref(), Some("rev-bom-123"));
+
+        std::fs::remove_file(dir.join("build-info.json")).unwrap();
+        std::fs::write(
+            dir.join("web-assets.json"),
+            b"{\"assetVersion\":\"rev-manifest-456\"}",
+        )
+        .unwrap();
+        assert_eq!(read_asset_version(&dir).as_deref(), Some("rev-manifest-456"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
