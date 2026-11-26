@@ -103,7 +103,10 @@ export function useColabChannelState({
       const status = await readColabProfile();
       setProfileStatus(status);
       setConfigured(status.configured);
-      window.localStorage.setItem(CONFIGURED_STORAGE_KEY, status.configured ? "true" : "false");
+      const nextConfiguredFlag = status.configured ? "true" : "false";
+      if (window.localStorage.getItem(CONFIGURED_STORAGE_KEY) !== nextConfiguredFlag) {
+        window.localStorage.setItem(CONFIGURED_STORAGE_KEY, nextConfiguredFlag);
+      }
       const allowedLoras = status.allowedLoras?.length
         ? status.allowedLoras
         : [...COLAB_ALLOWED_LORAS];
@@ -173,7 +176,10 @@ export function useColabChannelState({
     setSsPasswordDraft(connection.colabSsPassword ?? "");
     setProfileDraft((connection.colabProfile ?? "") as ColabProfileOption);
     setConfigured(nextConfigured);
-    window.localStorage.setItem(CONFIGURED_STORAGE_KEY, nextConfigured ? "true" : "false");
+    const nextConfiguredFlag = nextConfigured ? "true" : "false";
+    if (window.localStorage.getItem(CONFIGURED_STORAGE_KEY) !== nextConfiguredFlag) {
+      window.localStorage.setItem(CONFIGURED_STORAGE_KEY, nextConfiguredFlag);
+    }
   }, [active]);
 
   const buildConnectionPatch = useCallback((): ColabConnectionPatch => {

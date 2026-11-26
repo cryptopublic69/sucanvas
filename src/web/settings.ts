@@ -72,8 +72,21 @@ export async function loadSettings() {
   installed = true;
   const set = Storage.prototype.setItem;
   const remove = Storage.prototype.removeItem;
-  Storage.prototype.setItem = function (key, value) { set.call(this, key, value); if (this === localStorage && key.startsWith("infinite-canvas:")) schedule(); };
-  Storage.prototype.removeItem = function (key) { remove.call(this, key); if (this === localStorage && key.startsWith("infinite-canvas:")) schedule(); };
+  Storage.prototype.setItem = function (key, value) {
+    const strValue = String(value);
+    const previous = this === localStorage && typeof this.getItem === "function" ? this.getItem(key) : null;
+    set.call(this, key, strValue);
+    if (this === localStorage && key.startsWith("infinite-canvas:") && !SERVER_KEYS.has(key) && previous !== strValue) {
+      schedule();
+    }
+  };
+  Storage.prototype.removeItem = function (key) {
+    const existed = this === localStorage && typeof this.getItem === "function" && this.getItem(key) !== null;
+    remove.call(this, key);
+    if (existed && key.startsWith("infinite-canvas:") && !SERVER_KEYS.has(key)) {
+      schedule();
+    }
+  };
   window.addEventListener("pagehide", () => {
     if (!writesToServer()) return;
     // Keepalive preserves small settings updates when navigating away.

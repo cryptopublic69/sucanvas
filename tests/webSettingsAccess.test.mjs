@@ -96,3 +96,30 @@ test("admins mirror the server and write changes back", async (t) => {
   assert.equal(puts.length, 1);
   assert.equal(JSON.parse(puts[0].body)["infinite-canvas:theme"], "dark");
 });
+
+test("admin Storage hook ignores server-managed keys and unchanged values", async (t) => {
+  const store = browser(t);
+  globalThis.Storage.prototype.setItem = function (key, value) { store.set(key, String(value)); };
+  globalThis.Storage.prototype.removeItem = function (key) { store.delete(key); };
+  access.setAccessUser({ id: "u0", username: "admin", displayName: null, role: "admin" });
+  bridgeModule.setServer({
+    "infinite-canvas:theme": "dark",
+    "infinite-canvas:colab-comfy-configured": "false",
+  });
+  const settings = await settingsModule();
+  await settings.loadSettings();
+  bridgeModule.calls.length = 0;
+
+  // Writing a SERVER_KEYS entry or an unchanged value must not schedule a PUT.
+  globalThis.Storage.prototype.setItem.call(globalThis.localStorage, "infinite-canvas:colab-comfy-configured", "true");
+  globalThis.Storage.prototype.setItem.call(globalThis.localStorage, "infinite-canvas:theme", "dark");
+  await new Promise((resolve) => setTimeout(resolve, 320));
+  assert.deepEqual(bridgeModule.calls.filter((call) => call.method === "PUT"), []);
+
+  // Changing an actual user setting must still schedule a PUT.
+  globalThis.Storage.prototype.setItem.call(globalThis.localStorage, "infinite-canvas:theme", "light");
+  await new Promise((resolve) => setTimeout(resolve, 320));
+  const puts = bridgeModule.calls.filter((call) => call.method === "PUT");
+  assert.equal(puts.length, 1);
+  assert.equal(JSON.parse(puts[0].body)["infinite-canvas:theme"], "light");
+});

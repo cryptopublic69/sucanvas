@@ -8941,7 +8941,15 @@ function CanvasWorkspace() {
                 : node)
               : [...current, makeFlowNode(record)];
           });
-          setNotice(`已接收来自 ${record.source} 的提示词新版本`);
+          if (record.kind === "text") {
+            setNotice(`已接收来自 ${record.source} 的提示词新版本`);
+          } else if (
+            record.kind === "generated-video"
+            && record.content.generationPlaceholder !== true
+            && typeof record.content.externalProvider === "string"
+          ) {
+            setNotice(`${String(record.content.externalProviderLabel || "外部平台")}视频生成完成`);
+          }
         });
         if (!mounted) { unlistenUpdated(); return; }
         unlistenEdgeCreated = await listen<EdgeRecord>("canvas://edge-created", (event) => {

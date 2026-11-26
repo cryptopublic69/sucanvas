@@ -149,6 +149,7 @@ impl ExternalJobStore {
             .busy_timeout(Duration::from_secs(5))
             .map_err(|e| e.to_string())?;
         connection.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+        repair_completed_external_placeholders(&connection);
         Ok(Self {
             connection: Mutex::new(connection),
             cancel_signals: Mutex::new(HashMap::new()),
@@ -486,6 +487,14 @@ fn sync_nodes_status(
         Some(generator_status),
         None,
         |content| {
+            content.insert("status".to_owned(), json!(generator_status));
+            content.insert(
+                "validationMessage".to_owned(),
+                json!(error_msg.unwrap_or(stage_message)),
+            );
+            if generator_status == "idle" {
+                content.insert("executionProgress".to_owned(), Value::Null);
+            }
             content.insert("externalJobId".to_owned(), json!(job.id));
             content.insert("externalJobStatus".to_owned(), json!(job.status));
             content.insert("externalStageMessage".to_owned(), json!(stage_message));
@@ -596,6 +605,103 @@ fn prepare_output_location(
     Ok((target_path, asset_path, video_url, subfolder, filename))
 }
 
+fn apply_completed_external_video_content(
+    content: &mut Map<String, Value>,
+    job: &ExternalVideoJobRecord,
+    asset_path: &str,
+    video_url: &str,
+    subfolder: &str,
+    filename: &str,
+    aspect_numeric: f64,
+    elapsed_seconds: f64,
+    snapshot: Value,
+) {
+    content.remove("generationPlaceholder");
+    content.remove("externalQuoteSummary");
+    content.remove("generationClientId");
+    content.insert("status".to_owned(), json!("ready"));
+    content.insert("validationMessage".to_owned(), Value::Null);
+    content.insert("executionProgress".to_owned(), Value::Null);
+    content.insert("videoUrl".to_owned(), json!(video_url));
+    content.insert("assetPath".to_owned(), json!(asset_path));
+    content.insert("originalName".to_owned(), json!(filename));
+    content.insert("filename".to_owned(), json!(filename));
+    content.insert("subfolder".to_owned(), json!(subfolder));
+    content.insert("fileType".to_owned(), json!("output"));
+    content.insert("sourceGeneratorId".to_owned(), json!(job.generator_node_id));
+    content.insert("aspectRatio".to_owned(), json!(aspect_numeric));
+    content.insert(
+        "generationElapsedSeconds".to_owned(),
+        json!(elapsed_seconds),
+    );
+    content.insert("generationSnapshot".to_owned(), snapshot);
+    content.insert("externalProvider".to_owned(), json!(job.provider.as_str()));
+    content.insert(
+        "externalProviderLabel".to_owned(),
+        json!(job.provider_label),
+    );
+    content.insert("externalModelId".to_owned(), json!(job.model_id));
+    content.insert("externalModelLabel".to_owned(), json!(job.model_label));
+    content.insert("externalJobId".to_owned(), json!(job.id));
+    if let Some(credits) = job.cost_credits {
+        content.insert("externalCostCredits".to_owned(), json!(credits));
+    }
+    content.insert("hasBeenPlayed".to_owned(), json!(false));
+}
+
+fn repair_completed_external_placeholders(conn: &Connection) {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, content_json FROM nodes
+         WHERE kind = 'generated-video'
+           AND content_json LIKE '%generationPlaceholder%'
+           AND content_json LIKE '%sucanvas://provider-outputs/%'",
+    ) else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) else {
+        return;
+    };
+    let candidates: Vec<(String, String)> = rows.filter_map(Result::ok).collect();
+    for (node_id, content_json) in candidates {
+        let Ok(mut content_val) = serde_json::from_str::<Value>(&content_json) else {
+            continue;
+        };
+        let Some(content) = content_val.as_object_mut() else {
+            continue;
+        };
+        if content.get("generationPlaceholder").and_then(Value::as_bool) != Some(true)
+            || content.get("status").and_then(Value::as_str) != Some("ready")
+            || !content
+                .get("videoUrl")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+        {
+            continue;
+        }
+        content.remove("generationPlaceholder");
+        content.remove("externalQuoteSummary");
+        content.remove("generationClientId");
+        if let Some(credits) = content.get("externalCostCredits").and_then(Value::as_i64) {
+            if let Some(snap) = content
+                .get_mut("generationSnapshot")
+                .and_then(Value::as_object_mut)
+            {
+                if !snap.contains_key("externalCreditsCost") {
+                    snap.insert("externalCreditsCost".to_owned(), json!(credits));
+                }
+            }
+        }
+        if let Ok(updated_json) = serde_json::to_string(&content_val) {
+            let _ = conn.execute(
+                "UPDATE nodes SET content_json = ?1 WHERE id = ?2",
+                params![updated_json, node_id],
+            );
+        }
+    }
+}
+
 fn finalize_job_success(
     state: &WebState,
     job: &mut ExternalVideoJobRecord,
@@ -655,28 +761,17 @@ fn finalize_job_success(
         Some("ready"),
         Some(title),
         |content| {
-            content.insert("status".to_owned(), json!("ready"));
-            content.insert("validationMessage".to_owned(), Value::Null);
-            content.insert("executionProgress".to_owned(), Value::Null);
-            content.insert("videoUrl".to_owned(), json!(video_url));
-            content.insert("assetPath".to_owned(), json!(asset_path));
-            content.insert("originalName".to_owned(), json!(filename));
-            content.insert("filename".to_owned(), json!(filename));
-            content.insert("subfolder".to_owned(), json!(subfolder));
-            content.insert("fileType".to_owned(), json!("output"));
-            content.insert("sourceGeneratorId".to_owned(), json!(job.generator_node_id));
-            content.insert("aspectRatio".to_owned(), json!(aspect_numeric));
-            content.insert("generationElapsedSeconds".to_owned(), json!(elapsed_seconds));
-            content.insert("generationSnapshot".to_owned(), snapshot);
-            content.insert("externalProvider".to_owned(), json!(job.provider.as_str()));
-            content.insert("externalProviderLabel".to_owned(), json!(job.provider_label));
-            content.insert("externalModelId".to_owned(), json!(job.model_id));
-            content.insert("externalModelLabel".to_owned(), json!(job.model_label));
-            content.insert("externalJobId".to_owned(), json!(job.id));
-            if let Some(credits) = job.cost_credits {
-                content.insert("externalCostCredits".to_owned(), json!(credits));
-            }
-            content.insert("hasBeenPlayed".to_owned(), json!(false));
+            apply_completed_external_video_content(
+                content,
+                job,
+                &asset_path,
+                &video_url,
+                &subfolder,
+                &filename,
+                aspect_numeric,
+                elapsed_seconds,
+                snapshot,
+            );
         },
     );
 
@@ -687,6 +782,9 @@ fn finalize_job_success(
         Some("idle"),
         None,
         |content| {
+            content.insert("status".to_owned(), json!("idle"));
+            content.insert("validationMessage".to_owned(), json!(""));
+            content.insert("executionProgress".to_owned(), Value::Null);
             content.insert("externalJobId".to_owned(), json!(job.id));
             content.insert("externalJobStatus".to_owned(), json!("succeeded"));
             content.insert("externalStageMessage".to_owned(), json!("生成完成"));
@@ -2544,6 +2642,145 @@ mod tests {
         assert_eq!(
             fetched.output_asset_path.as_deref(),
             Some("sucanvas://provider-outputs/libtv/clip.mp4")
+        );
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn applies_completed_external_video_content_and_repairs_legacy_placeholders() {
+        let job = ExternalVideoJobRecord {
+            id: "ext-done".into(),
+            canvas_id: "canvas:main".into(),
+            provider: ProviderId::JimengCn,
+            provider_label: "即梦（国区）".into(),
+            model_id: "seedance_2.0_mini".into(),
+            model_label: "Seedance 2.0 Mini".into(),
+            generator_node_id: "gen-1".into(),
+            placeholder_node_id: "ph-1".into(),
+            user_id: "user-1".into(),
+            status: "running".into(),
+            stage_message: "running".into(),
+            cost_credits: Some(90),
+            quote_summary: None,
+            remote_project_id: None,
+            remote_node_id: None,
+            remote_submit_id: None,
+            remote_thread_id: None,
+            working_dir: None,
+            output_asset_path: None,
+            output_video_url: None,
+            request_json: "{}".into(),
+            error: None,
+            execution_elapsed_seconds: None,
+            created_at: "2026-11-26T00:00:00Z".into(),
+            updated_at: "2026-11-26T00:00:00Z".into(),
+        };
+
+        let mut content = json!({
+            "generationPlaceholder": true,
+            "externalQuoteSummary": "预计消耗 90 积分",
+            "generationClientId": "client-1",
+            "status": "running"
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        apply_completed_external_video_content(
+            &mut content,
+            &job,
+            "sucanvas://provider-outputs/jimeng-cn/clip.mp4",
+            "/api/resource?resource=clip",
+            "jimeng-cn/2026-11-26",
+            "clip.mp4",
+            16.0 / 9.0,
+            12.3,
+            json!({ "externalCreditsCost": 90 }),
+        );
+        assert!(!content.contains_key("generationPlaceholder"));
+        assert!(!content.contains_key("externalQuoteSummary"));
+        assert!(!content.contains_key("generationClientId"));
+        assert_eq!(content.get("status").and_then(Value::as_str), Some("ready"));
+        assert_eq!(
+            content.get("videoUrl").and_then(Value::as_str),
+            Some("/api/resource?resource=clip")
+        );
+        assert_eq!(
+            content.get("externalCostCredits").and_then(Value::as_i64),
+            Some(90)
+        );
+
+        let temp_dir = std::env::temp_dir().join(format!("ext-repair-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("repair.sqlite3");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT NOT NULL, content_json TEXT NOT NULL);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO nodes (id, kind, content_json) VALUES (?1, ?2, ?3)",
+                params![
+                    "node-finished",
+                    "generated-video",
+                    json!({
+                        "generationPlaceholder": true,
+                        "status": "ready",
+                        "videoUrl": "/api/resource?resource=done",
+                        "assetPath": "sucanvas://provider-outputs/jimeng-cn/2026-11-26/done.mp4",
+                        "externalCostCredits": 90,
+                        "externalQuoteSummary": "legacy",
+                        "generationSnapshot": { "externalProvider": "jimeng-cn" }
+                    })
+                    .to_string(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO nodes (id, kind, content_json) VALUES (?1, ?2, ?3)",
+                params![
+                    "node-active",
+                    "generated-video",
+                    json!({
+                        "generationPlaceholder": true,
+                        "status": "running",
+                        "assetPath": "sucanvas://provider-outputs/jimeng-cn/2026-11-26/pending.mp4"
+                    })
+                    .to_string(),
+                ],
+            )
+            .unwrap();
+        }
+        let _store = ExternalJobStore::open(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        let finished_json: String = conn
+            .query_row(
+                "SELECT content_json FROM nodes WHERE id = 'node-finished'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let finished: Value = serde_json::from_str(&finished_json).unwrap();
+        assert!(finished.get("generationPlaceholder").is_none());
+        assert!(finished.get("externalQuoteSummary").is_none());
+        assert_eq!(
+            finished
+                .pointer("/generationSnapshot/externalCreditsCost")
+                .and_then(Value::as_i64),
+            Some(90)
+        );
+
+        let active_json: String = conn
+            .query_row(
+                "SELECT content_json FROM nodes WHERE id = 'node-active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let active: Value = serde_json::from_str(&active_json).unwrap();
+        assert_eq!(
+            active.get("generationPlaceholder").and_then(Value::as_bool),
+            Some(true)
         );
         let _ = fs::remove_dir_all(&temp_dir);
     }
