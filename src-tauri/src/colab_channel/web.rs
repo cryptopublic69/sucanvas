@@ -17,9 +17,12 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs,
-    io::Write,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+    thread,
     time::Duration,
 };
 use uuid::Uuid;
@@ -825,10 +828,66 @@ fn build_resource_url(asset_path: &str) -> String {
     format!("/api/resource?{}", url.query().unwrap())
 }
 
+static MATERIALIZE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
+
+struct MaterializeLockGuard {
+    key: PathBuf,
+    lock: Arc<tokio::sync::Mutex<()>>,
+    permit: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for MaterializeLockGuard {
+    fn drop(&mut self) {
+        // Release the mutex permit (and its Arc clone) before checking strong_count for cleanup.
+        drop(self.permit.take());
+        if let Some(locks) = MATERIALIZE_LOCKS.get() {
+            if let Ok(mut map) = locks.lock() {
+                if map
+                    .get(&self.key)
+                    .is_some_and(|entry| Arc::ptr_eq(entry, &self.lock) && Arc::strong_count(entry) == 2)
+                {
+                    map.remove(&self.key);
+                }
+            }
+        }
+    }
+}
+
+async fn acquire_materialize_lock(key: PathBuf) -> MaterializeLockGuard {
+    let lock = {
+        let locks = MATERIALIZE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = locks.lock().unwrap_or_else(|poison| poison.into_inner());
+        map.entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let permit = lock.clone().lock_owned().await;
+    MaterializeLockGuard {
+        key,
+        lock,
+        permit: Some(permit),
+    }
+}
+
+fn target_already_materialized(target: &Path, expected_len: usize) -> bool {
+    fs::metadata(target)
+        .ok()
+        .is_some_and(|meta| meta.is_file() && meta.len() == expected_len as u64)
+}
+
+fn is_retryable_rename_error(error: &std::io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::AlreadyExists)
+        || matches!(error.raw_os_error(), Some(5 | 32))
+}
+
 fn write_atomic_file(target: &Path, root: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = target.parent().ok_or("Colab 输出目录无效")?;
     fs::create_dir_all(parent).map_err(|error| format!("创建 Colab 输出目录失败：{error}"))?;
     ensure_contained(target, &[root.to_owned()])?;
+    if target_already_materialized(target, bytes.len()) {
+        return Ok(());
+    }
     let temporary = target.with_extension(format!("{}.part", Uuid::new_v4()));
     let write_result = (|| -> Result<(), String> {
         let mut file = fs::OpenOptions::new()
@@ -841,8 +900,30 @@ fn write_atomic_file(target: &Path, root: &Path, bytes: &[u8]) -> Result<(), Str
         file.sync_all()
             .map_err(|error| format!("落盘 Colab 输出文件失败：{error}"))?;
         drop(file);
-        fs::rename(&temporary, target)
-            .map_err(|error| format!("保存 Colab 输出文件失败：{error}"))?;
+
+        let retry_delays_ms = [0u64, 50, 100, 200, 300, 500];
+        for (attempt, &delay_ms) in retry_delays_ms.iter().enumerate() {
+            if delay_ms > 0 {
+                thread::sleep(Duration::from_millis(delay_ms));
+            }
+            if target_already_materialized(target, bytes.len()) {
+                let _ = fs::remove_file(&temporary);
+                return Ok(());
+            }
+            match fs::rename(&temporary, target) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if target_already_materialized(target, bytes.len()) {
+                        let _ = fs::remove_file(&temporary);
+                        return Ok(());
+                    }
+                    let has_more_retries = attempt + 1 < retry_delays_ms.len();
+                    if !(is_retryable_rename_error(&error) && has_more_retries) {
+                        return Err(format!("保存 Colab 输出文件失败：{error}"));
+                    }
+                }
+            }
+        }
         Ok(())
     })();
     if write_result.is_err() {
@@ -923,7 +1004,8 @@ async fn materialize_entry_outputs(state: &WebState, entry: &mut Value) -> Resul
         );
         let base_name = format!("{stem}_{tag}");
 
-        let (decoded_filename, ext) =
+        let (decoded_filename, ext) = {
+            let _materialize_guard = acquire_materialize_lock(target_dir.join(&base_name)).await;
             if let Some((_existing_path, existing_ext)) = find_cached_decoded_file(&target_dir, &base_name) {
                 (format!("{base_name}.{existing_ext}"), existing_ext)
             } else {
@@ -954,7 +1036,8 @@ async fn materialize_entry_outputs(state: &WebState, entry: &mut Value) -> Resul
                 .await
                 .map_err(|error| format!("保存解码文件任务失败：{error}"))??;
                 (final_name, decoded_ext)
-            };
+            }
+        };
 
         let _ = ext;
         let clean_subfolder = segments.join("/");
@@ -1247,5 +1330,60 @@ mod tests {
                 .as_deref(),
             Some("https://canvas.example.com/api/comfy-colab/view?filename=a.png")
         );
+    }
+
+    #[test]
+    fn write_atomic_file_succeeds_idempotently_when_target_is_open_for_reading() {
+        let root = std::env::temp_dir().join(format!("colab-atomic-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("sample_clip.mp4");
+        let payload = b"\x00\x00\x00\x1cftypisom-test-video-bytes".repeat(8);
+
+        write_atomic_file(&target, &root, &payload).unwrap();
+        let reader = fs::File::open(&target).unwrap();
+        write_atomic_file(&target, &root, &payload).unwrap();
+        drop(reader);
+
+        assert_eq!(fs::read(&target).unwrap(), payload);
+        let leftovers: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("part"))
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected .part files: {leftovers:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn materialize_lock_serializes_same_key_and_cleans_up_entry() {
+        let key = PathBuf::from(format!("colab-lock-test-{}", Uuid::new_v4()));
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+        let guard1 = acquire_materialize_lock(key.clone()).await;
+        events.lock().unwrap().push("t1-enter");
+
+        let key2 = key.clone();
+        let events2 = events.clone();
+        let handle2 = tokio::spawn(async move {
+            let _guard2 = acquire_materialize_lock(key2).await;
+            events2.lock().unwrap().push("t2-enter");
+            events2.lock().unwrap().push("t2-exit");
+        });
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        events.lock().unwrap().push("t1-exit");
+        drop(guard1);
+
+        handle2.await.unwrap();
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["t1-enter", "t1-exit", "t2-enter", "t2-exit"]
+        );
+
+        let cleaned = MATERIALIZE_LOCKS
+            .get()
+            .and_then(|locks| locks.lock().ok())
+            .is_none_or(|map| !map.contains_key(&key));
+        assert!(cleaned, "materialize lock entry should be cleaned up");
     }
 }
