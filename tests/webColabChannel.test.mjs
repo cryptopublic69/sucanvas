@@ -15,6 +15,7 @@ const { webApiUrl } = await loadTsModule("../src/web/urls.ts");
 const { generatedVideoDeletionPaths } = await loadTsModule("../src/web/outputFiles.ts");
 const {
   loadVideoRegenerationPresets,
+  matchingVideoRegenerationPreset,
   saveVideoRegenerationPresets,
 } = await loadTsModule("../src/video/videoRegenerationPresets.ts");
 const {
@@ -103,6 +104,123 @@ test("generatedVideoDeletionPaths returns sucanvas://colab-outputs resource for 
     generatedVideoDeletionPaths("E:\\ComfyUI\\output", localContent),
     ["E:\\ComfyUI\\output\\H3\\day1\\scene.mp4"],
   );
+});
+
+test("colab saved presets strip secondary fields and match node content after colabPresetNodePatch", () => {
+  const storage = createMemoryStorage();
+  saveColabVideoPresets(storage, "cobijada", {
+    defaultPresetId: "",
+    presets: [
+      {
+        id: "cbj-custom",
+        name: "Cobijada新方案",
+        settings: {
+          primaryResolutionMegapixels: 0.9,
+          primaryUpscaleFactor: 1.5,
+          primaryVideoSteps: 6,
+          primaryAudioSteps: 10,
+          colabSampler: "lcm",
+          loraName: "MinimaxH3\\mysticxxx_mmh3-v1.safetensors",
+          loraStrength: 0.75,
+          loraBypassed: false,
+          primaryBrightness: 1.05,
+          primaryContrast: 0.9,
+          primarySaturation: 1.0,
+          styleLoras: [
+            {
+              name: "MinimaxH3\\pika_h3_flex_fl2va_comfy_bf16.safetensors",
+              strength: 0.4,
+              bypassed: false,
+              applyToSecondary: true,
+              applyToSecondPass: true,
+            },
+          ],
+          diffusionModelName: "MinimaxH3/local-model.safetensors",
+          secondaryResolutionMegapixels: 1.2,
+          secondarySchedulerSteps: 8,
+          secondaryLoraName: "MinimaxH3/local-sec.safetensors",
+          secondaryLoraStrength: 0.8,
+          secondaryLoraBypassed: true,
+          secondaryBrightness: 1.1,
+          secondaryContrast: 0.95,
+          secondarySaturation: 1.05,
+        },
+      },
+    ],
+  });
+
+  // Also simulate a pre-existing legacy storage entry saved with secondary* fields intact.
+  const rawSaved = JSON.parse(storage.getItem(colabPresetStorageKey("cobijada")));
+  assert.equal("secondaryLoraBypassed" in rawSaved.presets[0].settings, false);
+  assert.equal("secondaryResolutionMegapixels" in rawSaved.presets[0].settings, false);
+  rawSaved.presets.push({
+    id: "cbj-preexisting",
+    name: "旧版带secondary方案",
+    settings: {
+      ...colabWorkflowDefaultSettings("cobijada"),
+      primaryVideoSteps: 7,
+      primaryAudioSteps: 7,
+      secondaryLoraBypassed: true,
+      secondaryResolutionMegapixels: 1.4,
+    },
+  });
+  storage.setItem(colabPresetStorageKey("cobijada"), JSON.stringify(rawSaved));
+
+  const reloaded = loadColabVideoPresets(storage, "cobijada", parseSettings);
+  const customPreset = reloaded.presets.find((p) => p.id === "cbj-custom");
+  const preexistingPreset = reloaded.presets.find((p) => p.id === "cbj-preexisting");
+  assert.ok(customPreset);
+  assert.ok(preexistingPreset);
+  assert.equal("secondaryLoraBypassed" in customPreset.settings, false);
+  assert.equal("secondaryLoraBypassed" in preexistingPreset.settings, false);
+  assert.equal("secondaryResolutionMegapixels" in preexistingPreset.settings, false);
+  assert.equal(customPreset.settings.loraName, COLAB_ALLOWED_LORAS[1]);
+  assert.equal(customPreset.settings.styleLoras[0].name, COLAB_ALLOWED_LORAS[0]);
+
+  // Simulate applying the preset patch onto a node that retains local secondary* and upscale fields.
+  const patchedNode = {
+    generationPrimaryUpscaleFactor: 1.5,
+    generationSecondaryResolution: 1.2,
+    generationSecondarySchedulerSteps: 8,
+    generationSecondaryLoraName: "MinimaxH3/local-sec.safetensors",
+    generationSecondaryLoraStrength: 0.8,
+    generationSecondaryLoraBypassed: false,
+    generationSecondaryBrightness: 1,
+    generationSecondaryContrast: 0.9,
+    generationSecondarySaturation: 1,
+    ...colabPresetNodePatch(customPreset.settings),
+  };
+
+  const nodeCandidate = {
+    secondaryResolutionMegapixels: patchedNode.generationSecondaryResolution,
+    secondarySchedulerSteps: patchedNode.generationSecondarySchedulerSteps,
+    secondaryLoraName: patchedNode.generationSecondaryLoraName,
+    secondaryLoraStrength: patchedNode.generationSecondaryLoraStrength,
+    secondaryLoraBypassed: patchedNode.generationSecondaryLoraBypassed,
+    secondaryBrightness: patchedNode.generationSecondaryBrightness,
+    secondaryContrast: patchedNode.generationSecondaryContrast,
+    secondarySaturation: patchedNode.generationSecondarySaturation,
+    primaryResolutionMegapixels: patchedNode.generationPrimaryResolution,
+    primaryUpscaleFactor: 1.0,
+    loraName: patchedNode.generationLoraName,
+    loraBypassed: patchedNode.generationLoraBypassed,
+    loraStrength: patchedNode.generationLoraStrength,
+    primaryVideoSteps: patchedNode.generationPrimaryVideoSteps,
+    primaryAudioSteps: patchedNode.generationPrimaryVideoSteps,
+    primaryBrightness: patchedNode.generationPrimaryBrightness,
+    primaryContrast: patchedNode.generationPrimaryContrast,
+    primarySaturation: patchedNode.generationPrimarySaturation,
+    styleLoras: patchedNode.generationStyleLoras.map((slot) => ({
+      ...slot,
+      applyToSecondary: false,
+      applyToSecondPass: false,
+    })),
+    diffusionModelName: COLAB_PROFILE_MODELS.cobijada,
+    colabSampler: patchedNode.generationColabSampler,
+  };
+
+  const matched = matchingVideoRegenerationPreset(reloaded, nodeCandidate);
+  assert.equal(matched?.id, "cbj-custom");
 });
 
 test("colab video presets seed workflow defaults and isolate per-model storage from local presets", () => {

@@ -50,6 +50,7 @@ import type { VideoRegenerationPresetCollection } from "./video/videoRegeneratio
 import {
   COLAB_ALLOWED_LORAS,
   COLAB_CHANNEL_ENABLED,
+  COLAB_PROFILE_MODELS,
   ColabLockedModelField,
   ColabLockedWorkflowField,
   ColabSamplerRow,
@@ -5422,7 +5423,8 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
       : { presets: [], defaultPresetId: "" })
     : videoRegenerationPresets;
   const presetModelName = isColabChannel
-    ? (colab?.profileStatus?.diffusionModelName || nodeDiffusionModelName)
+    ? (colab?.profileStatus?.diffusionModelName
+      || (activeColabProfile ? COLAB_PROFILE_MODELS[activeColabProfile] : nodeDiffusionModelName))
     : nodeDiffusionModelName;
   const effectiveSharedPrimarySteps = isColabChannel ? true : sharedPrimarySteps;
   const colabSampler = colabSamplerFromContent(record.content);
@@ -5437,7 +5439,10 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
           ? preset.settings.primaryVideoSteps
           : preset.settings.primaryAudioSteps,
         ...(isColabChannel
-          ? { colabSampler: colabSamplerFromValue((preset.settings as ColabVideoPresetSettings).colabSampler) }
+          ? {
+            primaryUpscaleFactor: 1.0,
+            colabSampler: colabSamplerFromValue((preset.settings as ColabVideoPresetSettings).colabSampler),
+          }
           : {}),
       },
     })),
@@ -5445,7 +5450,15 @@ function CanvasNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
     ...currentPresetSettings,
     primaryAudioSteps: effectiveSharedPrimarySteps ? primaryVideoSteps : currentPresetSettings.primaryAudioSteps,
     diffusionModelName: presetModelName,
-    ...(isColabChannel ? { colabSampler } : {}),
+    ...(isColabChannel ? {
+      primaryUpscaleFactor: 1.0,
+      colabSampler,
+      styleLoras: currentPresetSettings.styleLoras.map((slot) => ({
+        ...slot,
+        applyToSecondary: false,
+        applyToSecondPass: false,
+      })),
+    } : {}),
   }) : undefined;
   const selectableH3Loras = activeH3LoraOptions;
   const switchVideoChannel = (nextChannel: VideoExecutionChannel) => {

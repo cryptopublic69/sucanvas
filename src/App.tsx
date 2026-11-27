@@ -5643,7 +5643,7 @@ function CanvasWorkspace() {
     const initialStyleLoras = colabProfile
       ? snapshot.styleLoras
         .filter((slot) => isAllowedColabLoraName(slot.name))
-        .map((slot) => ({ ...slot, applyToSecondary: false }))
+        .map((slot) => ({ ...slot, applyToSecondary: false, applyToSecondPass: false }))
       : snapshot.styleLoras.map((slot) => ({ ...slot }));
     const draft: VideoRegenerationDraft = {
       ...(colabProfile ? { colabProfile } : {}),
@@ -5799,7 +5799,7 @@ function CanvasWorkspace() {
           : (preset.settings.diffusionModelName ?? current.originalSnapshot.diffusionModelName),
         primaryUpscaleFactor: colabProfile ? 1 : preset.settings.primaryUpscaleFactor,
         styleLoras: preset.settings.styleLoras.map((slot) => (
-          colabProfile ? { ...slot, applyToSecondary: false } : { ...slot }
+          colabProfile ? { ...slot, applyToSecondary: false, applyToSecondPass: false } : { ...slot }
         )),
         primaryAudioSteps: sharedSteps
           ? preset.settings.primaryVideoSteps : preset.settings.primaryAudioSteps,
@@ -5825,7 +5825,7 @@ function CanvasWorkspace() {
       const nextSettings = chosenPreset?.settings ?? colabWorkflowDefaultSettings(targetProfile);
       const allowedStyleLoras = nextSettings.styleLoras
         .filter((slot) => isAllowedColabLoraName(slot.name))
-        .map((slot) => ({ ...slot, applyToSecondary: false }));
+        .map((slot) => ({ ...slot, applyToSecondary: false, applyToSecondPass: false }));
       const rawLora = nextSettings.loraName ?? "";
       const nextLoraName = isAllowedColabLoraName(rawLora) ? rawLora : (colabWorkflowDefaultSettings(targetProfile).loraName ?? "");
       const nextLoraBypassed = nextSettings.loraBypassed ?? !nextLoraName.trim();
@@ -5936,8 +5936,11 @@ function CanvasWorkspace() {
         primaryUpscaleFactor: 1,
         primaryAudioSteps: settings.primaryVideoSteps,
         colabSampler: colabSamplerFromValue(videoRegenerationDraft.colabSampler),
-        secondaryLoraBypassed: true,
-        styleLoras: settings.styleLoras.map((slot) => ({ ...slot, applyToSecondary: false })),
+        styleLoras: settings.styleLoras.map((slot) => ({
+          ...slot,
+          applyToSecondary: false,
+          applyToSecondPass: false,
+        })),
       }
       : settings;
     const preset = { id, name, settings: normalizedSettings };

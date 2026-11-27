@@ -55,9 +55,14 @@ export function normalizeVideoChannel(
   return enabled && isWebMode && generationChannel === "colab" ? "colab" : "local";
 }
 
+export function canonicalColabLoraName(name: string | undefined): string | null {
+  const normalized = (name ?? "").trim().replace(/\\/g, "/").toLowerCase();
+  if (!normalized) return null;
+  return COLAB_ALLOWED_LORAS.find((candidate) => candidate.toLowerCase() === normalized) ?? null;
+}
+
 export function isAllowedColabLoraName(name: string): boolean {
-  const normalized = name.trim().replace(/\\/g, "/").toLowerCase();
-  return Boolean(normalized) && COLAB_ALLOWED_LORAS.some((candidate) => candidate.toLowerCase() === normalized);
+  return canonicalColabLoraName(name) !== null;
 }
 
 export function colabSamplerFromValue(value: unknown): string {
@@ -106,9 +111,15 @@ export function withColabSamplerSetting(
   if (!settings) return null;
   return {
     ...settings,
+    primaryUpscaleFactor: 1.0,
     colabSampler: colabSamplerFromValue(
       colabSampler ?? (settings as ColabVideoPresetSettings).colabSampler,
     ),
+    styleLoras: settings.styleLoras.map((slot) => ({
+      ...slot,
+      applyToSecondary: false,
+      applyToSecondPass: false,
+    })),
   };
 }
 
@@ -152,9 +163,25 @@ export function emptyColabVideoPresetsByProfile(
   };
 }
 
-function stripTransientFields(settings: VideoRegenerationSettings): VideoRegenerationSettings {
-  const { durationSeconds: _duration, seed: _seed, refImageSize: _refImageSize, ...parameters } = settings as
-    VideoRegenerationSettings & { durationSeconds?: unknown; seed?: unknown; refImageSize?: unknown };
+function stripColabPresetUnusedFields(settings: ColabVideoPresetSettings): ColabVideoPresetSettings {
+  const {
+    durationSeconds: _duration,
+    seed: _seed,
+    refImageSize: _refImageSize,
+    secondaryResolutionMegapixels: _secRes,
+    secondarySchedulerSteps: _secSteps,
+    secondaryLoraName: _secLora,
+    secondaryLoraStrength: _secLoraStrength,
+    secondaryLoraBypassed: _secLoraBypassed,
+    secondaryBrightness: _secBrightness,
+    secondaryContrast: _secContrast,
+    secondarySaturation: _secSaturation,
+    ...parameters
+  } = settings as ColabVideoPresetSettings & {
+    durationSeconds?: unknown;
+    seed?: unknown;
+    refImageSize?: unknown;
+  };
   return parameters;
 }
 
@@ -163,26 +190,27 @@ function sanitizeColabPresetSettings(
   settings: ColabVideoPresetSettings,
 ): ColabVideoPresetSettings {
   const lockedModel = COLAB_PROFILE_MODELS[profile];
-  const primaryAllowed = Boolean(settings.loraName && isAllowedColabLoraName(settings.loraName));
+  const canonicalPrimaryLora = canonicalColabLoraName(settings.loraName);
   return {
-    ...stripTransientFields(settings),
+    ...stripColabPresetUnusedFields(settings),
     diffusionModelName: lockedModel,
     primaryUpscaleFactor: 1.0,
     primaryAudioSteps: settings.primaryVideoSteps,
     colabSampler: colabSamplerFromValue(settings.colabSampler),
-    loraName: primaryAllowed ? settings.loraName : COLAB_ALLOWED_LORAS[0],
-    loraBypassed: primaryAllowed ? (settings.loraBypassed ?? false) : true,
-    styleLoras: settings.styleLoras.map((slot) => (
-      isAllowedColabLoraName(slot.name)
-        ? { ...slot, applyToSecondary: false, applyToSecondPass: false }
+    loraName: canonicalPrimaryLora ?? COLAB_ALLOWED_LORAS[0],
+    loraBypassed: canonicalPrimaryLora ? (settings.loraBypassed ?? false) : true,
+    styleLoras: settings.styleLoras.map((slot) => {
+      const canonicalStyleLora = canonicalColabLoraName(slot.name);
+      return canonicalStyleLora
+        ? { ...slot, name: canonicalStyleLora, applyToSecondary: false, applyToSecondPass: false }
         : {
           ...slot,
           name: COLAB_ALLOWED_LORAS[1],
           bypassed: true,
           applyToSecondary: false,
           applyToSecondPass: false,
-        }
-    )),
+        };
+    }),
   };
 }
 
